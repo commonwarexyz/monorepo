@@ -80,7 +80,7 @@ library LibSimplex {
     ) internal view returns (bool) {
         uint256 count = publicKeys.length;
         if (count == 0) return false;
-        uint256 quorum = count - (count - 1) / 3;
+        uint256 quorum = _quorum(count);
         return Multisig.verifyMinSig(
             signature, signers, publicKeys, quorum, _namespace(namespace, subject.kind), _message(subject)
         );
@@ -104,7 +104,7 @@ library LibSimplex {
     ) internal view returns (bool) {
         uint256 count = publicKeys.length;
         if (count == 0) return false;
-        uint256 quorum = count - (count - 1) / 3;
+        uint256 quorum = _quorum(count);
         return Multisig.verifyMinPk(
             signature, signers, publicKeys, quorum, _namespace(namespace, subject.kind), _message(subject)
         );
@@ -115,6 +115,10 @@ library LibSimplex {
     /// parent view and payload. The namespace length and integer fields use unsigned varints.
     function encodeMessage(bytes memory namespace, Subject memory subject) internal pure returns (bytes memory) {
         return BLS.encodeMessage(_namespace(namespace, subject.kind), _message(subject));
+    }
+
+    function _quorum(uint256 count) private pure returns (uint256) {
+        return count - (count - 1) / 3;
     }
 
     function _namespace(bytes memory namespace, Kind kind) private pure returns (bytes memory) {
