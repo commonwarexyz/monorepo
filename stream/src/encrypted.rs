@@ -54,7 +54,7 @@
 //! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
 use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
-use commonware_codec::{DecodeExt, Encode as _, Error as CodecError, FixedSize};
+use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
     Signer,
     handshake::{
@@ -149,8 +149,17 @@ impl<S> Handshake<S> {
     }
 }
 
-// Handshake frames are fixed-size protocol messages, so we cap receives to
-// their exact encoded length instead of the application message limit.
+/// Sends a handshake message bounded by its fixed encoded size.
+async fn send_handshake_frame<M, T>(sink: &mut T, message: M) -> Result<(), Error>
+where
+    M: Encode + FixedSize,
+    T: Sink,
+{
+    let max_size = u32::try_from(M::SIZE).expect("handshake frame should fit in u32");
+    send_frame(sink, message.encode(), max_size).await
+}
+
+/// Receives and decodes a handshake message bounded by its fixed encoded size.
 async fn recv_handshake_frame<M, T>(stream: &mut T) -> Result<M, Error>
 where
     M: DecodeExt<()> + FixedSize,
@@ -195,24 +204,19 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
-        send_frame(
-            &mut sink,
-            self.signer.public_key().encode(),
-            max_message_size,
-        )
-        .await?;
+        send_handshake_frame(&mut sink, self.signer.public_key()).await?;
 
         let (current_time, ok_timestamps) = self.time_information(&context);
         let (state, syn) = dial_start(
             context,
             Context::new(namespace, current_time, ok_timestamps, self.signer, peer),
         );
-        send_frame(&mut sink, syn.encode(), max_message_size).await?;
+        send_handshake_frame(&mut sink, syn).await?;
 
         let syn_ack = recv_handshake_frame::<SynAck<S::Signature>, _>(&mut stream).await?;
 
         let (ack, send, recv) = dial_end(state, syn_ack)?;
-        send_frame(&mut sink, ack.encode(), max_message_size).await?;
+        send_handshake_frame(&mut sink, ack).await?;
 
         Ok((
             Sender {
@@ -270,7 +274,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
             ),
             msg1,
         )?;
-        send_frame(&mut sink, syn_ack.encode(), max_message_size).await?;
+        send_handshake_frame(&mut sink, syn_ack).await?;
 
         let ack = recv_handshake_frame::<Ack, _>(&mut stream).await?;
 
@@ -680,56 +684,74 @@ mod test {
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Box<dyn std::error::Error>> {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let dialer_signer = PrivateKey::from_seed(42);
-            let listener_signer = PrivateKey::from_seed(24);
+        for max_message_size in [0, 1, 100, MAX_MESSAGE_SIZE] {
+            let executor = deterministic::Runner::timed(Duration::from_secs(5));
+            executor.start(move |context| async move {
+                // Authenticate independently of the returned streams' plaintext limit.
+                let dialer_signer = PrivateKey::from_seed(42);
+                let listener_signer = PrivateKey::from_seed(24);
 
-            let (dialer_sink, listener_stream) = mocks::Channel::init();
-            let (listener_sink, dialer_stream) = mocks::Channel::init();
+                let (dialer_sink, listener_stream) = mocks::Channel::init();
+                let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone());
-            let listener_handshake = transport_handshake(listener_signer.clone());
+                let dialer_handshake = transport_handshake(dialer_signer.clone());
+                let listener_handshake = transport_handshake(listener_signer.clone());
 
-            let listener_handle = context.child("listener").spawn(move |context| async move {
-                Timeout::new(listener_handshake, Duration::from_secs(1))
-                    .listen(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        |_| async { true },
-                        listener_stream,
-                        listener_sink,
-                    )
-                    .await
-            });
+                let listener_handle = context.child("listener").spawn(move |context| async move {
+                    Timeout::new(listener_handshake, Duration::from_secs(1))
+                        .listen(
+                            context,
+                            NAMESPACE,
+                            max_message_size,
+                            |_| async { true },
+                            listener_stream,
+                            listener_sink,
+                        )
+                        .await
+                });
 
-            let (mut dialer_sender, mut dialer_receiver) =
-                Timeout::new(dialer_handshake, Duration::from_secs(1))
-                    .dial(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        listener_signer.public_key(),
-                        dialer_stream,
-                        dialer_sink,
-                    )
-                    .await?;
+                let (mut dialer_sender, mut dialer_receiver) =
+                    Timeout::new(dialer_handshake, Duration::from_secs(1))
+                        .dial(
+                            context,
+                            NAMESPACE,
+                            max_message_size,
+                            listener_signer.public_key(),
+                            dialer_stream,
+                            dialer_sink,
+                        )
+                        .await?;
 
-            let (listener_peer, mut listener_sender, mut listener_receiver) =
-                listener_handle.await.unwrap()?;
-            assert_eq!(listener_peer, dialer_signer.public_key());
-            let messages: Vec<&'static [u8]> = vec![b"A", b"B", b"C"];
-            for msg in &messages {
-                dialer_sender.send(&msg[..]).await?;
-                let syn_ack = listener_receiver.recv().await?;
-                assert_eq!(syn_ack.coalesce(), *msg);
-                listener_sender.send(&msg[..]).await?;
-                let ack = dialer_receiver.recv().await?;
-                assert_eq!(ack.coalesce(), *msg);
-            }
-            Ok(())
-        })
+                let (listener_peer, mut listener_sender, mut listener_receiver) =
+                    listener_handle.await.unwrap()?;
+                assert_eq!(listener_peer, dialer_signer.public_key());
+
+                // The established streams accept only payloads within the configured limit.
+                let oversized = IoBuf::from(vec![0u8; max_message_size as usize + 1]);
+                assert!(matches!(
+                    dialer_sender.send(oversized.clone()).await,
+                    Err(Error::SendTooLarge(_))
+                ));
+                assert!(matches!(
+                    listener_sender.send(oversized).await,
+                    Err(Error::SendTooLarge(_))
+                ));
+                let messages: [&[u8]; 4] = [b"", b"A", b"B", b"C"];
+                for msg in messages
+                    .iter()
+                    .filter(|msg| msg.len() <= max_message_size as usize)
+                {
+                    dialer_sender.send(&msg[..]).await?;
+                    let syn_ack = listener_receiver.recv().await?;
+                    assert_eq!(syn_ack.coalesce(), *msg);
+                    listener_sender.send(&msg[..]).await?;
+                    let ack = dialer_receiver.recv().await?;
+                    assert_eq!(ack.coalesce(), *msg);
+                }
+                Ok::<_, Box<dyn std::error::Error>>(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]

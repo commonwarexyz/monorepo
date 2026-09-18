@@ -18,8 +18,6 @@
 //! [`Config`] and [`Network`] use [`commonware_stream::Handshake`] to authenticate peers
 //! and supply their message streams. [`Network`] additionally requires [`Handshake`]
 //! to sign discovery gossip under the same identity.
-//! [`commonware_stream::encrypted::Handshake`] provides the standard encrypted stream
-//! and handshake transcript.
 //!
 //! ## Discovery
 //!
@@ -112,14 +110,12 @@
 //!
 //! ## Compression
 //!
-//! The default encrypted stream omits compression to avoid inadvertently
-//! enabling known attacks such as BREACH and CRIME. These attacks exploit the interaction
-//! between compression and encryption by analyzing patterns in the resulting data.
-//! By compressing secrets alongside attacker-controlled content, these attacks can infer
-//! sensitive information through compression ratio analysis. Applications that choose
-//! to compress data should do so with full awareness of these risks and implement
-//! appropriate mitigations (such as ensuring no attacker-controlled data is compressed
-//! alongside sensitive information).
+//! Compression is not provided to avoid unintended information leakage
+//! when the underlying stream is encrypted. Compressing secrets alongside attacker-controlled
+//! data can reveal sensitive information through variations in encrypted message sizes
+//! (as in BREACH and CRIME). Applications that choose to compress their payloads should
+//! account for these risks, for example by keeping secrets and attacker-controlled data
+//! in separate compression contexts.
 //!
 //! ## Batching
 //!

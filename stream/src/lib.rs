@@ -160,7 +160,6 @@ commonware_macros::stability_scope!(BETA {
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
         use commonware_utils::sync::Mutex;
         use futures::{FutureExt as _, future::Either};
-        use std::time::Duration;
         use std::{
             convert::Infallible,
             future,
@@ -170,6 +169,7 @@ commonware_macros::stability_scope!(BETA {
                 Arc,
                 atomic::{AtomicBool, Ordering},
             },
+            time::Duration,
         };
 
         struct OpaqueIdentity(PhantomData<Rc<()>>);

@@ -26,11 +26,14 @@ use rand_core::CryptoRng;
 use std::sync::Arc;
 use tracing::{debug, info};
 
-/// Unique suffix for signed discovery address records.
-const IP_SUFFIX: &[u8] = b"_TRACKER_IP";
+/// Unique suffix for discovery tracker messages.
+const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 
-/// Unique suffix for all messages signed in a stream.
+/// Unique suffix for stream authentication.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
+
+/// Unique suffix for signed discovery address records.
+const IP_SUFFIX: &[u8] = b"_IP";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
@@ -70,7 +73,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             cfg.max_message_size <= max_size::<H>(),
             "maximum message size exceeds stream limit"
         );
-        let max_frame_size = cfg.max_message_size + MAX_PAYLOAD_OVERHEAD;
+        let max_frame_size = cfg
+            .max_message_size
+            .checked_add(MAX_PAYLOAD_OVERHEAD)
+            .expect("maximum frame size overflow");
         let max_peer_set_size =
             u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
 
@@ -89,7 +95,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             cfg.tracked_peer_sets,
             persistent_peers,
         );
-        let ip_namespace = union(&cfg.namespace, IP_SUFFIX);
+        let ip_namespace = union(&union(&cfg.namespace, TRACKER_SUFFIX), IP_SUFFIX);
         let myself = Info::sign(
             local.clone(),
             &ip_namespace,
@@ -316,6 +322,7 @@ mod tests {
     #[test]
     fn greeting_and_verifier_use_the_authenticated_identity_and_gossip_namespace() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            // Configure distinct local and remote identities.
             let signer = PrivateKey::from_seed(0);
             let peer_signer = PrivateKey::from_seed(1);
             let local = signer.public_key();
@@ -332,6 +339,8 @@ mod tests {
             );
             let timestamp = context.current().epoch_millis();
             let (network, mut oracle) = Network::new(context.child("network"), cfg);
+
+            // Accept a peer record signed in the gossip namespace.
             let ingress = Ingress::from(address);
             let message = (ingress, timestamp).encode();
             let namespace = b"discovery-test_TRACKER_IP";
@@ -348,6 +357,7 @@ mod tests {
                     .is_ok()
             );
 
+            // Check that the greeting uses the handshake's identity and the gossip namespace.
             network.tracker.start();
             oracle.track(0, Set::try_from([local.clone(), peer.clone()]).unwrap());
             let _reservation = network.tracker_mailbox.listen(peer.clone()).await.unwrap();

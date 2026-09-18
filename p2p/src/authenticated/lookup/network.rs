@@ -67,7 +67,10 @@ where
             cfg.max_message_size <= max_size::<H>(),
             "maximum message size exceeds stream limit"
         );
-        let max_frame_size = cfg.max_message_size + MAX_PAYLOAD_OVERHEAD;
+        let max_frame_size = cfg
+            .max_message_size
+            .checked_add(MAX_PAYLOAD_OVERHEAD)
+            .expect("maximum frame size overflow");
         let max_retained_peers =
             max_retained_peers(cfg.max_peers_per_set, cfg.tracked_peer_sets, 0);
         let (listener_mailbox, listener) = listener::Mailbox::new();

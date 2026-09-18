@@ -174,21 +174,21 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         let rate_limits = Arc::new(rate_limits);
         let pool = self.context.network_buffer_pool().clone();
 
-        // Send greeting first before any other messages
-        self.sent_messages
-            .get_or_create(&metrics::Message::new_greeting(&peer))
-            .inc();
-        conn_sender
-            .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
-            .await
-            .map_err(Error::SendFailed)?;
-
         // Send/Receive messages from the peer
         let mut send_handler = self.context.child("sender").spawn({
             let peer = peer.clone();
             let tracker = tracker.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
+                // Send the greeting before queued messages while the receiver runs concurrently.
+                self.sent_messages
+                    .get_or_create(&metrics::Message::new_greeting(&peer))
+                    .inc();
+                conn_sender
+                    .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
+                    .await
+                    .map_err(Error::SendFailed)?;
+
                 // Set the initial deadline to now to start gossiping immediately
                 let mut deadline = context.current();
 
@@ -400,7 +400,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{discovery::actors::tracker, router};
+    use crate::{
+        Receiver as _,
+        authenticated::{discovery::actors::tracker, router},
+    };
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -413,7 +416,7 @@ mod tests {
     use commonware_stream::{
         Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
     };
-    use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap};
+    use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -462,6 +465,103 @@ mod tests {
         let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
         messenger.bind(router::Mailbox::new(router_sender));
         Channels::new(messenger, MAX_MESSAGE_SIZE, NZUsize!(1))
+    }
+
+    #[test]
+    fn greeting_and_queued_data_progress_with_backpressure() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            // Complete authentication over buffers smaller than a signed greeting.
+            let signers = [PrivateKey::from_seed(1), PrivateKey::from_seed(2)];
+            let public_keys = signers.each_ref().map(Signer::public_key);
+            let (local_sink, remote_stream) = mocks::Channel::init_with_buffer_size(64);
+            let (remote_sink, local_stream) = mocks::Channel::init_with_buffer_size(64);
+            let remote_handshake = handshake(signers[1].clone());
+            let listener = context.child("listener").spawn(move |context| async move {
+                remote_handshake
+                    .listen(
+                        context,
+                        STREAM_NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .unwrap()
+            });
+            let local_connection = handshake(signers[0].clone())
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    public_keys[1].clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .unwrap();
+            let (authenticated, remote_sender, remote_receiver) = listener.await.unwrap();
+            assert_eq!(authenticated, public_keys[0]);
+
+            // Queue application data before startup so greeting ordering is exercised too.
+            let messages: [&[u8]; 2] = [b"from dialer", b"from listener"];
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(10),
+            );
+            let tracker = tracker::Mailbox::new(tracker_mailbox);
+            let mut peer_mailboxes = Vec::new();
+            let mut receivers = Vec::new();
+            let mut tasks = Vec::new();
+            for (index, (signer, connection)) in signers
+                .into_iter()
+                .zip([local_connection, (remote_sender, remote_receiver)])
+                .enumerate()
+            {
+                let context = context.child(["dial_peer", "listen_peer"][index]);
+                let (actor, mailbox, relay) = Actor::new(
+                    context.child("actor"),
+                    default_peer_config(context.child("config"), signer.public_key()),
+                );
+                let greeting = types::Info::sign(
+                    signer.public_key(),
+                    IP_NAMESPACE,
+                    SocketAddr::from(([127, 0, 0, 1], 8080 + index as u16)),
+                    context.current().epoch_millis(),
+                    |namespace, message| signer.sign(namespace, message),
+                );
+                let mut channels = create_channels(context.child("channels"));
+                let (_, receiver) =
+                    channels.register(0, Quota::per_second(NZU32!(1)), context.child("channel"));
+                let message = EncodedData::new(
+                    context.network_buffer_pool(),
+                    0,
+                    IoBuf::from(messages[index]).into(),
+                );
+                assert!(relay.send(message, false).accepted());
+                peer_mailboxes.push((mailbox, relay));
+                receivers.push(receiver);
+                let peer = public_keys[1 - index].clone();
+                let tracker = tracker.clone();
+                tasks.push(
+                    context
+                        .spawn(move |_| actor.run(peer, greeting, connection, tracker, channels)),
+                );
+            }
+
+            // Each receiver accepts data only after validating its peer's greeting.
+            for (index, receiver) in receivers.iter_mut().enumerate() {
+                let (peer, message) = receiver.recv().await.unwrap();
+                assert_eq!(peer, public_keys[1 - index]);
+                assert_eq!(message, messages[1 - index]);
+            }
+            for task in &tasks {
+                task.abort();
+            }
+            for task in tasks {
+                assert!(task.await.is_err());
+            }
+        });
     }
 
     #[test]
