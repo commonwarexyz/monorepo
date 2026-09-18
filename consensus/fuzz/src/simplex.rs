@@ -160,7 +160,10 @@ impl Simplex for SimplexSecp256r1 {
 mod tests {
     use super::*;
     use crate::{FuzzInput, N4F1C3, Standard, fuzz, strategy::StrategyChoice, utils::Partition};
-    use commonware_consensus::types::{TermLength, ViewDelta};
+    use commonware_consensus::{
+        HandoffPublication,
+        types::{TermLength, ViewDelta},
+    };
     use commonware_macros::{test_group, test_traced};
     use commonware_utils::NZU32;
     use proptest::prelude::*;
@@ -179,6 +182,8 @@ mod tests {
             term_length,
             optimistic_views: ViewDelta::new(term_length.get()),
             heterogeneous_optimism: true,
+            accept_handoffs: false,
+            handoff_publication: HandoffPublication::AfterCertification,
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
         }

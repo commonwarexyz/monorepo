@@ -3,7 +3,7 @@ use super::{
     types::{Activity, Context, Finalization},
 };
 use crate::{
-    CertifiableAutomaton, Epochable, HandoffPublication, Relay, Reporter, Viewable,
+    CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
     types::{Epoch, View, ViewDelta},
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
@@ -245,17 +245,6 @@ where
 
     /// Policy governing whether `nullify(v)` may be broadcast before the normal round deadlines.
     pub skip: SkipPolicy,
-
-    /// Upper limit on publication permission for prepared handoff proposals.
-    ///
-    /// Early publication requires permission from both this setting and the application.
-    ///
-    /// Prefer [`HandoffPublication::AfterCertification`]: the application may prepare a
-    /// proposal early, but consensus retains it until its exact parent certifies or finalizes.
-    /// [`HandoffPublication::AllowBeforeCertification`] trusts the outgoing leader not to
-    /// equivocate; an uncertified tip can leave the early child unusable.
-    /// See the module's [pipelined handoff](super#pipelined-handoff) documentation.
-    pub handoff_publication: HandoffPublication,
 
     /// Timeout to wait for a peer to respond to a request.
     pub fetch_timeout: Duration,

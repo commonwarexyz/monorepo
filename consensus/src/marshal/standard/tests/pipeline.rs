@@ -158,7 +158,7 @@ fn retained_pipeline_handoff(certification_first: bool) {
             policies: policies.clone(),
             builds: builds.clone(),
             block,
-            publication: HandoffPublication::AllowBeforeCertification,
+            publication: HandoffPublication::AfterCertification,
         };
         let control = oracle.control(victim.clone());
         let vote_network = control.register(3, TEST_QUOTA).await.unwrap();
@@ -204,7 +204,6 @@ fn retained_pipeline_handoff(certification_first: bool) {
                 fetch_timeout: Duration::from_secs(1),
                 forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
-                handoff_publication: HandoffPublication::AfterCertification,
             },
         );
         let _engine = engine.start(vote_network, certificate_network, resolver_network);

@@ -315,7 +315,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.accept_handoffs = enabled;
     }
 
-    /// Configures the publication ceiling returned with accepted handoff proposals.
+    /// Sets the publication permission returned with accepted handoff proposals.
     pub const fn set_handoff_publication(&mut self, publication: HandoffPublication) {
         self.handoff_publication = publication;
     }

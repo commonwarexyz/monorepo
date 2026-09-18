@@ -113,6 +113,8 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 enum ProposalResponse<D> {
     Proposed {
         payload: D,
+        /// Publication permission from a handoff response. Ordinary proposals
+        /// carry `None` and publish immediately.
         publication: Option<HandoffPublication>,
     },
     AwaitCertification,
@@ -178,7 +180,6 @@ pub struct Actor<
     relay: R,
     reporter: F,
     floor: Option<Floor<S, D>>,
-    handoff_publication: HandoffPublication,
 
     certificate_config: <S::Certificate as Read>::Cfg,
     partition: String,
@@ -254,7 +255,6 @@ impl<
                 relay: cfg.relay,
                 reporter: cfg.reporter,
                 floor: Some(cfg.floor),
-                handoff_publication: cfg.handoff_publication,
 
                 certificate_config,
                 partition: cfg.partition,
@@ -1304,19 +1304,14 @@ impl<
                 // Clear propose waiter
                 pending_propose = None;
 
-                // Keep an unpublished build outside the round proposal slot. The
-                // captured request and build latch remain live until promotion.
-                if matches!(&request, ProposalRequest::Handoff(_))
-                    && (self.handoff_publication == HandoffPublication::AfterCertification
-                        || matches!(
-                            &proposed,
-                            Ok(ProposalResponse::Proposed {
-                                publication: Some(HandoffPublication::AfterCertification),
-                                ..
-                            })
-                        ))
+                // Keep a build the application holds until parent certification
+                // outside the round proposal slot. The captured request and build
+                // latch remain live until promotion.
+                if let Ok(ProposalResponse::Proposed {
+                    payload,
+                    publication: Some(HandoffPublication::AfterCertification),
+                }) = &proposed
                     && !self.state.proposal_parent_certified(request.context())
-                    && let Ok(ProposalResponse::Proposed { payload, .. }) = &proposed
                 {
                     pending_propose = Some(Request(request, span, ProposalState::Held(*payload)));
                     continue;
