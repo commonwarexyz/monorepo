@@ -64,8 +64,6 @@ pub(crate) enum Command {
         #[arg(value_enum)]
         kind: TreeKind,
         abi_hex: String,
-        #[arg(long, value_enum, default_value = "keccak")]
-        hash: Hash,
         #[command(flatten)]
         policy: Policy,
     },
@@ -88,8 +86,6 @@ pub(crate) enum Command {
         #[arg(value_enum)]
         kind: TreeKind,
         abi_hex: String,
-        #[arg(long, value_enum, default_value = "keccak")]
-        hash: Hash,
         #[command(flatten)]
         policy: Policy,
     },
@@ -131,8 +127,6 @@ impl Policy {
 
 #[derive(Args)]
 pub(crate) struct RangeArgs {
-    #[arg(long, value_enum, default_value = "keccak")]
-    hash: Hash,
     leaf_count: u64,
     start: u64,
     length: u64,
@@ -391,15 +385,7 @@ impl RangeArgs {
 }
 
 impl Command {
-    pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
-        let hash = match &self {
-            Self::Check { hash, .. } | Self::CheckMulti { hash, .. } => *hash,
-            Self::Generate { range, .. }
-            | Self::Synthetic { range, .. }
-            | Self::Mmr(range)
-            | Self::Mmb(range) => range.hash,
-            Self::GenerateMulti { args, .. } | Self::SyntheticMulti { args, .. } => args.hash,
-        };
+    pub(crate) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         match hash {
             Hash::Keccak => self.execute_with::<Keccak256>(),
             Hash::Sha256 => self.execute_with::<Sha256>(),
@@ -412,13 +398,11 @@ impl Command {
             Self::Check {
                 kind,
                 abi_hex,
-                hash: _,
                 policy,
             }
             | Self::CheckMulti {
                 kind,
                 abi_hex,
-                hash: _,
                 policy,
             } => {
                 let encoded = const_hex::decode(abi_hex.strip_prefix("0x").unwrap_or(&abi_hex))
@@ -472,6 +456,7 @@ mod tests {
                 let explicit = Cli::try_parse_from([
                     "commonware-sol-fuzz",
                     "merkle",
+                    "keccak",
                     mode,
                     kind,
                     "11",
@@ -505,6 +490,7 @@ mod tests {
                     let shorthand = Cli::try_parse_from([
                         "commonware-sol-fuzz",
                         "merkle",
+                        "keccak",
                         kind,
                         "11",
                         "2",
@@ -520,16 +506,44 @@ mod tests {
                 }
                 let input = const_hex::encode(check_input(&expected, 2));
                 for hex in [input.clone(), format!("0x{input}")] {
-                    let accepted =
-                        Cli::try_parse_from(["commonware-sol-fuzz", "merkle", "check", kind, &hex])
-                            .unwrap()
-                            .command
-                            .execute()
-                            .unwrap();
+                    let accepted = Cli::try_parse_from([
+                        "commonware-sol-fuzz",
+                        "merkle",
+                        "keccak",
+                        "check",
+                        kind,
+                        &hex,
+                    ])
+                    .unwrap()
+                    .command
+                    .execute()
+                    .unwrap();
                     assert_eq!(accepted, 1u64.abi_encode());
                 }
             }
         }
+    }
+
+    #[test]
+    fn cli_requires_valid_hash() {
+        for args in [
+            vec!["generate", "mmr", "11", "2", "6", "42"],
+            vec!["synthetic", "mmb", "11", "2", "6", "42"],
+            vec!["check", "mmr", "00"],
+            vec!["generate-multi", "mmb", "11", "2", "42"],
+            vec!["synthetic-multi", "mmr", "11", "2", "42"],
+            vec!["check-multi", "mmb", "00"],
+            vec!["mmr", "11", "2", "6", "42"],
+            vec!["mmb", "11", "2", "6", "42"],
+        ] {
+            assert!(Cli::try_parse_from(["fuzz", "merkle"].into_iter().chain(args)).is_err());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "fuzz", "merkle", "blake3", "generate", "mmr", "11", "2", "6", "42",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -737,11 +751,11 @@ mod tests {
             for mode in ["generate", "synthetic", "shorthand"] {
                 let mut outputs = Vec::new();
                 for hash in ["keccak", "sha256"] {
-                    let mut args = vec!["fuzz", "merkle"];
+                    let mut args = vec!["fuzz", "merkle", hash];
                     if mode != "shorthand" {
                         args.push(mode);
                     }
-                    args.extend([kind, "11", "2", "6", "42", "--hash", hash]);
+                    args.extend([kind, "11", "2", "6", "42"]);
                     let encoded = Cli::try_parse_from(args)
                         .unwrap()
                         .command
@@ -760,7 +774,7 @@ mod tests {
                     let hex = const_hex::encode(input);
                     for check_hash in ["keccak", "sha256"] {
                         let accepted = Cli::try_parse_from([
-                            "fuzz", "merkle", "check", kind, &hex, "--hash", check_hash,
+                            "fuzz", "merkle", check_hash, "check", kind, &hex,
                         ])
                         .unwrap()
                         .command

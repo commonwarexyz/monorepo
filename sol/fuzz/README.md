@@ -12,9 +12,6 @@ target/release/commonware-sol-fuzz merkle --help
 target/release/commonware-sol-fuzz simplex --help
 ```
 
-Certificate commands accept `minsig` or `minpk` as the variant. Simplex schemes are
-`threshold` or `multisig`:
-
 ```text
 certificate threshold generate <variant> <namespace_hex> <message_hex> <seed>
 certificate threshold check <variant> <public_key_hex> <namespace_hex> <message_hex> <signature_hex>
@@ -30,5 +27,3 @@ simplex generate <scheme> <variant> <kind> <namespace_hex> <epoch> <view> <paren
 - `merkle`: Generate and check MMR and MMB proofs.
 - `simplex`: Generate Simplex signatures. `--participants` and `--signers-hex` apply
   to `multisig` and default to `4` and `0x07`.
-
-`bmt` and `merkle` use Keccak256 by default. Pass `--hash sha256` to use SHA-256.

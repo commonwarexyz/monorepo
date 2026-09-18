@@ -30,8 +30,6 @@ sol! {
 
 #[derive(Args)]
 pub(crate) struct MultiArgs {
-    #[arg(long, value_enum, default_value = "keccak")]
-    pub(super) hash: Hash,
     leaf_count: u64,
     /// Comma-separated leaf locations in the desired element order.
     #[arg(value_delimiter = ',', num_args = 1, required = true)]
@@ -379,7 +377,6 @@ mod tests {
                     };
                     for locations in [vec![0], vec![leaves - 1, 0, leaves / 2, 0]] {
                         let args = MultiArgs {
-                            hash: Hash::Keccak,
                             leaf_count: leaves,
                             locations,
                             seed: 42,
@@ -445,7 +442,6 @@ mod tests {
             for bagging in [Fold::Forward, Fold::Backward] {
                 for inactive_peaks in [0, 1, peak_count] {
                     let args = MultiArgs {
-                        hash: Hash::Keccak,
                         leaf_count: leaves,
                         locations: vec![leaves - 1, 0, leaves / 2, 1, leaves / 2 - 1],
                         seed: 17,
@@ -479,7 +475,6 @@ mod tests {
     fn complete_selection<F: Family, H: Hasher>() {
         for leaves in [1, 3, 11, 31] {
             let args = MultiArgs {
-                hash: Hash::Keccak,
                 leaf_count: leaves,
                 locations: (0..leaves).rev().collect(),
                 seed: 81,
@@ -515,6 +510,7 @@ mod tests {
                 let encoded = Cli::try_parse_from([
                     "commonware-sol-fuzz",
                     "merkle",
+                    "keccak",
                     mode,
                     kind,
                     "31",
@@ -572,6 +568,7 @@ mod tests {
                     let encoded = Cli::try_parse_from([
                         "fuzz",
                         "merkle",
+                        hash,
                         mode,
                         kind,
                         "31",
@@ -581,8 +578,6 @@ mod tests {
                         "backward",
                         "--inactive-peaks",
                         "2",
-                        "--hash",
-                        hash,
                     ])
                     .unwrap()
                     .command
@@ -604,6 +599,7 @@ mod tests {
                         let accepted = Cli::try_parse_from([
                             "fuzz",
                             "merkle",
+                            check_hash,
                             "check-multi",
                             kind,
                             &hex,
@@ -611,8 +607,6 @@ mod tests {
                             "backward",
                             "--inactive-peaks",
                             "2",
-                            "--hash",
-                            check_hash,
                         ])
                         .unwrap()
                         .command
