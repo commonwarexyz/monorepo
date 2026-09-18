@@ -3908,7 +3908,7 @@ mod tests {
                 "actor",
                 &[
                     ("PublishedBeforeCertification", 1),
-                    ("Received", 1),
+                    ("CandidateReturned", 1),
                     ("Requested", 1),
                 ],
                 &[],
@@ -4385,7 +4385,7 @@ mod tests {
                 &[
                     ("Held", 1),
                     ("PublishedAfterCertification", 1),
-                    ("Received", 1),
+                    ("CandidateReturned", 1),
                     ("Requested", 1),
                 ],
                 &[],
@@ -4413,7 +4413,7 @@ mod tests {
             HANDOFF_ACTOR_METRICS,
             &[
                 ("PublishedAfterCertification", 1),
-                ("Received", 1),
+                ("CandidateReturned", 1),
                 ("Requested", 1),
             ],
             &[],
@@ -4475,7 +4475,7 @@ mod tests {
                 &[
                     ("Held", 1),
                     ("PublishedAfterCertification", 1),
-                    ("Received", 1),
+                    ("CandidateReturned", 1),
                     ("Requested", 1),
                 ],
                 &[],
@@ -4601,7 +4601,7 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("Received", 1), ("Requested", 2)],
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 2)],
                 &[("AncestrySuperseded", 1)],
             );
         });
@@ -4640,7 +4640,7 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("Received", 1), ("Requested", 1)],
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
                 &[("AncestrySuperseded", 1)],
             );
         });
@@ -4678,7 +4678,7 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("Received", 1), ("Requested", 1)],
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
                 &[("ViewExit", 1)],
             );
         });
@@ -4708,7 +4708,7 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("Received", 1), ("Requested", 1)],
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
                 &[("IneligibleAtRecording", 1)],
             );
         });
@@ -4726,7 +4726,7 @@ mod tests {
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
-                &[("Held", 1), ("Received", 1), ("Requested", 1)],
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
                 &[],
             );
 

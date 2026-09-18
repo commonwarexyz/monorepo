@@ -1378,11 +1378,11 @@ impl<
                 // Clear propose waiter
                 pending_propose = None;
 
-                // Released held results carry `None` to avoid counting them as received again.
+                // Released held results carry `None` to avoid counting the candidate twice.
                 if matches!(request, ProposalRequest::Handoff(_))
                     && matches!(&proposed, Ok(ProposalResponse::Proposed { publication: Some(_), .. }))
                 {
-                    self.record_handoff_event(HandoffEventKind::Received);
+                    self.record_handoff_event(HandoffEventKind::CandidateReturned);
                 }
 
                 // Retain a declined handoff or held build outside the round proposal
