@@ -109,6 +109,7 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
     }
 }
 
+/// Unified response from a regular or handoff proposal request.
 enum ProposalResponse<D> {
     Proposed(D),
     AwaitCertification,
