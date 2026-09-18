@@ -102,6 +102,122 @@ pub use verify::{
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
 };
 
+/// Reject a bound that cannot retain the bootstrap commit.
+pub(crate) fn validate_initialization_bound<F: Family>(
+    bound: Option<Location<F>>,
+) -> Result<(), Error<F>> {
+    if bound.is_some_and(|size| size == 0) {
+        return Err(Error::InvalidInitializationBound);
+    }
+    Ok(())
+}
+
+/// Validate a selected commit against its retained history and return its floor.
+fn validate_initialization_commit<F: Family>(
+    start: u64,
+    size: u64,
+    fresh: bool,
+    commit: Option<&impl Floored<F>>,
+    replay_from_floor: bool,
+) -> Result<Option<Location<F>>, Error<F>> {
+    if size == 0 {
+        return if fresh {
+            Ok(None)
+        } else {
+            Err(Error::DataCorrupted("no retained commit"))
+        };
+    }
+    let floor = commit
+        .and_then(Floored::has_floor)
+        .ok_or(Error::DataCorrupted(
+            "selected operation has no commit floor",
+        ))?;
+    if *floor >= size {
+        return Err(Error::DataCorrupted(
+            "inactivity floor exceeds commit location",
+        ));
+    }
+    if replay_from_floor && *floor < start {
+        return Err(Error::HistoricalFloorPruned(Location::new(size)));
+    }
+    Ok(Some(floor))
+}
+
+/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// additionally requires retaining that floor. Keyless only restores commit fields.
+pub(crate) async fn validate_initialization<F, E, C, H, S>(
+    pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
+    replay_from_floor: bool,
+) -> Result<Option<Location<F>>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    let bounds = pending.bounds();
+    let commit = if bounds.end == 0 {
+        None
+    } else {
+        Some(pending.read(bounds.end - 1).await?)
+    };
+    validate_initialization_commit(
+        bounds.start,
+        bounds.end,
+        pending.is_fresh(),
+        commit.as_ref(),
+        replay_from_floor,
+    )
+}
+
+/// Select a QMDB commit before validating variant-specific reconstruction state.
+pub(crate) async fn prepare_initialization<F, E, C, H, S>(
+    context: E,
+    merkle: crate::merkle::full::Config<S>,
+    journal: C::Config,
+    max_size: Option<Location<F>>,
+) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    validate_initialization_bound(max_size)?;
+    Ok(crate::journal::authenticated::Journal::prepare(
+        context,
+        merkle,
+        journal,
+        max_size.map(|size| *size),
+        |op: &C::Item| op.has_floor().is_some(),
+        ROOT_BAGGING,
+    )
+    .await?)
+}
+
+/// Publish a standard QMDB journal after validating the retained commit.
+#[commonware_macros::boxed]
+pub(crate) async fn init_journal<F, E, C, H, S>(
+    context: E,
+    merkle: crate::merkle::full::Config<S>,
+    journal: C::Config,
+    max_size: Option<Location<F>>,
+    replay_from_floor: bool,
+) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    let pending = prepare_initialization(context, merkle, journal, max_size).await?;
+    validate_initialization(&pending, replay_from_floor).await?;
+    Ok(pending.finish().await?)
+}
+
 /// Merkle peak bagging policy used by QMDB operation roots.
 pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
 
@@ -186,6 +302,10 @@ where
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
 pub enum Error<F: Family> {
+    /// A QMDB initialization bound cannot exclude its initial commit.
+    #[error("initialization bound must allow at least one operation")]
+    InvalidInitializationBound,
+
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
@@ -237,14 +357,8 @@ pub enum Error<F: Family> {
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
 
-    /// The inactivity floor that governed the requested `historical_size` is not retrievable from
-    /// the journal, so the wrapper cannot derive the `inactive_peaks` count needed to construct a
-    /// proof matching the historical root.
-    ///
-    /// Historical proofs require `historical_size` to be a commit-boundary: the operation at
-    /// `historical_size - 1` must itself be a commit op declaring the governing floor. This error
-    /// fires when the caller passes a non-commit-boundary size, or when pruning has removed the
-    /// commit that would have governed the size.
+    /// The commit at the given operation count cannot be reconstructed from retained history.
+    /// The payload is the requested or selected operation count, not its inactivity floor.
     #[error("historical floor pruned for size: {0}")]
     HistoricalFloorPruned(Location<F>),
 }
