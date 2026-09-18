@@ -192,6 +192,21 @@ commonware_macros::stability_scope!(ALPHA {
             shard: &Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
+        /// Check the integrity of multiple shards.
+        ///
+        /// Returns one result per input in the same order. Each result is equivalent
+        /// to calling [`Self::check`] independently with that input's index and shard.
+        fn check_many(
+            config: &Config,
+            commitment: &Self::Commitment,
+            shards: &[(u16, &Self::Shard)],
+            strategy: &impl Strategy,
+        ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
+            strategy.map_collect_vec(shards, |&(index, shard)| {
+                Self::check(config, commitment, index, shard)
+            })
+        }
+
         /// Decode the data from shards received from other participants.
         ///
         /// The data must be decodeable with as few as `config.minimum_shards`,

@@ -104,10 +104,7 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::TracedAsyncMutex,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span};
@@ -149,7 +146,7 @@ where
     B: CertifiableBlock,
     ES: Epocher,
 {
-    context: Arc<TracedAsyncMutex<E>>,
+    context: Arc<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
@@ -218,7 +215,7 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
-            context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
+            context: Arc::new(context),
             application,
             marshal,
             epocher,
@@ -243,7 +240,7 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Valid blocks are reported to the marshal as verified.
     #[inline]
-    async fn deferred_verify(
+    fn deferred_verify(
         &mut self,
         context: <Self as Automaton>::Context,
         block: Arc<B>,
@@ -256,8 +253,6 @@ where
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
         let runtime_context = self
             .context
-            .lock()
-            .await
             .child("deferred_verify")
             .with_attribute("round", context.round);
         let span = info_span!(
@@ -316,7 +311,7 @@ where
         rx
     }
 
-    async fn certify_from_embedded_context(
+    fn certify_from_embedded_context(
         &mut self,
         round: Round,
         digest: B::Digest,
@@ -346,12 +341,7 @@ where
         let mut marshaled = self.clone();
         let epocher = self.epocher.clone();
         let (mut tx, rx) = oneshot::channel();
-        let context = self
-            .context
-            .lock()
-            .await
-            .child("certify")
-            .with_attribute("round", round);
+        let context = self.context.child("certify").with_attribute("round", round);
         context.spawn(move |_| {
             async move {
                 let block = select! {
@@ -414,9 +404,12 @@ where
                     },
                 );
 
-                let verify_rx = marshaled
-                    .deferred_verify(embedded_context, block, parent_request, Stage::Certified)
-                    .await;
+                let verify_rx = marshaled.deferred_verify(
+                    embedded_context,
+                    block,
+                    parent_request,
+                    Stage::Certified,
+                );
                 gates::forward(tx, verify_rx, |result| match result {
                     GateOutcome::Ready(result) => Some(result),
                     GateOutcome::Recover => None,
@@ -431,9 +424,7 @@ where
         });
         rx
     }
-
-    #[allow(clippy::async_yields_async)]
-    async fn certify_from_existing_task(
+    fn certify_from_existing_task(
         &mut self,
         round: Round,
         digest: B::Digest,
@@ -452,13 +443,11 @@ where
         let (tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("certify_existing")
             .with_attribute("round", round);
         context.spawn(move |_| {
-            gates::drive(tx, task, round, digest, move || async move {
-                marshaled.certify_from_embedded_context(round, digest).await
+            gates::drive(tx, task, round, digest, move || {
+                marshaled.certify_from_embedded_context(round, digest)
             })
             .instrument(info_span!(
                 "marshal.deferred.certify.existing",
@@ -519,8 +508,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("propose")
             .with_attribute("round", consensus_context.round);
         let span = info_span!(
@@ -718,8 +705,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
             .context
-            .lock()
-            .await
             .child("optimistic_verify")
             .with_attribute("round", round);
         runtime_context.spawn(move |_| {
@@ -833,8 +818,7 @@ where
                 // gate owns the deferred work. Nullification keeps that gate
                 // alive, while finalization drops it.
                 let deferred_rx = marshaled
-                    .deferred_verify(context, block, parent_request, Stage::Verified)
-                    .await;
+                    .deferred_verify(context, block, parent_request, Stage::Verified);
                 tx.send_lossy(true);
                 gates::forward(task_tx, deferred_rx, Some).await;
             }
@@ -904,10 +888,10 @@ where
         // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.gates.take(round, digest);
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, digest, task).await;
+            return self.certify_from_existing_task(round, digest, task);
         }
 
-        self.certify_from_embedded_context(round, digest).await
+        self.certify_from_embedded_context(round, digest)
     }
 }
 

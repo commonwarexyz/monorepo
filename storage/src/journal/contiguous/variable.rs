@@ -1125,7 +1125,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             if blob == floor_blob
                 && floor > blob_first_position(blob, items_per_blob)?
                 && floor > offsets.pruning_boundary()
-                && valid <= offsets.read(floor - 1).await?
+                && valid <= offsets.reader().read(floor - 1).await?
             {
                 return Err(Error::Corruption(format!(
                     "blob {blob} no longer backs acknowledged items: well-formed prefix {valid} \
@@ -1338,7 +1338,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let discard_blob = position_to_blob(size, self.items_per_blob.get());
 
         // The byte offset of the first discarded item is the data truncation point.
-        let discard_offset = self.offsets.read(size).await?;
+        let discard_offset = self.offsets.reader().read(size).await?;
 
         // Rewind offsets before data. Rewinding the offsets journal persists a lowered recovery
         // watermark before any state moves backward, so a crash anywhere in this sequence leaves
@@ -2351,7 +2351,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// rollover fsync: the returned handle joins it, so an earlier call's handle may still be
     /// pending when this call returns. Reads always proceed while the returned handle is
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
-    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync.
+    /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
+    /// or lose its failure. A failed data flush or sync fails the next append that reaches
+    /// the blob and the next commit, sync, or flushing snapshot, and any prune or rewind that
+    /// changes the journal. A failed offsets or recovery-watermark sync is not observed by
+    /// commit and resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -2378,63 +2382,27 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 }
 
-impl<E: Context, V: CodecShared> Contiguous for Inner<E, V> {
-    type Item = V;
-
-    fn bounds(&self) -> Range<u64> {
-        self.bounds.clone()
-    }
-
-    async fn read(&self, position: u64) -> Result<V, Error> {
-        self.reader().read(position).await
-    }
-
-    async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        self.reader().read_many(positions).await
-    }
-
-    fn try_read_sync(&self, position: u64) -> Option<V> {
-        self.reader().try_read_sync(position)
-    }
-
-    fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        self.reader().try_read_many_sync(positions)
-    }
-
-    async fn replay_range(
-        &self,
-        range: Range<u64>,
-        buffer: NonZeroUsize,
-        read_options: ReadOptions,
-    ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        let reader = self.reader();
-        let states = reader.replay_states(range, buffer, read_options).await?;
-
-        Ok(super::replay_stream_from_states(states))
-    }
-}
-
 impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
 
     fn bounds(&self) -> Range<u64> {
-        Contiguous::bounds(&*self.0)
+        self.0.bounds.clone()
     }
 
     async fn read(&self, position: u64) -> Result<V, Error> {
-        Contiguous::read(&*self.0, position).await
+        self.0.reader().read(position).await
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
-        Contiguous::read_many(&*self.0, positions).await
+        self.0.reader().read_many(positions).await
     }
 
     fn try_read_sync(&self, position: u64) -> Option<V> {
-        Contiguous::try_read_sync(&*self.0, position)
+        self.0.reader().try_read_sync(position)
     }
 
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<V>> {
-        Contiguous::try_read_many_sync(&*self.0, positions)
+        self.0.reader().try_read_many_sync(positions)
     }
 
     async fn replay_range(
@@ -2443,7 +2411,10 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         buffer: NonZeroUsize,
         read_options: ReadOptions,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        Contiguous::replay_range(&*self.0, range, buffer, read_options).await
+        let reader = self.0.reader();
+        let states = reader.replay_states(range, buffer, read_options).await?;
+
+        Ok(super::replay_stream_from_states(states))
     }
 }
 
@@ -2538,7 +2509,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         &mut self,
         position: u64,
     ) -> Result<(), Error> {
-        let offset = self.0.offsets.read(position).await?;
+        let offset = self.0.offsets.reader().read(position).await?;
         let blob = position_to_blob(position, self.0.items_per_blob.get());
         if blob == self.0.blobs.tail_blob_index() {
             self.0.blobs.rewind_tail(offset).await
@@ -2750,9 +2721,9 @@ mod tests {
             drop(journal);
             let journal = make(pending.clone()).await.unwrap();
             assert_eq!(journal.offsets.recovery_watermark(), 4);
-            assert_eq!(journal.bounds(), 0..4);
+            assert_eq!(journal.bounds, 0..4);
             for i in 0..4u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i + 1);
+                assert_eq!(journal.reader().read(i).await.unwrap(), i + 1);
             }
             journal.destroy().await.unwrap();
         });
@@ -2903,8 +2874,8 @@ mod tests {
         });
     }
 
-    /// A flush failure inside `start_sync` never reaches the writer's sync state, so only the
-    /// tail sync slot carries it. A rollover must surface the retained failure, not discard it:
+    /// A flush failure inside `start_sync` is retained by the tail writer and by the tail sync
+    /// slot. A rollover must surface the retained failure, not discard it:
     /// the failed flush already dropped page bytes, so sealing would durably orphan a hole.
     #[test_traced]
     fn test_variable_dropped_failed_start_sync_surfaces_after_rollover() {
@@ -3497,10 +3468,13 @@ mod tests {
             let reader;
             (journal, reader) = journal.snapshot().await.unwrap();
 
-            // Churn the 4-page pool with section-1 frames (five data pages) so every
-            // section-0 page is evicted, then warm the offsets page shared by positions
-            // 0..64 without touching position 0's frame page (302-byte frames put frame 0
-            // in page 0 and frame 4 in page 2).
+            // Position 0's frame page already left the 4-page pool during the writes: its
+            // single Small slot evicts each flushed page when the next one arrives. Churn the
+            // pool with section-1 frames (five data pages), then warm the offsets page shared
+            // by positions 0..64 without touching position 0's frame page (302-byte frames put
+            // frame 0 in page 0 and frame 4 in page 2).
+            let (items, _) = reader.probe_parts(&[0]);
+            assert!(items[0].is_none());
             reader
                 .read_many(&(128..136).collect::<Vec<u64>>())
                 .await

@@ -20,6 +20,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
+use commonware_storage_fuzz::assert_ordered_neighbors;
 use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -74,6 +75,9 @@ enum QmdbOperation {
     GetSpan {
         key: RawKey,
     },
+    GetNeighbors {
+        key: RawKey,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -108,6 +112,29 @@ async fn commit_pending<F: MerkleFamily>(
     db
 }
 
+/// Check strict, non-wrapping neighbors against the committed model, excluding queued writes.
+async fn assert_neighbors<F: MerkleFamily>(
+    db: &GenericDb<F>,
+    committed_state: &HashMap<RawKey, RawValue>,
+    key: RawKey,
+) {
+    let query = Key::new(key);
+    let prev = db
+        .get_prev_key(&query)
+        .await
+        .expect("get_prev_key should not fail");
+    let next = db
+        .get_next_key(&query)
+        .await
+        .expect("get_next_key should not fail");
+    assert_ordered_neighbors(
+        committed_state.keys().copied().map(Key::new),
+        &query,
+        prev,
+        next,
+    );
+}
+
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
     let runner = deterministic::Runner::default();
 
@@ -137,7 +164,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                     page_cache,
                 },
                 translator: EightCap,
-                init_cache_size: Some(NZUsize!(3)),
+                init_cache: Some(NZUsize!(3)),
                 init_buffer: NZUsize!(1 << 21),
                 init_concurrency: (),
             };
@@ -173,6 +200,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         pending_writes.push((k, None));
                         pending_inserts.remove(key);
                         pending_deletes.insert(*key);
+                        all_keys.insert(*key);
                         db
                     }
 
@@ -283,6 +311,12 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         assert_eq!(result.is_some(), !db.is_empty(), "span should be empty only if db is empty");
                         db
                     }
+
+                    QmdbOperation::GetNeighbors { key } => {
+                        assert_neighbors(&db, &committed_state, *key).await;
+                        all_keys.insert(*key);
+                        db
+                    }
                 };
             }
 
@@ -315,6 +349,14 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         );
                     },
                 }
+            }
+
+            for key in all_keys
+                .iter()
+                .copied()
+                .chain([[0u8; 32], [u8::MAX; 32]])
+            {
+                assert_neighbors(&db, &committed_state, key).await;
             }
 
             let batch = db.new_batch().merkleize(&db, None).await.unwrap();
