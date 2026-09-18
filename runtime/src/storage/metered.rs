@@ -9,7 +9,7 @@ use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
 };
-use tracing::{Instrument as _, Span, field::Empty};
+use tracing::Instrument as _;
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -176,16 +176,6 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
-    #[tracing::instrument(
-        name = "runtime.storage.blob.write_at",
-        level = "info",
-        skip_all,
-        fields(
-            partition = %self.partition,
-            bytes = Empty,
-            options = options.0.traced(),
-        )
-    )]
     async fn write_at(
         &self,
         offset: u64,
@@ -199,13 +189,20 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if options.contains(WriteOptions::SYNC) {
             self.metrics.storage_syncs.inc();
         }
-        Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at(offset, bufs, options).await
+        self.inner
+            .write_at(offset, bufs, options)
+            .instrument(tracing::debug_span!(
+                "runtime.storage.blob.write_at",
+                partition = %self.partition,
+                bytes = bufs_len as u64,
+                options = options.0.traced(),
+            ))
+            .await
     }
 
     #[tracing::instrument(
         name = "runtime.storage.blob.resize",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(partition = %self.partition, len = len)
     )]
@@ -216,7 +213,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
     #[tracing::instrument(
         name = "runtime.storage.blob.sync",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(partition = %self.partition)
     )]
@@ -227,7 +224,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
     #[tracing::instrument(
         name = "runtime.storage.blob.start_sync",
-        level = "info",
+        level = "debug",
         skip_all,
         fields(partition = %self.partition)
     )]
@@ -235,7 +232,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn start_sync(&self) -> Handle<()> {
         self.metrics.storage_syncs.inc();
         let handle = self.inner.start_sync().await;
-        Handle::from_future(handle.instrument(tracing::info_span!(
+        Handle::from_future(handle.instrument(tracing::debug_span!(
             "runtime.storage.blob.sync",
             partition = %self.partition,
         )))
@@ -251,7 +248,12 @@ mod tests {
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
     };
+    use commonware_utils::sync::Mutex;
     use rstest::rstest;
+    use tracing::{Level, Subscriber, instrument::WithSubscriber as _, span};
+    use tracing_subscriber::{
+        Layer, filter::LevelFilter, layer::Context, prelude::*, registry::LookupSpan,
+    };
 
     fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
@@ -274,6 +276,88 @@ mod tests {
 
             run_storage_tests(context, storage).await;
         });
+    }
+
+    #[rstest]
+    #[case::info(LevelFilter::INFO, false)]
+    #[case::debug(LevelFilter::DEBUG, true)]
+    #[tokio::test]
+    async fn test_metered_blob_span_levels(
+        #[case] filter: LevelFilter,
+        #[case] expect_spans: bool,
+    ) {
+        #[derive(Clone, Default)]
+        struct Spans(Arc<Mutex<Vec<(&'static str, Level)>>>);
+
+        impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Spans {
+            fn on_record(&self, id: &span::Id, _: &span::Record<'_>, ctx: Context<'_, S>) {
+                assert_ne!(
+                    ctx.span(id).unwrap().name(),
+                    "parent",
+                    "blob operations must not overwrite parent fields"
+                );
+            }
+
+            fn on_new_span(&self, attrs: &span::Attributes<'_>, _: &span::Id, _: Context<'_, S>) {
+                let metadata = attrs.metadata();
+                if metadata.name().starts_with("runtime.storage.blob.") {
+                    self.0.lock().push((metadata.name(), *metadata.level()));
+                }
+            }
+        }
+
+        let spans = Spans::default();
+        let subscriber = tracing_subscriber::registry()
+            .with(filter)
+            .with(spans.clone());
+        async {
+            let parent = tracing::info_span!("parent", bytes = 17_u64);
+            async {
+                let mut registry = Registry::default();
+                let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+                let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+                let (blob, len) = storage.open("partition", b"blob").await.unwrap();
+                assert_eq!(len, 0);
+                assert_eq!(storage.metrics.open_blobs.get(), 1);
+
+                blob.write_at(0, b"data", WriteOptions::SYNC).await.unwrap();
+                blob.resize(3).await.unwrap();
+                blob.sync().await.unwrap();
+                blob.start_sync().await.await.unwrap();
+                assert_eq!(
+                    blob.read_at(0, 3, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce(),
+                    b"dat"
+                );
+                assert_eq!(storage.metrics.storage_writes.get(), 1);
+                assert_eq!(storage.metrics.storage_write_bytes.get(), 4);
+                assert_eq!(storage.metrics.storage_resizes.get(), 1);
+                assert_eq!(storage.metrics.storage_syncs.get(), 3);
+                assert_eq!(storage.metrics.storage_reads.get(), 1);
+                assert_eq!(storage.metrics.storage_read_bytes.get(), 3);
+                drop(blob);
+                assert_eq!(storage.metrics.open_blobs.get(), 0);
+            }
+            .instrument(parent)
+            .await;
+        }
+        .with_subscriber(subscriber)
+        .await;
+
+        let expected = if expect_spans {
+            vec![
+                ("runtime.storage.blob.write_at", Level::DEBUG),
+                ("runtime.storage.blob.resize", Level::DEBUG),
+                ("runtime.storage.blob.sync", Level::DEBUG),
+                ("runtime.storage.blob.start_sync", Level::DEBUG),
+                ("runtime.storage.blob.sync", Level::DEBUG),
+            ]
+        } else {
+            vec![]
+        };
+        assert_eq!(*spans.0.lock(), expected);
     }
 
     #[tokio::test]
