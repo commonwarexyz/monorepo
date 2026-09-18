@@ -13,7 +13,7 @@ pub struct Peer<P: PublicKey> {
 pub enum HandoffEventKind {
     Requested,
     Deferred,
-    Received,
+    CandidateReturned,
     Held,
     PublishedBeforeCertification,
     PublishedAfterCertification,

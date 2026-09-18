@@ -289,11 +289,11 @@
 //! ### Handoff Metrics
 //!
 //! `handoff_events` counts nonexclusive lifecycle events. `Requested` counts requests to the
-//! automaton, not unique views. `Deferred` counts explicit deferrals, `Received` counts returned
-//! candidates, and `Held` counts candidates retained for parent certification. A held candidate
-//! is not received again when released. Publication events count local relay attempts after
-//! proposal acceptance, classified by whether the exact captured parent has certified or
-//! finalized at that point. They do not imply network delivery.
+//! automaton, not unique views. `Deferred` counts explicit deferrals, `CandidateReturned` counts
+//! candidates returned by the automaton, and `Held` counts candidates retained for parent
+//! certification. Releasing a held candidate does not count it as returned again. Publication
+//! events count local relay attempts after proposal acceptance, classified by whether the exact
+//! captured parent has certified or finalized at that point. They do not imply network delivery.
 //!
 //! `handoff_abandoned` counts requests or candidates discarded before publication, labeled by
 //! view exit, superseded ancestry, response closure, or ineligibility at recording.
