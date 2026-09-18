@@ -1,5 +1,6 @@
 use crate::{BufferPool, IoBuf, IoBufMut};
 use bytes::BufMut;
+use commonware_codec::{FixedSize, Write};
 use std::ops::{Bound, RangeBounds};
 
 /// A buffer for caching data written to the tip of a blob.
@@ -241,6 +242,16 @@ impl Buffer {
         over_capacity
     }
 
+    /// Encode a fixed-size value into the tip. The caller must ensure it fits in capacity.
+    pub(super) fn append_value<T: FixedSize + Write>(&mut self, value: &T) {
+        let end = self.len + T::SIZE;
+        let mut dst = self.writable(end).limit(T::SIZE);
+        value.write(&mut dst);
+        assert_eq!(dst.remaining_mut(), 0, "encoded size must match FixedSize");
+        self.len = end;
+        self.data = dst.into_inner().freeze();
+    }
+
     /// Removes `len` leading bytes from the buffered data while preserving the remaining suffix.
     ///
     /// The remaining suffix stays as a logical prefix in the updated view.
@@ -355,6 +366,50 @@ mod tests {
         assert_eq!(buffer.size(), 59);
         assert!(buffer.take().is_none());
         assert_eq!(buffer.size(), 59);
+    }
+
+    #[test]
+    fn test_tip_append_value_reuses_backing_and_preserves_shared_prefix() {
+        let mut buffer = Buffer::new(0, 32, test_pool());
+        buffer.append_value(&1u64);
+        let ptr = buffer.as_ref().as_ptr();
+        buffer.append_value(&2u64);
+        assert_eq!(buffer.as_ref().as_ptr(), ptr);
+        let snapshot = buffer.slice(..);
+        buffer.append_value(&3u64);
+        assert_ne!(buffer.as_ref().as_ptr(), ptr);
+        assert_eq!(
+            snapshot.as_ref(),
+            [1u64.to_be_bytes(), 2u64.to_be_bytes()].concat()
+        );
+        assert_eq!(buffer.len(), 24);
+        assert_eq!(&buffer.as_ref()[16..], &3u64.to_be_bytes());
+    }
+
+    struct IncorrectSize(usize);
+
+    impl FixedSize for IncorrectSize {
+        const SIZE: usize = 8;
+    }
+
+    impl Write for IncorrectSize {
+        fn write(&self, buf: &mut impl BufMut) {
+            buf.put_bytes(0, self.0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "encoded size must match FixedSize")]
+    fn test_tip_append_value_rejects_short_encoding() {
+        let mut buffer = Buffer::new(0, 32, test_pool());
+        buffer.append_value(&IncorrectSize(7));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tip_append_value_rejects_long_encoding() {
+        let mut buffer = Buffer::new(0, 32, test_pool());
+        buffer.append_value(&IncorrectSize(9));
     }
 
     #[test]
