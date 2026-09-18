@@ -25,7 +25,7 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
-use commonware_stream::encrypted::{Config as StreamConfig, Handshake, listen};
+use commonware_stream::{Handshake as _, encrypted::Handshake, utils::Timeout};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
@@ -237,16 +237,14 @@ fn main() {
 
         // Start listener
         let mut listener = context.bind(socket).await.expect("failed to bind listener");
-        let config = StreamConfig {
-            handshake: Handshake {
+        let handshake = Timeout::new(
+            Handshake {
                 signer,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
             },
-            namespace: INDEXER_NAMESPACE.to_vec(),
-            max_message_size: 1024 * 1024,
-            handshake_timeout: Duration::from_secs(5),
-        };
+            Duration::from_secs(5),
+        );
         loop {
             // Listen for connection
             let Ok((_, sink, stream)) = listener.accept().await else {
@@ -254,17 +252,20 @@ fn main() {
                 continue;
             };
 
-            let (peer, mut sender, mut receiver) = match listen(
-                context.child("listener"),
-                |peer| {
-                    let out = validators.position(&peer).is_some();
-                    async move { out }
-                },
-                config.clone(),
-                stream,
-                sink,
-            )
-            .await
+            let (peer, mut sender, mut receiver) = match handshake
+                .clone()
+                .listen(
+                    context.child("listener"),
+                    INDEXER_NAMESPACE,
+                    1024 * 1024,
+                    |peer| {
+                        let out = validators.position(&peer).is_some();
+                        async move { out }
+                    },
+                    stream,
+                    sink,
+                )
+                .await
             {
                 Ok(x) => x,
                 Err(e) => {

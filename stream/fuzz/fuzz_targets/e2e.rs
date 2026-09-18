@@ -3,8 +3,12 @@
 use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::TAG_SIZE};
 use commonware_runtime::{Handle, Runner as _, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
-    encrypted::{Config, Error, Handshake, Receiver, Sender, dial, listen},
-    utils::codec::{recv_frame, send_frame},
+    Handshake as _,
+    encrypted::{Error, Handshake, Receiver, Sender},
+    utils::{
+        Timeout,
+        codec::{recv_frame, send_frame},
+    },
 };
 use futures::future::{Either, select};
 use libfuzzer_sys::fuzz_target;
@@ -100,47 +104,47 @@ fn fuzz(input: FuzzInput) {
         let (listener_sink, mut adversary_l_stream) = mocks::Channel::init();
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_config = Config {
-            handshake: Handshake {
+        let dialer_handshake = Timeout::new(
+            Handshake {
                 signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
-            namespace: NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            handshake_timeout: Duration::from_secs(1),
-        };
+            Duration::from_secs(1),
+        );
 
-        let listener_config = Config {
-            handshake: Handshake {
+        let listener_handshake = Timeout::new(
+            Handshake {
                 signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
-            namespace: NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            handshake_timeout: Duration::from_secs(1),
-        };
+            Duration::from_secs(1),
+        );
 
         let dialer_handle = context.child("dialer").spawn(move |context| async move {
-            dial(
-                context,
-                dialer_config,
-                listener_signer.public_key(),
-                dialer_stream,
-                dialer_sink,
-            )
-            .await
+            dialer_handshake
+                .dial(
+                    context,
+                    NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    listener_signer.public_key(),
+                    dialer_stream,
+                    dialer_sink,
+                )
+                .await
         });
         let listener_handle = context.child("listener").spawn(move |context| async move {
-            listen(
-                context,
-                |_| async { true },
-                listener_config,
-                listener_stream,
-                listener_sink,
-            )
-            .await
+            listener_handshake
+                .listen(
+                    context,
+                    NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    |_| async { true },
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
         });
         let adversary_handle: Handle<Result<_, Error>> =
             context

@@ -144,14 +144,17 @@ where
                     debug!(?peer, ?address, "dialed peer");
 
                     // Upgrade connection
-                    let timeout = context.sleep(stream_cfg.handshake_timeout);
-                    let connection = select! {
-                        result = stream_cfg.handshake.dial(context, &stream_cfg.namespace, stream_cfg.max_message_size, peer.clone(), stream, sink) => result,
-                        _ = timeout => {
-                            debug!(?peer, "handshake timed out");
-                            return;
-                        },
-                    };
+                    let connection = stream_cfg
+                        .handshake
+                        .dial(
+                            context,
+                            &stream_cfg.namespace,
+                            stream_cfg.max_message_size,
+                            peer.clone(),
+                            stream,
+                            sink,
+                        )
+                        .await;
                     let connection = match connection {
                         Ok(instance) => instance,
                         Err(err) => {
@@ -241,7 +244,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_stream::encrypted::Handshake as StreamHandshake;
+    use commonware_stream::{encrypted::Handshake as StreamHandshake, utils::Timeout};
     use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -267,10 +270,12 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream_cfg: StreamConfig {
-                        handshake: StreamHandshake::new(signer),
+                        handshake: Timeout::new(
+                            StreamHandshake::new(signer),
+                            Duration::from_secs(5),
+                        ),
                         namespace: b"test".to_vec(),
                         max_message_size: 1024,
-                        handshake_timeout: Duration::from_secs(5),
                     },
                     dial_timeout,
                     dial_frequency: Duration::from_secs(1),
@@ -321,10 +326,9 @@ mod tests {
 
             let dialer_cfg = Config {
                 stream_cfg: StreamConfig {
-                    handshake: StreamHandshake::new(signer),
+                    handshake: Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
                     namespace: b"test".to_vec(),
                     max_message_size: 1024,
-                    handshake_timeout: Duration::from_secs(5),
                 },
                 dial_timeout: Duration::from_secs(15),
                 dial_frequency,
@@ -413,10 +417,12 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream_cfg: StreamConfig {
-                        handshake: StreamHandshake::new(signer),
+                        handshake: Timeout::new(
+                            StreamHandshake::new(signer),
+                            Duration::from_secs(5),
+                        ),
                         namespace: b"test".to_vec(),
                         max_message_size: 1024,
-                        handshake_timeout: Duration::from_secs(5),
                     },
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
@@ -478,10 +484,12 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream_cfg: StreamConfig {
-                        handshake: StreamHandshake::new(signer),
+                        handshake: Timeout::new(
+                            StreamHandshake::new(signer),
+                            Duration::from_secs(5),
+                        ),
                         namespace: b"test".to_vec(),
                         max_message_size: 1024,
-                        handshake_timeout: Duration::from_secs(5),
                     },
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,
@@ -562,10 +570,12 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream_cfg: StreamConfig {
-                        handshake: StreamHandshake::new(signer),
+                        handshake: Timeout::new(
+                            StreamHandshake::new(signer),
+                            Duration::from_secs(5),
+                        ),
                         namespace: b"test".to_vec(),
                         max_message_size: 1024,
-                        handshake_timeout: Duration::from_secs(5),
                     },
                     dial_timeout: Duration::from_secs(15),
                     dial_frequency,

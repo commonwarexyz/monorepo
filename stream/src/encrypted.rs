@@ -7,7 +7,7 @@
 //! c.f. [commonware_cryptography::handshake]. One difference here is that the listener does not
 //! know the dialer's public key in advance. Instead, the dialer tells the listener its public key
 //! in the first message. The listener has an opportunity to reject the connection if it does not
-//! wish to connect ([listen] takes in an arbitrary function to implement this).
+//! wish to connect ([crate::Handshake::listen] takes in an arbitrary function to implement this).
 //!
 //! ## Encryption
 //!
@@ -44,8 +44,6 @@
 //! - **Session Uniqueness**: A listener's [commonware_cryptography::handshake::SynAck] is bound to the dialer's [commonware_cryptography::handshake::Syn] message and
 //!   [commonware_cryptography::handshake::Ack]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
 //!   message integrity.
-//! - **Handshake Timeout**: The free functions [dial] and [listen] enforce
-//!   [`Config::handshake_timeout`] to protect against peers that abandon handshakes.
 //!
 //! ## Not Provided
 //!
@@ -65,7 +63,6 @@ use commonware_cryptography::{
     },
 };
 use commonware_formatting::hex;
-use commonware_macros::select;
 use commonware_runtime::{
     BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
     Stream,
@@ -106,8 +103,6 @@ pub enum Error {
     SendTooLarge(usize),
     #[error("connection closed")]
     StreamClosed,
-    #[error("handshake timed out")]
-    HandshakeTimeout,
 }
 
 impl From<CodecError> for Error {
@@ -120,34 +115,6 @@ impl From<HandshakeError> for Error {
     fn from(value: HandshakeError) -> Self {
         Self::HandshakeError(value)
     }
-}
-
-/// Configuration for a connection.
-///
-/// # Warning
-///
-/// Peers must use the same namespace and coordinate message limits and handshake timestamp
-/// tolerances. Mismatches can cause messages or connections to be rejected. Signing credentials
-/// and handshake deadlines are local to each peer.
-#[derive(Clone)]
-pub struct Config<S> {
-    /// Handshake used to authenticate the connection.
-    pub handshake: Handshake<S>,
-
-    /// Unique prefix for all signed messages. Should be application-specific.
-    /// Prevents replay attacks across different applications using the same keys.
-    pub namespace: Vec<u8>,
-
-    /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
-    ///
-    /// The largest supported value is [`MAX_SIZE`].
-    ///
-    /// Fixed-size handshake frames use their protocol-defined sizes instead of
-    /// inheriting this limit.
-    pub max_message_size: u32,
-
-    /// The allotted time for the handshake to complete.
-    pub handshake_timeout: Duration,
 }
 
 /// Authenticates connections and exchanges encrypted messages using ChaCha20-Poly1305.
@@ -337,88 +304,6 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
                 pool,
             },
         ))
-    }
-}
-
-/// Establishes an authenticated connection to a peer as the dialer.
-/// Returns sender and receiver for encrypted communication.
-///
-/// # Panics
-///
-/// Panics if [`Config::max_message_size`] exceeds [`MAX_SIZE`].
-pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: Sink>(
-    ctx: R,
-    config: Config<S>,
-    peer: S::PublicKey,
-    stream: I,
-    sink: O,
-) -> Result<(Sender<O>, Receiver<I>), Error> {
-    let Config {
-        handshake,
-        namespace,
-        max_message_size,
-        handshake_timeout,
-    } = config;
-    let timeout = ctx.sleep(handshake_timeout);
-    let inner_routine = crate::Handshake::dial(
-        handshake,
-        ctx,
-        &namespace,
-        max_message_size,
-        peer,
-        stream,
-        sink,
-    );
-
-    select! {
-        x = inner_routine => x,
-        _ = timeout => Err(Error::HandshakeTimeout),
-    }
-}
-
-/// Accepts an authenticated connection from a peer as the listener.
-/// Returns the peer's identity, sender, and receiver for encrypted communication.
-///
-/// The bouncer receives an unverified identity claim. Only a successful handshake proves
-/// the returned peer's identity.
-///
-/// # Panics
-///
-/// Panics if [`Config::max_message_size`] exceeds [`MAX_SIZE`].
-pub async fn listen<
-    R: BufferPooler + CryptoRng + Clock,
-    S: Signer,
-    I: Stream,
-    O: Sink,
-    Fut: Future<Output = bool> + Send,
-    F: FnOnce(S::PublicKey) -> Fut + Send,
->(
-    ctx: R,
-    bouncer: F,
-    config: Config<S>,
-    stream: I,
-    sink: O,
-) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
-    let Config {
-        handshake,
-        namespace,
-        max_message_size,
-        handshake_timeout,
-    } = config;
-    let timeout = ctx.sleep(handshake_timeout);
-    let inner_routine = crate::Handshake::listen(
-        handshake,
-        ctx,
-        &namespace,
-        max_message_size,
-        bouncer,
-        stream,
-        sink,
-    );
-
-    select! {
-        x = inner_routine => x,
-        _ = timeout => Err(Error::HandshakeTimeout),
     }
 }
 
@@ -667,7 +552,10 @@ impl<I: Stream> Receiver<I> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::Handshake as _;
+    use crate::{
+        Handshake as _,
+        utils::{Timeout, TimeoutError},
+    };
     use commonware_codec::varint::UInt;
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{
@@ -738,16 +626,11 @@ mod test {
         });
     }
 
-    fn transport_config(signer: PrivateKey) -> Config<PrivateKey> {
-        Config {
-            handshake: Handshake {
-                signer,
-                synchrony_bound: Duration::from_secs(1),
-                max_handshake_age: Duration::from_secs(1),
-            },
-            namespace: NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            handshake_timeout: Duration::from_secs(1),
+    fn transport_handshake(signer: PrivateKey) -> Handshake<PrivateKey> {
+        Handshake {
+            signer,
+            synchrony_bound: Duration::from_secs(1),
+            max_handshake_age: Duration::from_secs(1),
         }
     }
 
@@ -809,7 +692,7 @@ mod test {
     }
 
     #[test]
-    fn test_can_setup_and_send_messages() -> Result<(), Error> {
+    fn test_can_setup_and_send_messages() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
@@ -818,28 +701,33 @@ mod test {
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-            let dialer_config = transport_config(dialer_signer.clone());
-            let listener_config = transport_config(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone());
+            let listener_handshake = transport_handshake(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    listener_config,
-                    listener_stream,
-                    listener_sink,
-                )
-                .await
+                Timeout::new(listener_handshake, Duration::from_secs(1))
+                    .listen(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
             });
 
-            let (mut dialer_sender, mut dialer_receiver) = dial(
-                context,
-                dialer_config,
-                listener_signer.public_key(),
-                dialer_stream,
-                dialer_sink,
-            )
-            .await?;
+            let (mut dialer_sender, mut dialer_receiver) =
+                Timeout::new(dialer_handshake, Duration::from_secs(1))
+                    .dial(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        listener_signer.public_key(),
+                        dialer_stream,
+                        dialer_sink,
+                    )
+                    .await?;
 
             let (listener_peer, mut listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
@@ -858,7 +746,7 @@ mod test {
     }
 
     #[test]
-    fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Error> {
+    fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
@@ -874,28 +762,33 @@ mod test {
                 last_alloc: last_alloc.clone(),
             };
 
-            let dialer_config = transport_config(dialer_signer);
-            let listener_config = transport_config(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer);
+            let listener_handshake = transport_handshake(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    listener_config,
-                    listener_stream,
-                    listener_sink,
-                )
-                .await
+                Timeout::new(listener_handshake, Duration::from_secs(1))
+                    .listen(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
             });
 
-            let (mut dialer_sender, _dialer_receiver) = dial(
-                context,
-                dialer_config,
-                listener_signer.public_key(),
-                dialer_stream,
-                dialer_sink,
-            )
-            .await?;
+            let (mut dialer_sender, _dialer_receiver) =
+                Timeout::new(dialer_handshake, Duration::from_secs(1))
+                    .dial(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        listener_signer.public_key(),
+                        dialer_stream,
+                        dialer_sink,
+                    )
+                    .await?;
 
             let (_, _, mut listener_receiver) = listener_handle.await.unwrap()?;
 
@@ -920,7 +813,7 @@ mod test {
     }
 
     #[test]
-    fn test_send_many_uses_single_runtime_send() -> Result<(), Error> {
+    fn test_send_many_uses_single_runtime_send() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
@@ -931,28 +824,33 @@ mod test {
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_config = transport_config(dialer_signer.clone());
-            let listener_config = transport_config(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone());
+            let listener_handshake = transport_handshake(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    listener_config,
-                    listener_stream,
-                    listener_sink,
-                )
-                .await
+                Timeout::new(listener_handshake, Duration::from_secs(1))
+                    .listen(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
             });
 
-            let (mut dialer_sender, _dialer_receiver) = dial(
-                context,
-                dialer_config,
-                listener_signer.public_key(),
-                dialer_stream,
-                CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
-            )
-            .await?;
+            let (mut dialer_sender, _dialer_receiver) =
+                Timeout::new(dialer_handshake, Duration::from_secs(1))
+                    .dial(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        listener_signer.public_key(),
+                        dialer_stream,
+                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                    )
+                    .await?;
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
@@ -988,7 +886,7 @@ mod test {
     }
 
     #[test]
-    fn test_send_many_flushes_at_network_pool_item_max() -> Result<(), Error> {
+    fn test_send_many_flushes_at_network_pool_item_max() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::new(
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
@@ -1005,28 +903,33 @@ mod test {
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_config = transport_config(dialer_signer.clone());
-            let listener_config = transport_config(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone());
+            let listener_handshake = transport_handshake(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    listener_config,
-                    listener_stream,
-                    listener_sink,
-                )
-                .await
+                Timeout::new(listener_handshake, Duration::from_secs(1))
+                    .listen(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
             });
 
-            let (mut dialer_sender, _dialer_receiver) = dial(
-                context,
-                dialer_config,
-                listener_signer.public_key(),
-                dialer_stream,
-                CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
-            )
-            .await?;
+            let (mut dialer_sender, _dialer_receiver) =
+                Timeout::new(dialer_handshake, Duration::from_secs(1))
+                    .dial(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        listener_signer.public_key(),
+                        dialer_stream,
+                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                    )
+                    .await?;
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
@@ -1058,7 +961,8 @@ mod test {
     }
 
     #[test]
-    fn test_send_many_sends_oversized_single_message_alone() -> Result<(), Error> {
+    fn test_send_many_sends_oversized_single_message_alone()
+    -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::new(
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
@@ -1075,28 +979,33 @@ mod test {
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_config = transport_config(dialer_signer.clone());
-            let listener_config = transport_config(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone());
+            let listener_handshake = transport_handshake(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    listener_config,
-                    listener_stream,
-                    listener_sink,
-                )
-                .await
+                Timeout::new(listener_handshake, Duration::from_secs(1))
+                    .listen(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
             });
 
-            let (mut dialer_sender, _dialer_receiver) = dial(
-                context,
-                dialer_config,
-                listener_signer.public_key(),
-                dialer_stream,
-                CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
-            )
-            .await?;
+            let (mut dialer_sender, _dialer_receiver) =
+                Timeout::new(dialer_handshake, Duration::from_secs(1))
+                    .dial(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        listener_signer.public_key(),
+                        dialer_stream,
+                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                    )
+                    .await?;
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
@@ -1123,7 +1032,7 @@ mod test {
     }
 
     #[test]
-    fn test_send_many_too_large_preserves_sender_state() -> Result<(), Error> {
+    fn test_send_many_too_large_preserves_sender_state() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
@@ -1134,28 +1043,33 @@ mod test {
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_config = transport_config(dialer_signer.clone());
-            let listener_config = transport_config(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone());
+            let listener_handshake = transport_handshake(listener_signer.clone());
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    listener_config,
-                    listener_stream,
-                    listener_sink,
-                )
-                .await
+                Timeout::new(listener_handshake, Duration::from_secs(1))
+                    .listen(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
             });
 
-            let (mut dialer_sender, _dialer_receiver) = dial(
-                context,
-                dialer_config,
-                listener_signer.public_key(),
-                dialer_stream,
-                CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
-            )
-            .await?;
+            let (mut dialer_sender, _dialer_receiver) =
+                Timeout::new(dialer_handshake, Duration::from_secs(1))
+                    .dial(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        listener_signer.public_key(),
+                        dialer_stream,
+                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                    )
+                    .await?;
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
@@ -1198,8 +1112,8 @@ mod test {
 
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
-            let mut listener_config = transport_config(listener_signer);
-            listener_config.max_message_size = 1024 * 1024;
+            let listener_handshake = transport_handshake(listener_signer);
+            let max_message_size = 1024 * 1024;
 
             // Advertise a frame that is one byte larger than the encoded public
             // key and send no payload. The old behavior accepted this because it
@@ -1209,19 +1123,13 @@ mod test {
                 .await
                 .unwrap();
 
-            let result = listen(
-                context,
-                |_| async { true },
-                listener_config,
-                listener_stream,
-                listener_sink,
-            )
+            let result = Timeout::new(listener_handshake, Duration::from_secs(1)).listen(context, NAMESPACE, max_message_size, |_| async { true }, listener_stream, listener_sink)
             .await;
 
             // The listener should reject immediately on the fixed-size bound
             // instead of waiting for more bytes or allocating for the larger
             // application limit.
-            assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == peer.encode().len() + 1));
+            assert!(matches!(result, Err(TimeoutError::Handshake(Error::RecvTooLarge(n))) if n == peer.encode().len() + 1));
         });
     }
 
@@ -1237,28 +1145,28 @@ mod test {
 
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
-            let mut dialer_config = transport_config(dialer_signer);
-            dialer_config.max_message_size = 1024 * 1024;
+            let dialer_handshake = transport_handshake(dialer_signer);
+            let max_message_size = 1024 * 1024;
 
             // Build a valid SynAck only to derive its true encoded size for the
             // oversized prefix we inject below.
-            let (current_time, ok_timestamps) = dialer_config.handshake.time_information(&context);
+            let (current_time, ok_timestamps) = dialer_handshake.time_information(&context);
             let listener_public_key = listener_signer.public_key();
-            let dialer_public_key = dialer_config.handshake.signer.public_key();
+            let dialer_public_key = dialer_handshake.signer.public_key();
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
-                    &dialer_config.namespace,
+                    NAMESPACE,
                     current_time,
                     ok_timestamps.clone(),
-                    dialer_config.handshake.signer.clone(),
+                    dialer_handshake.signer.clone(),
                     listener_public_key.clone(),
                 ),
             );
             let (_, syn_ack) = listen_start(
                 context.child("listener"),
                 Context::new(
-                    &dialer_config.namespace,
+                    NAMESPACE,
                     current_time,
                     ok_timestamps,
                     listener_signer,
@@ -1275,20 +1183,22 @@ mod test {
                 .await
                 .unwrap();
 
-            let result = dial(
-                context,
-                dialer_config,
-                listener_public_key,
-                dialer_stream,
-                dialer_sink,
-            )
-            .await;
+            let result = Timeout::new(dialer_handshake, Duration::from_secs(1))
+                .dial(
+                    context,
+                    NAMESPACE,
+                    max_message_size,
+                    listener_public_key,
+                    dialer_stream,
+                    dialer_sink,
+                )
+                .await;
 
             // The dialer should reject on the fixed handshake bound before any
             // larger application-sized receive path is considered.
             assert!(matches!(
                 result,
-                Err(Error::RecvTooLarge(n))
+                Err(TimeoutError::Handshake(Error::RecvTooLarge(n)))
                     if n == syn_ack.encode().len() + 1
             ));
         });

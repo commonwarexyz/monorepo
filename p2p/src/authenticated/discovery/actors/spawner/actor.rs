@@ -170,9 +170,12 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
-    use commonware_stream::encrypted::{
-        Config as EncryptedConfig, Handshake as StreamHandshake, Receiver as EncryptedReceiver,
-        Sender as EncryptedSender, dial, listen,
+    use commonware_stream::{
+        Handshake as _,
+        encrypted::{
+            Handshake as StreamHandshake, Receiver as EncryptedReceiver, Sender as EncryptedSender,
+        },
+        utils::Timeout,
     };
     use commonware_utils::{NZUsize, SystemTimeExt};
     use std::{
@@ -189,17 +192,15 @@ mod tests {
         EncryptedReceiver<mocks::Stream>,
     );
 
-    fn stream_config(signer: PrivateKey) -> EncryptedConfig<PrivateKey> {
-        EncryptedConfig {
-            handshake: StreamHandshake {
+    fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
+        Timeout::new(
+            StreamHandshake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },
-            namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            handshake_timeout: Duration::from_secs(10),
-        }
+            Duration::from_secs(10),
+        )
     }
 
     fn spawner_config(me: PublicKey) -> Config<PublicKey> {
@@ -231,30 +232,34 @@ mod tests {
         let listener = context.child("listener").spawn({
             let expected = peer.clone();
             move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    stream_config(signer),
-                    local_stream,
-                    local_sink,
-                )
-                .await
-                .map(|(connected_peer, sender, receiver)| {
-                    assert_eq!(connected_peer, expected);
-                    (sender, receiver)
-                })
+                handshake(signer)
+                    .listen(
+                        context,
+                        STREAM_NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        local_stream,
+                        local_sink,
+                    )
+                    .await
+                    .map(|(connected_peer, sender, receiver)| {
+                        assert_eq!(connected_peer, expected);
+                        (sender, receiver)
+                    })
             }
         });
 
-        let dialer = dial(
-            context.child("dialer"),
-            stream_config(peer_signer),
-            local,
-            peer_stream,
-            peer_sink,
-        )
-        .await
-        .expect("dial failed");
+        let dialer = handshake(peer_signer)
+            .dial(
+                context.child("dialer"),
+                STREAM_NAMESPACE,
+                MAX_MESSAGE_SIZE,
+                local,
+                peer_stream,
+                peer_sink,
+            )
+            .await
+            .expect("dial failed");
 
         let listener = listener
             .await

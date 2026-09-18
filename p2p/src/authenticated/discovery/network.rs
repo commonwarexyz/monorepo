@@ -20,6 +20,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
+use commonware_stream::utils::Timeout;
 use commonware_utils::{SystemTimeExt, ordered::Set, union};
 use rand_core::CryptoRng;
 use tracing::{debug, info};
@@ -245,10 +246,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: StreamConfig {
-                    handshake: self.cfg.handshake.clone(),
+                    handshake: Timeout::new(self.cfg.handshake.clone(), self.cfg.handshake_timeout),
                     namespace: stream_namespace.clone(),
                     max_message_size: self.max_frame_size,
-                    handshake_timeout: self.cfg.handshake_timeout,
                 },
                 allow_private_ips: self.cfg.allow_private_ips,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
@@ -264,10 +264,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             self.context.child("dialer"),
             dialer::Config {
                 stream_cfg: StreamConfig {
-                    handshake: self.cfg.handshake,
+                    handshake: Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
                     namespace: stream_namespace,
                     max_message_size: self.max_frame_size,
-                    handshake_timeout: self.cfg.handshake_timeout,
                 },
                 dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,

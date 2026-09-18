@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
-use commonware_stream::encrypted::{Config, Handshake, dial, listen};
+use commonware_stream::{Handshake as _, encrypted::Handshake, utils::Timeout};
 use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -93,50 +93,51 @@ fn fuzz(input: FuzzInput) {
         let (dialer_sink, listener_stream) = mocks::Channel::init();
         let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-        let dialer_config = Config {
-            handshake: Handshake {
+        let dialer_handshake = Timeout::new(
+            Handshake {
                 signer: dialer_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
             },
-            namespace: input.namespace.clone(),
-            max_message_size,
             handshake_timeout,
-        };
+        );
 
-        let listener_config = Config {
-            handshake: Handshake {
+        let listener_handshake = Timeout::new(
+            Handshake {
                 signer: listener_signer.clone(),
                 synchrony_bound,
                 max_handshake_age,
             },
-            namespace: input.namespace.clone(),
-            max_message_size,
             handshake_timeout,
-        };
+        );
 
+        let listener_namespace = input.namespace.clone();
         let listener_handle = context.child("listener").spawn({
             move |context| async move {
-                listen(
-                    context,
-                    |_| async { true },
-                    listener_config,
-                    listener_stream,
-                    listener_sink,
-                )
-                .await
+                listener_handshake
+                    .listen(
+                        context,
+                        &listener_namespace,
+                        max_message_size,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
             }
         });
 
-        let (mut dialer_sender, mut dialer_receiver) = dial(
-            context.child("dialer"),
-            dialer_config,
-            listener_signer.public_key(),
-            dialer_stream,
-            dialer_sink,
-        )
-        .await
-        .unwrap();
+        let (mut dialer_sender, mut dialer_receiver) = dialer_handshake
+            .dial(
+                context.child("dialer"),
+                &input.namespace,
+                max_message_size,
+                listener_signer.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await
+            .unwrap();
 
         let (listener_peer, mut listener_sender, mut listener_receiver) =
             listener_handle.await.unwrap().unwrap();

@@ -6,7 +6,7 @@ use crate::authenticated::{
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
     SinkOf, Spawner, StreamOf, spawn_cell,
@@ -146,21 +146,17 @@ where
     ) {
         // Perform handshake
         let source_ip = address.ip();
-        let timeout = context.sleep(stream_cfg.handshake_timeout);
-        let connection = select! {
-            result = stream_cfg.handshake.listen(
+        let connection = stream_cfg
+            .handshake
+            .listen(
                 context,
                 &stream_cfg.namespace,
                 stream_cfg.max_message_size,
                 |peer| tracker.acceptable(peer, source_ip),
                 stream,
                 sink,
-            ) => result,
-            _ = timeout => {
-                debug!(?address, "handshake timed out");
-                return;
-            },
-        };
+            )
+            .await;
         let (peer, send, recv) = match connection {
             Ok(connection) => connection,
             Err(err) => {
@@ -334,7 +330,7 @@ mod tests {
     use commonware_runtime::{
         Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
     };
-    use commonware_stream::encrypted::Handshake as StreamHandshake;
+    use commonware_stream::{encrypted::Handshake as StreamHandshake, utils::Timeout};
     use commonware_utils::{NZU32, NZUsize};
     use std::{
         net::{IpAddr, Ipv4Addr},
@@ -380,10 +376,9 @@ mod tests {
                 Config {
                     address,
                     stream_cfg: StreamConfig {
-                        handshake,
+                        handshake: Timeout::new(handshake, Duration::from_millis(5)),
                         namespace: b"test-rate-limit".to_vec(),
                         max_message_size: 1024,
-                        handshake_timeout: Duration::from_millis(5),
                     },
                     allow_private_ips: true,
                     max_concurrent_handshakes: NZU32!(8),
@@ -550,10 +545,9 @@ mod tests {
                 Config {
                     address,
                     stream_cfg: StreamConfig {
-                        handshake,
+                        handshake: Timeout::new(handshake, Duration::from_millis(5)),
                         namespace: b"test-rate-limit".to_vec(),
                         max_message_size: 1024,
-                        handshake_timeout: Duration::from_millis(5),
                     },
                     allow_private_ips: true,
                     bypass_ip_check: false,
@@ -637,10 +631,9 @@ mod tests {
                 Config {
                     address,
                     stream_cfg: StreamConfig {
-                        handshake,
+                        handshake: Timeout::new(handshake, Duration::from_millis(5)),
                         namespace: b"test-rate-limit".to_vec(),
                         max_message_size: 1024,
-                        handshake_timeout: Duration::from_millis(5),
                     },
                     allow_private_ips: true,
                     bypass_ip_check: true,
@@ -724,10 +717,9 @@ mod tests {
                 Config {
                     address,
                     stream_cfg: StreamConfig {
-                        handshake,
+                        handshake: Timeout::new(handshake, Duration::from_millis(5)),
                         namespace: b"test-private-ips".to_vec(),
                         max_message_size: 1024,
-                        handshake_timeout: Duration::from_millis(5),
                     },
                     allow_private_ips: false,
                     bypass_ip_check: true,

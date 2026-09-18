@@ -24,7 +24,7 @@ use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::encrypted::{Config as StreamConfig, Handshake, dial};
+use commonware_stream::{Handshake as _, encrypted::Handshake, utils::Timeout};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -160,16 +160,14 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let indexer_cfg = StreamConfig {
-        handshake: Handshake {
+    let indexer_handshake = Timeout::new(
+        Handshake {
             signer: signer.clone(),
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(60),
         },
-        namespace: INDEXER_NAMESPACE.to_vec(),
-        max_message_size: 1024 * 1024,
-        handshake_timeout: Duration::from_secs(5),
-    };
+        Duration::from_secs(5),
+    );
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
@@ -189,7 +187,15 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = dial(context.child("dialer"), indexer_cfg, indexer, stream, sink)
+        let indexer = indexer_handshake
+            .dial(
+                context.child("dialer"),
+                INDEXER_NAMESPACE,
+                1024 * 1024,
+                indexer,
+                stream,
+                sink,
+            )
             .await
             .expect("Failed to upgrade connection with indexer");
 

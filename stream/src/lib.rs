@@ -32,9 +32,8 @@ commonware_macros::stability_scope!(BETA {
     /// messages and enforce the limit before allocating for an inbound message. Protocol overhead
     /// does not count toward this limit.
     ///
-    /// Callers must enforce their own deadline by dropping the handshake future when it expires.
-    /// Dropping the future cancels the attempt, and implementations must release the underlying
-    /// connection.
+    /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the handshake
+    /// future cancels the attempt, and implementations must release the underlying connection.
     pub trait Handshake: Clone + Send + Sync + 'static {
         /// Largest plaintext message supported by the established streams, in bytes.
         const MAX_SIZE: u32;
@@ -156,7 +155,19 @@ commonware_macros::stability_scope!(BETA {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::{convert::Infallible, future, marker::PhantomData, rc::Rc, sync::Arc};
+        use crate::utils::{Timeout, TimeoutError};
+        use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
+        use std::time::Duration;
+        use std::{
+            convert::Infallible,
+            future,
+            marker::PhantomData,
+            rc::Rc,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
 
         struct OpaqueIdentity(PhantomData<Rc<()>>);
 
@@ -188,14 +199,50 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
+        #[derive(Clone, Copy, Debug)]
+        enum Outcome {
+            Success,
+            Error,
+            Pending,
+        }
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("authentication rejected")]
+        struct Rejected;
+
         #[derive(Clone)]
-        struct OpaqueHandshake;
+        struct OpaqueHandshake(Outcome);
+
+        impl OpaqueHandshake {
+            async fn establish<I: Stream, O: Sink>(
+                self,
+                stream: I,
+                sink: O,
+            ) -> Result<(SharedHalf<I, O>, SharedHalf<I, O>), Rejected> {
+                if matches!(self.0, Outcome::Pending) {
+                    future::pending::<()>().await;
+                }
+                if matches!(self.0, Outcome::Error) {
+                    return Err(Rejected);
+                }
+                let session = Arc::new(Session {
+                    _stream: stream,
+                    _sink: sink,
+                });
+                Ok((
+                    SharedHalf {
+                        _session: session.clone(),
+                    },
+                    SharedHalf { _session: session },
+                ))
+            }
+        }
 
         impl Handshake for OpaqueHandshake {
             const MAX_SIZE: u32 = encrypted::MAX_SIZE;
 
             type PublicKey = OpaqueIdentity;
-            type Error = Infallible;
+            type Error = Rejected;
             type Sender<I: Stream, O: Sink> = SharedHalf<I, O>;
             type Receiver<I: Stream, O: Sink> = SharedHalf<I, O>;
 
@@ -209,15 +256,15 @@ commonware_macros::stability_scope!(BETA {
                 _namespace: &[u8],
                 _max_message_size: u32,
                 _peer: Self::PublicKey,
-                _stream: I,
-                _sink: O,
+                stream: I,
+                sink: O,
             ) -> impl Future<Output = Result<(Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>> + Send
             where
                 C: BufferPooler + Clock + CryptoRng,
                 I: Stream,
                 O: Sink,
             {
-                future::pending()
+                self.establish(stream, sink)
             }
 
             fn listen<C, I, O, B, F>(
@@ -225,11 +272,14 @@ commonware_macros::stability_scope!(BETA {
                 _context: C,
                 _namespace: &[u8],
                 _max_message_size: u32,
-                _bouncer: B,
-                _stream: I,
-                _sink: O,
+                bouncer: B,
+                stream: I,
+                sink: O,
             ) -> impl Future<
-                Output = Result<(Self::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>), Self::Error>,
+                Output = Result<
+                    (Self::PublicKey, Self::Sender<I, O>, Self::Receiver<I, O>),
+                    Self::Error,
+                >,
             > + Send
             where
                 C: BufferPooler + Clock + CryptoRng,
@@ -238,13 +288,170 @@ commonware_macros::stability_scope!(BETA {
                 B: FnOnce(Self::PublicKey) -> F + Send,
                 F: Future<Output = bool> + Send,
             {
-                future::pending()
+                let accepted = bouncer(self.public_key());
+                async move {
+                    if !accepted.await {
+                        return Err(Rejected);
+                    }
+                    let (sender, receiver) = self.establish(stream, sink).await?;
+                    Ok((OpaqueIdentity(PhantomData), sender, receiver))
+                }
             }
         }
 
         #[test]
         fn handshake_supports_opaque_identity_and_shared_session() {
-            let _: OpaqueIdentity = OpaqueHandshake.public_key();
+            fn assert_send<T: Send>(_: T) {}
+
+            deterministic::Runner::default().start(|context| async move {
+                let handshake = Timeout::new(OpaqueHandshake(Outcome::Success), Duration::from_secs(1));
+                let _: OpaqueIdentity = handshake.public_key();
+                let namespace = vec![1, 2, 3];
+                let (sink, stream) = mocks::Channel::init();
+                assert_send(handshake.clone().dial(
+                    context.child("handshake"),
+                    &namespace,
+                    1,
+                    handshake.public_key(),
+                    stream,
+                    sink,
+                ));
+                let (sink, stream) = mocks::Channel::init();
+                let accepted = true;
+                assert_send(handshake.listen(
+                    context,
+                    &namespace,
+                    1,
+                    |_| async { accepted },
+                    stream,
+                    sink,
+                ));
+            });
+        }
+
+        #[test]
+        fn timeout_preserves_results_and_releases_connections() {
+            for dialer in [false, true] {
+                for outcome in [Outcome::Success, Outcome::Error, Outcome::Pending] {
+                    for duration in [Duration::ZERO, Duration::from_millis(50)] {
+                        deterministic::Runner::timed(Duration::from_secs(1)).start(
+                            |context| async move {
+                                let (sink, mut peer_stream) = mocks::Channel::init();
+                                let (mut peer_sink, stream) = mocks::Channel::init();
+                                let handshake = Timeout::new(OpaqueHandshake(outcome), duration);
+                                let start = context.current();
+                                let result = if dialer {
+                                    handshake
+                                        .dial(
+                                            context.child("handshake"),
+                                            b"timeout",
+                                            1,
+                                            OpaqueIdentity(PhantomData),
+                                            stream,
+                                            sink,
+                                        )
+                                        .await
+                                } else {
+                                    handshake
+                                        .listen(
+                                            context.child("handshake"),
+                                            b"timeout",
+                                            1,
+                                            |_| async { true },
+                                            stream,
+                                            sink,
+                                        )
+                                        .await
+                                        .map(|(_, sender, receiver)| (sender, receiver))
+                                };
+                                match outcome {
+                                    Outcome::Success => assert!(result.is_ok()),
+                                    Outcome::Error => assert!(matches!(
+                                        result,
+                                        Err(TimeoutError::Handshake(Rejected))
+                                    )),
+                                    Outcome::Pending => {
+                                        assert!(matches!(result, Err(TimeoutError::Timeout)));
+                                        let elapsed = context.current().duration_since(start).unwrap();
+                                        assert!(
+                                            elapsed >= duration
+                                                && elapsed < duration + Duration::from_millis(1)
+                                        );
+                                    }
+                                }
+                                drop(result);
+                                assert!(peer_sink.send(&b"x"[..]).await.is_err());
+                                assert!(peer_stream.recv(1).await.is_err());
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn timeout_cancels_pending_admission() {
+            struct Admission(Arc<AtomicBool>);
+            impl Drop for Admission {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Relaxed);
+                }
+            }
+
+            for cancel in [false, true] {
+                deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+                    let (sink, mut peer_stream) = mocks::Channel::init();
+                    let (mut peer_sink, stream) = mocks::Channel::init();
+                    let dropped = Arc::new(AtomicBool::new(false));
+                    let admission = Admission(dropped.clone());
+                    let handshake =
+                        Timeout::new(OpaqueHandshake(Outcome::Success), Duration::from_millis(50));
+                    let mut attempt = Box::pin(handshake.listen(
+                        context,
+                        b"timeout",
+                        1,
+                        |_| async move {
+                            future::pending::<()>().await;
+                            drop(admission);
+                            true
+                        },
+                        stream,
+                        sink,
+                    ));
+                    assert!(futures::poll!(attempt.as_mut()).is_pending());
+                    assert!(!dropped.load(Ordering::Relaxed));
+                    if cancel {
+                        drop(attempt);
+                    } else {
+                        assert!(matches!(attempt.await, Err(TimeoutError::Timeout)));
+                    }
+                    assert!(dropped.load(Ordering::Relaxed));
+                    assert!(peer_sink.send(&b"x"[..]).await.is_err());
+                    assert!(peer_stream.recv(1).await.is_err());
+                });
+            }
+        }
+
+        #[test]
+        fn timeout_starts_when_called() {
+            deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+                let (sink, stream) = mocks::Channel::init();
+                let handshake =
+                    Timeout::new(OpaqueHandshake(Outcome::Pending), Duration::from_millis(50));
+                let mut attempt = Box::pin(handshake.dial(
+                    context.child("handshake"),
+                    b"timeout",
+                    1,
+                    OpaqueIdentity(PhantomData),
+                    stream,
+                    sink,
+                ));
+                context.sleep(Duration::from_millis(100)).await;
+                assert!(matches!(
+                    futures::poll!(attempt.as_mut()),
+                    std::task::Poll::Ready(Err(TimeoutError::Timeout))
+                ));
+            });
         }
     }
 });

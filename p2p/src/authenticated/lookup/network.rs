@@ -19,7 +19,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::Handshake;
+use commonware_stream::{Handshake, utils::Timeout};
 use commonware_utils::union;
 use rand_core::CryptoRng;
 use tracing::{debug, info};
@@ -208,10 +208,9 @@ where
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: StreamConfig {
-                    handshake: self.cfg.handshake.clone(),
+                    handshake: Timeout::new(self.cfg.handshake.clone(), self.cfg.handshake_timeout),
                     namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
                     max_message_size: self.max_frame_size,
-                    handshake_timeout: self.cfg.handshake_timeout,
                 },
                 allow_private_ips: self.cfg.allow_private_ips,
                 bypass_ip_check: self.cfg.bypass_ip_check,
@@ -229,10 +228,9 @@ where
             self.context.child("dialer"),
             dialer::Config {
                 stream_cfg: StreamConfig {
-                    handshake: self.cfg.handshake,
+                    handshake: Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
                     namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
                     max_message_size: self.max_frame_size,
-                    handshake_timeout: self.cfg.handshake_timeout,
                 },
                 dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,

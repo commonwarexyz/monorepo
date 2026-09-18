@@ -506,10 +506,10 @@ stability_scope!(BETA {
         fn current(&self) -> SystemTime;
 
         /// Sleep for the given duration.
-        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<Self>;
 
         /// Sleep until the given deadline.
-        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static + use<Self>;
 
         /// Await a future with a timeout, returning `Error::Timeout` if it expires.
         ///

@@ -1415,7 +1415,7 @@ impl Clock for Context {
         *self.executor().time.lock()
     }
 
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
         let deadline = self
             .current()
             .checked_add(duration)
@@ -1423,7 +1423,10 @@ impl Clock for Context {
         self.sleep_until(deadline)
     }
 
-    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep_until(
+        &self,
+        deadline: SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static + use<> {
         Sleeper {
             executor: self.executor.clone(),
 

@@ -347,7 +347,9 @@ mod tests {
         BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::encrypted::{Config as EncryptedConfig, Handshake as StreamHandshake};
+    use commonware_stream::{
+        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
+    };
     use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,
@@ -390,17 +392,15 @@ mod tests {
         }
     }
 
-    fn stream_config<S: Signer>(signer: S) -> EncryptedConfig<S> {
-        EncryptedConfig {
-            handshake: StreamHandshake {
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
+        Timeout::new(
+            StreamHandshake {
                 signer,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },
-            namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            handshake_timeout: Duration::from_secs(10),
-        }
+            Duration::from_secs(10),
+        )
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
@@ -428,36 +428,40 @@ mod tests {
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
-            let local_config = stream_config(signer.clone());
-            let remote_config = stream_config(remote_signer.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -536,37 +540,41 @@ mod tests {
             let (remote_sink, local_stream) = mocks::Channel::init();
             let sends = Arc::new(AtomicUsize::new(0));
 
-            let local_config = stream_config(signer.clone());
-            let remote_config = stream_config(remote_signer.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 let sends = sends.clone();
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        CountingSink::new(remote_sink, sends),
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            CountingSink::new(remote_sink, sends),
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (_local_sender, mut local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (_local_sender, mut local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await

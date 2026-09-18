@@ -76,10 +76,10 @@ pub struct Config<H: Handshake> {
     /// Set this to `1` to disable batching.
     pub send_batch_size: NonZeroUsize,
 
-    /// Timeout for the handshake process.
+    /// Maximum time to authenticate an established connection, including peer admission.
     ///
-    /// This is often set to some value less than the connection read timeout to prevent
-    /// unauthenticated peers from holding open connection.
+    /// This starts after dialing or accepting the transport connection and bounds how long an
+    /// unauthenticated peer can hold it open.
     pub handshake_timeout: Duration,
 
     /// Timeout for an outbound dial attempt.
