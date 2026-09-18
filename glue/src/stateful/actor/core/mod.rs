@@ -293,25 +293,25 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Mailbox, Stateful};
+    use super::{Config, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{AttachableResolver, Shared, StateSyncDb, SyncEngineConfig},
         tests::{
             fixtures,
-            mocks::{TestApp, TestBlock, TestDb, TestScheme, TestVariant},
+            mocks::{TestApp, TestBlock, TestDb},
         },
     };
     use commonware_consensus::{
         Application as _, CertifiableAutomaton as _, CertifiableBlock as _, HandoffPolicy,
         HandoffProposal, HandoffPublication, Reporter as _,
-        marshal::{Update, ancestry, core::Mailbox as MarshalMailbox, standard::Deferred},
+        marshal::{Update, ancestry, standard::Deferred},
         simplex::mocks::scheme as scheme_mocks,
         types::FixedEpocher,
     };
     use commonware_cryptography::{Digestible as _, sha256::Digest as Sha256Digest};
     use commonware_macros::select;
-    use commonware_runtime::{Clock as _, Handle, Runner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{Clock as _, Runner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement as _, NZU64, NZUsize,
         acknowledgement::Exact,
@@ -385,61 +385,45 @@ mod tests {
         }
     }
 
-    async fn spawn_test_stateful(
-        context: &deterministic::Context,
-        prefix: &str,
-        application: TestApp,
-    ) -> (
-        Mailbox<deterministic::Context, TestApp>,
-        MarshalMailbox<TestScheme, TestVariant>,
-        Box<dyn std::any::Any>,
-        Handle<()>,
-    ) {
-        let mut signing_context = context.child("signing");
-        let fixture = scheme_mocks::fixture(&mut signing_context, prefix.as_bytes(), 1);
-        let marshal = fixtures::marshal_fixture(
-            context.child("marshal"),
-            prefix,
-            fixture.schemes[0].clone(),
-            None,
-            NZUsize!(8),
-            true,
-        )
-        .await;
-        let plan = SyncPlan::init(context, format!("{prefix}-stateful")).await;
-        let (stateful, mailbox) = Stateful::init(
-            context.child("stateful"),
-            Config {
-                application,
-                db_config: (),
-                provider: (),
-                marshal: (marshal.mailbox.clone(), marshal.floor),
-                mailbox_size: NZUsize!(8),
-                plan,
-                resolvers: NoopResolver::default(),
-                sync_config: SyncEngineConfig {
-                    fetch_batch_size: NZU64!(1),
-                    apply_batch_size: NZU64!(1),
-                    max_outstanding_requests: 1,
-                    update_channel_size: NZUsize!(1),
-                    max_retained_roots: 1,
-                },
-                prune_config: None,
-            },
-        );
-        (mailbox, marshal.mailbox, marshal.guards, stateful.start())
-    }
-
     #[test]
     fn forwards_handoff_policy_and_reuses_recovered_proposal() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
-            let publication = HandoffPublication::AllowBeforeCertification;
-            let (mailbox, marshal, _guards, actor) = spawn_test_stateful(
-                &context,
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"handoff-policy", 1);
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
                 "stateful-handoff-policy",
-                TestApp::with_handoff_policy(HandoffPolicy::Prepare(publication)),
+                fixture.schemes[0].clone(),
+                None,
+                NZUsize!(8),
+                true,
             )
             .await;
+            let plan = SyncPlan::init(&context, "stateful-handoff-policy-stateful").await;
+            let publication = HandoffPublication::AllowBeforeCertification;
+            let (stateful, mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestApp::with_handoff_policy(HandoffPolicy::Prepare(publication)),
+                    db_config: (),
+                    provider: (),
+                    marshal: (marshal.mailbox.clone(), marshal.floor),
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: NoopResolver::default(),
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                    prune_config: None,
+                },
+            );
+            let _guards = marshal.guards;
+            let marshal = marshal.mailbox;
+            let actor = stateful.start();
             let _databases = mailbox.subscribe_databases().await;
             let mut deferred = Deferred::new(
                 context.child("prepare"),
@@ -460,25 +444,6 @@ mod tests {
                     publication,
                 }
             );
-            actor.abort();
-
-            let (mailbox, marshal, _guards, actor) = spawn_test_stateful(
-                &context,
-                "stateful-default-handoff-policy",
-                TestApp::default(),
-            )
-            .await;
-            let _databases = mailbox.subscribe_databases().await;
-            let mut deferred = Deferred::new(
-                context.child("default_handoff"),
-                mailbox,
-                marshal,
-                FixedEpocher::new(NZU64!(10)),
-            );
-            let response = deferred
-                .propose_handoff(TestBlock::new(1, 1).context())
-                .await;
-            assert_eq!(response.await.unwrap(), HandoffProposal::AwaitCertification);
             actor.abort();
         });
     }

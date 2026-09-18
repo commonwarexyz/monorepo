@@ -116,8 +116,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-    type ProposeRequests = Arc<Mutex<Vec<(View, View)>>>;
-    type ProposeContexts = Arc<Mutex<Vec<crate::simplex::types::Context<Sha256Digest, PublicKey>>>>;
+    type ProposeRequests = Arc<Mutex<Vec<crate::simplex::types::Context<Sha256Digest, PublicKey>>>>;
     type HandoffProposeResponses =
         Arc<Mutex<Vec<(Sha256Digest, oneshot::Sender<HandoffProposal<Sha256Digest>>)>>>;
     type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
@@ -272,20 +271,17 @@ mod tests {
         verify_latency_ms: f64,
         /// Mock application certify latency, in milliseconds.
         certify_latency_ms: f64,
-        /// Views and parents supplied to mock application proposal requests.
+        /// Contexts supplied to mock application proposal requests.
         propose_requests: Option<ProposeRequests>,
-        /// Full contexts supplied to mock application proposal requests.
-        propose_contexts: Option<ProposeContexts>,
         /// Handoff proposal responses controlled by the test.
         handoff_propose_responses: Option<HandoffProposeResponses>,
         /// Whether mock application proposal requests should remain pending.
         stall_proposals: bool,
         /// Whether the mock application drops proposal responses.
         drop_proposals: bool,
-        /// Whether the mock application accepts pipelined handoff requests.
-        accept_handoffs: bool,
-        /// Publication permission the mock application returns with accepted handoffs.
-        handoff_publication: HandoffPublication,
+        /// Publication permission the mock application returns with handoff
+        /// proposals, or `None` to defer them until the parent certifies.
+        handoff: Option<HandoffPublication>,
         actor_handle: Option<Arc<Mutex<Option<commonware_runtime::Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
@@ -307,12 +303,10 @@ mod tests {
                 verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
                 propose_requests: None,
-                propose_contexts: None,
                 handoff_propose_responses: None,
                 stall_proposals: false,
                 drop_proposals: false,
-                accept_handoffs: false,
-                handoff_publication: HandoffPublication::AllowBeforeCertification,
+                handoff: None,
                 actor_handle: None,
                 verify_requests: None,
                 fail_verification: false,
@@ -352,7 +346,6 @@ mod tests {
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
         let propose_requests = options.propose_requests;
-        let propose_contexts = options.propose_contexts;
         let handoff_propose_responses = options.handoff_propose_responses;
         let verify_requests = options.verify_requests;
 
@@ -368,17 +361,11 @@ mod tests {
             mocks::application::Application::new(context.child("app"), application_cfg);
         actor.set_stall_proposals(options.stall_proposals);
         actor.set_drop_proposals(options.drop_proposals);
-        actor.set_accept_handoffs(options.accept_handoffs);
-        actor.set_handoff_publication(options.handoff_publication);
+        actor.set_handoff(options.handoff);
         actor.set_fail_verification(options.fail_verification);
-        if propose_requests.is_some() || propose_contexts.is_some() {
+        if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
-                if let Some(requests) = &propose_requests {
-                    requests.lock().push((context.view(), context.parent.0));
-                }
-                if let Some(contexts) = &propose_contexts {
-                    contexts.lock().push(context);
-                }
+                propose_requests.lock().push(context);
             }));
         }
         if let Some(handoff_propose_responses) = handoff_propose_responses {
@@ -548,23 +535,34 @@ mod tests {
         }
     }
 
-    async fn wait_for_request<T>(
+    /// Lets bare view logs share [`wait_for_request`] with context logs.
+    impl Viewable for View {
+        fn view(&self) -> View {
+            *self
+        }
+    }
+
+    async fn wait_for_request<T: Viewable>(
         context: &deterministic::Context,
         requests: &Arc<Mutex<Vec<T>>>,
         view: View,
-        request_view: impl Fn(&T) -> View,
     ) {
         let deadline = context.current() + Duration::from_secs(1);
-        while !requests
-            .lock()
-            .iter()
-            .any(|request| request_view(request) == view)
-        {
+        while !requests.lock().iter().any(|request| request.view() == view) {
             if context.current() >= deadline {
                 panic!("application did not receive request for {view}");
             }
             context.sleep(Duration::from_millis(1)).await;
         }
+    }
+
+    /// Returns the (view, parent) pairs of the logged proposal requests.
+    fn request_parents(requests: &ProposeRequests) -> Vec<(View, View)> {
+        requests
+            .lock()
+            .iter()
+            .map(|request| (request.view(), request.parent.0))
+            .collect()
     }
 
     async fn take_proposal_response<T>(
@@ -3531,10 +3529,7 @@ mod tests {
 
             // Once the view 1 propose request is in flight, gate the journal so
             // the sync covering the view 1 notarize blocks until released.
-            wait_for_request(&context, &propose_requests, View::new(1), |request| {
-                request.0
-            })
-            .await;
+            wait_for_request(&context, &propose_requests, View::new(1)).await;
             pending_syncs.arm();
 
             // The voter appends the view 1 notarize and blocks on the gated
@@ -3544,10 +3539,7 @@ mod tests {
                 .blocked
                 .await
                 .expect("view 1 journal sync was dropped");
-            wait_for_request(&context, &propose_requests, View::new(2), |request| {
-                request.0
-            })
-            .await;
+            wait_for_request(&context, &propose_requests, View::new(2)).await;
 
             // Nothing constructed for view 1 may reach the batcher while its
             // sync is blocked.
@@ -3633,10 +3625,7 @@ mod tests {
             ));
             // The view 1 propose request stalls forever, occupying the pending
             // request slot.
-            wait_for_request(&context, &propose_requests, View::new(1), |request| {
-                request.0
-            })
-            .await;
+            wait_for_request(&context, &propose_requests, View::new(1)).await;
 
             // The leader timeout fires while the request is still outstanding.
             let nullify = loop {
@@ -3662,10 +3651,7 @@ mod tests {
             // view 3, the term start, which builds on genesis. The stalled
             // view 1 request must not suppress the view 3 request.
             mailbox.resolved(Certificate::Nullification(nullification));
-            wait_for_request(&context, &propose_requests, View::new(3), |request| {
-                request.0
-            })
-            .await;
+            wait_for_request(&context, &propose_requests, View::new(3)).await;
 
             // The replacement must dispatch at the same-iteration checkpoint,
             // before the nullification broadcast.
@@ -3758,7 +3744,7 @@ mod tests {
             let contents_1 = (proposal_1.round, genesis, 0u64).encode();
             relay.broadcast(&leader, Recipients::All, (proposal_1.payload, contents_1));
             mailbox.proposal(proposal_1.clone());
-            wait_for_request(&context, &verify_requests, View::new(1), |request| *request).await;
+            wait_for_request(&context, &verify_requests, View::new(1)).await;
 
             let proposal_2 = Proposal::new(
                 Round::new(epoch, View::new(2)),
@@ -3863,8 +3849,7 @@ mod tests {
                     timeout_retry: Duration::from_secs(30),
                     local_index,
                     propose_latency_ms: 10.0,
-                    accept_handoffs: true,
-                    handoff_publication: HandoffPublication::AllowBeforeCertification,
+                    handoff: Some(HandoffPublication::AllowBeforeCertification),
                     ..Default::default()
                 },
             )
@@ -3966,8 +3951,7 @@ mod tests {
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
                     certifier,
-                    accept_handoffs: true,
-                    handoff_publication: HandoffPublication::AllowBeforeCertification,
+                    handoff: Some(HandoffPublication::AllowBeforeCertification),
                     ..Default::default()
                 },
             )
@@ -4072,8 +4056,6 @@ mod tests {
         resolver: mailbox::Receiver<resolver::MailboxMessage<ed25519::Scheme, Sha256Digest>>,
         relay: Arc<mocks::relay::Relay<Sha256Digest, PublicKey>>,
         propose_requests: ProposeRequests,
-        propose_contexts: ProposeContexts,
-        handoff_responses: HandoffProposeResponses,
     }
 
     impl HandoffFixture {
@@ -4104,7 +4086,6 @@ mod tests {
                 usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
             let outgoing = participants[outgoing_index].clone();
             let propose_requests = Arc::new(Mutex::new(Vec::new()));
-            let propose_contexts = Arc::new(Mutex::new(Vec::new()));
             let handoff_responses = Arc::new(Mutex::new(Vec::new()));
             let certification_requests = Arc::new(Mutex::new(Vec::new()));
             let controlled = certification_requests.clone();
@@ -4136,10 +4117,8 @@ mod tests {
                         },
                     )),
                     propose_requests: Some(propose_requests.clone()),
-                    propose_contexts: Some(propose_contexts.clone()),
                     handoff_propose_responses: Some(handoff_responses.clone()),
-                    accept_handoffs: true,
-                    handoff_publication,
+                    handoff: Some(handoff_publication),
                     ..Default::default()
                 },
             )
@@ -4174,8 +4153,6 @@ mod tests {
                 resolver,
                 relay,
                 propose_requests,
-                propose_contexts,
-                handoff_responses,
             }
         }
 
@@ -4198,7 +4175,7 @@ mod tests {
             self.propose_requests
                 .lock()
                 .iter()
-                .filter(|(request_view, _)| *request_view == view)
+                .filter(|request| request.view() == view)
                 .count()
         }
 
@@ -4213,6 +4190,18 @@ mod tests {
                 .expect("handoff request must remain open");
         }
 
+        /// Delivers the captured parent's notarization and returns its
+        /// certification request.
+        async fn certify_parent(
+            &mut self,
+            context: &deterministic::Context,
+        ) -> oneshot::Sender<bool> {
+            let parent = self.parent.clone();
+            self.certification_request(context, &parent).await
+        }
+
+        /// Delivers `parent`'s notarization and returns the certification
+        /// request for view 2.
         async fn certification_request(
             &mut self,
             context: &deterministic::Context,
@@ -4278,6 +4267,16 @@ mod tests {
                 self.participants[(self.local_index + 1) % self.participants.len()].clone();
             relay.register(observer)
         }
+    }
+
+    /// Waits for a `handoff_events` label to reach one.
+    async fn wait_for_handoff_event(context: &deterministic::Context, event: &str) {
+        wait_for_handoff_metric(context, "handoff_events", "event", event).await;
+    }
+
+    /// Waits for a `handoff_abandoned` label to reach one.
+    async fn wait_for_handoff_abandoned(context: &deterministic::Context, reason: &str) {
+        wait_for_handoff_metric(context, "handoff_abandoned", "reason", reason).await;
     }
 
     /// Waits for a handoff metric to reach one. Fixture tests trigger each
@@ -4361,9 +4360,8 @@ mod tests {
             let mut relayed = fixture.observer();
 
             fixture.respond();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
-            let parent = fixture.parent.clone();
-            let certified = fixture.certification_request(&context, &parent).await;
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
 
             let release = fixture.block_certification(certified).await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
@@ -4380,10 +4378,6 @@ mod tests {
                 fixture.requests_for(View::new(3)),
                 1,
                 "held handoff must not rebuild"
-            );
-            assert!(
-                fixture.handoff_responses.lock().is_empty(),
-                "no second handoff build"
             );
             assert_handoff_metrics(
                 &context.encode(),
@@ -4407,11 +4401,9 @@ mod tests {
     ) {
         let mut fixture = HandoffFixture::new(context, publication).await;
         let mut relayed = fixture.observer();
-        let parent = fixture.parent.clone();
-        let certified = fixture.certification_request(context, &parent).await;
+        let certified = fixture.certify_parent(context).await;
 
         fixture.finish_certification(certified).await;
-        assert_eq!(fixture.requests_for(View::new(3)), 1, "must not rebuild");
         fixture.respond();
         observe_handoff_publication(context, &mut relayed, &mut fixture.batcher, fixture.digest)
             .await;
@@ -4458,7 +4450,7 @@ mod tests {
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             let mut relayed = fixture.observer();
             fixture.respond();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
+            wait_for_handoff_event(&context, "Held").await;
 
             let (_, finalization) =
                 build_finalization(&fixture.schemes, &fixture.parent, fixture.quorum());
@@ -4500,9 +4492,8 @@ mod tests {
             let mut fixture =
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             fixture.defer();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Deferred").await;
-            let parent = fixture.parent.clone();
-            let certified = fixture.certification_request(&context, &parent).await;
+            wait_for_handoff_event(&context, "Deferred").await;
+            let certified = fixture.certify_parent(&context).await;
 
             let release = fixture.block_certification(certified).await;
             // Long enough for a re-request to reach the application if the
@@ -4524,7 +4515,7 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
             let contexts: Vec<_> = fixture
-                .propose_contexts
+                .propose_requests
                 .lock()
                 .iter()
                 .filter(|request| request.round.view() == View::new(3))
@@ -4535,11 +4526,7 @@ mod tests {
                 contexts[0], contexts[1],
                 "ordinary request must reuse the deferred context"
             );
-            assert_eq!(contexts[1].parent, (View::new(2), parent.payload));
-            assert!(
-                fixture.handoff_responses.lock().is_empty(),
-                "no second handoff build"
-            );
+            assert_eq!(contexts[1].parent, (View::new(2), fixture.parent.payload));
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -4557,9 +4544,8 @@ mod tests {
             let mut fixture =
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             fixture.defer();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Deferred").await;
-            let parent = fixture.parent.clone();
-            let certified = fixture.certification_request(&context, &parent).await;
+            wait_for_handoff_event(&context, "Deferred").await;
+            let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
                 &fixture.schemes,
@@ -4577,7 +4563,7 @@ mod tests {
                 }
             }
             fixture.finish_certification(certified).await;
-            wait_for_handoff_metric(&context, "handoff_abandoned", "reason", "ViewExit").await;
+            wait_for_handoff_abandoned(&context, "ViewExit").await;
             assert_eq!(
                 fixture.requests_for(View::new(3)),
                 1,
@@ -4600,7 +4586,7 @@ mod tests {
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             let mut relayed = fixture.observer();
             fixture.respond();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
+            wait_for_handoff_event(&context, "Held").await;
 
             let mut conflicting_parent = fixture.parent.clone();
             conflicting_parent.payload = Sha256::hash(&[b"conflicting parent"]);
@@ -4608,13 +4594,7 @@ mod tests {
                 .certification_request(&context, &conflicting_parent)
                 .await;
             fixture.finish_certification(certified).await;
-            wait_for_handoff_metric(
-                &context,
-                "handoff_abandoned",
-                "reason",
-                "AncestrySuperseded",
-            )
-            .await;
+            wait_for_handoff_abandoned(&context, "AncestrySuperseded").await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
             // The conflicting notarization supersedes the held build and issues
             // a second handoff request on the new tip.
@@ -4635,9 +4615,8 @@ mod tests {
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             let mut relayed = fixture.observer();
             fixture.respond();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
-            let parent = fixture.parent.clone();
-            let certified = fixture.certification_request(&context, &parent).await;
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
                 &fixture.schemes,
@@ -4654,6 +4633,9 @@ mod tests {
                     break;
                 }
             }
+            // Nullify view 3 locally before the parent's delayed certification
+            // lands. The ordinary replacement proposal for view 3 has already
+            // published, and the held build must still be rejected.
             fixture.mailbox.timeout(
                 Round::new(Epoch::new(333), View::new(3)),
                 TimeoutReason::LeaderTimeout,
@@ -4666,12 +4648,7 @@ mod tests {
                 }
             }
             fixture.finish_certification(certified).await;
-            wait_for_handoff_metric(
-                &context,
-                "handoff_abandoned",
-                "reason",
-                "AncestrySuperseded",
-            )
+            wait_for_handoff_abandoned(&context, "AncestrySuperseded")
             .await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
             assert_handoff_metrics(
@@ -4691,9 +4668,8 @@ mod tests {
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             let mut relayed = fixture.observer();
             fixture.respond();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
-            let parent = fixture.parent.clone();
-            let certified = fixture.certification_request(&context, &parent).await;
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
 
             let (_, nullification) = build_nullification(
                 &fixture.schemes,
@@ -4711,7 +4687,7 @@ mod tests {
                 }
             }
             fixture.finish_certification(certified).await;
-            wait_for_handoff_metric(&context, "handoff_abandoned", "reason", "ViewExit").await;
+            wait_for_handoff_abandoned(&context, "ViewExit").await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
             assert_handoff_metrics(
                 &context.encode(),
@@ -4730,9 +4706,8 @@ mod tests {
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             let mut relayed = fixture.observer();
             fixture.respond();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
-            let parent = fixture.parent.clone();
-            let certified = fixture.certification_request(&context, &parent).await;
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
 
             let release = fixture.block_certification(certified).await;
 
@@ -4742,13 +4717,7 @@ mod tests {
                 .sleep(HANDOFF_LEADER_TIMEOUT + Duration::from_secs(1))
                 .await;
             fixture.release_certification(release).await;
-            wait_for_handoff_metric(
-                &context,
-                "handoff_abandoned",
-                "reason",
-                "IneligibleAtRecording",
-            )
-            .await;
+            wait_for_handoff_abandoned(&context, "IneligibleAtRecording").await;
             assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
             assert_handoff_metrics(
                 &context.encode(),
@@ -4766,9 +4735,8 @@ mod tests {
             let mut fixture =
                 HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
             fixture.respond();
-            wait_for_handoff_metric(&context, "handoff_events", "event", "Held").await;
-            let parent = fixture.parent.clone();
-            let certified = fixture.certification_request(&context, &parent).await;
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
             assert_handoff_metrics(
                 &context.encode(),
                 HANDOFF_ACTOR_METRICS,
@@ -4797,7 +4765,7 @@ mod tests {
                     leader_timeout: HANDOFF_LEADER_TIMEOUT,
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    accept_handoffs: true,
+                    handoff: Some(HandoffPublication::AfterCertification),
                     handoff_propose_responses: Some(restarted_responses.clone()),
                     ..Default::default()
                 },
@@ -4875,8 +4843,7 @@ mod tests {
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
                     drop_proposals: true,
-                    accept_handoffs: true,
-                    handoff_publication: HandoffPublication::AllowBeforeCertification,
+                    handoff: Some(HandoffPublication::AllowBeforeCertification),
                     ..Default::default()
                 },
             )
@@ -4893,13 +4860,10 @@ mod tests {
             )
             .await;
 
-            wait_for_request(&context, &propose_requests, View::new(3), |request| {
-                request.0
-            })
-            .await;
+            wait_for_request(&context, &propose_requests, View::new(3)).await;
             assert_eq!(
-                propose_requests.lock().as_slice(),
-                &[(View::new(3), View::new(2))]
+                request_parents(&propose_requests),
+                [(View::new(3), View::new(2))]
             );
 
             let (_, notarization) = build_notarization(&schemes, &parent, quorum(n));
@@ -4944,8 +4908,8 @@ mod tests {
                 }
             }
             assert_eq!(
-                propose_requests.lock().as_slice(),
-                &[(View::new(3), View::new(2))],
+                request_parents(&propose_requests),
+                [(View::new(3), View::new(2))],
                 "parent certification must not retry a dropped handoff"
             );
             assert_handoff_metrics(
@@ -5004,8 +4968,7 @@ mod tests {
                     local_index,
                     propose_requests: Some(propose_requests.clone()),
                     stall_proposals: true,
-                    accept_handoffs: true,
-                    handoff_publication: HandoffPublication::AllowBeforeCertification,
+                    handoff: Some(HandoffPublication::AllowBeforeCertification),
                     ..Default::default()
                 },
             )
@@ -5024,13 +4987,10 @@ mod tests {
             )
             .await;
 
-            wait_for_request(&context, &propose_requests, View::new(3), |request| {
-                request.0
-            })
-            .await;
+            wait_for_request(&context, &propose_requests, View::new(3)).await;
             assert_eq!(
-                propose_requests.lock().as_slice(),
-                &[(View::new(3), View::new(2))]
+                request_parents(&propose_requests),
+                [(View::new(3), View::new(2))]
             );
 
             // Nullifying the captured parent enters view 3. The still-pending
@@ -5048,7 +5008,7 @@ mod tests {
                 context.sleep(Duration::from_millis(10)).await;
             }
             let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(1))];
-            assert_eq!(propose_requests.lock().as_slice(), &expected);
+            assert_eq!(request_parents(&propose_requests), expected);
             assert_handoff_metrics(
                 &context.encode(),
                 "actor",

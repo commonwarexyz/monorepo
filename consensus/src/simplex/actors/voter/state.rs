@@ -7041,13 +7041,13 @@ mod tests {
         certified
     }
 
-    /// Leaves a single-participant state at a pipelined term boundary with a
-    /// local notarize vote for the uncertified outgoing tip.
-    fn prepare_single_participant_term_boundary(
+    /// Notarizes a single participant's pipelined handoff: the outgoing tip
+    /// at view 5 and the child built on it at view 6 before the tip certifies.
+    fn notarize_single_participant_handoff(
         state: &mut TestState,
         verifier: &ed25519::Scheme,
         schemes: &[ed25519::Scheme],
-    ) -> Proposal<Sha256Digest> {
+    ) -> (Proposal<Sha256Digest>, Proposal<Sha256Digest>) {
         certify_view_4(state, verifier, schemes);
 
         let context = state
@@ -7057,7 +7057,20 @@ mod tests {
         let tip = fetch_proposal(5, 4, 65);
         assert!(state.proposed(&context, tip.payload));
         assert!(state.construct_notarize(View::new(5)).is_some());
-        tip
+
+        let context = state
+            .try_propose()
+            .expect("handoff proposal should use the uncertified tip")
+            .into_context();
+        let child = fetch_proposal(6, 5, 66);
+        assert!(state.proposed(&context, child.payload));
+        assert!(state.construct_notarize(View::new(6)).is_some());
+
+        let tip_notarization = build_notarization(verifier, schemes, &tip);
+        assert!(state.add_notarization(tip_notarization).0);
+        let child_notarization = build_notarization(verifier, schemes, &child);
+        assert!(state.add_notarization(child_notarization).0);
+        (tip, child)
     }
 
     #[test]
@@ -7121,23 +7134,9 @@ mod tests {
                 },
                 mut state,
             ) = setup_state_with_handoff(&mut context, 1, 0, 9, handoff_terms());
-            let tip = prepare_single_participant_term_boundary(&mut state, &verifier, &schemes);
+            let (tip, child) = notarize_single_participant_handoff(&mut state, &verifier, &schemes);
 
-            let child_context = state
-                .try_propose()
-                .expect("handoff proposal should use the uncertified tip")
-                .into_context();
-            let child = fetch_proposal(6, 5, 66);
-            assert!(state.proposed(&child_context, child.payload));
-            assert!(state.construct_notarize(View::new(6)).is_some());
-
-            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
-            assert!(state.add_notarization(tip_notarization).0);
-            let child_notarization = build_notarization(&verifier, &schemes, &child);
-            assert!(state.add_notarization(child_notarization).0);
-
-            // A single participant forms both notarizations. Only the parent
-            // may cross the application certification barrier first.
+            // Only the parent may cross the application certification barrier first.
             let (ready, fetches) = state.certify_candidates();
             assert!(fetches.is_empty());
             assert_eq!(ready, vec![tip]);
@@ -7203,20 +7202,7 @@ mod tests {
                 },
                 mut state,
             ) = setup_state_with_handoff(&mut context, 1, 0, 9, handoff_terms());
-            let tip = prepare_single_participant_term_boundary(&mut state, &verifier, &schemes);
-
-            let child_context = state
-                .try_propose()
-                .expect("handoff proposal should use the uncertified tip")
-                .into_context();
-            let child = fetch_proposal(6, 5, 66);
-            assert!(state.proposed(&child_context, child.payload));
-            assert!(state.construct_notarize(View::new(6)).is_some());
-
-            let tip_notarization = build_notarization(&verifier, &schemes, &tip);
-            assert!(state.add_notarization(tip_notarization).0);
-            let child_notarization = build_notarization(&verifier, &schemes, &child);
-            assert!(state.add_notarization(child_notarization).0);
+            notarize_single_participant_handoff(&mut state, &verifier, &schemes);
 
             // A finalize vote requires the certified parent even when the
             // child is already certified.

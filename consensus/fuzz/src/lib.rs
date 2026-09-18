@@ -126,10 +126,9 @@ pub struct FuzzInput {
     pub term_length: TermLength,
     pub optimistic_views: ViewDelta,
     pub heterogeneous_optimism: bool,
-    /// Whether honest applications prepare pipelined handoff candidates.
-    pub accept_handoffs: bool,
-    /// Publication permission that honest applications grant for prepared candidates.
-    pub handoff_publication: HandoffPublication,
+    /// Publication permission honest applications grant for pipelined handoff
+    /// candidates, or `None` to defer every handoff.
+    pub handoff: Option<HandoffPublication>,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -163,11 +162,10 @@ impl Arbitrary<'_> for FuzzInput {
         let optimistic_views =
             ViewDelta::new(u.int_in_range(0..=max_optimistic_views(term_length))?);
         let heterogeneous_optimism = u.arbitrary()?;
-        let accept_handoffs = u.arbitrary()?;
-        let handoff_publication = if u.arbitrary()? {
-            HandoffPublication::AllowBeforeCertification
-        } else {
-            HandoffPublication::AfterCertification
+        let handoff = match u.int_in_range(0..=2)? {
+            0 => None,
+            1 => Some(HandoffPublication::AfterCertification),
+            _ => Some(HandoffPublication::AllowBeforeCertification),
         };
 
         // SmallScope mutations with round-based injections - 80%,
@@ -202,8 +200,7 @@ impl Arbitrary<'_> for FuzzInput {
             term_length,
             optimistic_views,
             heterogeneous_optimism,
-            accept_handoffs,
-            handoff_publication,
+            handoff,
             strategy,
         })
     }
@@ -389,8 +386,7 @@ fn spawn_honest_validator<
     participants: &[Ed25519PublicKey],
     term_length: TermLength,
     optimistic_views: ViewDelta,
-    accept_handoffs: bool,
-    handoff_publication: HandoffPublication,
+    handoff: Option<HandoffPublication>,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
@@ -427,8 +423,7 @@ where
     };
     let (mut actor, application) =
         application::Application::new(context.child("application"), app_cfg);
-    actor.set_accept_handoffs(accept_handoffs);
-    actor.set_handoff_publication(handoff_publication);
+    actor.set_handoff(handoff);
     actor.start();
 
     let blocker = oracle.control(validator.clone());
@@ -501,8 +496,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 &participants,
                 input.term_length,
                 validator_optimistic_views(&input, i),
-                input.accept_handoffs,
-                input.handoff_publication,
+                input.handoff,
                 schemes[i].clone(),
                 validator.clone(),
                 relay.clone(),
@@ -679,8 +673,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             };
             let (mut actor, application) =
                 application::Application::new(primary_context.child("application"), app_cfg);
-            actor.set_accept_handoffs(input.accept_handoffs);
-            actor.set_handoff_publication(input.handoff_publication);
+            actor.set_handoff(input.handoff);
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -743,8 +736,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 participants.as_ref(),
                 input.term_length,
                 validator_optimistic_views(&input, idx),
-                input.accept_handoffs,
-                input.handoff_publication,
+                input.handoff,
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),

@@ -202,8 +202,7 @@ pub struct Application<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> {
     fail_verification: bool,
     drop_proposals: bool,
     stall_proposals: bool,
-    accept_handoffs: bool,
-    handoff_publication: HandoffPublication,
+    handoff: Option<HandoffPublication>,
     drop_verifications: bool,
     should_certify: Certifier<H::Digest>,
 
@@ -264,10 +263,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                 fail_verification: false,
                 drop_proposals: false,
                 stall_proposals: false,
-                accept_handoffs: false,
-                // Tests exercise early publication by default; production
-                // applications default to `AfterCertification`.
-                handoff_publication: HandoffPublication::AllowBeforeCertification,
+                handoff: None,
                 drop_verifications: false,
                 should_certify: cfg.should_certify,
 
@@ -301,14 +297,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
         self.stall_proposals = stall;
     }
 
-    /// Configures whether the mock accepts pipelined handoff proposal requests.
-    pub const fn set_accept_handoffs(&mut self, enabled: bool) {
-        self.accept_handoffs = enabled;
-    }
-
-    /// Sets the publication permission returned with accepted handoff proposals.
-    pub const fn set_handoff_publication(&mut self, publication: HandoffPublication) {
-        self.handoff_publication = publication;
+    /// Sets the publication permission returned with handoff proposals, or
+    /// `None` to defer every handoff until its parent certifies.
+    pub const fn set_handoff(&mut self, handoff: Option<HandoffPublication>) {
+        self.handoff = handoff;
     }
 
     pub const fn set_drop_verifications(&mut self, drop: bool) {
@@ -508,10 +500,10 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         if let Some(observer) = &self.propose_observer {
                             observer(context.clone());
                         }
-                        if !self.accept_handoffs {
+                        let Some(publication) = self.handoff else {
                             response.send_lossy(HandoffProposal::AwaitCertification);
                             continue;
-                        }
+                        };
                         if self.stall_proposals {
                             self.pending_handoff_proposes.push(response);
                             continue;
@@ -525,7 +517,7 @@ impl<E: Clock + Rng + Spawner, H: Hasher, P: PublicKey> Application<E, H, P> {
                         } else {
                             response.send_lossy(HandoffProposal::Proposed {
                                 payload: digest,
-                                publication: self.handoff_publication,
+                                publication,
                             });
                         }
                     }

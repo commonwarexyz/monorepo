@@ -729,7 +729,7 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        Monitor, Viewable,
+        HandoffPublication, Monitor, Viewable,
         simplex::{
             elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
             mocks::{
@@ -1855,7 +1855,9 @@ mod tests {
             };
             let (mut actor, application) =
                 mocks::application::Application::new(context.child("application"), application_cfg);
-            actor.set_accept_handoffs(accept_handoffs);
+            actor.set_handoff(
+                accept_handoffs.then_some(HandoffPublication::AllowBeforeCertification),
+            );
             actor.start();
 
             let blocker = oracle.control(validator.clone());
