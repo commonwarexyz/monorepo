@@ -1,9 +1,9 @@
-//! Handshake conformance tests
+//! SAKE conformance tests
 
 use crate::{
     Signer,
     ed25519::PrivateKey,
-    handshake::{Context, dial_end, dial_start, listen_end, listen_start},
+    sake::{Context, dial_end, dial_start, listen_end, listen_start},
 };
 use commonware_codec::Encode;
 use commonware_conformance::{Conformance, conformance_tests};
@@ -13,9 +13,9 @@ use rand_chacha::ChaCha8Rng;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE_CONFORMANCE_TESTS";
 
-struct Handshake;
+struct Sake;
 
-impl Conformance for Handshake {
+impl Conformance for Sake {
     async fn commit(seed: u64) -> Vec<u8> {
         let mut log = Vec::new();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
@@ -80,5 +80,5 @@ impl Conformance for Handshake {
 }
 
 conformance_tests! {
-    Handshake => 4096,
+    Sake => 4096,
 }

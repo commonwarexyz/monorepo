@@ -124,13 +124,13 @@ mod tests {
     use commonware_codec::{Decode as _, Encode as _, Error};
     use commonware_cryptography::ed25519;
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
-    use commonware_stream::encrypted::{self, Handshake as StreamHandshake};
+    use commonware_stream::cups::{self, Sake};
 
     #[test]
     fn test_max_size_bounds() {
         assert_eq!(
-            max_size::<StreamHandshake<ed25519::PrivateKey>>() + MAX_PAYLOAD_OVERHEAD,
-            encrypted::MAX_SIZE
+            max_size::<Sake<ed25519::PrivateKey>>() + MAX_PAYLOAD_OVERHEAD,
+            cups::MAX_SIZE
         );
     }
 

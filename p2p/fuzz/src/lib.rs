@@ -12,7 +12,7 @@ use commonware_runtime::{
     Clock, Handle, IoBuf, Quota, Runner, Supervisor as _,
     deterministic::{self, Context},
 };
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::cups::Sake;
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},
@@ -235,7 +235,7 @@ impl NetworkScheme for Discovery {
 
         // Create config with recommended defaults
         let mut config = discovery::Config::recommended(
-            Handshake::new(peer.info.signer.clone()),
+            Sake::new(peer.info.signer.clone()),
             b"fuzz_namespace",
             peer.info.address,
             peer.info.address,
@@ -313,7 +313,7 @@ impl NetworkScheme for Lookup {
     ) -> PeerNetwork<Self::Sender, Self::Receiver, Self::Oracle> {
         // Create lookup config - no bootstrappers needed since we register addresses directly
         let mut config = lookup::Config::recommended(
-            Handshake::new(peer.info.signer.clone()),
+            Sake::new(peer.info.signer.clone()),
             b"fuzz_namespace",
             peer.info.address,
             peer.topo

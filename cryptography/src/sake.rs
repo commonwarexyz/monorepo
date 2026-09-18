@@ -1,39 +1,46 @@
-//! This module provides an authenticated key exchange protocol, or handshake.
+//! Commonware SAKE (Simple Authenticated Key Exchange).
 //!
-//! # Design
+//! This is a Commonware construction, unrelated to [EAP-SAKE] or the [symmetric-key SAKE]
+//! protocol.
 //!
-//! The **dialer** and the **listener** both have a public identity, known to each other in advance.
-//! The goal of the handshake is to establish a shared, encrypted, and authenticated communication
-//! channel between these two parties. No third party should be able to read messages, or send
-//! messates along the channel.
+//! # Construction
 //!
-//! A three-message handshake is used to authenticate peers and establish a shared secret. The
-//! **dialer** initiates the connection, and the **listener** responds.
+//! SAKE is a fixed three-message handshake between a **dialer** and **listener**:
 //!
-//! [Syn] The dialer starts by sending a signed message with their ephemeral key.
+//! 1. [Syn]: The dialer sends a timestamp, an ephemeral X25519 public key, and a signature bound
+//!    to the transcript and intended listener.
+//! 2. [SynAck]: The listener sends its timestamp, ephemeral X25519 public key, transcript
+//!    signature, and key-confirmation tag.
+//! 3. [Ack]: The dialer verifies the response and sends the opposite-direction confirmation.
 //!
-//! [SynAck] The listener responds by sending back their ephemeral key, along with a signature over the
-//! protocol transcript thus far. They can also derive a shared secret, which they use to generate
-//! a confirmation tag, also sent to the dialer.
+//! The current suite uses X25519 for ephemeral key agreement, BLAKE3 for the transcript and key
+//! derivation, a generic [Signer] implementation for identity signatures, and ChaCha20-Poly1305
+//! for the resulting directional traffic ciphers.
 //!
-//! [Ack] The dialer verifies the signed message, then derives the same secret, and uses
-//! that to send their own confirmation back to the listener.
+//! Both public identities are inputs to the core exchange and are incorporated into the transcript
+//! with the timestamps, ephemeral keys, and shared secret in a fixed order. Identities are visible,
+//! not hidden by the construction. SAKE has no 0-RTT mode or resumption mechanism; application data
+//! can be sent only after the three messages complete.
 //!
-//! The listener then verifies this confirmation.
+//! The BLAKE3 transcript first commits the caller-provided application namespace as one packet,
+//! then forks it with the fixed `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` protocol namespace. It uses
+//! [Version::V0] because SAKE commits a fixed sequence of canonical encodings at fixed positions.
+//! Distinct labels derive the listener-to-dialer and dialer-to-listener traffic keys and
+//! confirmations. These namespace bytes, transcript order, version, and labels are protocol
+//! constants.
 //!
-//! The shared secret can then be used to derive to AEAD keys, for the sending data ([SendCipher])
-//! and receiving data ([RecvCipher]). These use ChaCha20-Poly1305 as the AEAD. Each direction has
-//! a 12 byte counter to used as a nonce, with every call to [SendCipher::send] on one end,
-//! or [RecvCipher::recv] on the other end incrementing this counter. This guarantees that if
-//! a message is successfully received, then it was delivered in order. Re-ordering messages on
-//! the wire will have the effect of producing errors on the receiving end, but not of producing
-//! successful messages in a different order.
+//! [SendCipher] and [RecvCipher] use independent ChaCha20-Poly1305 keys and 96-bit counter nonces.
+//! A successful receive therefore authenticates a message at its expected position in that
+//! direction.
 //!
-//! # Security Features
+//! # Timing
 //!
-//! The protocol includes timestamp validation to protect against replay attacks and clock skew:
-//! - Messages with timestamps too old are rejected to prevent replay attacks
-//! - Messages with timestamps too far in the future are rejected to safeguard against clock skew
+//! Callers provide the accepted timestamp range to limit replay and clock skew. Because this core
+//! performs no I/O, callers must separately enforce deadlines around the handshake to bound stalled
+//! attempts.
+//!
+//! [EAP-SAKE]: https://www.rfc-editor.org/rfc/rfc4763
+//! [symmetric-key SAKE]: https://eprint.iacr.org/2019/444
 use crate::{
     PublicKey, Signature, Signer, Verifier,
     transcript::{Summary, Transcript, Version},
@@ -61,7 +68,7 @@ const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
 const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 
 // V0 is safe because the application namespace is summarized as a single packet before the
-// handshake commits a fixed sequence of canonical encodings at fixed positions.
+// SAKE commits a fixed sequence of canonical encodings at fixed positions.
 const TRANSCRIPT_VERSION: Version = Version::V0;
 
 /// First handshake message sent by the dialer.

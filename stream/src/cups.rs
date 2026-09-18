@@ -1,63 +1,51 @@
-//! Encrypted stream implementation using ChaCha20-Poly1305.
+//! Commonware CUPS (Counter Unidirectional Packet Stream).
 //!
-//! # Design
+//! CUPS protects ordered message records using a separate key and implicit counter for each
+//! direction. "Packet" refers to a framed message on an ordered byte stream, not a datagram.
+//! The current construction uses ChaCha20-Poly1305; the construction name is independent of
+//! this algorithm choice.
 //!
-//! ## Handshake
+//! # Handshake
 //!
-//! c.f. [commonware_cryptography::handshake]. One difference here is that the listener does not
-//! know the dialer's public key in advance. Instead, the dialer tells the listener its public key
-//! in the first message. The listener has an opportunity to reject the connection if it does not
-//! wish to connect ([crate::Handshake::listen] takes in an arbitrary function to implement this).
+//! [Sake] implements [crate::Handshake] using Commonware
+//! [SAKE](commonware_cryptography::sake) (Simple Authenticated Key Exchange) and returns CUPS
+//! [Sender] and [Receiver] halves. SAKE uses a fixed three-message exchange with ephemeral X25519
+//! keys, identity signatures, and BLAKE3 transcript derivation to establish directional ciphers.
 //!
-//! ## Encryption
+//! The core SAKE protocol receives both peer identities as inputs. This adapter first sends the
+//! dialer's public key in a framed, cleartext prelude, separate from SAKE's three messages. The
+//! listener's bouncer may reject that claim before authentication. Accepting it only permits the
+//! handshake to continue; a successful handshake authenticates the returned identity.
 //!
-//! All traffic is encrypted using ChaCha20-Poly1305. A shared secret is established using an
-//! ephemeral X25519 Diffie-Hellman key exchange. This secret, combined with the handshake
-//! transcript, is used to derive keys for both the handshake's key confirmation messages and
-//! the post-handshake data traffic. Binding the derived keys to the handshake transcript prevents
-//! man-in-the-middle and transcript substitution attacks.
+//! Peers must agree on a unique, application-specific namespace and have clocks within the
+//! configured timestamp acceptance windows. Callers must enforce a handshake deadline, for example
+//! with [crate::utils::Timeout]. Identities are exposed during the handshake, and there is no 0-RTT
+//! resumption.
 //!
-//! Each directional cipher uses a 12-byte nonce derived from a counter that is incremented for each
-//! message sent. This counter has sufficient cardinality for over 2.5 trillion years of continuous
-//! communication at a rate of 1 billion messages per second - sufficient for all practical use cases.
-//! This ensures that well-behaving peers can remain connected indefinitely as long as they both
-//! remain online (maximizing p2p network stability). In the unlikely case of counter overflow, the
-//! connection will be terminated and a new connection should be established. This method prevents
-//! nonce reuse (which would compromise message confidentiality) while saving bandwidth (as there is
-//! no need to transmit nonces explicitly).
+//! # Records
+//!
+//! Each message is independently encrypted and authenticated with a 16-byte tag and empty AEAD
+//! associated data. A visible u32-varint length prefix frames the ciphertext and tag. Batching
+//! writes preserves individual record boundaries.
+//!
+//! Each direction uses a fixed session key and an implicit 96-bit counter nonce, starting at zero
+//! and encoded little-endian. The counter advances for each record and is never transmitted.
+//! Counter exhaustion requires a new connection. Counters bind records to their expected positions:
+//! replayed, reordered, or corrupted records fail authentication rather than being reordered for
+//! delivery. Callers must discard the connection after an authentication failure.
 //!
 //! # Security
 //!
-//! ## Requirements
-//!
-//! - **Pre-Shared Namespace**: Peers must agree on a unique, application-specific namespace
-//!   out-of-band to prevent cross-application replay attacks.
-//! - **Time Synchronization**: Peer clocks must be synchronized to within the `synchrony_bound`
-//!   to correctly validate timestamps.
-//!
-//! ## Provided
-//!
-//! - **Mutual Authentication**: Both parties prove ownership of their static private keys through
-//!   signatures.
-//! - **Forward Secrecy**: Ephemeral encryption keys ensure that any compromise of long-term static keys
-//!   doesn't expose the contents of previous sessions.
-//! - **Session Uniqueness**: A listener's [commonware_cryptography::handshake::SynAck] is bound to the dialer's [commonware_cryptography::handshake::Syn] message and
-//!   [commonware_cryptography::handshake::Ack]s are bound to the complete handshake transcript, preventing replay attacks and ensuring
-//!   message integrity.
-//!
-//! ## Not Provided
-//!
-//! - **Anonymity**: Peer identities are not hidden during handshakes from network observers (both active
-//!   and passive).
-//! - **Padding**: Messages are encrypted as-is, allowing an attacker to perform traffic analysis.
-//! - **Future Secrecy**: If a peer's static private key is compromised, future sessions will be exposed.
-//! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
+//! SAKE provides mutual authentication and ephemeral session keys. CUPS protects record contents
+//! and integrity, while lengths, boundaries, and timing remain observable. There is no padding,
+//! in-session key ratchet, or rekeying. Callers must discard the connection after an I/O error or
+//! cancellation, as required by [crate::Sender] and [crate::Receiver].
 
 use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
     Signer,
-    handshake::{
+    sake::{
         self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
         dial_start, listen_end, listen_start,
     },
@@ -73,8 +61,8 @@ use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
 const TAG_SIZE: u32 = {
-    assert!(handshake::TAG_SIZE <= u32::MAX as usize);
-    handshake::TAG_SIZE as u32
+    assert!(sake::TAG_SIZE <= u32::MAX as usize);
+    sake::TAG_SIZE as u32
 };
 
 /// Maximum supported plaintext message size.
@@ -117,9 +105,11 @@ impl From<HandshakeError> for Error {
     }
 }
 
-/// Authenticates connections and exchanges encrypted messages using ChaCha20-Poly1305.
+/// Establishes CUPS streams with Commonware SAKE (Simple Authenticated Key Exchange).
+///
+/// Implements [crate::Handshake] using [commonware_cryptography::sake].
 #[derive(Clone)]
-pub struct Handshake<S> {
+pub struct Sake<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
@@ -130,8 +120,8 @@ pub struct Handshake<S> {
     pub max_handshake_age: Duration,
 }
 
-impl<S> Handshake<S> {
-    /// Creates a handshake accepting timestamps up to five seconds ahead or ten seconds old.
+impl<S> Sake<S> {
+    /// Creates a SAKE handshake accepting timestamps up to five seconds ahead or ten seconds old.
     pub const fn new(signer: S) -> Self {
         Self {
             signer,
@@ -173,7 +163,7 @@ where
     Ok(M::decode(frame)?)
 }
 
-impl<S: Signer> crate::Handshake for Handshake<S> {
+impl<S: Signer> crate::Handshake for Sake<S> {
     const MAX_SIZE: u32 = MAX_SIZE;
 
     type PublicKey = S::PublicKey;
@@ -298,7 +288,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
     }
 }
 
-/// Sends encrypted messages to a peer.
+/// Sends CUPS records to a peer.
 pub struct Sender<O> {
     cipher: SendCipher,
     sink: O,
@@ -469,7 +459,7 @@ impl<O: Sink> Sender<O> {
     }
 }
 
-/// Receives encrypted messages from a peer.
+/// Receives CUPS records from a peer.
 pub struct Receiver<I> {
     cipher: RecvCipher,
     stream: I,
@@ -575,7 +565,7 @@ mod test {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
-                    let handshake = Handshake::new(PrivateKey::from_seed(0));
+                    let handshake = Sake::new(PrivateKey::from_seed(0));
                     let attempt = async {
                         if dialer {
                             handshake
@@ -617,8 +607,8 @@ mod test {
         });
     }
 
-    fn transport_handshake(signer: PrivateKey) -> Handshake<PrivateKey> {
-        Handshake {
+    fn transport_handshake(signer: PrivateKey) -> Sake<PrivateKey> {
+        Sake {
             signer,
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),

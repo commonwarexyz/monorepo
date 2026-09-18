@@ -1,5 +1,8 @@
 //! Exchange messages over arbitrary transport.
 //!
+//! [cups] provides Commonware CUPS records established with the SAKE handshake ([cups::Sake]).
+//! [Handshake], [Sender], and [Receiver] define the generic connection and message interfaces.
+//!
 //! # Status
 //!
 //! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
@@ -16,7 +19,7 @@ commonware_macros::stability_scope!(BETA {
 
     mod config;
     pub use config::Config;
-    pub mod encrypted;
+    pub mod cups;
     pub mod utils;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
@@ -258,7 +261,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         impl Handshake for OpaqueHandshake {
-            const MAX_SIZE: u32 = encrypted::MAX_SIZE;
+            const MAX_SIZE: u32 = cups::MAX_SIZE;
 
             type PublicKey = OpaqueIdentity;
             type Error = Rejected;

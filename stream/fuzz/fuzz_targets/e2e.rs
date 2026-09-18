@@ -1,10 +1,10 @@
 #![no_main]
 
-use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::TAG_SIZE};
+use commonware_cryptography::{Signer, ed25519::PrivateKey, sake::TAG_SIZE};
 use commonware_runtime::{Handle, Runner as _, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,
-    encrypted::{Error, Handshake, Receiver, Sender},
+    cups::{Error, Receiver, Sake, Sender},
     utils::{
         Timeout,
         codec::{recv_frame, send_frame},
@@ -105,7 +105,7 @@ fn fuzz(input: FuzzInput) {
         let (mut adversary_l_sink, dialer_stream) = mocks::Channel::init();
 
         let dialer_handshake = Timeout::new(
-            Handshake {
+            Sake {
                 signer: dialer_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
@@ -114,7 +114,7 @@ fn fuzz(input: FuzzInput) {
         );
 
         let listener_handshake = Timeout::new(
-            Handshake {
+            Sake {
                 signer: listener_signer.clone(),
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),

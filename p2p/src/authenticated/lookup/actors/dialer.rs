@@ -234,7 +234,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_stream::{encrypted::Handshake as StreamHandshake, utils::Timeout};
+    use commonware_stream::{cups::Sake, utils::Timeout};
     use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -260,7 +260,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        Timeout::new(Sake::new(signer), Duration::from_secs(5)),
                         b"test",
                         1024,
                     )),
@@ -313,7 +313,7 @@ mod tests {
 
             let dialer_cfg = Config {
                 stream: Arc::new(StreamConfig::new(
-                    Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                    Timeout::new(Sake::new(signer), Duration::from_secs(5)),
                     b"test",
                     1024,
                 )),
@@ -404,7 +404,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        Timeout::new(Sake::new(signer), Duration::from_secs(5)),
                         b"test",
                         1024,
                     )),
@@ -468,7 +468,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        Timeout::new(Sake::new(signer), Duration::from_secs(5)),
                         b"test",
                         1024,
                     )),
@@ -551,7 +551,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream: Arc::new(StreamConfig::new(
-                        Timeout::new(StreamHandshake::new(signer), Duration::from_secs(5)),
+                        Timeout::new(Sake::new(signer), Duration::from_secs(5)),
                         b"test",
                         1024,
                     )),
