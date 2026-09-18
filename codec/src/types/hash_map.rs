@@ -22,7 +22,7 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
 
         // Sort the keys to ensure deterministic encoding
         let mut entries: Vec<_> = self.iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
         for (k, v) in entries {
             k.write(buf);
             v.write(buf);
@@ -34,7 +34,7 @@ impl<K: Ord + Hash + Eq + Write, V: Write> Write for HashMap<K, V> {
 
         // Sort the keys to ensure deterministic encoding
         let mut entries: Vec<_> = self.iter().collect();
-        entries.sort_by(|a, b| a.0.cmp(b.0));
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
         for (k, v) in entries {
             k.write_bufs(buf);
             v.write_bufs(buf);
@@ -96,9 +96,9 @@ impl<K: Read + Clone + Ord + Hash + Eq, V: Read + Clone> Read for HashMap<K, V> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Decode, Encode, FixedSize};
+    use crate::{Decode, Encode, FixedSize, types::tests::TrackingWriteBuf};
     use bytes::{Bytes, BytesMut};
-    use std::fmt::Debug;
+    use std::{collections::BTreeMap, fmt::Debug};
 
     // Manual round trip test function for HashMap with non-default configs
     fn round_trip_hash<K, V, KCfg, VCfg>(
@@ -313,6 +313,31 @@ mod tests {
         });
 
         assert_eq!(map1.encode(), map2.encode());
+    }
+
+    #[test]
+    fn test_hashmap_encoding_matches_ordered_map() {
+        for len in [0, 1, 20, 128, 1024] {
+            let ordered: BTreeMap<_, _> = (0..len)
+                .map(|key: u32| (key, Bytes::copy_from_slice(&key.to_le_bytes())))
+                .collect();
+            let expected = ordered.encode();
+            for reverse in [false, true] {
+                let mut entries: Vec<_> = ordered.iter().collect();
+                if reverse {
+                    entries.reverse();
+                }
+                let map: HashMap<_, _> = entries
+                    .into_iter()
+                    .map(|(&key, value)| (key, value.clone()))
+                    .collect();
+                assert_eq!(map.encode(), expected);
+
+                let mut buf = TrackingWriteBuf::new();
+                map.write_bufs(&mut buf);
+                assert_eq!(buf.freeze(), expected);
+            }
+        }
     }
 
     #[test]
