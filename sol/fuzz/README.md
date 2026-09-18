@@ -17,7 +17,8 @@ target/release/commonware-sol-fuzz simplex --help
 - `certificate`: Generate and check BLS12-381 certificates, or hash namespaced messages
   to curve points.
 - `merkle`: Generate and check MMR and MMB proofs.
-- `qmdb` generates active operation proofs for current MMB QMDBs.
+- `qmdb` generates active operation proofs for current QMDBs. Pass `--family mmr`
+  for MMR proofs or use the default MMB family.
 - `simplex`: Generate Simplex signatures.
 
 `qmdb` uses Keccak256 by default. Pass `--hash sha256` to use SHA-256.

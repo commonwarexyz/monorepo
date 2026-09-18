@@ -44,21 +44,22 @@ library LibMerkle {
         uint256 width;
     }
 
-    /// @dev Reconstruct a backward-folded MMB root from a positioned leaf digest.
+    /// @dev Reconstruct a backward-folded root from a positioned leaf digest in the selected tree family.
     /// `graft.prefix` is hashed before the ancestor digest at `graft.width` leaves.
     /// Width is zero to disable grafting or a power of two of at least two.
     /// Callers authenticate the returned root.
-    function reconstructGraftedMMB(
+    function reconstructGrafted(
         uint256 leaves,
         uint256 index,
         bytes32 leaf,
         bytes32[] calldata proof,
         uint256 inactive,
         Graft memory graft,
+        bool mmb,
         address hasher
     ) internal view returns (bytes32 root, bool valid) {
         // forge-lint: disable-next-line(boolean-cst)
-        if (leaves > (uint256(1) << 62) + 30 || index >= leaves) return (0, false);
+        if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0) || index >= leaves) return (0, false);
         uint256 free;
         uint256 proofData;
         uint256 graftData;
@@ -70,8 +71,8 @@ library LibMerkle {
         Proof memory p = Proof(uint256(leaf), index, index + 1, proofData, proof.length);
         uint256 scratch;
         assembly ("memory-safe") { scratch := mload(0x40) }
-        (root, valid) = _backwardRoot(leaves, p, scratch, inactive, true, true, true, graftData, hasher);
-        _clear(free, scratch + Common.levels(leaves, true) * 32);
+        (root, valid) = _backwardRoot(leaves, p, scratch, inactive, true, true, mmb, graftData, hasher);
+        _clear(free, scratch + Common.levels(leaves, mmb) * 32);
         assembly ("memory-safe") { mstore(0x40, free) }
     }
 

@@ -2,13 +2,13 @@
 pragma solidity ^0.8.15;
 
 import { HashTest } from "./Common.t.sol";
-import { LibQMDB } from "../src/qmdb/LibQMDB.sol";
+import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 
 /// @dev Operations remain opaque byte strings.
 struct QMDBCase {
     bytes32 root;
     bytes operation;
-    LibQMDB.Proof proof;
+    LibQMDBCurrent.Proof proof;
 }
 
 /// @dev Append history supplies positions and ancestry independently of verifier geometry.
@@ -21,10 +21,25 @@ struct QMDBNode {
     uint256 right;
 }
 
-contract LibQMDBTest is HashTest {
+contract LibQMDBCurrentTest is HashTest {
+    /// @dev Select the delayed-merge MMB append family.
+    function _mmb() internal pure virtual returns (bool) {
+        return true;
+    }
+
     /// @dev Expose the calldata proof entrypoint for tests and gas measurements.
     function verify(QMDBCase calldata c) external view returns (bool) {
-        return LibQMDB.verify(c.root, c.operation, c.proof, _hasher());
+        return _mmb()
+            ? LibQMDBCurrent.verify(c.root, c.operation, c.proof, _hasher())
+            : LibQMDBCurrent.verifyMMR(c.root, c.operation, c.proof, _hasher());
+    }
+
+    /// @dev Reject the supplied root and proof under the other append family's topology.
+    function rejectOtherFamily(QMDBCase calldata c) external view {
+        bool valid = _mmb()
+            ? LibQMDBCurrent.verifyMMR(c.root, c.operation, c.proof, _hasher())
+            : LibQMDBCurrent.verify(c.root, c.operation, c.proof, _hasher());
+        assertFalse(valid, "proof accepted by the other append family");
     }
 
     /// @dev Check caller allocations, dirty scratch, and subsequent allocations on every exit path.
@@ -42,7 +57,9 @@ contract LibQMDBTest is HashTest {
                     mstore(p, not(0))
                 }
             }
-            bool result = LibQMDB.verify(c.root, operation, c.proof, _hasher());
+            bool result = _mmb()
+                ? LibQMDBCurrent.verify(c.root, operation, c.proof, _hasher())
+                : LibQMDBCurrent.verifyMMR(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
                 afterPointer := mload(0x40)
                 zero := mload(0x60)
@@ -61,7 +78,7 @@ contract LibQMDBTest is HashTest {
         }
     }
 
-    /// @dev Replay delayed append merges, grafting each completed 256-leaf subtree once.
+    /// @dev Replay family-specific append merges, grafting each completed 256-leaf subtree once.
     function build(uint256 n, uint256 location, bytes memory operation, bool active)
         external
         pure
@@ -106,7 +123,8 @@ contract LibQMDBTest is HashTest {
                     peaks[k] = peaks[k + 1];
                 }
                 --count;
-                break;
+                if (_mmb()) break;
+                j = count;
             }
         }
         bytes32 plain = nodes[peaks[count - 1]].plain;
@@ -170,12 +188,15 @@ contract LibQMDBTest is HashTest {
 
     /// @dev Cover chunk completion, delayed graft creation, and higher grafted ancestors.
     function test_IndependentBoundaryTrees() public view {
-        uint256[15] memory sizes = [uint256(1), 2, 255, 256, 257, 382, 383, 511, 512, 638, 639, 767, 1023, 1535, 2047];
+        uint256[16] memory sizes =
+            [uint256(1), 2, 255, 256, 257, 382, 383, 511, 512, 513, 638, 639, 767, 1023, 1535, 2047];
         for (uint256 i; i < sizes.length; ++i) {
             uint256 n = sizes[i];
             uint256[4] memory locations = [uint256(0), n / 2, n > 256 ? 255 : n - 1, n - 1];
             for (uint256 j; j < locations.length; ++j) {
-                assertTrue(this.checked(this.build(n, locations[j], hex"00112233445566778899aabbcc", true)));
+                QMDBCase memory c = this.build(n, locations[j], hex"00112233445566778899aabbcc", true);
+                if (!_mmb()) assertEq(c.proof.pending, 0, "MMR leaves a complete chunk ungrafted");
+                assertTrue(this.checked(c));
             }
         }
     }
@@ -265,7 +286,7 @@ contract LibQMDBTest is HashTest {
         c.proof.location = 0;
         c.proof.leaves = 0;
         assertFalse(this.checked(c));
-        c.proof.leaves = (uint256(1) << 62) + 31;
+        c.proof.leaves = (uint256(1) << 62) + (_mmb() ? 31 : 1);
         assertFalse(this.checked(c));
         c.proof.leaves = type(uint256).max;
         assertFalse(this.checked(c));
@@ -273,7 +294,7 @@ contract LibQMDBTest is HashTest {
 
     /// @dev Exercise absent, pending, partial, and combined witness shapes on rejection paths.
     function test_TamperedProofsAndBounds() public view {
-        uint256[6] memory sizes = [uint256(1), 256, 257, 383, 512, 639];
+        uint256[7] memory sizes = [uint256(1), 256, 257, 383, 512, 513, 639];
         for (uint256 i; i < sizes.length; ++i) {
             rejectMutations(this.build(sizes[i], sizes[i] - 1, hex"010203", true));
             QMDBCase memory c = this.build(sizes[i], 0, hex"010203", true);
@@ -299,9 +320,19 @@ contract LibQMDBTest is HashTest {
         assertFalse(this.checked(c));
     }
 
+    /// @dev Distinct eager and delayed merge histories bind operations to their append family.
+    function test_CrossFamilyRejection() public view {
+        uint256[3] memory sizes = [uint256(8), 256, 512];
+        for (uint256 i; i < sizes.length; ++i) {
+            QMDBCase memory c = this.build(sizes[i], sizes[i] - 1, hex"010203", true);
+            assertTrue(this.checked(c));
+            this.rejectOtherFamily(c);
+        }
+    }
+
     /// @dev Decode the Rust oracle's flat ABI tuple without imposing an operation type.
     function generate(uint256 leaves, uint256 location, uint256 floor) internal returns (QMDBCase memory c) {
-        string[] memory args = new string[](8);
+        string[] memory args = new string[](10);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "generate";
@@ -310,6 +341,8 @@ contract LibQMDBTest is HashTest {
         args[5] = "71";
         args[6] = "--inactivity-floor";
         args[7] = vm.toString(floor);
+        args[8] = "--family";
+        args[9] = _mmb() ? "mmb" : "mmr";
         (
             c.root,
             c.proof.leaves,
@@ -331,12 +364,23 @@ contract LibQMDBTest is HashTest {
 
     /// @dev Production Commonware proofs cross every pending and partial chunk transition.
     function test_DifferentialBoundaryTrees() public {
-        uint256[14] memory sizes = [uint256(1), 2, 255, 256, 257, 382, 383, 511, 512, 638, 639, 767, 1023, 2047];
+        uint256[15] memory sizes = [uint256(1), 2, 255, 256, 257, 382, 383, 511, 512, 513, 638, 639, 767, 1023, 2047];
         for (uint256 i; i < sizes.length; ++i) {
             assertTrue(this.checked(generate(sizes[i], 0, 0)));
             assertTrue(this.checked(generate(sizes[i], sizes[i] - 1, 0)));
             if (sizes[i] > 256) assertTrue(this.checked(generate(sizes[i], 256, 0)));
         }
+    }
+
+    /// @dev Random active locations and inactivity floors exercise production proof geometry.
+    function testFuzz_DifferentialTrees(uint16 leavesSeed, uint16 locationSeed, uint16 floorSeed) public {
+        uint256 n = uint256(leavesSeed) % 1536 + 1;
+        uint256 floor = uint256(floorSeed) % n;
+        uint256 location = floor + uint256(locationSeed) % (n - floor);
+        QMDBCase memory c = generate(n, location, floor);
+        assertTrue(this.checked(c));
+        c.operation = abi.encodePacked(c.operation, bytes1(0));
+        assertFalse(this.checked(c), "modified oracle operation accepted");
     }
 
     /// @dev Chunk-aligned inactive prefixes bind the root and alter witness ordering.
@@ -359,17 +403,33 @@ contract LibQMDBTest is HashTest {
     /// @dev Measure only the verifier call for grafted, pending, and partial target chunks.
     function test_Gas() public {
         uint256[3] memory locations = [uint256(17), 256, 637];
-        string[3] memory names = [string("grafted"), "pending", "partial"];
+        string[3] memory names = [string("grafted"), _mmb() ? "pending" : "grafted-second", "partial"];
         for (uint256 i; i < locations.length; ++i) {
             QMDBCase memory c = this.build(638, locations[i], new bytes(97), true);
             assertTrue(this.verify(c));
-            emit log_named_uint(string.concat(_group("QMDB"), "/", names[i]), vm.lastFrameGas().gasTotalUsed);
+            emit log_named_uint(
+                string.concat(_group(_mmb() ? "QMDB" : "QMDBMMR"), "/", names[i]), vm.lastFrameGas().gasTotalUsed
+            );
         }
     }
 }
 
-contract LibQMDBSha256Test is LibQMDBTest {
+contract LibQMDBCurrentSha256Test is LibQMDBCurrentTest {
     /// @dev Run the same compatibility and rejection cases through the SHA-256 precompile.
+    function _hasher() internal pure override returns (address) {
+        return address(2);
+    }
+}
+
+contract LibQMDBCurrentMMRTest is LibQMDBCurrentTest {
+    /// @dev Select the eagerly merged MMR append family.
+    function _mmb() internal pure override returns (bool) {
+        return false;
+    }
+}
+
+contract LibQMDBCurrentMMRSha256Test is LibQMDBCurrentMMRTest {
+    /// @dev Run MMR compatibility and rejection cases through the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
