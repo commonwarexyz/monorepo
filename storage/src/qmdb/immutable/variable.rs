@@ -4,18 +4,9 @@
 
 use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
-    Context,
     journal::contiguous::variable::{self, Config as JournalConfig},
-    merkle::Family,
-    qmdb::{
-        Error,
-        any::{VariableValue, value::VariableEncoding},
-        operation::Key,
-    },
+    qmdb::any::value::VariableEncoding,
 };
-use commonware_codec::Read;
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 
 /// Type alias for a variable-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, VariableEncoding<V>>;
@@ -32,31 +23,6 @@ pub type Config<T, C, S> = BaseConfig<T, JournalConfig<C>, S>;
 
 /// Configuration for a variable-size compact immutable db.
 pub type CompactConfig<C, S> = super::CompactConfig<C, S>;
-
-impl<
-    F: Family,
-    E: Context,
-    K: Key,
-    V: VariableValue,
-    H: Hasher,
-    C: Clone + Send + Sync + 'static,
-    S: Strategy,
-> CompactDb<F, E, K, V, H, C, S>
-where
-    Operation<F, K, V>: Read<Cfg = C>,
-{
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(
-            merkle,
-            context.child("witness"),
-            cfg.witness,
-            cfg.commit_codec_config,
-        )
-        .await
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -132,7 +98,7 @@ mod tests {
             },
             commit_codec_config: ((), ()),
         };
-        CompactDb::init(context, cfg).await.unwrap()
+        CompactDb::init(context, cfg, None).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
