@@ -1,6 +1,7 @@
 use crate::reed_solomon::engine::{
+    Engine, GF_MODULUS, GfElement, SHARD_CHUNK_BYTES, ShardsRefMut,
     tables::{self, Exp, Log, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, SHARD_CHUNK_BYTES,
+    utils,
 };
 
 // ======================================================================

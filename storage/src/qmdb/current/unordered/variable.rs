@@ -6,23 +6,23 @@
 //!
 //! See [Db] for the main database type.
 
-pub use super::db::KeyValueProof;
 use crate::{
+    Context,
     index::unordered::Index,
     journal::contiguous::variable::Journal,
     merkle::{Graftable, Location},
     qmdb::{
-        any::{unordered::variable::Operation, value::VariableEncoding, VariableValue},
-        current::VariableConfig as Config,
         Error,
+        any::{VariableValue, unordered::variable::Operation, value::VariableEncoding},
+        current::VariableConfig as Config,
+        operation::Key,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
-use commonware_utils::Array;
+use commonware_runtime::Spawner;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
@@ -37,15 +37,15 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 >;
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Array,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context + Spawner,
+    K: Key,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, K, V, H, T, N, S>
 where
     Operation<F, K, V>: Read,
 {
@@ -85,16 +85,16 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable,
-            E: Context,
-            K: Array,
-            V: VariableValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            const N: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, N, S>
+        F: Graftable,
+        E: Context + Spawner,
+        K: Key,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, N, S>
     where
         Operation<F, K, V>: Read,
     {
@@ -102,7 +102,7 @@ pub mod partitioned {
         /// The configured [`Strategy`] is used to parallelize merkleization.
         pub async fn init(
             context: E,
-            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
@@ -117,9 +117,9 @@ mod test {
         qmdb::current::{tests::variable_config, unordered::tests as shared},
         translator::TwoCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<
@@ -157,5 +157,76 @@ mod test {
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
         shared::test_proving_repeated_updates(open_db);
+    }
+
+    /// A [Db] keyed by variable-length byte keys.
+    type VecKeyTest = Db<
+        mmr::Family,
+        deterministic::Context,
+        Vec<u8>,
+        Digest,
+        Sha256,
+        TwoCap,
+        32,
+        commonware_parallel::Sequential,
+    >;
+
+    #[test_traced("WARN")]
+    pub fn test_current_db_variable_length_keys() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Configure the operation codec for variable-length keys.
+            let base = variable_config::<TwoCap>("vec-keys", &context);
+            let cfg = crate::qmdb::current::VariableConfig {
+                merkle_config: base.merkle_config.clone(),
+                journal_config: crate::journal::contiguous::variable::Config {
+                    partition: base.journal_config.partition.clone(),
+                    items_per_section: base.journal_config.items_per_section,
+                    compression: None,
+                    codec_config: (((0..).into(), ()), ()),
+                    page_cache: base.journal_config.page_cache.clone(),
+                    write_buffer: base.journal_config.write_buffer,
+                    replay_buffer: base.journal_config.replay_buffer,
+                },
+                grafted_metadata_partition: base.grafted_metadata_partition.clone(),
+                translator: TwoCap,
+                init_cache: base.init_cache,
+                init_buffer: base.init_buffer,
+                init_concurrency: (),
+            };
+
+            // Commit a value and verify its lookup and proof under a variable-length key.
+            let db = VecKeyTest::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            let key = b"variable-length-key".to_vec();
+            let value = Sha256::hash(&[b"value"]);
+            let merkleized = db
+                .new_batch()
+                .write(key.clone(), Some(value))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            let db = db.commit().await.unwrap();
+            assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
+            let root = db.root();
+            let proof = db.key_value_proof(key.clone()).await.unwrap();
+            assert!(VecKeyTest::verify_key_value_proof(
+                key.clone(),
+                value,
+                &proof,
+                &root
+            ));
+            drop(db);
+
+            // Reopen the database and verify the committed root and value.
+            let db = VecKeyTest::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
+            db.destroy().await.unwrap();
+        });
     }
 }

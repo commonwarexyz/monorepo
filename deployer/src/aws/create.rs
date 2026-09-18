@@ -1,16 +1,18 @@
 //! `create` subcommand for `ec2`
 
 use crate::aws::{
+    Architecture, CREATED_FILE_NAME, Config, Error, Host, Hosts, InstanceConfig, Ips, LOGS_PORT,
+    METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION, Metadata, PROFILES_PORT, TRACES_PORT,
     deployer_directory,
     ec2::{self, *},
     images,
     s3::{self, *},
     services::*,
     utils::*,
-    Architecture, Config, Error, Host, Hosts, InstanceConfig, Ips, Metadata, CREATED_FILE_NAME,
-    LOGS_PORT, METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_macros::boxed;
+use commonware_utils::iter::zip_eq;
 use futures::{
     future::try_join_all,
     stream::{self, StreamExt, TryStreamExt},
@@ -18,6 +20,7 @@ use futures::{
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::File,
+    future::Future,
     net::IpAddr,
     path::PathBuf,
     slice,
@@ -32,7 +35,6 @@ const MAX_DESCRIBE_BATCH: usize = 1000;
 /// Pre-signed URLs for tools per architecture
 struct ToolUrls {
     docker: String,
-    libjemalloc: String,
     logrotate: String,
 }
 
@@ -53,6 +55,36 @@ pub struct RegionResources {
     pub az_support: BTreeMap<String, BTreeSet<String>>,
     pub binary_sg_id: Option<String>,
     pub monitoring_sg_id: Option<String>,
+}
+
+/// Returns whether `name` matches `[A-Za-z0-9_-]+`.
+fn is_valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Validates the deployment tag and instance names.
+///
+/// Both are written unescaped into file paths, YAML, shell scripts, S3 keys, and AWS tags.
+/// Instance names must also be unique ignoring case, because they name generated files on
+/// the operator's filesystem, and must not be [`MONITORING_NAME`].
+fn validate_names(config: &Config) -> Result<(), Error> {
+    if !is_valid_name(&config.tag) {
+        return Err(Error::InvalidTag(config.tag.clone()));
+    }
+    let mut instance_names = HashSet::new();
+    for instance in &config.instances {
+        let name = &instance.name;
+        if name == MONITORING_NAME || !is_valid_name(name) {
+            return Err(Error::InvalidInstanceName(name.clone()));
+        }
+        if !instance_names.insert(name.to_ascii_lowercase()) {
+            return Err(Error::DuplicateInstanceName(name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Validates storage options before create allocates AWS resources.
@@ -89,6 +121,55 @@ fn validate_storage_config(config: &Config) -> Result<(), Error> {
     Ok(())
 }
 
+/// Runs regional launch queues in parallel, with monitoring first in its region.
+#[boxed]
+async fn run_launches<MF, F, M, T, E>(
+    monitoring_region: String,
+    monitoring: MF,
+    launches: impl IntoIterator<Item = (String, F)>,
+) -> Result<(M, Vec<T>), E>
+where
+    MF: Future<Output = Result<M, E>>,
+    F: Future<Output = Result<T, E>>,
+{
+    // Group launches by region and preserve input positions for the final result.
+    let mut launches_by_region: BTreeMap<String, Vec<(usize, F)>> = BTreeMap::new();
+    for (index, (region, launch)) in launches.into_iter().enumerate() {
+        launches_by_region
+            .entry(region)
+            .or_default()
+            .push((index, launch));
+    }
+
+    // Serialize launches within each region, with monitoring first in its region.
+    let colocated = launches_by_region
+        .remove(&monitoring_region)
+        .unwrap_or_default();
+    let run_region = |launches: Vec<(usize, F)>| async move {
+        let mut completed = Vec::with_capacity(launches.len());
+        for (index, launch) in launches {
+            completed.push((index, launch.await?));
+        }
+        Ok::<Vec<(usize, T)>, E>(completed)
+    };
+    let colocated = run_region(colocated);
+    let remote_regions = launches_by_region.into_values().map(run_region);
+    let monitoring_and_colocated = async move {
+        let monitoring = monitoring.await?;
+        Ok::<_, E>((monitoring, colocated.await?))
+    };
+
+    // Execute independent regional queues concurrently and restore the input order.
+    let ((monitoring, mut completed), remote) =
+        tokio::try_join!(monitoring_and_colocated, try_join_all(remote_regions),)?;
+    completed.extend(remote.into_iter().flatten());
+    completed.sort_unstable_by_key(|(index, _)| *index);
+    Ok((
+        monitoring,
+        completed.into_iter().map(|(_, result)| result).collect(),
+    ))
+}
+
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
 pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Load configuration from YAML file
@@ -99,18 +180,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let tag = &config.tag;
     info!(tag = tag.as_str(), "loaded configuration");
 
-    // Ensure no instance is duplicated or named MONITORING_NAME
-    let mut instance_names = HashSet::new();
-    for instance in &config.instances {
-        if !instance_names.insert(&instance.name) {
-            return Err(Error::DuplicateInstanceName(instance.name.clone()));
-        }
-        if instance.name == MONITORING_NAME {
-            return Err(Error::InvalidInstanceName(instance.name.clone()));
-        }
-    }
-
-    // Validate storage settings before allocating any AWS resources.
+    // Validate the configuration before allocating any AWS resources.
+    validate_names(&config)?;
     validate_storage_config(&config)?;
 
     // Determine unique regions
@@ -277,14 +348,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     .await?;
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
-        let [docker_url, libjemalloc_url, logrotate_url]: [String; 3] = try_join_all([
+        let [docker_url, logrotate_url]: [String; 2] = try_join_all([
             cache_tool(
                 docker_bin_s3_key(DOCKER_VERSION, *arch),
                 docker_download_url(DOCKER_VERSION, *arch),
-            ),
-            cache_tool(
-                libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch),
-                libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch),
             ),
             cache_tool(
                 logrotate_bin_s3_key(LOGROTATE_VERSION, *arch),
@@ -298,7 +365,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             *arch,
             ToolUrls {
                 docker: docker_url,
-                libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
             },
         );
@@ -709,7 +775,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let region = instance.region.clone();
             let subnets = grouped_subnets(instance, resources, &availability_zone_groups);
             let az_support = resources.az_support.clone();
-            async move {
+            (region.clone(), async move {
                 let storage_class = parse_storage_class(&instance.name, &instance.storage_class)?;
                 let (mut ids, az) = launch_instances(
                     ec2_client,
@@ -741,15 +807,17 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     region,
                     (*instance).clone(),
                 ))
-            }
+            })
         },
     );
 
     // Wait for all launches to complete (get instance IDs)
-    let (monitoring_instance_id, binary_launches) = tokio::try_join!(
+    let (monitoring_instance_id, binary_launches) = run_launches(
+        monitoring_region.clone(),
         monitoring_launch_future,
-        try_join_all(binary_launch_futures)
-    )?;
+        binary_launch_futures,
+    )
+    .await?;
     info!("instances requested");
 
     // Group binary instances by region for batched DescribeInstances calls
@@ -781,9 +849,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                             count = chunk.len(),
                             "instances running in region"
                         );
-                        let deployments: Vec<Deployment> = chunk
-                            .into_iter()
-                            .zip(ips)
+                        let deployments: Vec<Deployment> = zip_eq(chunk, ips)
                             .map(|((instance_id, instance_config), ip)| Deployment {
                                 instance: instance_config,
                                 id: instance_id,
@@ -836,13 +902,55 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
     ]: [String; 7] = try_join_all([
-        cache_and_presign(&s3_client, &bucket_name, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &grafana_datasources_s3_key(),
+            UploadSource::Static(DATASOURCES_YML.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &grafana_dashboards_s3_key(),
+            UploadSource::Static(ALL_YML.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &loki_config_s3_key(),
+            UploadSource::Static(LOKI_CONFIG.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &pyroscope_config_s3_key(),
+            UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &tempo_config_s3_key(),
+            UploadSource::Static(TEMPO_CONFIG.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &pyroscope_agent_service_s3_key(),
+            UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()),
+            PRESIGN_DURATION,
+        ),
+        cache_and_presign(
+            &s3_client,
+            &bucket_name,
+            &pyroscope_agent_timer_s3_key(),
+            UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()),
+            PRESIGN_DURATION,
+        ),
     ])
     .await?
     .try_into()
@@ -851,7 +959,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Cache binary_service per architecture
     let mut binary_service_urls_by_arch: HashMap<Architecture, String> = HashMap::new();
     for arch in &architectures_needed {
-        let binary_service_content = binary_service(*arch);
+        let binary_service_content = binary_service();
         let temp_path = tag_directory.join(format!("binary-{}.service", arch.as_str()));
         std::fs::write(&temp_path, &binary_service_content)?;
         let binary_service_url = cache_and_presign(
@@ -880,7 +988,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         })
         .collect();
     let prom_config = generate_prometheus_config(&instances);
-    let prom_digest = Sha256::hash(prom_config.as_bytes()).to_string();
+    let prom_digest = Sha256::hash(&[prom_config.as_bytes()]).to_string();
     let prom_path = tag_directory.join("prometheus.yml");
     std::fs::write(&prom_path, &prom_config)?;
     let dashboard_path = std::path::PathBuf::from(&config.monitoring.dashboard);
@@ -921,7 +1029,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             .collect(),
     };
     let hosts_yaml = serde_yaml::to_string(&hosts)?;
-    let hosts_digest = Sha256::hash(hosts_yaml.as_bytes()).to_string();
+    let hosts_digest = Sha256::hash(&[hosts_yaml.as_bytes()]).to_string();
     let hosts_path = tag_directory.join("hosts.yaml");
     std::fs::write(&hosts_path, &hosts_yaml)?;
     let hosts_url = cache_and_presign(
@@ -950,7 +1058,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             &instance.region,
             arch,
         );
-        let promtail_digest = Sha256::hash(promtail_cfg.as_bytes()).to_string();
+        let promtail_digest = Sha256::hash(&[promtail_cfg.as_bytes()]).to_string();
         let promtail_path = tag_directory.join(format!("promtail_{}.yml", instance.name));
         std::fs::write(&promtail_path, &promtail_cfg)?;
 
@@ -961,7 +1069,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             &instance.region,
             arch,
         );
-        let pyroscope_digest = Sha256::hash(pyroscope_script.as_bytes()).to_string();
+        let pyroscope_digest = Sha256::hash(&[pyroscope_script.as_bytes()]).to_string();
         let pyroscope_path = tag_directory.join(format!("pyroscope-agent_{}.sh", instance.name));
         std::fs::write(&pyroscope_path, &pyroscope_script)?;
 
@@ -1033,7 +1141,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     )?;
 
     // Build instance URLs map with architecture-specific tool URLs
-    let mut instance_urls_map: HashMap<String, (InstanceUrls, Architecture)> = HashMap::new();
+    let mut instance_urls_map: HashMap<String, InstanceUrls> = HashMap::new();
     for deployment in &deployments {
         let name = &deployment.instance.name;
         let arch = instance_architectures[name];
@@ -1043,25 +1151,21 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
         instance_urls_map.insert(
             name.clone(),
-            (
-                InstanceUrls {
-                    binary: instance_binary_urls[name].clone(),
-                    config: instance_config_urls[name].clone(),
-                    hosts: hosts_url.clone(),
-                    promtail_config: promtail_digest_to_url[promtail_digest].clone(),
-                    binary_service: binary_service_urls_by_arch[&arch].clone(),
-                    pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
-                    pyroscope_service: pyroscope_agent_service_url.clone(),
-                    pyroscope_timer: pyroscope_agent_timer_url.clone(),
-                    docker_tgz: tool_urls.docker.clone(),
-                    libjemalloc_deb: tool_urls.libjemalloc.clone(),
-                    logrotate_deb: tool_urls.logrotate.clone(),
-                    images: binary_images()
-                        .map(|image| (image, image_urls_by_arch[&arch][image].clone()))
-                        .collect(),
-                },
-                arch,
-            ),
+            InstanceUrls {
+                binary: instance_binary_urls[name].clone(),
+                config: instance_config_urls[name].clone(),
+                hosts: hosts_url.clone(),
+                promtail_config: promtail_digest_to_url[promtail_digest].clone(),
+                binary_service: binary_service_urls_by_arch[&arch].clone(),
+                pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
+                pyroscope_service: pyroscope_agent_service_url.clone(),
+                pyroscope_timer: pyroscope_agent_timer_url.clone(),
+                docker_tgz: tool_urls.docker.clone(),
+                logrotate_deb: tool_urls.logrotate.clone(),
+                images: binary_images()
+                    .map(|image| (image, image_urls_by_arch[&arch][image].clone()))
+                    .collect(),
+            },
         );
     }
     info!("uploaded config files to S3");
@@ -1098,17 +1202,18 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let ec2_client = ec2_clients[&instance.region].clone();
             let ip = deployment.ip.clone();
             let nvme = nvme_supported_by_instance_type[&instance.instance_type];
-            let (urls, arch) = instance_urls_map.remove(&instance.name).unwrap();
-            (instance, deployment_id, ec2_client, ip, urls, arch, nvme)
+            let urls = instance_urls_map.remove(&instance.name).unwrap();
+            (instance, deployment_id, ec2_client, ip, urls, nvme)
         })
         .collect();
     let binary_futures = binary_configs.into_iter().map(
-        |(instance, deployment_id, ec2_client, ip, urls, arch, nvme)| async move {
+        |(instance, deployment_id, ec2_client, ip, urls, nvme)| async move {
             let start = Instant::now();
 
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
             let deploy = format!("{:.1}s", start.elapsed().as_secs_f64());
 
+            ssh_execute(private_key, &ip, disable_automatic_apt_upgrades_cmd()).await?;
             let download_start = Instant::now();
             if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling, nvme) {
                 ssh_execute(private_key, &ip, &apt_cmd).await?;
@@ -1123,7 +1228,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             ssh_execute(
                 private_key,
                 &ip,
-                &install_binary_setup_cmd(instance.profiling, arch),
+                &install_binary_setup_cmd(instance.profiling),
             )
             .await?;
             let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());
@@ -1162,6 +1267,12 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             .await?;
             let deploy = format!("{:.1}s", start.elapsed().as_secs_f64());
 
+            ssh_execute(
+                private_key,
+                &monitoring_ip,
+                disable_automatic_apt_upgrades_cmd(),
+            )
+            .await?;
             let download_start = Instant::now();
             ssh_execute(
                 private_key,
@@ -1422,11 +1533,19 @@ fn grouped_subnets(
 #[cfg(test)]
 mod tests {
     use super::{
-        grouped_subnets, select_availability_zone_groups, select_group_availability_zone,
-        validate_storage_config, RegionResources,
+        RegionResources, grouped_subnets, run_launches, select_availability_zone_groups,
+        select_group_availability_zone, validate_names, validate_storage_config,
     };
     use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
-    use std::collections::{BTreeSet, HashMap};
+    use std::{
+        collections::{BTreeSet, HashMap},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+    use tokio::time::sleep;
 
     fn instance(
         name: &str,
@@ -1467,6 +1586,94 @@ mod tests {
             storage_throughput: None,
             dashboard: "dashboard.json".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn launches_are_serial_within_each_region() {
+        let east_active = Arc::new(AtomicUsize::new(0));
+        let east_max = Arc::new(AtomicUsize::new(0));
+        let west_active = Arc::new(AtomicUsize::new(0));
+        let west_max = Arc::new(AtomicUsize::new(0));
+        let global_active = Arc::new(AtomicUsize::new(0));
+        let global_max = Arc::new(AtomicUsize::new(0));
+        let launches = [
+            ("us-west-2", 0usize),
+            ("us-east-1", 1),
+            ("us-west-2", 2),
+            ("us-east-1", 3),
+        ]
+        .into_iter()
+        .map(|(region, id)| {
+            let (regional_active, regional_max) = if region == "us-east-1" {
+                (east_active.clone(), east_max.clone())
+            } else {
+                (west_active.clone(), west_max.clone())
+            };
+            let global_active = global_active.clone();
+            let global_max = global_max.clone();
+            (region.to_string(), async move {
+                let regional = regional_active.fetch_add(1, Ordering::SeqCst) + 1;
+                regional_max.fetch_max(regional, Ordering::SeqCst);
+                let global = global_active.fetch_add(1, Ordering::SeqCst) + 1;
+                global_max.fetch_max(global, Ordering::SeqCst);
+                sleep(Duration::from_millis(10)).await;
+                global_active.fetch_sub(1, Ordering::SeqCst);
+                regional_active.fetch_sub(1, Ordering::SeqCst);
+                Ok::<usize, ()>(id)
+            })
+        });
+
+        let (_, completed) = run_launches(
+            "monitoring".to_string(),
+            async { Ok::<_, ()>(()) },
+            launches,
+        )
+        .await
+        .expect("launches should succeed");
+
+        assert_eq!(completed, [0, 1, 2, 3]);
+        assert_eq!(east_max.load(Ordering::SeqCst), 1);
+        assert_eq!(west_max.load(Ordering::SeqCst), 1);
+        assert!(global_max.load(Ordering::SeqCst) > 1);
+    }
+
+    #[tokio::test]
+    async fn monitoring_shares_the_binary_region_launch_queue() {
+        let east_active = Arc::new(AtomicUsize::new(0));
+        let east_max = Arc::new(AtomicUsize::new(0));
+
+        let monitoring = {
+            let active = east_active.clone();
+            let max = east_max.clone();
+            async move {
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max.fetch_max(count, Ordering::SeqCst);
+                sleep(Duration::from_millis(10)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok::<_, ()>("monitoring")
+            }
+        };
+        let binaries = [("us-east-1".to_string(), 0usize)]
+            .into_iter()
+            .map(|(region, id)| {
+                let active = east_active.clone();
+                let max = east_max.clone();
+                (region, async move {
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max.fetch_max(count, Ordering::SeqCst);
+                    sleep(Duration::from_millis(10)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok::<_, ()>(id)
+                })
+            });
+
+        let (monitoring, binaries) = run_launches("us-east-1".to_string(), monitoring, binaries)
+            .await
+            .expect("launches should succeed");
+
+        assert_eq!(monitoring, "monitoring");
+        assert_eq!(binaries, [0]);
+        assert_eq!(east_max.load(Ordering::SeqCst), 1);
     }
 
     fn resources_in(region: &str) -> RegionResources {
@@ -1647,6 +1854,63 @@ mod tests {
                 storage_throughput,
             } if target == "monitoring" && storage_throughput == 124
         ));
+    }
+
+    #[test]
+    fn valid_names_pass() {
+        let cfg = config(
+            monitoring("gp3", None),
+            vec![
+                instance("validator-0", "us-east-1", "c8g.4xlarge", None),
+                instance("Worker_1", "us-east-1", "c8g.4xlarge", None),
+            ],
+        );
+
+        validate_names(&cfg).expect("names are valid");
+    }
+
+    #[test]
+    fn invalid_instance_names_rejected() {
+        for name in ["", "monitoring", "a b", "$(id)", "../x", "a.b", "\u{e9}"] {
+            let cfg = config(
+                monitoring("gp3", None),
+                vec![instance(name, "us-east-1", "c8g.4xlarge", None)],
+            );
+
+            let err = validate_names(&cfg).expect_err(name);
+
+            assert!(
+                matches!(err, Error::InvalidInstanceName(n) if n == name),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_tags_rejected() {
+        for tag in ["", "../x", "/tmp"] {
+            let mut cfg = config(monitoring("gp3", None), Vec::new());
+            cfg.tag = tag.to_string();
+
+            let err = validate_names(&cfg).expect_err(tag);
+
+            assert!(matches!(err, Error::InvalidTag(t) if t == tag), "{tag}");
+        }
+    }
+
+    #[test]
+    fn duplicate_instance_names_rejected() {
+        let cfg = config(
+            monitoring("gp3", None),
+            vec![
+                instance("worker", "us-east-1", "c8g.4xlarge", None),
+                instance("Worker", "us-west-2", "c8g.4xlarge", None),
+            ],
+        );
+
+        let err = validate_names(&cfg).expect_err("duplicate name ignoring case");
+
+        assert!(matches!(err, Error::DuplicateInstanceName(n) if n == "Worker"));
     }
 
     #[test]

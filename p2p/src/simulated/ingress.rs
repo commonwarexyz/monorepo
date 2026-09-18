@@ -1,13 +1,15 @@
 use super::{Error, Receiver, Sender};
 use crate::{
-    Address, AddressableTrackedPeers, Channel, PeerSetSubscription, Recipients, TrackedPeers,
+    Address, AddressableTrackedPeers, BlockedSubscription, Channel, PeerSetSubscription,
+    Recipients, TrackedPeers,
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Clock, IoBuf, Quota};
 use commonware_utils::{
+    NZUsize, Probability,
     channel::{fallible::FallibleExt, mpsc, oneshot, ring},
-    ordered::Map,
+    ordered::{Map, Set},
 };
 use rand_distr::Normal;
 use std::time::Duration;
@@ -52,7 +54,7 @@ pub enum Message<P: PublicKey, E: Clock> {
         sender: P,
         receiver: P,
         sampler: Normal<f64>,
-        success_rate: f64,
+        success_rate: Probability,
         result: oneshot::Sender<Result<(), Error>>,
     },
     RemoveLink {
@@ -66,8 +68,21 @@ pub enum Message<P: PublicKey, E: Clock> {
         /// The public key of the peer to block.
         to: P,
     },
+    Unblock {
+        /// The public key of the peer lifting the block.
+        from: P,
+        /// The public key of the peer to unblock.
+        to: P,
+        /// One-shot channel to confirm the block was lifted.
+        result: oneshot::Sender<Result<(), Error>>,
+    },
     Blocked {
         result: oneshot::Sender<Result<Vec<(P, P)>, Error>>,
+    },
+    SubscribeBlocked {
+        /// The public key of the peer whose blocked set is subscribed to.
+        from: P,
+        sender: ring::Sender<Set<P>>,
     },
 }
 
@@ -97,7 +112,16 @@ impl<P: PublicKey, E: Clock> std::fmt::Debug for Message<P, E> {
                 .field("from", from)
                 .field("to", to)
                 .finish(),
+            Self::Unblock { from, to, .. } => f
+                .debug_struct("Unblock")
+                .field("from", from)
+                .field("to", to)
+                .finish_non_exhaustive(),
             Self::Blocked { .. } => f.debug_struct("Blocked").finish_non_exhaustive(),
+            Self::SubscribeBlocked { from, .. } => f
+                .debug_struct("SubscribeBlocked")
+                .field("from", from)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -138,8 +162,8 @@ pub struct Link {
     /// Standard deviation of the latency for the delivery of a message.
     pub jitter: Duration,
 
-    /// Probability of a message being delivered successfully (in range \[0,1\]).
-    pub success_rate: f64,
+    /// Probability of a message being delivered successfully.
+    pub success_rate: Probability,
 }
 
 /// Interface for modifying the simulated network.
@@ -198,6 +222,13 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
             .ok_or(Error::NetworkClosed)?
     }
 
+    /// Lift a block that `from` placed on `to`.
+    pub async fn unblock(&self, from: P, to: P) -> Result<(), Error> {
+        request(&self.sender, |result| Message::Unblock { from, to, result })
+            .await
+            .ok_or(Error::NetworkClosed)?
+    }
+
     /// Set bandwidth limits for a peer.
     ///
     /// Bandwidth is specified for the peer's egress (upload) and ingress (download)
@@ -230,9 +261,6 @@ impl<P: PublicKey, E: Clock> Oracle<P, E> {
         // Sanity checks
         if sender == receiver {
             return Err(Error::LinkingSelf);
-        }
-        if config.success_rate < 0.0 || config.success_rate > 1.0 {
-            return Err(Error::InvalidSuccessRate(config.success_rate));
         }
 
         // Convert Duration to milliseconds as f64 for the Normal distribution
@@ -453,5 +481,17 @@ impl<P: PublicKey, E: Clock> crate::Blocker for Control<P, E> {
                 to: public_key,
             },
         )
+    }
+
+    fn blocked(&mut self) -> BlockedSubscription<P> {
+        let (sender, receiver) = ring::channel(NZUsize!(1));
+        let _ = enqueue(
+            &self.sender,
+            Message::SubscribeBlocked {
+                from: self.me.clone(),
+                sender,
+            },
+        );
+        receiver
     }
 }

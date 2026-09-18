@@ -1,11 +1,11 @@
 //! Core traits for encoding and decoding.
 
-use crate::error::Error;
+use crate::{Buf, Copying, Input, error::Error};
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use alloc::{sync::Arc, vec::Vec};
+use bytes::{Buf as _, BufMut, Bytes, BytesMut};
 #[cfg(feature = "std")]
-use std::vec::Vec;
+use std::{sync::Arc, vec::Vec};
 
 /// Trait for types with a known, fixed encoded size.
 ///
@@ -169,7 +169,31 @@ pub trait Write {
     }
 }
 
-/// Trait for types that can be read (decoded) from a byte buffer.
+impl<T: EncodeSize + ?Sized> EncodeSize for Arc<T> {
+    #[inline]
+    fn encode_size(&self) -> usize {
+        self.as_ref().encode_size()
+    }
+
+    #[inline]
+    fn encode_inline_size(&self) -> usize {
+        self.as_ref().encode_inline_size()
+    }
+}
+
+impl<T: Write + ?Sized> Write for Arc<T> {
+    #[inline]
+    fn write(&self, buf: &mut impl BufMut) {
+        self.as_ref().write(buf);
+    }
+
+    #[inline]
+    fn write_bufs(&self, buf: &mut impl BufsMut) {
+        self.as_ref().write_bufs(buf);
+    }
+}
+
+/// Trait for types that can be read (decoded) from a [Buf].
 pub trait Read: Sized {
     /// The `Cfg` type parameter allows passing configuration during the read process. This is
     /// crucial for safely decoding untrusted data, for example, by providing size limits for
@@ -183,8 +207,12 @@ pub trait Read: Sized {
     /// Implementations should consume the exact number of bytes required from `buf` to reconstruct
     /// the value.
     ///
-    /// Returns [Error] if decoding fails due to invalid data, insufficient bytes in the buffer,
-    /// or violation of constraints imposed by the `cfg`.
+    /// Implementations must return [Error] if decoding fails due to invalid data, insufficient
+    /// bytes in the buffer, or violation of constraints imposed by the `cfg`.
+    ///
+    /// # Warning
+    ///
+    /// Parsing a message (often untrusted) should never result in a panic.
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error>;
 
     /// Reads `len` values from the buffer into a vector.
@@ -201,7 +229,7 @@ pub trait Read: Sized {
     #[doc(hidden)]
     #[inline]
     fn read_vec(buf: &mut impl Buf, len: usize, cfg: &Self::Cfg) -> Result<Vec<Self>, Error> {
-        let mut values = Vec::with_capacity(len);
+        let mut values = Vec::with_capacity(len.min(buf.remaining()));
         for _ in 0..len {
             values.push(Self::read_cfg(buf, cfg)?);
         }
@@ -223,6 +251,15 @@ pub trait Read: Sized {
         Ok(Self::read_vec(buf, N, cfg)?
             .try_into()
             .unwrap_or_else(|_| unreachable!("array length should match capacity")))
+    }
+}
+
+impl<T: Read> Read for Arc<T> {
+    type Cfg = T::Cfg;
+
+    #[inline]
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+        T::read_cfg(buf, cfg).map(Self::new)
     }
 }
 
@@ -281,9 +318,13 @@ impl<T: Encode + Send + Sync> EncodeShared for T {}
 pub trait Decode: Read {
     /// Decodes a value from `buf` using `cfg`, ensuring the entire buffer is consumed.
     ///
+    /// Accepts [Buf] inputs and owned [`Vec<u8>`] values through [Input]. Borrowed
+    /// slices require an explicit [Copying] adapter.
+    ///
     /// Returns [Error] if decoding fails via [Read::read_cfg] or if there are leftover bytes in
     /// `buf` after reading.
-    fn decode_cfg(mut buf: impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
+    fn decode_cfg(buf: impl Input, cfg: &Self::Cfg) -> Result<Self, Error> {
+        let mut buf = buf.into();
         let result = Self::read_cfg(&mut buf, cfg)?;
 
         // Check that the buffer is fully consumed.
@@ -353,7 +394,7 @@ pub trait DecodeFixed: Read<Cfg = ()> + FixedSize {
             Self::SIZE
         );
 
-        Self::decode_cfg(bytes.as_ref(), &())
+        Self::decode_cfg(Copying(&bytes), &())
     }
 }
 
@@ -396,8 +437,8 @@ pub trait BufsMut: BufMut {
 mod tests {
     use super::*;
     use crate::{
-        extensions::{DecodeExt, ReadExt},
         Error, FixedArray,
+        extensions::{DecodeExt, ReadExt},
     };
     use bytes::Bytes;
     use core::marker::PhantomData;
@@ -418,8 +459,32 @@ mod tests {
     fn test_encode_fixed() {
         let value = 42u32;
         let encoded: [u8; 4] = value.encode_fixed();
-        let decoded = <u32>::decode(&encoded[..]).unwrap();
+        let decoded = <u32>::decode(Copying(&encoded)).unwrap();
         assert_eq!(value, decoded);
+    }
+
+    #[test]
+    fn test_arc_codec() {
+        let value = Arc::new(vec![1u8, 2, 3]);
+        let encoded = value.encode();
+        let cfg = ((..=3).into(), ());
+
+        assert_eq!(encoded, value.as_ref().encode());
+        assert_eq!(value.encode_size(), value.as_ref().encode_size());
+        assert_eq!(
+            Arc::<Vec<u8>>::decode_cfg(encoded.clone(), &cfg).unwrap(),
+            value
+        );
+
+        // Shared decoding enforces the inner type's bounds and rejects truncation
+        assert!(matches!(
+            Arc::<Vec<u8>>::decode_cfg(encoded.clone(), &((..=2).into(), ())),
+            Err(Error::InvalidLength(3))
+        ));
+        assert!(matches!(
+            Arc::<Vec<u8>>::decode_cfg(encoded.slice(..encoded.len() - 1), &cfg),
+            Err(Error::EndOfBuffer)
+        ));
     }
 
     #[test]
@@ -718,5 +783,16 @@ mod tests {
             LifetimeFixed::try_from([1u8, 2].as_slice()).unwrap().raw,
             [1, 2]
         );
+    }
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::Arc;
+        use crate::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Arc<u64>>,
+            CodecConformance<Arc<Vec<u8>>>,
+        }
     }
 }

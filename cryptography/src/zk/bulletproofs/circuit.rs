@@ -49,7 +49,7 @@
 //! ```rust
 //! # use commonware_cryptography::{
 //! #     bls12381::primitives::group::{G1, Scalar},
-//! #     transcript::Transcript,
+//! #     transcript::{Transcript, Version},
 //! #     zk::bulletproofs::{
 //! #         circuit::{prove, verify, Circuit, Setup, SparseMatrix, Witness},
 //! #         ipa,
@@ -96,7 +96,7 @@
 //! .expect("witness lengths should match");
 //! let claim = witness.claim(&setup);
 //!
-//! let mut prover_transcript = Transcript::new(b"circuit-example");
+//! let mut prover_transcript = Transcript::new(b"circuit-example", Version::V1);
 //! prover_transcript.commit(b"context".as_slice());
 //! let proof = prove(
 //!     &mut prover_rng,
@@ -110,7 +110,7 @@
 //! .expect("witness should satisfy the claim and circuit");
 //!
 //! let mut verifier_rng = test_rng();
-//! let mut verifier_transcript = Transcript::new(b"circuit-example");
+//! let mut verifier_transcript = Transcript::new(b"circuit-example", Version::V1);
 //! verifier_transcript.commit(b"context".as_slice());
 //! let valid = setup
 //!     .eval(
@@ -133,14 +133,14 @@
 
 use super::ipa;
 use crate::transcript::Transcript;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
-    algebra::{powers, Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space},
+    algebra::{Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space, powers},
     synthetic::Synthetic,
 };
 use commonware_parallel::{Sequential, Strategy};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::BTreeMap,
     ops::{Index, IndexMut, Mul},
@@ -237,13 +237,15 @@ impl<F: Ring> Mul<&[F]> for &SparseMatrix<F> {
 
 impl<F: Write> Write for SparseMatrix<F> {
     fn write(&self, buf: &mut impl BufMut) {
+        self.width.write(buf);
+        self.height.write(buf);
         self.weights.write(buf);
     }
 }
 
 impl<F: EncodeSize> EncodeSize for SparseMatrix<F> {
     fn encode_size(&self) -> usize {
-        self.weights.encode_size()
+        self.width.encode_size() + self.height.encode_size() + self.weights.encode_size()
     }
 }
 
@@ -257,6 +259,7 @@ pub struct Circuit<F> {
 impl<F: Write> Write for Circuit<F> {
     fn write(&self, buf: &mut impl BufMut) {
         self.committed_vars.write(buf);
+        self.internal_vars.write(buf);
         self.weights.write(buf);
     }
 }
@@ -269,7 +272,9 @@ impl<F: Encode> Circuit<F> {
 
 impl<F: EncodeSize> EncodeSize for Circuit<F> {
     fn encode_size(&self) -> usize {
-        self.committed_vars.encode_size() + self.weights.encode_size()
+        self.committed_vars.encode_size()
+            + self.internal_vars.encode_size()
+            + self.weights.encode_size()
     }
 }
 
@@ -358,7 +363,7 @@ mod zkc {
     use crate::zk::circuit as zk;
     use commonware_math::algebra::{Field, Random, Ring};
     use commonware_utils::ordered::Map;
-    use rand_core::CryptoRngCore;
+    use rand_core::CryptoRng;
     use std::{borrow::Cow, collections::BTreeMap};
 
     /// A column of the bulletproofs weight matrix.
@@ -530,7 +535,7 @@ mod zkc {
         /// Without a `blinding_rng`, the blinding factors are zero.
         pub fn circuit_and_witness(
             mut self,
-            blinding_rng: Option<&mut impl CryptoRngCore>,
+            blinding_rng: Option<&mut impl CryptoRng>,
             zkc: zk::ValuedCircuit<F>,
         ) -> (super::Circuit<F>, super::Witness<F>) {
             self.populate(&zkc.circuit);
@@ -611,6 +616,27 @@ mod zkc {
             let committed = self.committed_indices.clone();
             for (i, c_pos) in committed.into_iter().enumerate() {
                 self.linearize(zkc, c_pos);
+                // If a committed witness still resolves to its own `Committed`
+                // column, its binding row would collapse to
+                // `Committed(i) - Committed(i) = 0`. That happens whenever no
+                // non-tautological constraint references it (it is used
+                // nowhere, or only in `assert(w == w)`), leaving the commitment
+                // with an all-zero column: a prover could then swap it for an
+                // arbitrary group element and still verify. Anchor it to a fresh
+                // padding wire and redirect every reference there, so its
+                // binding row reads `Left(k) - Committed(i) = 0`, tying the
+                // column to a value genuinely committed in `M`. A wire-anchored
+                // entry (e.g. a duplicate of an already-anchored index) is left
+                // as is.
+                if matches!(
+                    self.linearize_cache.get(&c_pos),
+                    Some(LinComb::Location(Location::Committed(_)))
+                ) {
+                    let k = self.internal_vars.len();
+                    self.internal_vars.push((c_pos, None, None));
+                    self.linearize_cache
+                        .insert(c_pos, LinComb::Location(Location::Left(k)));
+                }
                 self.extra_assertions.push((c_pos, Location::Committed(i)));
             }
         }
@@ -812,7 +838,7 @@ pub fn zkc_to_circuit<F: Field + Random>(
 /// allocated by the circuit; other indices are unsupported, and may panic
 /// or leave a commitment unconstrained.
 pub fn zkc_to_circuit_and_witness<F: Field + Random>(
-    blinding_rng: Option<&mut impl CryptoRngCore>,
+    blinding_rng: Option<&mut impl CryptoRng>,
     zkc: crate::zk::circuit::ValuedCircuit<F>,
     committed_indices: &[crate::zk::circuit::CircuitIdx],
 ) -> (Circuit<F>, Witness<F>) {
@@ -962,7 +988,7 @@ impl<G> Setup<G> {
     /// returned `Vec` indicate that the corresponding item is structurally
     /// invalid; they are reported as `false` in the result without ever
     /// being included in any subset sum.
-    pub fn eval_check_batched<F: Field + Random, R: CryptoRngCore>(
+    pub fn eval_check_batched<F: Field + Random, R: CryptoRng>(
         &self,
         rng: &mut R,
         f: impl FnOnce(&Setup<Synthetic<F, G>>, &mut R) -> Option<Vec<Option<Synthetic<F, G>>>>,
@@ -1244,7 +1270,7 @@ where
 /// witness lengths are inconsistent with the circuit, or if the claim does not
 /// match the witness.
 pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<G>,
     circuit: &Circuit<F>,
@@ -1689,7 +1715,7 @@ pub fn prove<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
 /// The extra randomness is used to compress the circuit-specific checks into a
 /// single equation before combining them with the inner product argument.
 pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
-    rng: &mut impl CryptoRngCore,
+    rng: &mut impl CryptoRng,
     transcript: &mut Transcript,
     setup: &Setup<Synthetic<F, G>>,
     circuit: &Circuit<F>,
@@ -1850,6 +1876,7 @@ pub fn verify<F: Field + Encode + Random, G: CryptoGroup<Scalar = F> + Encode>(
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {
     use super::*;
+    use crate::transcript::Version;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_math::{
         algebra::{Additive, Ring},
@@ -1859,24 +1886,31 @@ pub mod fuzz {
     use commonware_utils::test_rng;
     use std::sync::OnceLock;
 
-    const NUM_GENERATORS: usize = 5;
     const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_ZK_BULLETPROOFS_CIRCUIT";
+
+    /// Number of IPA generator pairs in the test setup. Large enough to prove
+    /// and verify any circuit produced by the fuzz plans, whose op count
+    /// bounds `internal_vars` well below this.
+    const TEST_SETUP_PAIRS: usize = 64;
 
     pub(super) fn test_setup() -> &'static Setup<G> {
         static TEST_SETUP: OnceLock<Setup<G>> = OnceLock::new();
         TEST_SETUP.get_or_init(|| {
-            let generators = (1..=NUM_GENERATORS)
-                .map(|i| G::generator() * &F::from(i as u8))
+            let count = 2 * TEST_SETUP_PAIRS + 3;
+            let gens = (1..=count)
+                .map(|i| G::generator() * &F::from(i as u64))
                 .collect::<Vec<_>>();
             Setup::new(
                 ipa::Setup::new(
-                    generators[0],
-                    generators[1..3]
-                        .chunks_exact(2)
-                        .map(|chunk| (chunk[0], chunk[1])),
+                    gens[2 * TEST_SETUP_PAIRS],
+                    gens[..2 * TEST_SETUP_PAIRS]
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|c| (c[0], c[1])),
                 ),
-                generators[3],
-                generators[4],
+                gens[2 * TEST_SETUP_PAIRS + 1],
+                gens[2 * TEST_SETUP_PAIRS + 2],
             )
         })
     }
@@ -1912,23 +1946,6 @@ pub mod fuzz {
     }
 
     impl Case {
-        fn prove(&self, setup: &Setup<G>) -> (Claim<G>, Proof<F, G>) {
-            let mut rng = test_rng();
-            let mut transcript = Transcript::new(NAMESPACE);
-            let claim = self.witness.claim(setup);
-            let proof = super::prove(
-                &mut rng,
-                &mut transcript,
-                setup,
-                &self.circuit,
-                &claim,
-                &self.witness,
-                &Sequential,
-            )
-            .expect("generated case should always create a proof");
-            (claim, proof)
-        }
-
         fn is_satisfied(&self) -> bool {
             self.circuit.is_satisfied(
                 &self.witness.values,
@@ -1988,19 +2005,43 @@ pub mod fuzz {
     }
 
     fn assert_verify_matches_satisfaction(case: &Case) {
-        let mut rng = test_rng();
         let setup = test_setup();
-        let (claim, proof) = case.prove(setup);
-        let mut transcript = Transcript::new(NAMESPACE);
-        let verified = setup
+        let claim = case.witness.claim(setup);
+        let verified = prove_and_verify(setup, &case.circuit, &claim, &case.witness);
+        assert_eq!(verified, case.is_satisfied());
+    }
+
+    /// Prove `claim` against `circuit` with `witness`, then verify, returning
+    /// whether verification accepted. A `prove` failure counts as rejection.
+    fn prove_and_verify(
+        setup: &Setup<G>,
+        circuit: &Circuit<F>,
+        claim: &Claim<G>,
+        witness: &Witness<F>,
+    ) -> bool {
+        let mut rng = test_rng();
+        let mut prover_transcript = Transcript::new(NAMESPACE, Version::V1);
+        let Some(proof) = super::prove(
+            &mut rng,
+            &mut prover_transcript,
+            setup,
+            circuit,
+            claim,
+            witness,
+            &Sequential,
+        ) else {
+            return false;
+        };
+        let mut verifier_transcript = Transcript::new(NAMESPACE, Version::V1);
+        setup
             .eval(
                 |vs| {
                     verify(
                         &mut rng,
-                        &mut transcript,
+                        &mut verifier_transcript,
                         vs,
-                        &case.circuit,
-                        &claim,
+                        circuit,
+                        claim,
                         proof,
                         &Sequential,
                     )
@@ -2008,13 +2049,19 @@ pub mod fuzz {
                 &Sequential,
             )
             .map(|g| g == G::zero())
-            .unwrap_or(false);
-        assert_eq!(verified, case.is_satisfied());
+            .unwrap_or(false)
     }
 
     /// Check that converting a ZK circuit to a bulletproofs circuit and
     /// witness preserves satisfaction, committing a random subset of the
     /// witnesses.
+    ///
+    /// For satisfied circuits this also runs a full prove/verify roundtrip and
+    /// checks that tampering with a committed commitment is rejected. The
+    /// latter is the binding property: every committed value (including a
+    /// witness constrained by nothing) must enter the verification equation
+    /// with a nonzero coefficient, so it cannot be swapped for an arbitrary
+    /// group element.
     pub(super) fn assert_zkc_conversion_preserves_satisfaction(
         plan: &crate::zk::circuit::fuzz::Plan,
         u: &mut Unstructured<'_>,
@@ -2028,11 +2075,31 @@ pub mod fuzz {
         }
         let (circuit, witness) =
             zkc_to_circuit_and_witness(Some(&mut test_rng()), valued, &committed);
-        assert_eq!(
-            witness.is_satisfied(&circuit),
-            plan.satisfied(),
-            "plan: {plan:?}"
-        );
+        let satisfied = witness.is_satisfied(&circuit);
+        assert_eq!(satisfied, plan.satisfied(), "plan: {plan:?}");
+
+        if satisfied {
+            let setup = test_setup();
+            assert!(
+                circuit.internal_vars() <= TEST_SETUP_PAIRS,
+                "circuit too large for test setup ({} > {TEST_SETUP_PAIRS}); plan: {plan:?}",
+                circuit.internal_vars()
+            );
+            let honest = witness.claim(setup);
+            assert!(
+                prove_and_verify(setup, &circuit, &honest, &witness),
+                "honest claim must verify; plan: {plan:?}"
+            );
+            if !committed.is_empty() {
+                let j = u.choose_index(committed.len())?;
+                let mut tampered = witness.claim(setup);
+                tampered.commitments[j] += setup.value_generator();
+                assert!(
+                    !prove_and_verify(setup, &circuit, &tampered, &witness),
+                    "tampering committed value {j} must break verification; plan: {plan:?}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -2051,8 +2118,11 @@ pub mod fuzz {
 
 #[cfg(test)]
 mod test {
-    use super::{fuzz, prove, verify, Circuit, Setup, SparseMatrix, Witness};
-    use crate::{transcript::Transcript, zk::circuit as zk};
+    use super::{Circuit, Setup, SparseMatrix, Witness, fuzz, prove, verify};
+    use crate::{
+        transcript::{Transcript, Version},
+        zk::circuit as zk,
+    };
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::{
@@ -2061,6 +2131,72 @@ mod test {
     };
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+
+    #[test]
+    fn test_sparse_matrix_encoding_binds_dimensions() {
+        let matrix = SparseMatrix::<F>::default();
+        let mut wider = SparseMatrix::<F>::default();
+        wider.pad(1, 0);
+        let mut taller = SparseMatrix::<F>::default();
+        taller.pad(0, 1);
+
+        assert_eq!(matrix.weights, wider.weights);
+        assert_eq!(matrix.weights, taller.weights);
+        assert_ne!(matrix.encode(), wider.encode());
+        assert_ne!(matrix.encode(), taller.encode());
+        assert_ne!(wider.encode(), taller.encode());
+    }
+
+    #[test]
+    fn test_distinct_valid_circuits_encode_differently() {
+        let mut no_internal_vars = SparseMatrix::<F>::default();
+        no_internal_vars.pad(1, 0);
+        let no_internal_vars =
+            Circuit::new(0, no_internal_vars).expect("width 1 is a valid circuit layout");
+
+        let mut one_internal_var = SparseMatrix::<F>::default();
+        one_internal_var.pad(4, 0);
+        let one_internal_var =
+            Circuit::new(0, one_internal_var).expect("width 4 is a valid circuit layout");
+
+        assert_eq!(no_internal_vars.internal_vars(), 0);
+        assert_eq!(one_internal_var.internal_vars(), 1);
+        assert!(no_internal_vars.is_satisfied(&[], &[], &[]));
+        assert!(!one_internal_var.is_satisfied(&[], &[], &[]));
+        assert!(one_internal_var.is_satisfied(&[], &[F::zero()], &[F::zero()]));
+        assert_ne!(no_internal_vars.encode(), one_internal_var.encode());
+    }
+
+    #[test]
+    fn test_converted_circuits_bind_internal_vars() {
+        let (one_internal_var, _) = zk::build::<F>(|ctx| {
+            let a = zk::Var::witness(ctx, |_| F::zero());
+            let b = zk::Var::witness(ctx, |_| F::zero());
+            let product = a * &b;
+            product.assert_eq(&product);
+            Vec::new()
+        });
+        let one_internal_var = super::zkc_to_circuit(one_internal_var, &[]);
+
+        let (two_internal_vars, _) = zk::build::<F>(|ctx| {
+            let w0 = zk::Var::witness(ctx, |_| F::zero());
+            let w1 = zk::Var::witness(ctx, |_| F::zero());
+            let w2 = zk::Var::witness(ctx, |_| F::zero());
+            w1.assert_eq(&w1);
+            w0.assert_eq(&w0);
+            w2.assert_eq(&w2);
+            Vec::new()
+        });
+        let two_internal_vars = super::zkc_to_circuit(two_internal_vars, &[]);
+
+        assert_eq!(one_internal_var.internal_vars(), 1);
+        assert_eq!(two_internal_vars.internal_vars(), 2);
+        assert_eq!(
+            one_internal_var.weights.encode(),
+            two_internal_vars.weights.encode()
+        );
+        assert_ne!(one_internal_var.encode(), two_internal_vars.encode());
+    }
 
     #[test]
     fn test_zkc_conversion_preserves_satisfaction_minifuzz() {
@@ -2231,7 +2367,7 @@ mod test {
         claim.commitments.push(G::generator() * &F::from(9u8));
 
         let mut rng = test_rng();
-        let mut prover_transcript = Transcript::new(b"verify-rejects-over-long-claim");
+        let mut prover_transcript = Transcript::new(b"verify-rejects-over-long-claim", Version::V1);
         let proof = prove(
             &mut rng,
             &mut prover_transcript,
@@ -2243,7 +2379,8 @@ mod test {
         )
         .expect("prove still produces a proof against the malformed claim");
 
-        let mut verifier_transcript = Transcript::new(b"verify-rejects-over-long-claim");
+        let mut verifier_transcript =
+            Transcript::new(b"verify-rejects-over-long-claim", Version::V1);
         let verified = setup.eval(
             |vs| {
                 verify(

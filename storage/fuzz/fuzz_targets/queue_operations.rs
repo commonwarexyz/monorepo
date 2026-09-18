@@ -1,32 +1,17 @@
 #![no_main]
 
-use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
-use commonware_storage::queue::{Config, Queue};
+use arbitrary::Arbitrary;
+use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
+use commonware_storage::queue::{Config, Error, Queue};
+use commonware_storage_fuzz::{
+    bounded_buffer, bounded_items, bounded_page_cache_size, bounded_page_size,
+};
+use commonware_utils::NZUsize;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeSet,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
 };
-
-/// Maximum write buffer size.
-const MAX_WRITE_BUF: usize = 2048;
-
-fn bounded_page_size(u: &mut Unstructured<'_>) -> Result<u16> {
-    u.int_in_range(1..=256)
-}
-
-fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=16)
-}
-
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> Result<u64> {
-    u.int_in_range(1..=64)
-}
-
-fn bounded_write_buffer(u: &mut Unstructured<'_>) -> Result<usize> {
-    u.int_in_range(1..=MAX_WRITE_BUF)
-}
 
 #[derive(Arbitrary, Debug, Clone)]
 enum QueueOperation {
@@ -57,10 +42,10 @@ struct FuzzInput {
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
     /// Items per section.
-    #[arbitrary(with = bounded_items_per_section)]
+    #[arbitrary(with = bounded_items)]
     items_per_section: u64,
     /// Write buffer size.
-    #[arbitrary(with = bounded_write_buffer)]
+    #[arbitrary(with = bounded_buffer)]
     write_buffer: usize,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
@@ -169,6 +154,9 @@ fn fuzz(input: FuzzInput) {
             codec_config: ((0usize..).into(), ()),
             page_cache: CacheRef::from_pooler(&context, page_size, page_cache_size),
             write_buffer,
+            // The queue is initialized once on an empty partition and never reopened,
+            // so replay never reads anything: fuzzing this knob adds no coverage.
+            replay_buffer: NZUsize!(1024),
         };
 
         let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
@@ -177,22 +165,22 @@ fn fuzz(input: FuzzInput) {
         let mut reference = ReferenceQueue::new();
 
         for op in input.operations.iter() {
-            match op {
+            queue = match op {
                 QueueOperation::Enqueue { value } => {
-                    let pos = queue.enqueue(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.enqueue(vec![*value]).await.unwrap();
                     let ref_pos = reference.enqueue(*value);
                     assert_eq!(pos, ref_pos, "enqueue position mismatch");
+                    queue
                 }
 
                 QueueOperation::Append { value } => {
-                    let pos = queue.append(vec![*value]).await.unwrap();
+                    let (queue, pos) = queue.append(vec![*value]).await.unwrap();
                     let ref_pos = reference.enqueue(*value);
                     assert_eq!(pos, ref_pos, "append position mismatch");
+                    queue
                 }
 
-                QueueOperation::Commit => {
-                    queue.commit().await.unwrap();
-                }
+                QueueOperation::Commit => queue.commit().await.unwrap(),
 
                 QueueOperation::Dequeue => {
                     let result = queue.dequeue().await.unwrap();
@@ -208,17 +196,20 @@ fn fuzz(input: FuzzInput) {
                             panic!("dequeue mismatch: got {actual:?}, expected {expected:?}");
                         }
                     }
+                    queue
                 }
 
                 QueueOperation::Ack { pos_offset } => {
-                    let size = queue.size().await;
-                    if size == 0 {
-                        continue;
-                    }
-                    // Map offset to a valid position range
-                    let pos = (*pos_offset as u64) % size;
+                    // Map the offset with slack past size so out-of-range positions stay
+                    // reachable while in-range remains the common case.
+                    let size = reference.size();
+                    let pos = (*pos_offset as u64) % (size + size / 4 + 1);
 
-                    let result = queue.ack(pos).await;
+                    // Snapshot ack state to pin that a rejected ack is a no-op
+                    let floor_before = queue.ack_floor();
+                    let read_before = queue.read_position();
+
+                    let result = queue.ack(pos);
                     let ref_result = reference.ack(pos);
 
                     assert_eq!(
@@ -226,14 +217,36 @@ fn fuzz(input: FuzzInput) {
                         ref_result,
                         "ack result mismatch for pos {pos}"
                     );
+                    if let Err(err) = result {
+                        // Out-of-range positions must fail with the documented error
+                        assert!(
+                            matches!(err, Error::PositionOutOfRange(p, s) if p == pos && s == size),
+                            "unexpected ack error for pos {pos} size {size}: {err:?}"
+                        );
+
+                        // A rejected ack must not mutate ack state
+                        assert_eq!(queue.ack_floor(), floor_before, "rejected ack moved floor");
+                        assert_eq!(
+                            queue.read_position(),
+                            read_before,
+                            "rejected ack moved read position"
+                        );
+                        assert!(!queue.is_acked(pos), "rejected ack marked pos {pos} acked");
+                    }
+                    queue
                 }
 
                 QueueOperation::AckUpTo { pos_offset } => {
-                    let size = queue.size().await;
-                    // Map offset to valid range [0, size]
-                    let up_to = (*pos_offset as u64) % (size + 1);
+                    // Map the offset with slack past size + 1 so out-of-range values stay
+                    // reachable while in-range remains the common case.
+                    let size = reference.size();
+                    let up_to = (*pos_offset as u64) % (size + size / 4 + 2);
 
-                    let result = queue.ack_up_to(up_to).await;
+                    // Snapshot ack state to pin that a rejected ack_up_to is a no-op
+                    let floor_before = queue.ack_floor();
+                    let read_before = queue.read_position();
+
+                    let result = queue.ack_up_to(up_to);
                     let ref_result = reference.ack_up_to(up_to);
 
                     assert_eq!(
@@ -241,24 +254,39 @@ fn fuzz(input: FuzzInput) {
                         ref_result,
                         "ack_up_to result mismatch for up_to {up_to}"
                     );
+                    if let Err(err) = result {
+                        // Out-of-range values must fail with the documented error
+                        assert!(
+                            matches!(err, Error::PositionOutOfRange(p, s) if p == up_to && s == size),
+                            "unexpected ack_up_to error for up_to {up_to} size {size}: {err:?}"
+                        );
+
+                        // A rejected ack_up_to must not mutate ack state
+                        assert_eq!(
+                            queue.ack_floor(),
+                            floor_before,
+                            "rejected ack_up_to moved floor"
+                        );
+                        assert_eq!(
+                            queue.read_position(),
+                            read_before,
+                            "rejected ack_up_to moved read position"
+                        );
+                    }
+                    queue
                 }
 
                 QueueOperation::Reset => {
                     queue.reset();
                     reference.reset();
+                    queue
                 }
 
-                QueueOperation::Sync => {
-                    queue.sync().await.unwrap();
-                }
-            }
+                QueueOperation::Sync => queue.sync().await.unwrap(),
+            };
 
             // Verify invariants after each operation
-            assert_eq!(
-                queue.size().await,
-                reference.size(),
-                "size mismatch after {op:?}"
-            );
+            assert_eq!(queue.size(), reference.size(), "size mismatch after {op:?}");
             assert_eq!(
                 queue.ack_floor(),
                 reference.ack_floor(),
@@ -270,13 +298,13 @@ fn fuzz(input: FuzzInput) {
                 "read_position mismatch after {op:?}"
             );
             assert_eq!(
-                queue.is_empty().await,
+                queue.is_empty(),
                 reference.is_empty(),
                 "is_empty mismatch after {op:?}"
             );
 
             // Verify is_acked consistency for a sample of positions
-            for pos in 0..queue.size().await.min(20) {
+            for pos in 0..queue.size().min(20) {
                 assert_eq!(
                     queue.is_acked(pos),
                     reference.is_acked(pos),

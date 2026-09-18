@@ -18,7 +18,7 @@
 //!
 
 use crate::reed_solomon::engine::{
-    fwht, utils, GfElement, CANTOR_BASIS, GF_BITS, GF_MODULUS, GF_ORDER, GF_POLYNOMIAL,
+    CANTOR_BASIS, GF_BITS, GF_MODULUS, GF_ORDER, GF_POLYNOMIAL, GfElement, fwht, utils,
 };
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;

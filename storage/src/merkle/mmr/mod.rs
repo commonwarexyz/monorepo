@@ -80,7 +80,7 @@ cfg_if::cfg_if! {
 
 pub use super::proof::MAX_PROOF_DIGESTS_PER_ELEMENT;
 use crate::merkle::{self, Family as _, Graftable};
-pub use crate::merkle::{hasher, Readable};
+pub use crate::merkle::{Readable, hasher};
 pub use batch::{MerkleizedBatch, UnmerkleizedBatch};
 use commonware_cryptography::Digest;
 
@@ -439,34 +439,31 @@ mod tests {
         use commonware_codec::{Encode, ReadExt};
 
         let pos = Position::new(0);
-        assert_eq!(Position::read(&mut pos.encode().as_ref()).unwrap(), pos);
+        assert_eq!(Position::read(&mut pos.encode()).unwrap(), pos);
 
         let pos = Position::new(12345);
-        assert_eq!(Position::read(&mut pos.encode().as_ref()).unwrap(), pos);
+        assert_eq!(Position::read(&mut pos.encode()).unwrap(), pos);
 
         // MAX_NODES is a valid value (inclusive bound), so it should decode successfully
-        assert_eq!(
-            Position::read(&mut MAX_NODES.encode().as_ref()).unwrap(),
-            MAX_NODES
-        );
+        assert_eq!(Position::read(&mut MAX_NODES.encode()).unwrap(), MAX_NODES);
 
         let pos = MAX_NODES - 1;
-        assert_eq!(Position::read(&mut pos.encode().as_ref()).unwrap(), pos);
+        assert_eq!(Position::read(&mut pos.encode()).unwrap(), pos);
     }
 
     #[test]
     fn test_position_read_cfg_invalid_values() {
-        use commonware_codec::{varint::UInt, Encode, ReadExt};
+        use commonware_codec::{Encode, ReadExt, varint::UInt};
 
-        let encoded = UInt(*MAX_NODES + 1).encode();
+        let mut encoded = UInt(*MAX_NODES + 1).encode();
         assert!(matches!(
-            Position::read(&mut encoded.as_ref()),
+            Position::read(&mut encoded),
             Err(commonware_codec::Error::Invalid("Position", _))
         ));
 
-        let encoded = UInt(u64::MAX).encode();
+        let mut encoded = UInt(u64::MAX).encode();
         assert!(matches!(
-            Position::read(&mut encoded.as_ref()),
+            Position::read(&mut encoded),
             Err(commonware_codec::Error::Invalid("Position", _))
         ));
     }
@@ -632,10 +629,10 @@ mod tests {
         assert!(Location::new(u64::MAX).checked_add(1).is_none());
         assert!(MAX_LEAVES.checked_add(1).is_none());
         // MAX_LEAVES - 10 + 10 = MAX_LEAVES, which IS valid (inclusive bound)
-        let loc = Location::new(*MAX_LEAVES - 10);
+        let loc = MAX_LEAVES - 10;
         assert_eq!(loc.checked_add(10).unwrap(), *MAX_LEAVES);
         // MAX_LEAVES - 11 + 10 = MAX_LEAVES - 1, also valid
-        let loc = Location::new(*MAX_LEAVES - 11);
+        let loc = MAX_LEAVES - 11;
         assert_eq!(loc.checked_add(10).unwrap(), *MAX_LEAVES - 1);
     }
 
@@ -707,7 +704,7 @@ mod tests {
         // MAX_LEAVES IS valid (inclusive bound)
         assert!(MAX_LEAVES.is_valid());
         assert!((MAX_LEAVES - 1).is_valid());
-        assert!(!Location::new(*MAX_LEAVES + 1).is_valid());
+        assert!(!(MAX_LEAVES + 1).is_valid());
         assert!(!Location::new(u64::MAX).is_valid());
     }
 
@@ -725,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_overflow_location_returns_error() {
-        let over_loc = Location::new(*MAX_LEAVES + 1);
+        let over_loc = MAX_LEAVES + 1;
         assert!(!over_loc.is_valid());
         assert!(matches!(
             Position::try_from(over_loc).unwrap_err(),
@@ -738,34 +735,34 @@ mod tests {
         use commonware_codec::{Encode, ReadExt};
 
         let loc = Location::new(0);
-        assert_eq!(Location::read(&mut loc.encode().as_ref()).unwrap(), loc);
+        assert_eq!(Location::read(&mut loc.encode()).unwrap(), loc);
 
         let loc = Location::new(12345);
-        assert_eq!(Location::read(&mut loc.encode().as_ref()).unwrap(), loc);
+        assert_eq!(Location::read(&mut loc.encode()).unwrap(), loc);
 
         // MAX_LEAVES is a valid value (inclusive bound), so it should decode successfully
         assert_eq!(
-            Location::read(&mut MAX_LEAVES.encode().as_ref()).unwrap(),
+            Location::read(&mut MAX_LEAVES.encode()).unwrap(),
             MAX_LEAVES
         );
 
         let loc = MAX_LEAVES - 1;
-        assert_eq!(Location::read(&mut loc.encode().as_ref()).unwrap(), loc);
+        assert_eq!(Location::read(&mut loc.encode()).unwrap(), loc);
     }
 
     #[test]
     fn test_location_read_cfg_invalid_values() {
-        use commonware_codec::{varint::UInt, Encode, ReadExt};
+        use commonware_codec::{Encode, ReadExt, varint::UInt};
 
-        let encoded = UInt(*MAX_LEAVES + 1).encode();
+        let mut encoded = UInt(*MAX_LEAVES + 1).encode();
         assert!(matches!(
-            Location::read(&mut encoded.as_ref()),
+            Location::read(&mut encoded),
             Err(commonware_codec::Error::Invalid("Location", _))
         ));
 
-        let encoded = UInt(u64::MAX).encode();
+        let mut encoded = UInt(u64::MAX).encode();
         assert!(matches!(
-            Location::read(&mut encoded.as_ref()),
+            Location::read(&mut encoded),
             Err(commonware_codec::Error::Invalid("Location", _))
         ));
     }
@@ -895,7 +892,7 @@ mod tests {
 
     #[test]
     fn test_inactive_peaks() {
-        let size = Family::location_to_position(Location::new(11));
+        let size = Location::new(11);
 
         // At 11 leaves, MMR has 3 peaks:
         // - Height 3 covering leaves 0..8 (capacity 8)

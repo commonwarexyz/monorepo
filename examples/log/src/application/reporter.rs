@@ -1,6 +1,6 @@
 use super::Scheme;
 use commonware_actor::Feedback;
-use commonware_consensus::{simplex::types::Activity, Viewable};
+use commonware_consensus::{Viewable, simplex::types::Activity};
 use commonware_cryptography::Digest;
 use std::marker::PhantomData;
 use tracing::info;

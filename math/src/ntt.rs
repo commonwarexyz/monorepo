@@ -1,13 +1,13 @@
 use crate::algebra::{Additive, FieldNTT, Ring};
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
-use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
 use commonware_utils::bitmap::BitMap;
 use core::{
     num::NonZeroU32,
     ops::{Index, IndexMut},
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::vec::Vec;
 
@@ -722,7 +722,7 @@ impl<F: Read> Read for Matrix<F> {
     type Cfg = (usize, <F as Read>::Cfg);
 
     fn read_cfg(
-        buf: &mut impl bytes::Buf,
+        buf: &mut impl Buf,
         (max_els, f_cfg): &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
         let cfg = RangeCfg::from(..=*max_els);
@@ -850,7 +850,7 @@ impl<F> Matrix<F> {
 
 impl<F: crate::algebra::Random> Matrix<F> {
     /// Create a random matrix with certain dimensions.
-    pub fn rand(mut rng: impl CryptoRngCore, rows: usize, cols: usize) -> Self
+    pub fn rand(mut rng: impl CryptoRng, rows: usize, cols: usize) -> Self
     where
         F: Additive,
     {

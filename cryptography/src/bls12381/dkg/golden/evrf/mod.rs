@@ -1,33 +1,33 @@
 mod banderwagon;
 
 use crate::{
-    bls12381::primitives::group::{Scalar, ScalarReadCfg, G1},
-    transcript::{Summary, Transcript},
+    Secret,
+    bls12381::primitives::group::{G1, Scalar, ScalarReadCfg},
+    transcript::{Summary, Transcript, Version},
     zk::{
         bulletproofs::circuit::{self, prove, verify},
         pedersen_to_plain,
     },
-    Secret,
 };
-use banderwagon::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
-use bytes::{Buf, BufMut, Bytes};
+use banderwagon::{F, G, vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv};
+use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
-    Write,
+    Buf, Copying, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize,
+    Read, ReadExt, Write,
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    ordered::{Map, Set},
     Array, Span, TryCollect, TryFromIterator,
+    ordered::{Map, Set},
 };
 use core::{
     fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::num::NonZeroU32;
 use zeroize::Zeroizing;
 
@@ -42,11 +42,11 @@ const BULLETPROOFS_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BULLETPROO
 // (See `banderwagon::tests::measure_circuit_size_per_receiver` for the
 // raw data this fit was derived from.)
 //
-// TODO: with a hand-tailored scalar-mul gadget the per-receiver constant
-// could drop to ~2.5k (Golden paper, eprint 2025/1924), letting us hit a much
-// larger receiver count with the same (or smaller) setup.
-const WIRES_PER_PLAYER: usize = 4818;
-const WIRES_BASE: usize = 1513;
+// The circuit uses windowed fixed-base scalar multiplication and shares window
+// selectors across bases that use the same scalar. A hand-tailored x-only or
+// endomorphism-based gadget may reduce this further.
+const WIRES_PER_PLAYER: usize = 2247;
+const WIRES_BASE: usize = 1327;
 
 /// `ceil(log2(WIRES_PER_PLAYER * num_players + WIRES_BASE))`.
 ///
@@ -159,7 +159,7 @@ pub struct PrivateKey {
 }
 
 impl Random for PrivateKey {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         Self {
             inner: Secret::new(F::random(rng)),
         }
@@ -177,7 +177,7 @@ impl crate::Signer for PrivateKey {
 
     fn sign(&self, namespace: &[u8], msg: &[u8]) -> Signature {
         let pk = self.public();
-        let mut t = Transcript::new(SCHNORR_NS);
+        let mut t = Transcript::new(SCHNORR_NS, Version::V1);
         t.commit(namespace).commit(msg).commit(pk.raw.as_slice());
 
         // Derive deterministic nonce from secret key + public transcript state
@@ -185,13 +185,13 @@ impl crate::Signer for PrivateKey {
             let mut nonce_t = t.fork(b"nonce");
             let x_bytes = Zeroizing::new(x.encode_fixed::<{ F::SIZE }>());
             nonce_t.commit(x_bytes.as_slice());
-            F::random(&mut nonce_t.noise(b"k"))
+            F::random(nonce_t.noise(b"k"))
         });
 
         let k_big = G::generator() * &k;
         let k_big_bytes: [u8; G::SIZE] = k_big.encode_fixed();
         t.commit(k_big_bytes.as_slice());
-        let e = F::random(&mut t.noise(b"challenge"));
+        let e = F::random(t.noise(b"challenge"));
 
         // s = k + e * x
         let s = self.inner.expose(|x| e * x + &k);
@@ -230,7 +230,7 @@ impl PrivateKey {
     /// Panics if `receivers` contains duplicate public keys.
     pub(super) fn vrf_batch_checked(
         &self,
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         setup: &Setup,
         transcript: &mut Transcript,
         msg: &Summary,
@@ -311,7 +311,7 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let x: F = ReadExt::read(&mut raw.as_slice())?;
+        let x: F = ReadExt::read(&mut Copying(raw.as_slice()))?;
         Ok(Self {
             inner: Secret::new(x),
         })
@@ -400,22 +400,22 @@ impl crate::Verifier for PublicKey {
     type Signature = Signature;
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
-        let k_big: G = match ReadExt::read(&mut &sig.raw[..G::SIZE]) {
+        let k_big: G = match ReadExt::read(&mut Copying(&sig.raw[..G::SIZE])) {
             Ok(p) => p,
             Err(_) => return false,
         };
-        let s: F = match ReadExt::read(&mut &sig.raw[G::SIZE..]) {
+        let s: F = match ReadExt::read(&mut Copying(&sig.raw[G::SIZE..])) {
             Ok(s) => s,
             Err(_) => return false,
         };
 
         // Recompute the challenge
-        let mut t = Transcript::new(SCHNORR_NS);
+        let mut t = Transcript::new(SCHNORR_NS, Version::V1);
         t.commit(namespace)
             .commit(msg)
             .commit(self.raw.as_slice())
             .commit(sig.raw[..G::SIZE].as_ref());
-        let e = F::random(&mut t.noise(b"challenge"));
+        let e = F::random(t.noise(b"challenge"));
 
         // Check: s * G == K + e * X
         let lhs = G::generator() * &s;
@@ -437,7 +437,7 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let point: G = ReadExt::read(&mut raw.as_slice())?;
+        let point: G = ReadExt::read(&mut Copying(&raw))?;
         Ok(Self { raw, point })
     }
 }
@@ -597,7 +597,7 @@ impl VrfCommitments {
     /// `msg` is the same nonce ([`Summary`]) the dealer passed to
     /// [`PrivateKey::vrf_batch_checked`], and `commitments` is what they
     /// produced. `transcript` must match the outer transcript the dealers used
-    /// when proving (typically `Transcript::resume(*info.summary())`).
+    /// when proving (typically `Transcript::resume(*info.summary(), Version::V1)`).
     ///
     /// `players` is the set of receiver public keys relevant to this round.
     /// Senders whose commitment map references any receiver outside `players`
@@ -616,7 +616,7 @@ impl VrfCommitments {
     ///
     /// Panics if `outputs` contains duplicate sender public keys.
     pub fn check_batch(
-        rng: &mut impl CryptoRngCore,
+        rng: &mut impl CryptoRng,
         setup: &Setup,
         transcript: &Transcript,
         players: &Set<PublicKey>,
@@ -636,7 +636,7 @@ impl VrfCommitments {
         let outputs: Vec<(PublicKey, Bytes, Self)> = outputs
             .into_iter()
             .filter_map(|(sender, msg, commitments)| {
-                let mut buf: &[u8] = msg.as_ref();
+                let mut buf = msg.clone();
                 let _: Summary = ReadExt::read(&mut buf).ok()?;
                 if commitments.proof.pedersen_to_plain.len() != commitments.commitments.len() {
                     return None;
@@ -774,7 +774,7 @@ mod tests {
         // The outer transcript both sides agree on. The prover forks it the
         // same way `golden::deal` does, and `check_batch` re-forks it
         // internally per sender.
-        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test", Version::V1);
 
         let mut prover_t = outer_transcript.fork(b"dealer vrf");
         prover_t.commit(sender_pk.encode());
@@ -818,7 +818,7 @@ mod tests {
         let nonce = Summary::random(&mut rng);
         let msg = Bytes::copy_from_slice(nonce.as_ref());
 
-        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test", Version::V1);
 
         let mut prover_t = outer_transcript.fork(b"dealer vrf");
         prover_t.commit(sender_pk.encode());
@@ -859,7 +859,7 @@ mod tests {
         let nonce = Summary::random(&mut rng);
         let msg = Bytes::copy_from_slice(nonce.as_ref());
 
-        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test", Version::V1);
 
         let mut prover_t = outer_transcript.fork(b"dealer vrf");
         prover_t.commit(sender_pk.encode());
@@ -910,7 +910,7 @@ mod tests {
             .map(|_| PrivateKey::random(&mut rng).public())
             .collect();
 
-        let outer_transcript = Transcript::new(b"vrf-batch-checked-test");
+        let outer_transcript = Transcript::new(b"vrf-batch-checked-test", Version::V1);
 
         let mut prepared = Vec::new();
         for (sk, pk) in &senders {
@@ -955,7 +955,7 @@ mod tests {
     fn setup_codec_roundtrip() {
         let s = Setup::new(NonZeroU32::new(3).unwrap());
         let bytes = s.encode();
-        let decoded = Setup::read_cfg(&mut bytes.as_ref(), &NonZeroU32::new(3).unwrap()).unwrap();
+        let decoded = Setup::read_cfg(&mut bytes.clone(), &NonZeroU32::new(3).unwrap()).unwrap();
         assert_eq!(decoded.max_players(), s.max_players());
         // Re-encode and compare to make sure the roundtrip is bit-exact.
         assert_eq!(decoded.encode(), bytes);

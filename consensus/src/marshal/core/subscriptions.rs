@@ -4,10 +4,14 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
 };
-use std::collections::{btree_map::Entry, BTreeMap};
-use tracing::{info_span, Span};
+use std::collections::{BTreeMap, btree_map::Entry};
+use tracing::{Span, info_span};
 
 /// A set of local subscribers waiting for one block.
+///
+/// The retrieval strategy is not part of subscription ownership. Each caller
+/// remains registered until delivery, caller cancellation, or a backing-buffer
+/// closure that proves the buffer can no longer deliver.
 ///
 /// Dropping the subscription aborts the backing buffer waiter, if one exists.
 struct BlockSubscription<V: Variant> {
@@ -65,17 +69,19 @@ impl<V: Variant> Subscriptions<V> {
         });
     }
 
-    /// Notify any digest- or commitment-scoped subscribers for the provided block.
-    pub(super) fn notify(&mut self, block: &V::Block) {
-        if let Some(mut subscription) = self.entries.remove(&Key::Digest(block.digest())) {
+    /// Notify subscribers waiting for the provided block.
+    pub(super) fn notify(&mut self, block: V::Block) {
+        let digest_key = Key::Digest(block.digest());
+        let commitment_key = Key::Commitment(V::commitment(&block));
+
+        if let Some(mut subscription) = self.entries.remove(&digest_key) {
             for subscriber in subscription.subscribers.drain(..) {
-                deliver(subscriber, block);
+                deliver(subscriber, &block);
             }
         }
-        if let Some(mut subscription) = self.entries.remove(&Key::Commitment(V::commitment(block)))
-        {
+        if let Some(mut subscription) = self.entries.remove(&commitment_key) {
             for subscriber in subscription.subscribers.drain(..) {
-                deliver(subscriber, block);
+                deliver(subscriber, &block);
             }
         }
     }
@@ -85,7 +91,7 @@ impl<V: Variant> Subscriptions<V> {
         span: Span,
         key: KeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        waiters: &mut AbortablePool<Result<V::Block, KeyFor<V>>>,
+        waiters: &mut AbortablePool<'_, Result<V::Block, KeyFor<V>>>,
         buffer: &Buf,
     ) {
         let subscriber = Subscriber {
@@ -118,25 +124,25 @@ impl<V: Variant> Subscriptions<V> {
 mod tests {
     use super::*;
     use crate::{
-        marshal::{core::variant::NoBuffer, mocks::block::Block, standard::Standard},
+        marshal::{core::variant::NoBuffer, mocks::block::EmptyBlock, standard::Standard},
         types::{Height, Round},
     };
     use commonware_cryptography::{
+        Digestible,
         ed25519::PublicKey,
         sha256::{Digest, Sha256},
-        Digestible,
     };
     use commonware_macros::select;
     use commonware_p2p::Recipients;
-    use commonware_runtime::{deterministic, Clock, Runner as _};
+    use commonware_runtime::{Clock, Runner as _, deterministic};
     use commonware_utils::sync::Mutex;
     use futures::FutureExt;
     use std::sync::Arc;
 
-    type TestBlock = Block<Digest, ()>;
+    type TestBlock = EmptyBlock<Sha256>;
     type TestVariant = Standard<TestBlock>;
-    type TestWaiters = AbortablePool<Result<TestBlock, KeyFor<TestVariant>>>;
-    type Subscriber = oneshot::Sender<TestBlock>;
+    type TestWaiters = AbortablePool<'static, Result<Arc<TestBlock>, KeyFor<TestVariant>>>;
+    type Subscriber = oneshot::Sender<Arc<TestBlock>>;
     type Subscribers = Arc<Mutex<Vec<Subscriber>>>;
 
     #[derive(Clone, Default)]
@@ -158,15 +164,18 @@ mod tests {
     impl Buffer<TestVariant> for TestBuffer {
         type PublicKey = PublicKey;
 
-        async fn find_by_digest(&self, _digest: Digest) -> Option<TestBlock> {
+        async fn find_by_digest(&self, _digest: Digest) -> Option<Arc<TestBlock>> {
             None
         }
 
-        async fn find_by_commitment(&self, _commitment: Digest) -> Option<TestBlock> {
+        async fn find_by_commitment(&self, _commitment: Digest) -> Option<Arc<TestBlock>> {
             None
         }
 
-        fn subscribe_by_digest(&self, _digest: Digest) -> Option<oneshot::Receiver<TestBlock>> {
+        fn subscribe_by_digest(
+            &self,
+            _digest: Digest,
+        ) -> Option<oneshot::Receiver<Arc<TestBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.digest_subscribers.lock().push(sender);
             Some(receiver)
@@ -175,22 +184,22 @@ mod tests {
         fn subscribe_by_commitment(
             &self,
             _commitment: Digest,
-        ) -> Option<oneshot::Receiver<TestBlock>> {
+        ) -> Option<oneshot::Receiver<Arc<TestBlock>>> {
             let (sender, receiver) = oneshot::channel();
             self.commitment_subscribers.lock().push(sender);
             Some(receiver)
         }
 
-        fn finalized(&self, _commitment: Digest) {}
+        fn retire(&self, _update: crate::marshal::core::Retirement<Digest>) {}
 
-        fn send(&self, _round: Round, _block: TestBlock, _recipients: Recipients<PublicKey>) {}
+        fn send(&self, _round: Round, _block: Arc<TestBlock>, _recipients: Recipients<PublicKey>) {}
     }
 
     fn block(height: u64, timestamp: u64) -> TestBlock {
-        Block::new::<Sha256>((), Sha256::fill(0), Height::new(height), timestamp)
+        TestBlock::new(Sha256::fill(0), Height::new(height), timestamp)
     }
 
-    fn assert_receives(receiver: oneshot::Receiver<TestBlock>, expected: &TestBlock) {
+    fn assert_receives(receiver: oneshot::Receiver<Arc<TestBlock>>, expected: &TestBlock) {
         let received = receiver
             .now_or_never()
             .expect("receiver should be ready")
@@ -226,7 +235,7 @@ mod tests {
         assert_eq!(test_buffer.digest_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 1);
 
-        subscriptions.notify(&block);
+        subscriptions.notify(Arc::new(block.clone()));
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
         assert!(subscriptions.entries.is_empty());
@@ -261,7 +270,7 @@ mod tests {
         assert_eq!(test_buffer.commitment_subscription_count(), 1);
         assert_eq!(subscriptions.entries.len(), 2);
 
-        subscriptions.notify(&block);
+        subscriptions.notify(Arc::new(block.clone()));
         assert_receives(digest_receiver, &block);
         assert_receives(commitment_receiver, &block);
         assert!(subscriptions.entries.is_empty());
@@ -299,7 +308,7 @@ mod tests {
             .expect("open subscriber should remain");
         assert_eq!(subscription.subscribers.len(), 1);
 
-        subscriptions.notify(&block);
+        subscriptions.notify(Arc::new(block.clone()));
         assert_receives(open_receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }
@@ -348,7 +357,7 @@ mod tests {
         );
 
         assert_eq!(subscriptions.entries.len(), 1);
-        subscriptions.notify(&block);
+        subscriptions.notify(Arc::new(block.clone()));
         assert_receives(receiver, &block);
         assert!(subscriptions.entries.is_empty());
     }

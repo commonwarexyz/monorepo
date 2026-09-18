@@ -1,60 +1,49 @@
-#[cfg(not(feature = "iouring-network"))]
-use crate::network::tokio::{Config as TokioNetworkConfig, Network as TokioNetwork};
-#[cfg(feature = "iouring-storage")]
-use crate::storage::iouring::{Config as IoUringConfig, Storage as IoUringStorage};
-#[cfg(not(feature = "iouring-storage"))]
-use crate::storage::tokio::{Config as TokioStorageConfig, Storage as TokioStorage};
 #[cfg(feature = "external")]
 use crate::Pacer;
 use crate::{
-    child_label,
-    network::metered::Network as MeteredNetwork,
+    BlobLayout, BlobVersion, BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle,
+    METRICS_PREFIX, Name, SinkOf, StreamOf, child_label,
+    network::{
+        metered::Network as MeteredNetwork,
+        tokio::{Config as TokioNetworkConfig, Network as TokioNetwork},
+    },
     prefixed_name,
     process::metered::Metrics as MeteredProcess,
     signal::Signal,
-    storage::metered::Storage as MeteredStorage,
-    telemetry::metrics::{
-        add_attribute, raw, task::Label, validate_label, CounterFamily, GaugeFamily, Metric,
-        Register, Registered, Registry,
+    storage::{
+        metered::Storage as MeteredStorage,
+        tokio::{Config as TokioStorageConfig, Storage as TokioStorage},
     },
-    utils::{self, signal::Stopper, supervision::Tree, Panicker},
-    BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, Name, SinkOf, Spawner as _,
-    StreamOf, Supervisor as _, METRICS_PREFIX,
-};
-#[cfg(feature = "iouring-network")]
-use crate::{
-    iouring,
-    network::iouring::{Config as IoUringNetworkConfig, Network as IoUringNetwork},
+    telemetry::metrics::{
+        CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute, raw,
+        task::Label, validate_label,
+    },
+    utils::{self, FactoryGuard, Panicker, signal::Stopper, supervision::Tree},
 };
 use commonware_macros::{select, stability};
 #[stability(BETA)]
-use commonware_parallel::ThreadPool;
-use commonware_utils::{sync::Mutex, NZUsize};
+use commonware_parallel::Rayon;
+use commonware_utils::{NZUsize, sync::Mutex, sys_rng};
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
-use rand::{rngs::OsRng, CryptoRng, RngCore};
+use rand_core::{Rng, TryCryptoRng, TryRng};
 #[stability(BETA)]
-use rayon::{ThreadPoolBuildError, ThreadPoolBuilder};
+use rayon::ThreadPoolBuilder;
 use std::{
+    convert::Infallible,
     env,
     future::Future,
     net::{IpAddr, SocketAddr},
     num::NonZeroUsize,
+    ops::RangeInclusive,
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::runtime::{Builder, Runtime};
-
-#[cfg(feature = "iouring-network")]
-cfg_if::cfg_if! {
-    if #[cfg(test)] {
-        // Use a smaller ring in tests to reduce `io_uring_setup` failures
-        // under parallel test load due to mlock/resource limits.
-        const IOURING_NETWORK_SIZE: u32 = 128;
-    } else {
-        const IOURING_NETWORK_SIZE: u32 = 1024;
-    }
-}
+use tokio::{
+    runtime::{Builder, Handle as RuntimeHandle},
+    sync::Notify,
+};
 
 #[derive(Debug)]
 struct Metrics {
@@ -97,11 +86,18 @@ pub struct NetworkConfig {
     /// Defaults to `true`.
     zero_linger: bool,
 
+    /// Timeout for establishing an outbound TCP connection.
+    ///
+    /// Defaults to 10 seconds.
+    connect_timeout: Duration,
+
     /// Read/write timeout for network operations.
     ///
     /// Bounds the full `Sink::send` and `Stream::recv` calls rather than each
-    /// individual socket syscall. Larger
-    /// batched writes may therefore require a larger timeout.
+    /// individual socket syscall. Larger batched writes may therefore require a
+    /// larger timeout.
+    ///
+    /// Defaults to 60 seconds.
     read_write_timeout: Duration,
 }
 
@@ -110,6 +106,7 @@ impl Default for NetworkConfig {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
         }
     }
@@ -153,13 +150,17 @@ pub struct Config {
     /// Whether or not to catch panics.
     catch_panics: bool,
 
-    /// Base directory for all storage operations.
+    /// Base directory for all storage operations, created at start if missing
+    /// and held for the run.
     storage_directory: PathBuf,
 
-    /// Maximum buffer size for operations on blobs.
+    /// Blob layouts accepted by storage.
     ///
-    /// Tokio sets the default value to 2MB.
-    maximum_buffer_size: usize,
+    /// Defaults to [BlobLayout::ALL] and must be non-empty. New blobs use the latest layout in
+    /// the range. Existing blobs outside it fail to open with [Error::BlobLayoutMismatch], so
+    /// restrict the range to what a rollback target can read before the upgraded binary first
+    /// opens storage.
+    storage_blob_layouts: RangeInclusive<BlobLayout>,
 
     /// Network configuration.
     network_cfg: NetworkConfig,
@@ -174,7 +175,7 @@ pub struct Config {
 impl Config {
     /// Returns a new [Config] with default values.
     pub fn new() -> Self {
-        let rng = OsRng.next_u64();
+        let rng = sys_rng().next_u64();
         let storage_directory = env::temp_dir().join(format!("commonware_tokio_runtime_{rng}"));
         Self {
             worker_threads: 2,
@@ -183,7 +184,7 @@ impl Config {
             thread_stack_size: utils::thread::system_thread_stack_size(),
             catch_panics: false,
             storage_directory,
-            maximum_buffer_size: 2 * 1024 * 1024, // 2 MB
+            storage_blob_layouts: BlobLayout::ALL,
             network_cfg: NetworkConfig::default(),
             network_buffer_pool_cfg: None,
             storage_buffer_pool_cfg: None,
@@ -217,6 +218,11 @@ impl Config {
         self
     }
     /// See [Config]
+    pub const fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.network_cfg.connect_timeout = timeout;
+        self
+    }
+    /// See [Config]
     pub const fn with_read_write_timeout(mut self, d: Duration) -> Self {
         self.network_cfg.read_write_timeout = d;
         self
@@ -237,17 +243,25 @@ impl Config {
         self
     }
     /// See [Config]
-    pub const fn with_maximum_buffer_size(mut self, n: usize) -> Self {
-        self.maximum_buffer_size = n;
+    ///
+    /// # Panics
+    ///
+    /// Panics if `layouts` is empty.
+    pub fn with_storage_blob_layouts(mut self, layouts: RangeInclusive<BlobLayout>) -> Self {
+        assert!(
+            !layouts.is_empty(),
+            "storage blob layouts must be non-empty"
+        );
+        self.storage_blob_layouts = layouts;
         self
     }
     /// See [Config]
-    pub const fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub fn with_network_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.network_buffer_pool_cfg = Some(cfg);
         self
     }
     /// See [Config]
-    pub const fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
+    pub fn with_storage_buffer_pool_config(mut self, cfg: BufferPoolConfig) -> Self {
         self.storage_buffer_pool_cfg = Some(cfg);
         self
     }
@@ -274,6 +288,10 @@ impl Config {
         self.catch_panics
     }
     /// See [Config]
+    pub const fn connect_timeout(&self) -> Duration {
+        self.network_cfg.connect_timeout
+    }
+    /// See [Config]
     pub const fn read_write_timeout(&self) -> Duration {
         self.network_cfg.read_write_timeout
     }
@@ -290,8 +308,8 @@ impl Config {
         &self.storage_directory
     }
     /// See [Config]
-    pub const fn maximum_buffer_size(&self) -> usize {
-        self.maximum_buffer_size
+    pub const fn storage_blob_layouts(&self) -> &RangeInclusive<BlobLayout> {
+        &self.storage_blob_layouts
     }
 
     /// Returns the network buffer pool config, deriving pool parallelism from
@@ -321,10 +339,63 @@ impl Default for Config {
 pub struct Executor {
     registry: Registry,
     metrics: Arc<Metrics>,
-    runtime: Runtime,
+    runtime: RuntimeHandle,
+    tasks: Arc<TaskTracker>,
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     thread_stack_size: usize,
+}
+
+/// Closes task admission and tracks wrappers through user-future drop and descendant cleanup.
+#[derive(Default)]
+struct TaskTracker {
+    state: Mutex<TaskTrackerState>,
+    idle: Notify,
+}
+
+#[derive(Default)]
+struct TaskTrackerState {
+    active: usize,
+    closed: bool,
+}
+
+impl TaskTracker {
+    fn admit(self: &Arc<Self>) -> Option<TaskGuard> {
+        let mut state = self.state.lock();
+        if state.closed {
+            return None;
+        }
+        state.active = state.active.checked_add(1).expect("active task overflow");
+        Some(TaskGuard(Arc::clone(self)))
+    }
+
+    fn close(&self) {
+        self.state.lock().closed = true;
+    }
+
+    async fn wait(&self) {
+        loop {
+            // Subscribe before checking so the final task cannot notify between the check and wait.
+            let idle = self.idle.notified();
+            if self.state.lock().active == 0 {
+                return;
+            }
+            idle.await;
+        }
+    }
+}
+
+struct TaskGuard(Arc<TaskTracker>);
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        let mut state = self.0.state.lock();
+        state.active = state.active.checked_sub(1).expect("active task underflow");
+        if state.active == 0 {
+            drop(state);
+            self.0.idle.notify_one();
+        }
+    }
 }
 
 /// Implementation of [crate::Runner] for the `tokio` runtime.
@@ -390,8 +461,21 @@ impl crate::Runner for Runner {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
+        // Initialize storage
+        let storage = MeteredStorage::new(
+            TokioStorage::new(
+                TokioStorageConfig::new(
+                    self.cfg.storage_directory.clone(),
+                    self.cfg.storage_blob_layouts.clone(),
+                ),
+                storage_buffer_pool.clone(),
+            ),
+            &mut runtime_registry,
+        );
+
         // Make any storage a prior process left in the page cache crash-durable before we open it,
-        // so the data read during init is durable.
+        // so the data read during init is durable. This runs under the hold, after any straggling
+        // writes from a previous run have landed, so the flush covers them too.
         if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
             panic!(
                 "failed to sync storage filesystem at startup ({}): {e}",
@@ -399,81 +483,24 @@ impl crate::Runner for Runner {
             );
         }
 
-        // Initialize storage
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "iouring-storage")] {
-                let mut iouring_registry = runtime_registry.sub_registry("iouring_storage");
-                let storage = MeteredStorage::new(
-                    IoUringStorage::start(
-                        IoUringConfig {
-                            storage_directory: self.cfg.storage_directory.clone(),
-                            iouring_config: Default::default(),
-                            thread_stack_size: self.cfg.thread_stack_size,
-                        },
-                        &mut iouring_registry,
-                        storage_buffer_pool.clone(),
-                    ),
-                    &mut runtime_registry,
-                );
-            } else {
-                let storage = MeteredStorage::new(
-                    TokioStorage::new(
-                        TokioStorageConfig::new(
-                            self.cfg.storage_directory.clone(),
-                            self.cfg.maximum_buffer_size,
-                        ),
-                        storage_buffer_pool.clone(),
-                    ),
-                    &mut runtime_registry,
-                );
-            }
-        }
-
         // Initialize network
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "iouring-network")] {
-                let mut iouring_registry = runtime_registry.sub_registry("iouring_network");
-                let config = IoUringNetworkConfig {
-                    tcp_nodelay: self.cfg.network_cfg.tcp_nodelay,
-                    zero_linger: self.cfg.network_cfg.zero_linger,
-                    read_write_timeout: self.cfg.network_cfg.read_write_timeout,
-                    iouring_config: iouring::Config {
-                        // TODO (#1045): make `IOURING_NETWORK_SIZE` configurable
-                        size: IOURING_NETWORK_SIZE,
-                        max_request_timeout: self.cfg.network_cfg.read_write_timeout,
-                        shutdown_timeout: Some(self.cfg.network_cfg.read_write_timeout),
-                        ..Default::default()
-                    },
-                    thread_stack_size: self.cfg.thread_stack_size,
-                    ..Default::default()
-                };
-                let network = MeteredNetwork::new(
-                    IoUringNetwork::start(
-                        config,
-                        &mut iouring_registry,
-                        network_buffer_pool.clone(),
-                    )
-                    .unwrap(),
-                    &mut runtime_registry,
-                );
-            } else {
-                let config = TokioNetworkConfig::default()
-                    .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
-                    .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
-                    .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
-                    .with_zero_linger(self.cfg.network_cfg.zero_linger);
-                let network = MeteredNetwork::new(
-                    TokioNetwork::new(config, network_buffer_pool.clone()),
-                    &mut runtime_registry,
-                );
-            }
-        }
+        let config = TokioNetworkConfig::default()
+            .with_connect_timeout(self.cfg.network_cfg.connect_timeout)
+            .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
+            .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
+            .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
+            .with_zero_linger(self.cfg.network_cfg.zero_linger);
+        let network = MeteredNetwork::new(
+            TokioNetwork::new(config, network_buffer_pool.clone()),
+            &mut runtime_registry,
+        );
 
         // Initialize executor
         let executor = Arc::new(Executor {
             registry,
             metrics,
-            runtime,
+            runtime: runtime.handle().clone(),
+            tasks: Arc::new(TaskTracker::default()),
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             thread_stack_size: self.cfg.thread_stack_size,
@@ -485,6 +512,7 @@ impl crate::Runner for Runner {
         let gauge = executor.metrics.tasks_running.get_or_create(&label).clone();
 
         // Run the future
+        let tree = Tree::root();
         let context = Context {
             storage,
             name: label.name(),
@@ -493,31 +521,26 @@ impl crate::Runner for Runner {
             network,
             network_buffer_pool,
             storage_buffer_pool,
-            tree: Tree::root(),
+            tree: Arc::clone(&tree),
             execution: Execution::default(),
         };
-        let output = executor.runtime.block_on(panicked.interrupt(f(context)));
+        let output = catch_unwind(AssertUnwindSafe(|| {
+            runtime.block_on(panicked.interrupt(f(context)))
+        }));
+        executor.tasks.close();
+        tree.abort();
+        runtime.block_on(executor.tasks.wait());
         gauge.dec();
 
-        output
+        match output {
+            Ok(output) => output,
+            Err(panic) => resume_unwind(panic),
+        }
     }
 }
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "iouring-storage")] {
-        type Storage = MeteredStorage<IoUringStorage>;
-    } else {
-        type Storage = MeteredStorage<TokioStorage>;
-    }
-}
-
-cfg_if::cfg_if! {
-    if #[cfg(feature = "iouring-network")] {
-        type Network = MeteredNetwork<IoUringNetwork>;
-    } else {
-        type Network = MeteredNetwork<TokioNetwork>;
-    }
-}
+type Storage = MeteredStorage<TokioStorage>;
+type Network = MeteredNetwork<TokioNetwork>;
 
 /// Implementation of [crate::Spawner], [crate::Clock],
 /// [crate::Network], and [crate::Storage] for the `tokio`
@@ -573,18 +596,29 @@ impl crate::Spawner for Context {
 
         // Spawn the task
         let executor = self.executor.clone();
+        let Some(task_guard) = executor.tasks.admit() else {
+            return Handle::closed(metric);
+        };
+
+        // The factory runs user code. If it unwinds, the guard finishes the
+        // running gauge and closes the supervision node the wrapper never received.
+        let guard = FactoryGuard::new(&parent, metric);
         let future = f(self);
         let (f, handle) = Handle::init(
             future,
-            metric,
+            guard.disarm(),
             executor.panicker.clone(),
             Arc::clone(&parent),
         );
+        let f = async move {
+            let _task_guard = task_guard;
+            f.await;
+        };
 
         if matches!(past, Execution::Dedicated) {
             utils::thread::spawn(executor.thread_stack_size, {
                 // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
+                let handle = executor.runtime.clone();
                 move || {
                     handle.block_on(f);
                 }
@@ -592,7 +626,7 @@ impl crate::Spawner for Context {
         } else if matches!(past, Execution::Shared(true)) {
             executor.runtime.spawn_blocking({
                 // Ensure the task can access the tokio runtime
-                let handle = executor.runtime.handle().clone();
+                let handle = executor.runtime.clone();
                 move || {
                     handle.block_on(f);
                 }
@@ -635,23 +669,14 @@ impl crate::Spawner for Context {
 }
 
 #[stability(BETA)]
-impl crate::ThreadPooler for Context {
-    fn create_thread_pool(
-        &self,
-        concurrency: NonZeroUsize,
-    ) -> Result<ThreadPool, ThreadPoolBuildError> {
-        ThreadPoolBuilder::new()
-            .num_threads(concurrency.get())
-            .spawn_handler(move |thread| {
-                // Tasks spawned in a thread pool are expected to run longer than any single
-                // task and thus should be provisioned as a dedicated thread.
-                self.child("rayon_thread")
-                    .dedicated()
-                    .spawn(move |_| async move { thread.run() });
-                Ok(())
-            })
+impl crate::Strategizer for Context {
+    fn strategy(&self, parallelism: NonZeroUsize) -> Rayon {
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(parallelism.get())
+            .stack_size(self.executor.thread_stack_size)
             .build()
-            .map(Arc::new)
+            .expect("failed to create Tokio Rayon thread pool");
+        Rayon::with_pool(Arc::new(pool))
     }
 }
 
@@ -766,8 +791,8 @@ impl crate::Network for Context {
 
 impl crate::Resolver for Context {
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, Error> {
-        // Uses the host's DNS configuration (e.g. /etc/resolv.conf on Unix,
-        // registry on Windows). This delegates to the system's libc resolver.
+        // Uses the host's DNS configuration (e.g. /etc/resolv.conf). This delegates to the
+        // system's libc resolver.
         //
         // The `:0` port is required by lookup_host's API but is not used
         // for DNS resolution.
@@ -778,25 +803,24 @@ impl crate::Resolver for Context {
     }
 }
 
-impl RngCore for Context {
-    fn next_u32(&mut self) -> u32 {
-        OsRng.next_u32()
+impl TryRng for Context {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(sys_rng().next_u32())
     }
 
-    fn next_u64(&mut self) -> u64 {
-        OsRng.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(sys_rng().next_u64())
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        OsRng.fill_bytes(dest);
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand::Error> {
-        OsRng.try_fill_bytes(dest)
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        sys_rng().fill_bytes(dest);
+        Ok(())
     }
 }
 
-impl CryptoRng for Context {}
+impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
     type Blob = <Storage as crate::Storage>::Blob;
@@ -805,8 +829,8 @@ impl crate::Storage for Context {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         self.storage.open_versioned(partition, name, versions).await
     }
 
@@ -830,8 +854,240 @@ impl crate::BufferPooler for Context {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
+    use crate::{
+        AbortOnDrop, Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _,
+        Storage as _, Strategizer as _, Stream, Supervisor as _, telemetry::metrics::raw::Counter,
+        tokio::telemetry,
+    };
+    use bytes::Bytes;
+    use commonware_parallel::Strategy as _;
+    use std::{
+        self,
+        collections::HashMap,
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        str::FromStr,
+    };
+    use tracing::{Level, error};
+
+    struct TaskDropGate {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Drop for TaskDropGate {
+        fn drop(&mut self) {
+            let _ = self.entered.send(());
+            let _ = self.release.recv();
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum RootExit {
+        Return,
+        FuturePanic,
+        ConstructorPanic,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum JoinRelease {
+        Task,
+        Completion,
+        Output,
+    }
+
+    fn spawn_drop_gated_task(
+        context: Context,
+        execution: Execution,
+        drop_gate: TaskDropGate,
+        ready: Option<commonware_utils::channel::oneshot::Sender<()>>,
+    ) {
+        let child = match execution {
+            Execution::Dedicated => context.dedicated(),
+            Execution::Shared(blocking) => context.shared(blocking),
+        };
+        child.spawn(move |context| async move {
+            let _context = context;
+            let _drop_gate = drop_gate;
+            if let Some(ready) = ready {
+                ready.send(()).unwrap();
+            }
+            futures::future::pending::<()>().await;
+        });
+    }
+
+    fn assert_runner_drains_spawned_task(execution: Execution, root_exit: RootExit) {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (ready_tx, ready_rx) = commonware_utils::channel::oneshot::channel();
+        let (drop_entered_tx, drop_entered_rx) = std::sync::mpsc::channel();
+        let (drop_release_tx, drop_release_rx) = std::sync::mpsc::channel();
+        let (runner_done_tx, runner_done_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                let drop_gate = TaskDropGate {
+                    entered: drop_entered_tx,
+                    release: drop_release_rx,
+                };
+                match root_exit {
+                    RootExit::ConstructorPanic => {
+                        Runner::new(cfg).start(move |context| -> futures::future::Pending<()> {
+                            spawn_drop_gated_task(context, execution, drop_gate, None);
+                            panic!("root constructor panic after spawning child");
+                        })
+                    }
+                    RootExit::Return | RootExit::FuturePanic => {
+                        Runner::new(cfg).start(move |context| async move {
+                            spawn_drop_gated_task(context, execution, drop_gate, Some(ready_tx));
+                            ready_rx.await.unwrap();
+                            assert!(
+                                matches!(root_exit, RootExit::Return),
+                                "root future panic after spawning child"
+                            );
+                        })
+                    }
+                }
+            }));
+            runner_done_tx.send(result.is_err()).unwrap();
+        });
+
+        drop_entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("spawned task was not canceled after the root returned");
+        let early = runner_done_rx.recv_timeout(Duration::from_millis(250));
+        let returned_before_cleanup = match early {
+            Ok(panicked) => Some(panicked),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("Runner::start exited without reporting its result")
+            }
+        };
+        drop_release_tx.send(()).unwrap();
+        let panicked = returned_before_cleanup.unwrap_or_else(|| {
+            runner_done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Runner::start did not return after task cleanup completed")
+        });
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            returned_before_cleanup.is_none(),
+            "Runner::start returned before {execution:?} task cleanup completed"
+        );
+        assert_eq!(panicked, !matches!(root_exit, RootExit::Return));
+    }
+
+    fn run_with_returned_strategy(retain: bool) -> Option<Rayon> {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (strategy_tx, strategy_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let strategy = Runner::new(cfg).start(move |context| async move {
+                let strategy = context.strategy(NZUsize!(2));
+                strategy.spawn(1, |_| ()).await;
+                retain.then_some(strategy)
+            });
+            strategy_tx.send(strategy).unwrap();
+        });
+
+        let strategy = strategy_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runner::start did not return after the strategy completed work");
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        strategy
+    }
+
+    #[test]
+    fn test_storage_blob_layout_restriction() {
+        // The default policy accepts legacy V0 blobs while selecting V1 for new blobs.
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        assert_eq!(cfg.storage_blob_layouts(), &BlobLayout::ALL);
+
+        let partition = "layout_restriction";
+        let v0_name = b"v0";
+        let partition_directory = storage_directory.join(partition);
+        std::fs::create_dir_all(&partition_directory).unwrap();
+        let v0_path = partition_directory.join(commonware_formatting::hex(v0_name));
+        let v0_bytes = crate::storage::tests::v0_blob_bytes(0, b"payload");
+        std::fs::write(&v0_path, &v0_bytes).unwrap();
+
+        Runner::new(cfg).start(|context| async move {
+            let (blob, size) = context.open(partition, v0_name).await.unwrap();
+            assert_eq!(size, 7);
+            let payload = blob
+                .read_at(0, 7, crate::ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(payload.coalesce(), b"payload".as_slice());
+        });
+
+        // A V1-only policy rejects V0 without modifying it and creates new blobs as V1.
+        let cfg = Config::new()
+            .with_storage_directory(storage_directory.clone())
+            .with_storage_blob_layouts(BlobLayout::V1..=BlobLayout::V1);
+        Runner::new(cfg).start(|context| async move {
+            let result = context.open(partition, v0_name).await;
+            assert!(matches!(
+                result,
+                Err(Error::BlobLayoutMismatch { expected, found })
+                    if expected == (BlobLayout::V1..=BlobLayout::V1)
+                        && found == BlobLayout::V0
+            ));
+
+            context.open(partition, b"v1").await.unwrap();
+        });
+
+        assert_eq!(std::fs::read(&v0_path).unwrap(), v0_bytes);
+        let v1_path = partition_directory.join(commonware_formatting::hex(b"v1"));
+        let v1 = std::fs::read(&v1_path).unwrap();
+        assert_eq!(&v1[..4], &BlobLayout::V1.magic());
+
+        // A V0-only policy rejects the intact header-only V1 blob without healing it and
+        // creates new blobs the rollback target can read and write.
+        let cfg = Config::new()
+            .with_storage_directory(storage_directory.clone())
+            .with_storage_blob_layouts(BlobLayout::V0..=BlobLayout::V0);
+        Runner::new(cfg).start(|context| async move {
+            let result = context.open(partition, b"v1").await;
+            assert!(matches!(
+                result,
+                Err(Error::BlobLayoutMismatch { expected, found })
+                    if expected == (BlobLayout::V0..=BlobLayout::V0)
+                        && found == BlobLayout::V1
+            ));
+
+            let (blob, size) = context.open(partition, b"rollback").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, b"rollback!".as_slice(), crate::WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(blob);
+            let (blob, size) = context.open(partition, b"rollback").await.unwrap();
+            assert_eq!(size, 9);
+            let payload = blob
+                .read_at(0, 9, crate::ReadOptions::default())
+                .await
+                .unwrap();
+            assert_eq!(payload.coalesce(), b"rollback!".as_slice());
+        });
+
+        assert_eq!(std::fs::read(&v1_path).unwrap(), v1);
+        let rollback_path = partition_directory.join(commonware_formatting::hex(b"rollback"));
+        let rollback = std::fs::read(rollback_path).unwrap();
+        assert_eq!(&rollback[..4], &BlobLayout::V0.magic());
+        assert_eq!(&rollback[8..], b"rollback!");
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty")]
+    fn test_storage_blob_layout_restriction_rejects_empty_range() {
+        let _ = Config::new().with_storage_blob_layouts(BlobLayout::V1..=BlobLayout::V0);
+    }
 
     #[test]
     fn test_worker_threads_updates_default_buffer_pool_parallelism() {
@@ -839,14 +1095,14 @@ mod tests {
 
         assert_eq!(cfg.worker_threads, 8);
         let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism, NZUsize!(8));
+        assert_eq!(network.parallelism(), NZUsize!(8));
         assert_eq!(
             network.thread_cache_config,
             BufferPoolConfig::for_network().thread_cache_config
         );
 
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism, NZUsize!(8));
+        assert_eq!(storage.parallelism(), NZUsize!(8));
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage().thread_cache_config
@@ -860,6 +1116,246 @@ mod tests {
             cfg.thread_stack_size(),
             utils::thread::system_thread_stack_size()
         );
+    }
+
+    #[test]
+    fn test_runner_waits_for_spawned_task_cancellation() {
+        for execution in [
+            Execution::Shared(false),
+            Execution::Shared(true),
+            Execution::Dedicated,
+        ] {
+            for root_exit in [
+                RootExit::Return,
+                RootExit::FuturePanic,
+                RootExit::ConstructorPanic,
+            ] {
+                assert_runner_drains_spawned_task(execution, root_exit);
+            }
+        }
+    }
+
+    fn assert_join_all_releases_pending_work(release_owner: JoinRelease) {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (started, started_rx) = commonware_utils::channel::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let (joining, joining_rx) = std::sync::mpsc::channel();
+        let (done, done_rx) = std::sync::mpsc::channel();
+        let (exited, exited_rx) = std::sync::mpsc::channel();
+        let (drop_release, drop_release_rx) = std::sync::mpsc::channel();
+        drop(drop_release);
+        let release_on_drop = TaskDropGate {
+            entered: release.clone(),
+            release: drop_release_rx,
+        };
+
+        let runner = std::thread::spawn(move || {
+            Runner::new(cfg).start(move |context| async move {
+                let blocked = context
+                    .child("blocked")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        started.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        exited.send(()).unwrap();
+                        Ok::<_, Error>(None::<TaskDropGate>)
+                    })
+                    .abort_on_drop();
+                let failed = Handle::ready(Ok(Err(Error::Closed))).abort_on_drop();
+                let mut guards = vec![failed, blocked];
+                if matches!(release_owner, JoinRelease::Output) {
+                    guards.insert(
+                        0,
+                        Handle::ready(Ok(Ok(Some(release_on_drop)))).abort_on_drop(),
+                    );
+                } else {
+                    let pending = async move {
+                        let _release_on_drop = release_on_drop;
+                        futures::future::pending::<Result<Option<TaskDropGate>, Error>>().await
+                    };
+                    let pending = if matches!(release_owner, JoinRelease::Task) {
+                        context.child("pending").spawn(move |_| pending)
+                    } else {
+                        Handle::from_future(async move { Ok(pending.await) })
+                    };
+                    guards.push(pending.abort_on_drop());
+                }
+
+                started_rx.await.unwrap();
+                joining.send(()).unwrap();
+                let result = AbortOnDrop::join_all::<Error>(guards).await;
+                assert!(done.send((result, exited_rx.try_recv().is_ok())).is_ok());
+            });
+        });
+
+        joining_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("blocking task did not start");
+        let early = done_rx.recv_timeout(Duration::from_secs(5));
+        let completed = early.is_ok();
+
+        // Release the blocking poll even when cancellation stalls, so the runner can shut down.
+        let _ = release.send(());
+        let (result, exited) = early.unwrap_or_else(|_| {
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("joining did not finish after releasing the blocking task")
+        });
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            completed,
+            "joining stalled with release owned by {release_owner:?}"
+        );
+        assert!(exited, "joining returned before the blocking task exited");
+        assert!(matches!(result, Err(Error::Closed)));
+    }
+
+    #[test]
+    fn test_join_all_aborts_all_tasks_before_waiting() {
+        assert_join_all_releases_pending_work(JoinRelease::Task);
+    }
+
+    #[test]
+    fn test_join_all_drains_completions_concurrently() {
+        assert_join_all_releases_pending_work(JoinRelease::Completion);
+    }
+
+    #[test]
+    fn test_join_all_drops_outputs_before_waiting() {
+        assert_join_all_releases_pending_work(JoinRelease::Output);
+    }
+
+    #[test]
+    fn test_runner_start_waits_for_previous_run() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+
+        // The first run keeps its context, and with it the storage directory,
+        // until it is released.
+        let (started, first_started) = std::sync::mpsc::channel();
+        let (release, released) = futures::channel::oneshot::channel();
+        let first_cfg = cfg.clone();
+        let first = std::thread::spawn(move || {
+            Runner::new(first_cfg).start(|context| async move {
+                started.send(()).unwrap();
+                released.await.unwrap();
+                drop(context);
+            });
+        });
+        first_started.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // A second run on the same directory cannot start until the first has
+        // returned.
+        let (started, second_started) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            Runner::new(cfg).start(|_| async move {
+                started.send(()).unwrap();
+            });
+        });
+        match second_started.recv_timeout(Duration::from_millis(200)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            other => panic!("second run started while the first held the directory: {other:?}"),
+        }
+        release.send(()).unwrap();
+        first.join().unwrap();
+        second_started
+            .recv_timeout(Duration::from_secs(10))
+            .expect("second run did not start after the first returned");
+        second.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+    }
+
+    #[test]
+    fn test_runner_owns_runtime_when_context_escapes() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (ready_tx, ready_rx) = commonware_utils::channel::oneshot::channel();
+        let (drop_entered_tx, drop_entered_rx) = std::sync::mpsc::channel();
+        let (drop_release_tx, drop_release_rx) = std::sync::mpsc::channel();
+        let (runner_returned_tx, runner_returned_rx) = std::sync::mpsc::channel();
+        let (context_release_tx, context_release_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let context = Runner::new(cfg).start(move |context| async move {
+                context.executor.runtime.spawn(async move {
+                    let _drop_gate = TaskDropGate {
+                        entered: drop_entered_tx,
+                        release: drop_release_rx,
+                    };
+                    ready_tx.send(()).unwrap();
+                    futures::future::pending::<()>().await;
+                });
+                ready_rx.await.unwrap();
+                context
+            });
+            runner_returned_tx.send(()).unwrap();
+            context_release_rx.recv().unwrap();
+            drop(context);
+        });
+
+        let returned_early = runner_returned_rx
+            .recv_timeout(Duration::from_millis(500))
+            .is_ok();
+        if returned_early {
+            drop_release_tx.send(()).unwrap();
+            context_release_tx.send(()).unwrap();
+            drop_entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("escaped Context did not retain the raw runtime task");
+        } else {
+            drop_entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Runner did not cancel its raw runtime task");
+            drop_release_tx.send(()).unwrap();
+            runner_returned_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("Runner did not return after raw task cleanup");
+            context_release_tx.send(()).unwrap();
+        }
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert!(
+            !returned_early,
+            "a returned Context kept the Tokio runtime alive after Runner::start"
+        );
+    }
+
+    #[test]
+    fn test_runner_returns_strategy_after_pool_work() {
+        assert!(run_with_returned_strategy(false).is_none());
+
+        let strategy = run_with_returned_strategy(true).unwrap();
+        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
+    }
+
+    #[test]
+    fn test_runner_resumes_strategy_panic_payload_after_pool_work() {
+        let cfg = Config::new();
+        let storage_directory = cfg.storage_directory().clone();
+        let (strategy_tx, strategy_rx) = std::sync::mpsc::channel();
+        let runner = std::thread::spawn(move || {
+            let result: std::thread::Result<()> =
+                std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    Runner::new(cfg).start(move |context| async move {
+                        let strategy = context.strategy(NZUsize!(2));
+                        strategy.spawn(1, |_| ()).await;
+                        std::panic::panic_any(strategy);
+                    });
+                }));
+            let strategy = result
+                .expect_err("Runner::start did not resume the root panic")
+                .downcast::<Rayon>()
+                .expect("Runner::start changed the root panic payload");
+            strategy_tx.send(*strategy).unwrap();
+        });
+
+        let strategy = strategy_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Runner::start did not resume the strategy panic payload");
+        runner.join().unwrap();
+        let _ = std::fs::remove_dir_all(storage_directory);
+        assert_eq!(futures::executor::block_on(strategy.spawn(1, |_| 42)), 42);
     }
 
     #[test]
@@ -881,14 +1377,14 @@ mod tests {
             );
 
         let network = cfg.resolved_network_buffer_pool_config();
-        assert_eq!(network.parallelism, NZUsize!(2));
+        assert_eq!(network.parallelism(), NZUsize!(2));
         assert_eq!(
             network.thread_cache_config,
             BufferPoolConfig::for_network().thread_cache_config
         );
 
         let storage = cfg.resolved_storage_buffer_pool_config();
-        assert_eq!(storage.parallelism, NZUsize!(1));
+        assert_eq!(storage.parallelism(), NZUsize!(1));
         assert_eq!(
             storage.thread_cache_config,
             BufferPoolConfig::for_storage()
@@ -897,28 +1393,156 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
     #[test]
-    fn test_startup_flush_survives_restart() {
-        use crate::{Blob as _, Runner as _, Storage as _};
+    fn test_process_rss_metric() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            loop {
+                // Wait for RSS metric to be available
+                let metrics = context.encode();
+                if !metrics.contains("runtime_process_rss") {
+                    context.sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
 
-        // Write and sync a blob, drop the runtime, then reopen the same storage directory in a new
-        // runtime. `sync` runs on startup and reads the blob back.
-        // Confirms the startup flush path runs and storage survives a restart.
-        let cfg = Config::new();
-        let dir = cfg.storage_directory().clone();
-        Runner::new(cfg).start(|context| async move {
-            let (blob, _) = context.open("test", b"blob").await.unwrap();
-            blob.write_at(0, vec![1u8, 2, 3, 4]).await.unwrap();
-            blob.sync().await.unwrap();
+                // Verify the RSS value is eventually populated (greater than 0)
+                for line in metrics.lines() {
+                    if line.starts_with("runtime_process_rss")
+                        && !line.starts_with("runtime_process_rss{")
+                    {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if parts.len() >= 2 {
+                            let rss_value: i64 =
+                                parts[1].parse().expect("Failed to parse RSS value");
+                            if rss_value > 0 {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
         });
-        let reopened_len = Runner::new(Config::new().with_storage_directory(dir.clone())).start(
-            |context| async move {
-                let (_, len) = context.open("test", b"blob").await.unwrap();
-                len
-            },
-        );
-        assert_eq!(reopened_len, 4);
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_telemetry() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            // Define the server address
+            let address = SocketAddr::from_str("127.0.0.1:8000").unwrap();
+
+            // Configure telemetry
+            telemetry::init(
+                context.child("metrics"),
+                telemetry::Logs {
+                    level: Level::INFO,
+                    json: false,
+                },
+                Some(address),
+                None,
+            );
+
+            // Register a test metric
+            let counter: Counter<u64> = Counter::default();
+            let _registered = context.register("test_counter", "Test counter", counter.clone());
+            counter.inc();
+
+            // Helper functions to parse HTTP response
+            async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
+                let mut line = Vec::new();
+                loop {
+                    let received = stream.recv(1).await?;
+                    let byte = received.coalesce().as_ref()[0];
+                    if byte == b'\n' {
+                        if line.last() == Some(&b'\r') {
+                            line.pop(); // Remove trailing \r
+                        }
+                        break;
+                    }
+                    line.push(byte);
+                }
+                String::from_utf8(line).map_err(|_| Error::ReadFailed)
+            }
+
+            async fn read_headers<St: Stream>(
+                stream: &mut St,
+            ) -> Result<HashMap<String, String>, Error> {
+                let mut headers = HashMap::new();
+                loop {
+                    let line = read_line(stream).await?;
+                    if line.is_empty() {
+                        break;
+                    }
+                    let parts: Vec<&str> = line.splitn(2, ": ").collect();
+                    if parts.len() == 2 {
+                        headers.insert(parts[0].to_string(), parts[1].to_string());
+                    }
+                }
+                Ok(headers)
+            }
+
+            async fn read_body<St: Stream>(
+                stream: &mut St,
+                content_length: usize,
+            ) -> Result<String, Error> {
+                let received = stream.recv(content_length).await?;
+                String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
+            }
+
+            // Simulate a client connecting to the server
+            let client_handle = context.child("client").spawn(move |context| async move {
+                let (mut sink, mut stream) = loop {
+                    match context.dial(address).await {
+                        Ok((sink, stream)) => break (sink, stream),
+                        Err(e) => {
+                            // The client may be polled before the server is ready, that's alright!
+                            error!(err =?e, "failed to connect");
+                            context.sleep(Duration::from_millis(10)).await;
+                        }
+                    }
+                };
+
+                // Send a GET request to the server
+                let request = format!(
+                    "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+                );
+                sink.send(Bytes::from(request)).await.unwrap();
+
+                // Read and verify the HTTP status line
+                let status_line = read_line(&mut stream).await.unwrap();
+                assert_eq!(status_line, "HTTP/1.1 200 OK");
+
+                // Read and parse headers
+                let headers = read_headers(&mut stream).await.unwrap();
+                println!("Headers: {headers:?}");
+                let content_length = headers
+                    .get("content-length")
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
+
+                // Read and verify the body
+                let body = read_body(&mut stream, content_length).await.unwrap();
+                assert!(body.contains("test_counter_total 1"));
+            });
+
+            // Wait for the client task to complete
+            client_handle.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_resolver() {
+        let executor = Runner::default();
+        executor.start(|context| async move {
+            let addrs = context.resolve("localhost").await.unwrap();
+            assert!(!addrs.is_empty());
+            for addr in addrs {
+                assert!(
+                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
+                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
+                );
+            }
+        });
     }
 }

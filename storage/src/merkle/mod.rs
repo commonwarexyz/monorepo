@@ -26,16 +26,15 @@ pub mod storage;
 #[cfg(feature = "std")]
 pub mod verification;
 
-use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use core::fmt::Debug;
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
 #[cfg(test)]
 pub(crate) use proof::build_range_proof;
-pub use proof::{Proof, MAX_PROOF_DIGESTS_PER_ELEMENT};
+pub use proof::{MAX_PROOF_DIGESTS_PER_ELEMENT, Proof};
 pub use read::Readable;
 use thiserror::Error;
 
@@ -99,10 +98,10 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     ///
     /// A peak is considered entirely inactive if all of its leaves strictly precede the
     /// `inactivity_floor`. These peaks can be safely bagged forward into the `grafted_root`.
-    fn inactive_peaks(size: Position<Self>, inactivity_floor: Location<Self>) -> usize {
+    fn inactive_peaks(size: Location<Self>, inactivity_floor: Location<Self>) -> usize {
         let mut inactive_count = 0;
         let mut leaf_capacity_sum = 0u64;
-        for (_, height) in Self::peaks(size) {
+        for (_, height) in Self::peaks(Self::location_to_position(size)) {
             let capacity = 1u64.checked_shl(height).expect("height excessively large");
             leaf_capacity_sum = leaf_capacity_sum
                 .checked_add(capacity)
@@ -133,8 +132,6 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
         Self::peaks(prune_pos)
             .filter(move |&(pos, _)| pos < prune_pos)
             .map(|(pos, _)| pos)
-            .collect::<Vec<_>>()
-            .into_iter()
     }
 
     /// Return the positions of the left and right children of the node at `pos` with the
@@ -388,10 +385,6 @@ pub enum Error<F: Family> {
     #[error("root mismatch")]
     RootMismatch,
 
-    /// A required digest is missing.
-    #[error("missing digest: {0}")]
-    MissingDigest(Position<F>),
-
     /// A metadata error occurred.
     #[cfg(feature = "std")]
     #[error("metadata error: {0}")]
@@ -402,11 +395,6 @@ pub enum Error<F: Family> {
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
 
-    /// A runtime error occurred.
-    #[cfg(feature = "std")]
-    #[error("runtime error: {0}")]
-    Runtime(#[from] commonware_runtime::Error),
-
     /// A required node is missing.
     #[error("missing node: {0}")]
     MissingNode(Position<F>),
@@ -414,10 +402,6 @@ pub enum Error<F: Family> {
     /// Data is corrupted.
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
-
-    /// A required grafted leaf digest is missing.
-    #[error("missing grafted leaf digest: {0}")]
-    MissingGraftedLeaf(Position<F>),
 
     /// Bit offset is out of bounds.
     #[error("bit offset {0} out of bounds (size: {1})")]

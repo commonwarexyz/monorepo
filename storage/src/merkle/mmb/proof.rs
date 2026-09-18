@@ -6,8 +6,8 @@
 mod tests {
     use crate::{
         merkle::{
-            hasher::Standard, mmb::mem::Mmb, proof::Blueprint, Bagging, Bagging::ForwardFold,
-            Family,
+            Bagging, Bagging::ForwardFold, Family, hasher::Standard, mmb::mem::Mmb,
+            proof::Blueprint,
         },
         mmb::Location,
     };
@@ -71,7 +71,7 @@ mod tests {
 
             let loc = n - 1;
             let inactive_peaks =
-                crate::merkle::mmb::Family::inactive_peaks(mmb.size(), Location::new(0));
+                crate::merkle::mmb::Family::inactive_peaks(leaves, Location::new(0));
             let bp = Blueprint::new(
                 leaves,
                 inactive_peaks,

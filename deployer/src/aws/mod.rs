@@ -73,6 +73,7 @@
 //!   Instances whose type includes EC2 NVMe instance store automatically mount it at `/home/ubuntu`.
 //! * Run:
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
+//!       The binary uses the default allocator on the target Linux platform.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //!     * **Node Exporter**: Exposes system metrics at `:9100`.
 //!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
@@ -80,6 +81,9 @@
 //!     * Deployer IP access (TCP 0-65535).
 //!     * Monitoring IP access to `:9090` and `:9100` for Prometheus.
 //!     * User-defined ports from the configuration.
+//!
+//! _For allocator-sensitive workloads, consider compiling the binary with `jemalloc` or
+//! `mimalloc`._
 //!
 //! ## Networking
 //!
@@ -318,14 +322,6 @@ cfg_if::cfg_if! {
                     Self::X86_64 => "amd64",
                 }
             }
-
-            /// Returns the Linux library path component for jemalloc
-            pub const fn linux_lib(&self) -> &'static str {
-                match self {
-                    Self::Arm64 => "aarch64-linux-gnu",
-                    Self::X86_64 => "x86_64-linux-gnu",
-                }
-            }
         }
 
         impl std::fmt::Display for Architecture {
@@ -501,7 +497,9 @@ cfg_if::cfg_if! {
             Yaml(#[from] serde_yaml::Error),
             #[error("creation already attempted")]
             CreationAttempted,
-            #[error("invalid instance name: {0}")]
+            #[error("invalid tag (must match [A-Za-z0-9_-]+): {0}")]
+            InvalidTag(String),
+            #[error("invalid instance name (must match [A-Za-z0-9_-]+ and not be `monitoring`): {0}")]
             InvalidInstanceName(String),
             #[error("invalid storage class for {target}: {storage_class}")]
             InvalidStorageClass {
@@ -513,18 +511,24 @@ cfg_if::cfg_if! {
                 target: String,
                 storage_class: String,
             },
-            #[error("storage_iops for {target} is invalid for storage_class {storage_class}: {storage_iops}")]
+            #[error(
+                "storage_iops for {target} is invalid for storage_class {storage_class}: {storage_iops}"
+            )]
             InvalidStorageIops {
                 target: String,
                 storage_class: String,
                 storage_iops: i32,
             },
-            #[error("storage_throughput is only supported for {target} when storage_class is gp3: {storage_class}")]
+            #[error(
+                "storage_throughput is only supported for {target} when storage_class is gp3: {storage_class}"
+            )]
             UnsupportedStorageThroughput {
                 target: String,
                 storage_class: String,
             },
-            #[error("storage_throughput for {target} must be between 125 and 2000 MiB/s: {storage_throughput}")]
+            #[error(
+                "storage_throughput for {target} must be between 125 and 2000 MiB/s: {storage_throughput}"
+            )]
             InvalidStorageThroughput {
                 target: String,
                 storage_throughput: i32,
@@ -571,7 +575,9 @@ cfg_if::cfg_if! {
             UnsupportedInstanceType(String),
             #[error("no subnets available")]
             NoSubnetsAvailable,
-            #[error("availability zone group '{group}' in region '{region}' has no mutually-supported AZ for instance types {instance_types:?}")]
+            #[error(
+                "availability zone group '{group}' in region '{region}' has no mutually-supported AZ for instance types {instance_types:?}"
+            )]
             AvailabilityZoneGroupUnsupported {
                 region: String,
                 group: String,
@@ -649,7 +655,9 @@ pub struct PortConfig {
 /// Instance configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct InstanceConfig {
-    /// Name of the instance
+    /// Name of the instance.
+    ///
+    /// Must be unique ignoring case, must not be `monitoring`, and must match `[A-Za-z0-9_-]+`.
     pub name: String,
 
     /// AWS region where the instance is deployed
@@ -717,7 +725,9 @@ pub struct MonitoringConfig {
 /// Deployer configuration
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Config {
-    /// Unique tag for the deployment
+    /// Unique tag for the deployment.
+    ///
+    /// Must match `[A-Za-z0-9_-]+`.
     pub tag: String,
 
     /// Monitoring instance configuration

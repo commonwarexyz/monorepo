@@ -770,13 +770,13 @@ impl<const N: usize> DirtyBitMap<N> {
         }
 
         // Validate commit number is monotonically increasing
-        if let Some(&max_commit) = self.commits.keys().next_back() {
-            if commit_number <= max_commit {
-                return Err(Error::NonMonotonicCommit {
-                    previous: max_commit,
-                    attempted: commit_number,
-                });
-            }
+        if let Some(&max_commit) = self.commits.keys().next_back()
+            && commit_number <= max_commit
+        {
+            return Err(Error::NonMonotonicCommit {
+                previous: max_commit,
+                attempted: commit_number,
+            });
         }
 
         // Build reverse diff (captures OLD state before applying changes)

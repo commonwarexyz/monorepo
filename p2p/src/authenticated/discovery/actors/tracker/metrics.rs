@@ -1,8 +1,8 @@
 use crate::authenticated::discovery::metrics;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{
-    telemetry::metrics::{CounterFamily, Gauge, GaugeFamily, MetricsExt as _},
     Metrics as RuntimeMetrics,
+    telemetry::metrics::{CounterFamily, Gauge, GaugeFamily, MetricsExt as _},
 };
 
 /// Metrics for the [super::Actor]

@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use commonware_codec::{EncodeSize, Write};
 use commonware_utils::bitmap::roaring::Bitmap;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
 fn alternating_bitmap(containers: u64) -> Bitmap {

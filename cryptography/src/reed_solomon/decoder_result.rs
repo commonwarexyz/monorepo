@@ -214,9 +214,11 @@ impl<'a> Recoveries<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{test_util, Decoder, Encoder, SHARD_CHUNK_BYTES};
+    use crate::reed_solomon::{Decoder, Encoder, SHARD_CHUNK_BYTES, test_util};
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
+    use commonware_utils::test_rng;
+    use rand::seq::SliceRandom as _;
 
     fn simple_roundtrip(shard_size: usize) {
         let original = test_util::generate_original(3, shard_size, 0);
@@ -374,6 +376,51 @@ mod tests {
             // 250-shard / k=83 / m=167 shape used by the coding crate.
             recovery_roundtrip(4, 8, shard_size);
             recovery_roundtrip(83, 167, shard_size);
+        }
+    }
+
+    #[test]
+    fn direct_recovery_matches_encoder() {
+        // The last two cases straddle the direct-evaluation limit.
+        let mut rng = test_rng();
+        for (k, m) in [(7, 13), (84, 166), (128, 384), (128, 385)] {
+            for shard_size in [2, 66, 1024] {
+                let originals = test_util::generate_original(k, shard_size, 0);
+                let mut encoder = Encoder::new(k, m, shard_size).unwrap();
+                for shard in &originals {
+                    encoder.add_original_shard(shard).unwrap();
+                }
+                let encoding = encoder.encode().unwrap();
+                let recoveries: Vec<_> = encoding.recovery_iter().collect();
+                let mut decoder = Decoder::new(k, m, shard_size).unwrap();
+
+                // Always omit original 0 so recovery runs, even with surplus shards.
+                let mut indices: Vec<_> = (1..k + m).collect();
+                for provided in [k, k + 3, k + m - 1] {
+                    indices.shuffle(&mut rng);
+                    let selected = &indices[..provided];
+                    for &i in selected {
+                        if i < k {
+                            decoder.add_original_shard(i, &originals[i]).unwrap();
+                        } else {
+                            decoder
+                                .add_recovery_shard(i - k, recoveries[i - k])
+                                .unwrap();
+                        }
+                    }
+                    let result = decoder.decode_with_recovery().unwrap().unwrap();
+                    for (i, shard) in originals.iter().enumerate() {
+                        if !selected.contains(&i) {
+                            assert_eq!(result.original(i).unwrap(), shard.as_slice());
+                        }
+                    }
+                    for (i, shard) in recoveries.iter().enumerate() {
+                        if !selected.contains(&(k + i)) {
+                            assert_eq!(result.recovery(i).unwrap(), *shard);
+                        }
+                    }
+                }
+            }
         }
     }
 

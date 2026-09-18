@@ -1,7 +1,7 @@
 //! Implements a [criterion]-compatible executor for the [tokio] runtime.
 
 use super::context;
-use crate::{tokio, Runner as _};
+use crate::{Runner as _, tokio};
 use criterion::async_executor::AsyncExecutor;
 use futures::Future;
 

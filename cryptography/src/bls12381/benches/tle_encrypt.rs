@@ -1,25 +1,23 @@
 use commonware_cryptography::bls12381::{
     primitives::{ops::keypair, variant::MinSig},
-    tle::{encrypt, Block},
+    tle::{Block, encrypt},
 };
-use criterion::{criterion_group, Criterion};
-use rand::thread_rng;
+use commonware_utils::test_rng;
+use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_tle_encrypt(c: &mut Criterion) {
-    let mut rng = thread_rng();
+    let mut rng = test_rng();
     let (_, master_public) = keypair::<_, MinSig>(&mut rng);
     let target = 10u64.to_be_bytes();
     let message = Block::new([0x42u8; 32]);
 
     c.bench_function(module_path!(), |b| {
         b.iter(|| {
-            black_box(encrypt::<_, MinSig>(
-                &mut rng,
-                master_public,
-                (b"_BENCH_TLE_", &target),
-                &message,
-            ));
+            black_box(
+                encrypt::<_, MinSig>(&mut rng, master_public, (b"_BENCH_TLE_", &target), &message)
+                    .expect("encryption should succeed"),
+            );
         });
     });
 }

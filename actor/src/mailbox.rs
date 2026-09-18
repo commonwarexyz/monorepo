@@ -42,8 +42,8 @@
 
 use crate::{Feedback, Unreliable};
 use commonware_runtime::{
-    telemetry::metrics::{Counter, MetricsExt as _},
     Metrics,
+    telemetry::metrics::{Counter, MetricsExt as _},
 };
 use std::{
     collections::VecDeque,
@@ -413,8 +413,8 @@ cfg_if::cfg_if! {
         use loom::{
             future::AtomicWaker,
             sync::{
-                atomic::{AtomicBool, AtomicUsize, Ordering},
                 Arc, Mutex, MutexGuard,
+                atomic::{AtomicBool, AtomicUsize, Ordering},
             },
         };
 
@@ -487,8 +487,8 @@ cfg_if::cfg_if! {
         use futures_util::task::AtomicWaker;
         use parking_lot::{Mutex, MutexGuard};
         use std::sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         };
 
         fn register_waker(waker: &AtomicWaker, task: &std::task::Waker) {
@@ -800,8 +800,8 @@ fn try_recv_from<T, M: Mode<T>>(state: &State<T, M>) -> Result<T, TryRecvError> 
 #[cfg(test)]
 mod mocks {
     use commonware_runtime::{
-        telemetry::metrics::{Metric, Registered, Registration},
         Metrics as RuntimeMetrics, Name, Supervisor,
+        telemetry::metrics::{Metric, Registered, Registration},
     };
     use std::fmt;
 
@@ -842,17 +842,16 @@ mod mocks {
 mod tests {
     use super::{mocks, *};
     use commonware_macros::test_async;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor};
-    use commonware_utils::{channel::oneshot, NZUsize};
+    use commonware_runtime::{Runner as _, Supervisor, deterministic};
+    use commonware_utils::{NZUsize, channel::oneshot};
     use futures::{
-        pin_mut,
-        task::{waker_ref, ArcWake},
-        FutureExt,
+        FutureExt, pin_mut,
+        task::{ArcWake, waker_ref},
     };
     use std::sync::{
+        Arc,
         atomic::{AtomicUsize, Ordering},
         mpsc::TryRecvError,
-        Arc,
     };
 
     fn new<T: Policy>(capacity: NonZeroUsize) -> (Sender<T>, Receiver<T>) {
@@ -1478,8 +1477,8 @@ mod loom_tests {
     use futures::pin_mut;
     use loom::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         thread,
     };
@@ -1872,11 +1871,13 @@ mod loom_tests {
                 drop(receiver);
             });
 
-            assert!(sender
-                .state
-                .ready
-                .push(TrackedMessage::new(drops.clone()))
-                .is_ok());
+            assert!(
+                sender
+                    .state
+                    .ready
+                    .push(TrackedMessage::new(drops.clone()))
+                    .is_ok()
+            );
             mutation.publish(queue.is_empty());
             drop(queue);
             drop(mutation);

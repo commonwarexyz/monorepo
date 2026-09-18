@@ -12,31 +12,53 @@
 //! mechanisms, though it is required that the digest can be extracted from the commitment
 //! for lookup purposes.
 
-use crate::{simplex::scheme::Scheme, types::Round, Block};
+use crate::{Block, simplex::scheme::Scheme, types::Round};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, marker::PhantomData};
+use std::{future::Future, marker::PhantomData, sync::Arc};
+
+/// An atomic retirement from a buffer's retained state.
+///
+/// The round floor and exact retirements are independent eligibility signals
+/// carried together so implementations apply one coherent update.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Retirement<C> {
+    /// The inclusive floor for entries owned by their last observation round.
+    pub round_floor: Round,
+    /// Commitments to retire regardless of their last observation round.
+    pub exact_retirements: Vec<C>,
+}
+
+/// A block commitment and the evidence available when decoding it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExpectedCommitment<C> {
+    /// A locally certified or finalized block commitment, or an ancestor's.
+    ///
+    /// Decoding may reuse commitment material. Notarization alone is insufficient.
+    Trusted(C),
+    /// A commitment without certification evidence.
+    Untrusted(C),
+}
 
 /// A marker trait describing the types used by a variant of Marshal.
 pub trait Variant: Clone + Send + Sync + 'static {
     /// The working block type of marshal, supporting the consensus commitment.
     ///
-    /// Must be convertible to `StoredBlock` via `Into` for archival.
+    /// Cloning must share the block payload, and conversion to [`Self::StoredBlock`]
+    /// must not copy it.
     type Block: Block<Digest = <Self::ApplicationBlock as Digestible>::Digest>
-        + Into<Self::StoredBlock>
-        + Clone;
+        + Into<Self::StoredBlock>;
 
     /// The application block type.
-    type ApplicationBlock: Block + Clone;
+    type ApplicationBlock: Block;
 
     /// The type of block stored in the archive.
     ///
     /// Must be convertible back to the working block type via `Into`.
     type StoredBlock: Block<Digest = <Self::Block as Digestible>::Digest>
         + Into<Self::Block>
-        + Clone
         + Codec<Cfg = <Self::ApplicationBlock as Read>::Cfg>;
 
     /// The [`Digest`] type used by consensus.
@@ -73,18 +95,16 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
     ///
-    /// The returned configuration may bind `expected_commitment` so that decoding rejects
-    /// blocks that do not match the expected commitment.
+    /// The configuration may bind `expected` and reuse trusted commitment material.
+    /// Decoding need not check every component, so callers requiring a full commitment
+    /// match must compare it after decoding.
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
-        expected: Self::Commitment,
+        expected: ExpectedCommitment<Self::Commitment>,
     ) -> <Self::Block as Read>::Cfg;
 
-    /// Converts a working block to an application block.
-    ///
-    /// This conversion cannot use `Into` due to orphan rules when `Block` wraps
-    /// `ApplicationBlock` (e.g., `CodedBlock<B, C, H> -> B`).
-    fn into_inner(block: Self::Block) -> Self::ApplicationBlock;
+    /// Converts a working block to a shared application block without copying the payload.
+    fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock>;
 
     /// Reconstructs a working block from an application block and trusted payload.
     fn from_application_block(
@@ -137,6 +157,9 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     /// If the block is already cached, the receiver may resolve immediately.
     /// Returns `None` when the buffer cannot provide availability notifications.
     ///
+    /// Keep the subscription open while the block may still arrive. Close it only when the buffer
+    /// shuts down or can no longer obtain the block from any source.
+    ///
     /// The returned receiver can be dropped to cancel the subscription.
     fn subscribe_by_digest(
         &self,
@@ -152,16 +175,22 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
     /// Having the full commitment may enable additional retrieval mechanisms
     /// depending on the variant implementation.
     ///
+    /// Keep the subscription open while the block may still arrive. Close it only when the buffer
+    /// shuts down or can no longer obtain the block from any source.
+    ///
     /// The returned receiver can be dropped to cancel the subscription.
     fn subscribe_by_commitment(
         &self,
         commitment: V::Commitment,
     ) -> Option<oneshot::Receiver<V::Block>>;
 
-    /// Notify the buffer that a block has been finalized.
+    /// Retire entries made eligible by durable application progress.
     ///
-    /// This allows the buffer to perform variant-specific cleanup operations.
-    fn finalized(&self, commitment: V::Commitment);
+    /// [`Retirement::round_floor`] is increasing and inclusive.
+    /// [`Retirement::exact_retirements`] may be empty, sparse, or batched.
+    /// Implementations must apply both fields as one update and must not infer
+    /// that they describe the same finalization.
+    fn retire(&self, update: Retirement<V::Commitment>);
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
@@ -214,7 +243,7 @@ where
         None
     }
 
-    fn finalized(&self, _: V::Commitment) {}
+    fn retire(&self, _: Retirement<V::Commitment>) {}
 
     fn send(&self, _: Round, _: V::Block, _: Recipients<Self::PublicKey>) {}
 }

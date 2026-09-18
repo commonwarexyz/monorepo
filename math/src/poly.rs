@@ -1,18 +1,18 @@
 use crate::algebra::{
-    msm_naive, powers, Additive, CryptoGroup, Field, Object, Random, Ring, Space,
+    Additive, CryptoGroup, Field, Object, Random, Ring, Space, msm_naive, powers,
 };
 #[cfg(not(feature = "std"))]
 use alloc::{borrow::Cow, vec, vec::Vec};
-use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{Buf, EncodeSize, RangeCfg, Read, Write};
 use commonware_parallel::Strategy;
-use commonware_utils::{non_empty_vec, ordered::Map, vec::NonEmptyVec, TryCollect};
+use commonware_utils::{TryCollect, non_empty_vec, ordered::Map, vec::NonEmptyVec};
 use core::{
     fmt::Debug,
     iter,
     num::NonZeroU32,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::borrow::Cow;
 
@@ -206,10 +206,7 @@ impl<K: Write> Write for Poly<K> {
 impl<K: Read> Read for Poly<K> {
     type Cfg = (RangeCfg<NonZeroU32>, <K as Read>::Cfg);
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         Ok(Self {
             coeffs: NonEmptyVec::<K>::read_cfg(buf, &(cfg.0.into(), cfg.1.clone()))?,
         })
@@ -219,14 +216,14 @@ impl<K: Read> Read for Poly<K> {
 impl<K: Random> Poly<K> {
     // Returns a new polynomial of the given degree where each coefficient is
     // sampled at random from the provided RNG.
-    pub fn new(mut rng: impl CryptoRngCore, degree: u32) -> Self {
+    pub fn new(mut rng: impl CryptoRng, degree: u32) -> Self {
         Self::from_iter_unchecked((0..=degree).map(|_| K::random(&mut rng)))
     }
 
     /// Returns a new scalar polynomial with a particular value for the constant coefficient.
     ///
     /// This does the same thing as [`Poly::new`] otherwise.
-    pub fn new_with_constant(mut rng: impl CryptoRngCore, degree: u32, constant: K) -> Self {
+    pub fn new_with_constant(mut rng: impl CryptoRng, degree: u32, constant: K) -> Self {
         Self::from_iter_unchecked(
             iter::once(constant).chain((0..=degree).skip(1).map(|_| K::random(&mut rng))),
         )
@@ -583,8 +580,8 @@ pub mod fuzz {
     use commonware_codec::Encode as _;
     use commonware_parallel::Sequential;
     use commonware_utils::{
-        ordered::{BiMap, Map},
         TryFromIterator,
+        ordered::{BiMap, Map},
     };
 
     #[derive(Debug, Arbitrary)]

@@ -1,21 +1,22 @@
 //! Utilities for collecting and reporting telemetry data.
 
 use super::{
-    tracing::{export, Config},
     Context,
+    tracing::{Config, export},
 };
 use crate::{Metrics as _, Spawner, Supervisor as _};
 use axum::{
+    Extension, Router,
     body::Body,
-    http::{header, Response, StatusCode},
+    http::{Response, StatusCode, header},
     routing::get,
-    serve, Extension, Router,
+    serve,
 };
 use cfg_if::cfg_if;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 use tracing::Level;
-use tracing_subscriber::{filter::filter_fn, layer::SubscriberExt, Layer, Registry};
+use tracing_subscriber::{Layer, Registry, filter::filter_fn, layer::SubscriberExt};
 
 /// Log configuration.
 pub struct Logs {

@@ -6,8 +6,8 @@
 )]
 
 use commonware_cryptography::{
-    ed25519::{self, PublicKey},
     Signer,
+    ed25519::{self, PublicKey},
 };
 use commonware_p2p::Recipients;
 use reqwest::blocking::Client;

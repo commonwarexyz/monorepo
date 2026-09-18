@@ -18,15 +18,14 @@ default = [ "std" ]
 std = [
 	"bytes/std",
 	"commonware-macros/std",
-	"rand?/std",
 	"rand_chacha?/std",
 	"thiserror/std",
 ]
 arbitrary = [
 	"dep:arbitrary",
 	"dep:commonware-conformance",
-	"dep:rand",
 	"dep:rand_chacha",
+	"dep:rand_core",
 	"std",
 ]
 
@@ -38,8 +37,8 @@ commonware-codec-macros.workspace = true
 commonware-conformance = { workspace = true, optional = true }
 commonware-macros.workspace = true
 paste.workspace = true
-rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
+rand_core = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]

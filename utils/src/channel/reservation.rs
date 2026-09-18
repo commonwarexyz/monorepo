@@ -1,9 +1,8 @@
 //! Channel reservation helpers.
 
 use super::mpsc::{
-    self,
+    self, OwnedPermit,
     error::{SendError, TrySendError},
-    OwnedPermit,
 };
 use std::{
     future::Future,

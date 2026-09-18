@@ -18,11 +18,12 @@ stability_scope!(BETA {
     use commonware_cryptography::PublicKey;
     use commonware_runtime::{IoBuf, IoBufs};
     use commonware_utils::{
-        channel::mpsc,
+        channel::{mpsc, ring},
         ordered::{Map, Set},
     };
     use std::{error::Error as StdError, fmt::Debug, future::Future, time::SystemTime};
 
+    mod sizing;
     pub mod authenticated;
     pub mod types;
     pub mod utils;
@@ -58,6 +59,10 @@ stability_scope!(BETA {
         /// If a recipient is offline at the time a message is sent, the message
         /// will be dropped. It is up to the application to handle retries (if
         /// necessary).
+        ///
+        /// # Panics
+        ///
+        /// Panics if `message` exceeds the sender's configured maximum application payload size.
         ///
         /// # Returns
         ///
@@ -118,6 +123,10 @@ stability_scope!(BETA {
         /// will be dropped. It is up to the application to handle retries (if
         /// necessary).
         ///
+        /// # Panics
+        ///
+        /// Panics if `message` exceeds the sender's configured maximum application payload size.
+        ///
         /// # Returns
         ///
         /// Feedback from submitting the message for delivery.
@@ -140,6 +149,10 @@ stability_scope!(BETA {
         ///
         /// Recipients that exceed their rate limit will be skipped. The message is
         /// still sent to non-limited recipients.
+        ///
+        /// # Panics
+        ///
+        /// Panics if `message` exceeds the sender's configured maximum application payload size.
         ///
         /// # Returns
         ///
@@ -197,6 +210,11 @@ stability_scope!(BETA {
 
     /// Alias for the subscription type returned by [`Provider::subscribe`].
     pub type PeerSetSubscription<P> = mpsc::UnboundedReceiver<PeerSetUpdate<P>>;
+
+    /// Alias for the subscription type returned by [`Blocker::blocked`].
+    ///
+    /// Each value is the full set of peers this node currently blocks.
+    pub type BlockedSubscription<P> = ring::Receiver<Set<P>>;
 
     /// Primary and secondary peers provided together to [`Manager::track`].
     ///
@@ -365,6 +383,13 @@ stability_scope!(BETA {
 
         /// Block a peer, disconnecting them if currently connected and preventing future connections.
         fn block(&mut self, peer: Self::PublicKey) -> Feedback;
+
+        /// Subscribe to the set of peers this node currently blocks.
+        ///
+        /// The subscription yields the current set once the request is processed,
+        /// then a new set whenever a peer is blocked or unblocked. An unread set is
+        /// replaced by the next one, so a reader always sees the latest state.
+        fn blocked(&mut self) -> BlockedSubscription<Self::PublicKey>;
     }
 });
 

@@ -2,7 +2,7 @@ use arbitrary::Unstructured;
 use commonware_codec::ReadExt;
 use commonware_cryptography::bls12381::{
     primitives::{
-        group::{Scalar, Share, G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH},
+        group::{G1, G1_ELEMENT_BYTE_LENGTH, G2, G2_ELEMENT_BYTE_LENGTH, Scalar, Share},
         variant::{MinPk, MinSig, PartialSignature, Variant},
     },
     tle::{Block, Ciphertext},
@@ -12,12 +12,12 @@ use commonware_math::{
     poly::Poly,
 };
 use commonware_utils::Participant;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 #[allow(unused)]
 pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
     let bytes: [u8; G1_ELEMENT_BYTE_LENGTH] = u.arbitrary()?;
-    match G1::read(&mut bytes.as_slice()) {
+    match G1::read(&mut commonware_codec::Copying(&bytes)) {
         Ok(point) => Ok(point),
         Err(_) => Ok(if u.arbitrary()? {
             G1::zero()
@@ -30,7 +30,7 @@ pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
 #[allow(unused)]
 pub fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
     let bytes: [u8; G2_ELEMENT_BYTE_LENGTH] = u.arbitrary()?;
-    match G2::read(&mut bytes.as_slice()) {
+    match G2::read(&mut commonware_codec::Copying(&bytes)) {
         Ok(point) => Ok(point),
         Err(_) => Ok(if u.arbitrary()? {
             G2::zero()

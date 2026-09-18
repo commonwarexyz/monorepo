@@ -1,12 +1,11 @@
 //! `profile` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory,
+    CREATED_FILE_NAME, Config, DESTROYED_FILE_NAME, Error, MONITORING_REGION, deployer_directory,
     ec2::{self, *},
     s3::{self, *},
     services::*,
     utils::{download_file, scp_download, ssh_execute},
-    Config, Error, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use std::{

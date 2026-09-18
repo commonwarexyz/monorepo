@@ -3,6 +3,8 @@
 //! This crate provides a collection of runtimes that can be
 //! used to execute asynchronous tasks in a variety of ways. For production use,
 //! the `tokio` module provides a runtime backed by [Tokio](https://tokio.rs).
+//! On Linux, the `iouring` feature enables a single-threaded runtime backed by
+//! io_uring that drives tasks and I/O together on the calling thread.
 //! For testing and simulation, the `deterministic` module provides a runtime
 //! that allows for deterministic execution of tasks (given a fixed seed).
 //!
@@ -31,14 +33,16 @@ mod process;
 mod storage;
 
 stability_scope!(ALPHA {
+    #[cfg(feature = "arbitrary")]
+    pub mod conformance;
     pub mod deterministic;
     pub mod mocks;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
 });
-stability_scope!(ALPHA, cfg(any(feature = "iouring-storage", feature = "iouring-network")) {
-    mod iouring;
+stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
+    pub mod iouring;
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
@@ -47,25 +51,25 @@ stability_scope!(BETA {
     /// Re-export of `Buf` and `BufMut` traits for usage with [I/O buffers](iobuf).
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
-    use commonware_parallel::{Rayon, ThreadPool};
+    use commonware_parallel::Rayon;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
     use iobuf::PoolError;
-    use rayon::ThreadPoolBuildError;
     use std::{
         future::Future,
         io::Error as IoError,
         net::SocketAddr,
         num::NonZeroUsize,
+        sync::Arc,
         time::{Duration, SystemTime},
     };
-    pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
+    pub(crate) use telemetry::metrics::{METRICS_PREFIX, child_label, prefixed_name};
     use thiserror::Error;
 
     pub mod iobuf;
     pub use iobuf::{
-        cache_line_size, page_size, BufferPool, BufferPoolConfig, BufferPoolThreadCache,
-        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+        BufferPool, BufferPoolClassConfig, BufferPoolConfig, BufferPoolThreadCache,
+        Builder as IoBufsBuilder, IoBuf, IoBufMut, IoBufs, IoBufsMut, cache_line_size, page_size,
     };
 
     pub mod utils;
@@ -73,11 +77,74 @@ stability_scope!(BETA {
 
     pub mod telemetry;
 
-    /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
-    pub const DEFAULT_BLOB_VERSION: u16 = 0;
+    /// Runtime-owned layout of a [`Blob`].
+    ///
+    /// This determines the container format, including its header and data offset, not the
+    /// application-owned contents version passed to [`Storage::open_versioned`].
+    ///
+    /// Restricting the layouts a runtime accepts can be used to orchestrate rollback-safe
+    /// upgrades.
+    #[repr(u16)]
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub enum BlobLayout {
+        /// An 8-byte header, with data beginning immediately after it.
+        ///
+        /// A V0 header has no checksum, so an interrupted creation is not reliably
+        /// recognized: an image whose magic and layout version are durable parses as a
+        /// complete header and reopens as blob version 0 or fails as a version mismatch
+        /// until the blob is removed.
+        #[deprecated(note = "unaligned pages can degrade performance")]
+        V0 = 0,
+        /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
+        V1 = 1,
+    }
+
+    /// Latest supported [`BlobLayout`], used to create new [`Blob`]s unless the runtime
+    /// restricts layouts to an older range.
+    pub const DEFAULT_BLOB_LAYOUT: BlobLayout = BlobLayout::V1;
+
+    impl BlobLayout {
+        /// All blob layouts supported by this runtime.
+        #[allow(deprecated)]
+        pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
+    }
+
+    /// Application-owned version of a [`Blob`]'s contents.
+    ///
+    /// This is independent of the runtime-owned [`BlobLayout`].
+    #[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+    pub struct BlobVersion(u16);
+
+    impl BlobVersion {
+        /// Creates a blob version from a `u16`.
+        pub const fn new(version: u16) -> Self {
+            Self(version)
+        }
+
+        /// Returns the underlying `u16`.
+        pub const fn get(self) -> u16 {
+            self.0
+        }
+    }
+
+    impl std::fmt::Display for BlobVersion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl std::fmt::Debug for BlobVersion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    /// Default application-owned [`Blob`] contents version used by [`Storage::open`].
+    pub const DEFAULT_BLOB_VERSION: BlobVersion = BlobVersion::new(0);
 
     /// Errors that can occur when interacting with the runtime.
-    #[derive(Error, Debug)]
+    #[derive(Error, Debug, Clone)]
     pub enum Error {
         #[error("exited")]
         Exited,
@@ -101,7 +168,9 @@ stability_scope!(BETA {
         RecvFailed,
         #[error("dns resolution failed: {0}")]
         ResolveFailed(String),
-        #[error("partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}")]
+        #[error(
+            "partition name invalid, must only contain alphanumeric, dash ('-'), or underscore ('_') characters: {0}"
+        )]
         PartitionNameInvalid(String),
         #[error("partition creation failed: {0}")]
         PartitionCreationFailed(String),
@@ -110,30 +179,41 @@ stability_scope!(BETA {
         #[error("partition corrupt: {0}")]
         PartitionCorrupt(String),
         #[error("blob open failed: {0}/{1} error: {2}")]
-        BlobOpenFailed(String, String, IoError),
+        BlobOpenFailed(String, String, Arc<IoError>),
         #[error("blob missing: {0}/{1}")]
         BlobMissing(String, String),
         #[error("blob resize failed: {0}/{1} error: {2}")]
-        BlobResizeFailed(String, String, IoError),
+        BlobResizeFailed(String, String, Arc<IoError>),
         #[error("blob sync failed: {0}/{1} error: {2}")]
-        BlobSyncFailed(String, String, IoError),
+        BlobSyncFailed(String, String, Arc<IoError>),
         #[error("blob insufficient length")]
         BlobInsufficientLength,
         #[error("blob corrupt: {0}/{1} reason: {2}")]
         BlobCorrupt(String, String, String),
+        #[error("blob layout mismatch: expected one of {expected:?}, found {found:?}")]
+        BlobLayoutMismatch {
+            expected: std::ops::RangeInclusive<BlobLayout>,
+            found: BlobLayout,
+        },
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
         BlobVersionMismatch {
-            expected: std::ops::RangeInclusive<u16>,
-            found: u16,
+            expected: std::ops::RangeInclusive<BlobVersion>,
+            found: BlobVersion,
         },
         #[error("invalid or missing checksum")]
         InvalidChecksum,
         #[error("offset overflow")]
         OffsetOverflow,
         #[error("io error: {0}")]
-        Io(#[from] IoError),
+        Io(Arc<IoError>),
         #[error("buffer pool: {0}")]
         Pool(#[from] PoolError),
+    }
+
+    impl From<IoError> for Error {
+        fn from(err: IoError) -> Self {
+            Self::Io(Arc::new(err))
+        }
     }
 
     /// Interface that any task scheduler must implement to start
@@ -344,36 +424,17 @@ stability_scope!(BETA {
         fn stopped(&self) -> signal::Signal;
     }
 
-    /// Trait for creating [rayon]-compatible thread pools with each worker thread
-    /// placed on dedicated threads via [Spawner].
-    pub trait ThreadPooler: Spawner {
-        /// Creates a clone-able [rayon]-compatible thread pool with [Spawner::spawn].
+    /// Interface that runtimes implement to provide parallel execution strategies.
+    pub trait Strategizer: Spawner {
+        /// Returns a new [Rayon] strategy with the requested parallelism.
         ///
         /// # Arguments
-        /// - `concurrency`: The number of tasks to execute concurrently in the pool.
+        /// - `parallelism`: The number of tasks to execute concurrently in the pool.
         ///
-        /// # Returns
-        /// A `Result` containing the configured [rayon::ThreadPool] or a [rayon::ThreadPoolBuildError] if the pool cannot
-        /// be built.
-        fn create_thread_pool(
-            &self,
-            concurrency: NonZeroUsize,
-        ) -> Result<ThreadPool, ThreadPoolBuildError>;
-
-        /// Creates a clone-able [Rayon] strategy for use with [commonware_parallel].
+        /// # Panics
         ///
-        /// # Arguments
-        /// - `concurrency`: The number of tasks to execute concurrently in the pool.
-        ///
-        /// # Returns
-        /// A `Result` containing the configured [Rayon] strategy or a [rayon::ThreadPoolBuildError] if the pool cannot be
-        /// built.
-        fn create_strategy(
-            &self,
-            concurrency: NonZeroUsize,
-        ) -> Result<Rayon, ThreadPoolBuildError> {
-            self.create_thread_pool(concurrency).map(Rayon::with_pool)
-        }
+        /// Panics if the runtime cannot initialize the strategy's backing Rayon thread pool.
+        fn strategy(&self, parallelism: NonZeroUsize) -> Rayon;
     }
 
     /// Interface to register and encode metrics.
@@ -608,6 +669,15 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// # Cancellation
+    ///
+    /// Dropping an operation's future does not guarantee cancellation: the
+    /// operation may still complete, and later operations may observe its
+    /// effect.
+    ///
+    /// Runtimes must ensure that no operation issued by a previous run against
+    /// the same storage is still in flight when a new run begins.
+    ///
     /// # Partition Names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
@@ -645,6 +715,13 @@ stability_scope!(BETA {
         /// Blobs are versioned. If the blob's version is not in `versions`, returns
         /// [Error::BlobVersionMismatch].
         ///
+        /// # Layout
+        ///
+        /// New blobs are created with the latest layout allowed by the runtime. Reopening an
+        /// existing blob honors the layout recorded in its header when the runtime's
+        /// configured layout range allows it, and returns [Error::BlobLayoutMismatch]
+        /// otherwise.
+        ///
         /// # Returns
         ///
         /// A tuple of (blob, logical_size, blob_version).
@@ -652,8 +729,8 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: &[u8],
-            versions: std::ops::RangeInclusive<u16>,
-        ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
+            versions: std::ops::RangeInclusive<BlobVersion>,
+        ) -> impl Future<Output = Result<(Self::Blob, u64, BlobVersion), Error>> + Send;
 
         /// Remove a blob from a given partition.
         ///
@@ -681,7 +758,96 @@ stability_scope!(BETA {
 
         /// Return all blobs in a given partition.
         fn scan(&self, partition: &str)
-            -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+        -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
+    }
+
+    /// Options that alter one [`Blob::read_at`] or [`Blob::read_at_buf`] operation.
+    ///
+    /// [`ReadOptions::default`] applies no options.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct ReadOptions(u8);
+
+    impl ReadOptions {
+        /// Advise that data brought in by this read need not remain in the OS page cache.
+        ///
+        /// This is a best-effort performance hint for callers that retain the data or
+        /// do not expect to read it again soon. Implementations may ignore it, and it
+        /// does not guarantee that the range is absent from the OS page cache.
+        pub const DONT_CACHE: Self = Self(1 << 0);
+
+        /// Return whether all of `options` are set.
+        #[must_use]
+        pub const fn contains(self, options: Self) -> bool {
+            self.0 & options.0 == options.0
+        }
+
+        /// Return these options with `options` cleared.
+        #[must_use]
+        pub const fn without(self, options: Self) -> Self {
+            Self(self.0 & !options.0)
+        }
+    }
+
+    impl std::ops::BitOr for ReadOptions {
+        type Output = Self;
+
+        fn bitor(self, rhs: Self) -> Self::Output {
+            Self(self.0 | rhs.0)
+        }
+    }
+
+    impl std::ops::BitOrAssign for ReadOptions {
+        fn bitor_assign(&mut self, rhs: Self) {
+            self.0 |= rhs.0;
+        }
+    }
+
+    /// Options that alter one [`Blob::write_at`] operation.
+    ///
+    /// [`WriteOptions::default`] applies no options.
+    /// Combine options with `|`, such as `WriteOptions::SYNC | WriteOptions::DONT_CACHE`.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct WriteOptions(u8);
+
+    impl WriteOptions {
+        /// Durably persist the submitted bytes before returning.
+        ///
+        /// This is not a durability barrier for earlier writes without
+        /// [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
+        pub const SYNC: Self = Self(1 << 0);
+
+        /// Advise that the submitted bytes need not remain in the OS page cache.
+        ///
+        /// This is a best-effort performance hint for callers that maintain their own cache.
+        /// Implementations may ignore it. It does not change visibility or durability, or
+        /// guarantee that the range is absent from the OS page cache.
+        pub const DONT_CACHE: Self = Self(1 << 1);
+
+        /// Return whether all of `options` are set.
+        #[must_use]
+        pub const fn contains(self, options: Self) -> bool {
+            self.0 & options.0 == options.0
+        }
+
+        /// Return these options with `options` cleared.
+        #[must_use]
+        pub const fn without(self, options: Self) -> Self {
+            Self(self.0 & !options.0)
+        }
+    }
+
+    impl std::ops::BitOr for WriteOptions {
+        type Output = Self;
+
+        fn bitor(self, rhs: Self) -> Self::Output {
+            Self(self.0 | rhs.0)
+        }
+    }
+
+    impl std::ops::BitOrAssign for WriteOptions {
+        fn bitor_assign(&mut self, rhs: Self) {
+            self.0 |= rhs.0;
+        }
     }
 
     /// Interface to read and write to a blob.
@@ -698,19 +864,17 @@ stability_scope!(BETA {
     /// When a blob is dropped, any unsynced changes may be discarded. Implementations
     /// may attempt to sync during drop but errors will go unhandled. Call `sync`
     /// before dropping to ensure all changes are durably persisted.
+    ///
+    /// # Durability
+    ///
+    /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
+    /// subset of its bytes may be durable. Bytes outside the written range remain
+    /// unchanged.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
-        /// Read `len` bytes at `offset` into caller-provided buffer(s).
+        /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///
-        /// The caller provides the buffer(s), and the implementation fills it with
-        /// exactly `len` bytes of data read from the blob starting at `offset`.
-        /// Returns the same buffer(s), filled with data.
-        ///
-        /// # Contract
-        ///
-        /// - The returned buffers reuse caller-provided storage, with exactly `len`
-        ///   bytes filled from `offset`.
-        /// - Caller-provided chunk layout is preserved.
+        /// Returns the same buffers with their chunk layout preserved.
         ///
         /// # Panics
         ///
@@ -720,35 +884,27 @@ stability_scope!(BETA {
             offset: u64,
             len: usize,
             bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
-        /// of data read from the blob starting at `offset`.
+        /// Read exactly `len` bytes at `offset`.
         ///
         /// To reuse a buffer(s), use [`Blob::read_at_buf`].
         fn read_at(
             &self,
             offset: u64,
             len: usize,
+            options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Write `bufs` to the blob at the given offset.
+        /// Write every remaining byte in `bufs` to the blob at `offset`.
+        ///
+        /// The buffers are treated as one logical byte sequence in chunk order.
         fn write_at(
             &self,
             offset: u64,
             bufs: impl Into<IoBufs> + Send,
-        ) -> impl Future<Output = Result<(), Error>> + Send;
-
-        /// Write `bufs` to the blob at the given offset and durably persist that write.
-        ///
-        /// This is not a durability barrier for previous operations. When it completes,
-        /// only the bytes submitted to this call are guaranteed durable. Earlier unsynced
-        /// [`Blob::write_at`] or [`Blob::resize`] calls require [`Blob::sync`] to become
-        /// durable.
-        fn write_at_sync(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
         ) -> impl Future<Output = Result<(), Error>> + Send;
 
         /// Resize the blob to the given length.
@@ -762,8 +918,9 @@ stability_scope!(BETA {
 
         /// Request that all pending data is durably persisted.
         ///
-        /// Awaiting this future waits until the sync has started. Awaiting the returned
-        /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
+        /// Awaiting this future waits until the runtime accepts responsibility for
+        /// the sync. It continues even if the returned [`Handle`] is dropped.
+        /// Awaiting that handle waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 
@@ -835,39 +992,85 @@ stability_scope!(BETA, cfg(feature = "external") {
 mod tests {
     use super::*;
     use crate::telemetry::metrics::{
-        count_running_tasks,
-        raw::{Counter, Family},
         EncodeLabelKey, EncodeLabelSetTrait as EncodeLabelSet,
-        EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder,
+        EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder, count_running_tasks,
+        raw::{Counter, Family},
     };
-    use bytes::Bytes;
     use commonware_macros::select;
+    use commonware_parallel::Strategy as _;
     use commonware_utils::{
+        NZU32, NZUsize, SystemTimeExt,
         channel::{mpsc, oneshot},
         futures::Pool as FuturesPool,
         sync::Mutex,
-        NZUsize, SystemTimeExt, NZU32,
     };
     use futures::{
+        FutureExt,
         future::{pending, ready},
-        join, pin_mut, FutureExt,
+        join, pin_mut,
     };
-    use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+    use rstest::rstest;
     use std::{
-        collections::HashMap,
-        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        panic::{AssertUnwindSafe, catch_unwind},
         pin::Pin,
-        str::FromStr,
         sync::{
-            atomic::{AtomicU32, Ordering},
             Arc,
+            atomic::{AtomicU32, Ordering},
         },
         task::{Context as TContext, Poll, Waker},
     };
-    use tracing::{error, Level};
     use utils::reschedule;
 
-    fn test_error_future<R: Runner>(runner: R) {
+    #[test]
+    fn test_blob_version() {
+        let version = BlobVersion::new(7);
+        assert_eq!(version.get(), 7);
+        assert_eq!(version.to_string(), "7");
+        assert_eq!(format!("{version:?}"), "7");
+        assert_eq!(BlobVersion::default(), DEFAULT_BLOB_VERSION);
+        assert!((BlobVersion::new(3)..=BlobVersion::new(7)).contains(&version));
+    }
+
+    #[test]
+    fn test_read_options_compose() {
+        // The flag must compose, assign, remove, and remain absent from the default.
+        let options = ReadOptions::default() | ReadOptions::DONT_CACHE;
+        let mut assigned = ReadOptions::default();
+        assigned |= ReadOptions::DONT_CACHE;
+        assert!(options.contains(ReadOptions::DONT_CACHE));
+        assert_eq!(assigned, options);
+        assert_eq!(
+            options.without(ReadOptions::DONT_CACHE),
+            ReadOptions::default()
+        );
+        assert!(!ReadOptions::default().contains(ReadOptions::DONT_CACHE));
+    }
+
+    #[test]
+    fn test_write_options_compose() {
+        let options = WriteOptions::SYNC | WriteOptions::DONT_CACHE;
+        let mut assigned = WriteOptions::SYNC;
+        assigned |= WriteOptions::DONT_CACHE;
+        assert!(options.contains(WriteOptions::SYNC));
+        assert!(options.contains(WriteOptions::DONT_CACHE));
+        assert_eq!(assigned, options);
+        assert_eq!(
+            options.without(WriteOptions::SYNC),
+            WriteOptions::DONT_CACHE
+        );
+        let default = WriteOptions::default();
+        assert!(!default.contains(WriteOptions::SYNC));
+        assert!(!default.contains(WriteOptions::DONT_CACHE));
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_error_future<R: Runner>(#[case] runner: R) {
         #[allow(clippy::unused_async)]
         async fn error_future() -> Result<&'static str, &'static str> {
             Err("An error occurred")
@@ -876,16 +1079,29 @@ mod tests {
         assert_eq!(result, Err("An error occurred"));
     }
 
-    #[test]
-    fn test_handle_can_use_futures_pool() {
-        deterministic::Runner::default().start(|_| async move {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_handle_can_use_futures_pool<R: Runner>(#[case] runner: R) {
+        runner.start(|_| async move {
             let mut pool = FuturesPool::<Result<(), Error>>::default();
             pool.push(Handle::ready(Ok(())));
             assert!(pool.next_completed().await.is_ok());
         });
     }
 
-    fn test_clock_sleep<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_clock_sleep<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -901,7 +1117,14 @@ mod tests {
         });
     }
 
-    fn test_clock_sleep_until<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_clock_sleep_until<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock + Metrics,
     {
@@ -916,7 +1139,14 @@ mod tests {
         });
     }
 
-    fn test_clock_sleep_until_far_future<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_clock_sleep_until_far_future<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -927,7 +1157,14 @@ mod tests {
         });
     }
 
-    fn test_clock_timeout<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_clock_timeout<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -955,7 +1192,14 @@ mod tests {
         });
     }
 
-    fn test_root_finishes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_root_finishes<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
     {
@@ -968,7 +1212,14 @@ mod tests {
         });
     }
 
-    fn test_spawn_after_abort<R>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_after_abort<R>(#[case] runner: R)
     where
         R: Runner,
         R::Context: Spawner,
@@ -991,16 +1242,28 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort<R: Runner>(runner: R, dedicated: bool, blocking: bool)
-    where
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_abort<R: Runner>(
+        #[case] runner: R,
+        #[values(
+            Execution::Shared(false),
+            Execution::Shared(true),
+            Execution::Dedicated
+        )]
+        execution: Execution,
+    ) where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let context = if dedicated {
-                assert!(!blocking);
-                context.dedicated()
-            } else {
-                context.shared(blocking)
+            let context = match execution {
+                Execution::Dedicated => context.dedicated(),
+                Execution::Shared(blocking) => context.shared(blocking),
             };
 
             let handle = context.spawn(|_| async move {
@@ -1013,14 +1276,35 @@ mod tests {
         });
     }
 
-    fn test_panic_aborts_root<R: Runner>(runner: R) {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::deterministic_caught(deterministic::Runner::new(
+        deterministic::Config::default().with_catch_panics(true)
+    ))]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    #[case::tokio_caught(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring_caught(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
+    #[should_panic(expected = "blah")]
+    fn test_panic_aborts_root<R: Runner>(#[case] runner: R) {
         let result: Result<(), Error> = runner.start(|_| async move {
             panic!("blah");
         });
         result.unwrap_err();
     }
 
-    fn test_panic_aborts_spawn<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    #[should_panic(expected = "blah")]
+    fn test_panic_aborts_spawn<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1036,7 +1320,13 @@ mod tests {
         });
     }
 
-    fn test_panic_aborts_spawn_caught<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::new(
+        deterministic::Config::default().with_catch_panics(true)
+    ))]
+    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
+    fn test_panic_aborts_spawn_caught<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1049,7 +1339,15 @@ mod tests {
         assert!(matches!(result, Err(Error::Exited)));
     }
 
-    fn test_multiple_panics<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    #[should_panic(expected = "boom")]
+    fn test_multiple_panics<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1071,7 +1369,13 @@ mod tests {
         });
     }
 
-    fn test_multiple_panics_caught<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::new(
+        deterministic::Config::default().with_catch_panics(true)
+    ))]
+    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
+    fn test_multiple_panics_caught<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1093,7 +1397,14 @@ mod tests {
         assert!(matches!(res3, Err(Error::Exited)));
     }
 
-    fn test_select<R: Runner>(runner: R) {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_select<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             // Test first branch
             let output = Mutex::new(0);
@@ -1121,7 +1432,14 @@ mod tests {
     }
 
     /// Ensure future fusing works as expected.
-    fn test_select_loop<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_select_loop<R: Runner>(#[case] runner: R)
     where
         R::Context: Clock,
     {
@@ -1167,7 +1485,14 @@ mod tests {
         });
     }
 
-    fn test_storage_operations<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_storage_operations<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1184,7 +1509,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 
@@ -1193,7 +1518,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, data.len())
+                .read_at(0, data.len(), ReadOptions::default())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -1216,7 +1541,10 @@ mod tests {
             assert_eq!(len, data.len() as u64);
 
             // Read data part of message back
-            let read = blob.read_at(7, 7).await.expect("Failed to read data");
+            let read = blob
+                .read_at(7, 7, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             assert_eq!(read.coalesce(), b"Storage");
 
             // Sync the blob
@@ -1247,7 +1575,14 @@ mod tests {
         });
     }
 
-    fn test_blob_read_write<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_blob_read_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1264,42 +1599,55 @@ mod tests {
             // Write data at different offsets
             let data1 = b"Hello";
             let data2 = b"World";
-            blob.write_at(0, data1)
+            blob.write_at(0, data1, WriteOptions::default())
                 .await
                 .expect("Failed to write data1");
-            blob.write_at(5, data2)
+            blob.write_at(5, data2, WriteOptions::default())
                 .await
                 .expect("Failed to write data2");
 
             // Read data back
-            let read = blob.read_at(0, 10).await.expect("Failed to read data");
+            let read = blob
+                .read_at(0, 10, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
             // Read past end of blob
-            let result = blob.read_at(10, 10).await;
+            let result = blob.read_at(10, 10, ReadOptions::default()).await;
             assert!(result.is_err());
 
             // Rewrite data without affecting length
             let data3 = b"Store";
-            blob.write_at(5, data3)
+            blob.write_at(5, data3, WriteOptions::default())
                 .await
                 .expect("Failed to write data3");
 
             // Read data back
-            let read = blob.read_at(0, 10).await.expect("Failed to read data");
+            let read = blob
+                .read_at(0, 10, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data3);
 
             // Read past end of blob
-            let result = blob.read_at(10, 10).await;
+            let result = blob.read_at(10, 10, ReadOptions::default()).await;
             assert!(result.is_err());
         });
     }
 
-    fn test_blob_resize<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_blob_resize<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1314,7 +1662,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             let data = b"some data";
-            blob.write_at(0, data.to_vec())
+            blob.write_at(0, data.to_vec(), WriteOptions::default())
                 .await
                 .expect("Failed to write");
             blob.sync().await.expect("Failed to sync after write");
@@ -1335,11 +1683,17 @@ mod tests {
             assert_eq!(len, new_len);
 
             // Read original data
-            let read_buf = blob.read_at(0, data.len()).await.unwrap();
+            let read_buf = blob
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(read_buf.coalesce(), data);
 
             // Read extended part (should be zeros)
-            let extended_part = blob.read_at(data.len() as u64, data.len()).await.unwrap();
+            let extended_part = blob
+                .read_at(data.len() as u64, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(extended_part.coalesce(), vec![0; data.len()].as_slice());
 
             // Truncate the blob
@@ -1351,13 +1705,23 @@ mod tests {
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
-            let read_buf = blob.read_at(0, data.len()).await.unwrap();
+            let read_buf = blob
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(read_buf.coalesce(), data);
             blob.sync().await.unwrap();
         });
     }
 
-    fn test_many_partition_read_write<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_many_partition_read_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1375,10 +1739,10 @@ mod tests {
                     .expect("Failed to open blob");
 
                 // Write data at different offsets
-                blob.write_at(0, data1)
+                blob.write_at(0, data1, WriteOptions::default())
                     .await
                     .expect("Failed to write data1");
-                blob.write_at(5 + additional as u64, data2)
+                blob.write_at(5 + additional as u64, data2, WriteOptions::default())
                     .await
                     .expect("Failed to write data2");
 
@@ -1396,7 +1760,7 @@ mod tests {
 
                 // Read data back
                 let read = blob
-                    .read_at(0, 10 + additional)
+                    .read_at(0, 10 + additional, ReadOptions::default())
                     .await
                     .expect("Failed to read data");
                 let read = read.coalesce();
@@ -1406,7 +1770,14 @@ mod tests {
         });
     }
 
-    fn test_blob_read_past_length<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_blob_read_past_length<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
     {
@@ -1421,22 +1792,29 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let result = blob.read_at(0, 10).await;
+            let result = blob.read_at(0, 10, ReadOptions::default()).await;
             assert!(result.is_err());
 
             // Write data to the blob
             let data = b"Hello, Storage!".to_vec();
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let result = blob.read_at(0, 20).await;
+            let result = blob.read_at(0, 20, ReadOptions::default()).await;
             assert!(result.is_err());
         })
     }
 
-    fn test_blob_clone_and_concurrent_read<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_blob_clone_and_concurrent_read<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Storage + Metrics,
     {
@@ -1452,7 +1830,7 @@ mod tests {
 
             // Write data to the blob
             let data = b"Hello, Storage!";
-            blob.write_at(0, data)
+            blob.write_at(0, data, WriteOptions::default())
                 .await
                 .expect("Failed to write to blob");
 
@@ -1465,7 +1843,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, data_len)
+                        .read_at(0, data_len, ReadOptions::default())
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1476,7 +1854,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, data_len)
+                        .read_at(0, data_len, ReadOptions::default())
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1490,7 +1868,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, data.len())
+                .read_at(0, data.len(), ReadOptions::default())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -1504,7 +1882,14 @@ mod tests {
         });
     }
 
-    fn test_shutdown<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_shutdown<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1536,7 +1921,14 @@ mod tests {
         });
     }
 
-    fn test_shutdown_multiple_signals<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_shutdown_multiple_signals<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1587,7 +1979,14 @@ mod tests {
         });
     }
 
-    fn test_shutdown_timeout<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_shutdown_timeout<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1613,7 +2012,14 @@ mod tests {
         });
     }
 
-    fn test_shutdown_multiple_stop_calls<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_shutdown_multiple_stop_calls<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -1675,7 +2081,14 @@ mod tests {
         });
     }
 
-    fn test_unfulfilled_shutdown<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_unfulfilled_shutdown<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics,
     {
@@ -1695,7 +2108,14 @@ mod tests {
         });
     }
 
-    fn test_spawn_dedicated<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_dedicated<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
     {
@@ -1705,7 +2125,14 @@ mod tests {
         });
     }
 
-    fn test_spawn<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1743,7 +2170,14 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort_on_parent_abort<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_abort_on_parent_abort<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1778,7 +2212,14 @@ mod tests {
         });
     }
 
-    fn test_spawn_abort_on_parent_completion<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_abort_on_parent_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1810,7 +2251,14 @@ mod tests {
         });
     }
 
-    fn test_spawn_cascading_abort<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_cascading_abort<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1885,7 +2333,14 @@ mod tests {
         });
     }
 
-    fn test_child_survives_sibling_completion<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_child_survives_sibling_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1943,7 +2398,14 @@ mod tests {
         });
     }
 
-    fn test_spawn_clone_chain<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_clone_chain<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -1996,7 +2458,14 @@ mod tests {
         });
     }
 
-    fn test_spawn_sparse_clone_chain<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_sparse_clone_chain<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
     {
@@ -2033,15 +2502,23 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking<R: Runner>(runner: R, dedicated: bool)
-    where
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_spawn_blocking<R: Runner>(
+        #[case] runner: R,
+        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
+    ) where
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let context = if dedicated {
-                context.dedicated()
-            } else {
-                context.shared(true)
+            let context = match execution {
+                Execution::Dedicated => context.dedicated(),
+                Execution::Shared(blocking) => context.shared(blocking),
             };
 
             let handle = context.spawn(|_| async move { 42 });
@@ -2050,23 +2527,28 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking_panic<R: Runner>(runner: R, dedicated: bool)
-    where
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    #[should_panic(expected = "blocking task panicked")]
+    fn test_spawn_blocking_panic<R: Runner>(
+        #[case] runner: R,
+        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
+    ) where
         R::Context: Spawner + Clock,
     {
         runner.start(|context| async move {
-            if dedicated {
-                context.child("blocking").dedicated().spawn(|_| async move {
-                    panic!("blocking task panicked");
-                });
-            } else {
-                context
-                    .child("blocking")
-                    .shared(true)
-                    .spawn(|_| async move {
-                        panic!("blocking task panicked");
-                    });
-            }
+            let spawner = match execution {
+                Execution::Dedicated => context.child("blocking").dedicated(),
+                Execution::Shared(blocking) => context.child("blocking").shared(blocking),
+            };
+            spawner.spawn(|_| async move {
+                panic!("blocking task panicked");
+            });
 
             // Loop until panic
             loop {
@@ -2075,29 +2557,39 @@ mod tests {
         });
     }
 
-    fn test_spawn_blocking_panic_caught<R: Runner>(runner: R, dedicated: bool)
-    where
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::new(
+        deterministic::Config::default().with_catch_panics(true)
+    ))]
+    #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
+    fn test_spawn_blocking_panic_caught<R: Runner>(
+        #[case] runner: R,
+        #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
+    ) where
         R::Context: Spawner + Clock,
     {
         let result: Result<(), Error> = runner.start(|context| async move {
-            let handle = if dedicated {
-                context.child("blocking").dedicated().spawn(|_| async move {
-                    panic!("blocking task panicked");
-                })
-            } else {
-                context
-                    .child("blocking")
-                    .shared(true)
-                    .spawn(|_| async move {
-                        panic!("blocking task panicked");
-                    })
+            let spawner = match execution {
+                Execution::Dedicated => context.child("blocking").dedicated(),
+                Execution::Shared(blocking) => context.child("blocking").shared(blocking),
             };
+            let handle = spawner.spawn(|_| async move {
+                panic!("blocking task panicked");
+            });
             handle.await
         });
         assert!(matches!(result, Err(Error::Exited)));
     }
 
-    fn test_circular_reference_prevents_cleanup<R: Runner>(runner: R) {
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_circular_reference_prevents_cleanup<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
             let dropper = Arc::new(());
@@ -2151,7 +2643,14 @@ mod tests {
         });
     }
 
-    fn test_late_waker<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_late_waker<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics + Spawner,
     {
@@ -2214,7 +2713,45 @@ mod tests {
         drop(holder);
     }
 
-    fn test_metrics<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_factory_panic_finishes_running_metric<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Metrics,
+    {
+        // A task factory that unwinds must finish the running gauge and close its
+        // supervision node, even though the execution wrapper never received them.
+        runner.start(|context| async move {
+            let child = context.child("panicking_factory");
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                child.spawn(|_| -> std::future::Ready<()> { panic!("factory failed") })
+            }))
+            .err()
+            .expect("factory panic must reach its caller");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"factory failed"));
+
+            // The attempted spawn stays counted, but nothing is left running.
+            assert_eq!(count_running_tasks(&context, "panicking_factory"), 0);
+            let buffer = context.encode();
+            assert!(buffer.contains(
+                "runtime_tasks_spawned_total{name=\"panicking_factory\",kind=\"Task\",execution=\"Shared\"} 1"
+            ));
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_metrics<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2248,7 +2785,14 @@ mod tests {
         });
     }
 
-    fn test_metrics_with_attribute<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_metrics_with_attribute<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2321,19 +2865,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_with_attribute() {
-        let executor = deterministic::Runner::default();
-        test_metrics_with_attribute(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_with_attribute() {
-        let runner = tokio::Runner::default();
-        test_metrics_with_attribute(runner);
-    }
-
-    fn test_metrics_attribute_with_nested_label<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_metrics_attribute_with_nested_label<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2379,19 +2918,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_attribute_with_nested_label() {
-        let executor = deterministic::Runner::default();
-        test_metrics_attribute_with_nested_label(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_attribute_with_nested_label() {
-        let runner = tokio::Runner::default();
-        test_metrics_attribute_with_nested_label(runner);
-    }
-
-    fn test_metrics_attributes_isolated_between_contexts<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_metrics_attributes_isolated_between_contexts<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2440,25 +2974,20 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_attributes_isolated_between_contexts() {
-        let executor = deterministic::Runner::default();
-        test_metrics_attributes_isolated_between_contexts(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_attributes_isolated_between_contexts() {
-        let runner = tokio::Runner::default();
-        test_metrics_attributes_isolated_between_contexts(runner);
-    }
-
     /// Regression test for https://github.com/commonwarexyz/monorepo/issues/3485.
     ///
     /// Verifies the documented guarantee that runtime task metrics ignore context
     /// attributes: spawning with a varying `with_attribute` (as the marshaled
     /// consensus code does for each round) must not create per-value entries in
     /// `runtime_tasks_spawned` / `runtime_tasks_running`.
-    fn test_metrics_spawn_attribute_cardinality<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_metrics_spawn_attribute_cardinality<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
     {
@@ -2537,19 +3066,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_spawn_attribute_cardinality() {
-        let executor = deterministic::Runner::default();
-        test_metrics_spawn_attribute_cardinality(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_spawn_attribute_cardinality() {
-        let runner = tokio::Runner::default();
-        test_metrics_spawn_attribute_cardinality(runner);
-    }
-
-    fn test_metrics_attributes_sorted_deterministically<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_metrics_attributes_sorted_deterministically<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2596,19 +3120,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_attributes_sorted_deterministically() {
-        let executor = deterministic::Runner::default();
-        test_metrics_attributes_sorted_deterministically(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_attributes_sorted_deterministically() {
-        let runner = tokio::Runner::default();
-        test_metrics_attributes_sorted_deterministically(runner);
-    }
-
-    fn test_metrics_nested_labels_with_attributes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_metrics_nested_labels_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2711,19 +3230,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_nested_labels_with_attributes() {
-        let executor = deterministic::Runner::default();
-        test_metrics_nested_labels_with_attributes(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_nested_labels_with_attributes() {
-        let runner = tokio::Runner::default();
-        test_metrics_nested_labels_with_attributes(runner);
-    }
-
-    fn test_metrics_family_with_attributes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_metrics_family_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2819,19 +3333,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_metrics_family_with_attributes() {
-        let executor = deterministic::Runner::default();
-        test_metrics_family_with_attributes(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics_family_with_attributes() {
-        let runner = tokio::Runner::default();
-        test_metrics_family_with_attributes(runner);
-    }
-
-    fn test_register_and_encode<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_register_and_encode<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2850,19 +3359,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_register_and_encode() {
-        let executor = deterministic::Runner::default();
-        test_register_and_encode(executor);
-    }
-
-    #[test]
-    fn test_tokio_register_and_encode() {
-        let runner = tokio::Runner::default();
-        test_register_and_encode(runner);
-    }
-
-    fn test_register_drop_removes_metrics<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_register_drop_removes_metrics<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2898,19 +3402,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_register_drop_removes_metrics() {
-        let executor = deterministic::Runner::default();
-        test_register_drop_removes_metrics(executor);
-    }
-
-    #[test]
-    fn test_tokio_register_drop_removes_metrics() {
-        let runner = tokio::Runner::default();
-        test_register_drop_removes_metrics(runner);
-    }
-
-    fn test_register_with_attributes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_register_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2962,19 +3461,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_register_with_attributes() {
-        let executor = deterministic::Runner::default();
-        test_register_with_attributes(executor);
-    }
-
-    #[test]
-    fn test_tokio_register_with_attributes() {
-        let runner = tokio::Runner::default();
-        test_register_with_attributes(runner);
-    }
-
-    fn test_reregister_after_drop<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_reregister_after_drop<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -2995,19 +3489,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_reregister_after_drop() {
-        let executor = deterministic::Runner::default();
-        test_reregister_after_drop(executor);
-    }
-
-    #[test]
-    fn test_tokio_reregister_after_drop() {
-        let runner = tokio::Runner::default();
-        test_reregister_after_drop(runner);
-    }
-
-    fn test_register_clone_keeps_metric_alive<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_register_clone_keeps_metric_alive<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -3041,19 +3530,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_register_clone_keeps_metric_alive() {
-        let executor = deterministic::Runner::default();
-        test_register_clone_keeps_metric_alive(executor);
-    }
-
-    #[test]
-    fn test_tokio_register_clone_keeps_metric_alive() {
-        let runner = tokio::Runner::default();
-        test_register_clone_keeps_metric_alive(runner);
-    }
-
-    fn test_encode_single_eof<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_encode_single_eof<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -3088,19 +3572,14 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_encode_single_eof() {
-        let executor = deterministic::Runner::default();
-        test_encode_single_eof(executor);
-    }
-
-    #[test]
-    fn test_tokio_encode_single_eof() {
-        let runner = tokio::Runner::default();
-        test_encode_single_eof(runner);
-    }
-
-    fn test_family_with_attributes<R: Runner>(runner: R)
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_family_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
     {
@@ -3154,779 +3633,100 @@ mod tests {
         });
     }
 
-    #[test]
-    fn test_deterministic_family_with_attributes() {
-        let executor = deterministic::Runner::default();
-        test_family_with_attributes(executor);
-    }
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_strategy<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Strategizer + Metrics,
+    {
+        runner.start(|context| async move {
+            // Create a strategy with a parallelism of 4.
+            let strategy = context.child("pool").strategy(NZUsize!(4));
+            assert_eq!(strategy.manual().parallelism(), 4);
 
-    #[test]
-    fn test_tokio_family_with_attributes() {
-        let runner = tokio::Runner::default();
-        test_family_with_attributes(runner);
-    }
-
-    #[test]
-    fn test_deterministic_future() {
-        let runner = deterministic::Runner::default();
-        test_error_future(runner);
-    }
-
-    #[test]
-    fn test_deterministic_clock_sleep() {
-        let executor = deterministic::Runner::default();
-        test_clock_sleep(executor);
-    }
-
-    #[test]
-    fn test_deterministic_clock_sleep_until() {
-        let executor = deterministic::Runner::default();
-        test_clock_sleep_until(executor);
-    }
-
-    #[test]
-    fn test_deterministic_clock_sleep_until_far_future() {
-        let executor = deterministic::Runner::default();
-        test_clock_sleep_until_far_future(executor);
-    }
-
-    #[test]
-    fn test_deterministic_clock_timeout() {
-        let executor = deterministic::Runner::default();
-        test_clock_timeout(executor);
-    }
-
-    #[test]
-    fn test_deterministic_root_finishes() {
-        let executor = deterministic::Runner::default();
-        test_root_finishes(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_after_abort() {
-        let executor = deterministic::Runner::default();
-        test_spawn_after_abort(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_abort() {
-        let executor = deterministic::Runner::default();
-        test_spawn_abort(executor, false, false);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_deterministic_panic_aborts_root() {
-        let runner = deterministic::Runner::default();
-        test_panic_aborts_root(runner);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_deterministic_panic_aborts_root_caught() {
-        let cfg = deterministic::Config::default().with_catch_panics(true);
-        let runner = deterministic::Runner::new(cfg);
-        test_panic_aborts_root(runner);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_deterministic_panic_aborts_spawn() {
-        let executor = deterministic::Runner::default();
-        test_panic_aborts_spawn(executor);
-    }
-
-    #[test]
-    fn test_deterministic_panic_aborts_spawn_caught() {
-        let cfg = deterministic::Config::default().with_catch_panics(true);
-        let executor = deterministic::Runner::new(cfg);
-        test_panic_aborts_spawn_caught(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "boom")]
-    fn test_deterministic_multiple_panics() {
-        let executor = deterministic::Runner::default();
-        test_multiple_panics(executor);
-    }
-
-    #[test]
-    fn test_deterministic_multiple_panics_caught() {
-        let cfg = deterministic::Config::default().with_catch_panics(true);
-        let executor = deterministic::Runner::new(cfg);
-        test_multiple_panics_caught(executor);
-    }
-
-    #[test]
-    fn test_deterministic_select() {
-        let executor = deterministic::Runner::default();
-        test_select(executor);
-    }
-
-    #[test]
-    fn test_deterministic_select_loop() {
-        let executor = deterministic::Runner::default();
-        test_select_loop(executor);
-    }
-
-    #[test]
-    fn test_deterministic_storage_operations() {
-        let executor = deterministic::Runner::default();
-        test_storage_operations(executor);
-    }
-
-    #[test]
-    fn test_deterministic_blob_read_write() {
-        let executor = deterministic::Runner::default();
-        test_blob_read_write(executor);
-    }
-
-    #[test]
-    fn test_deterministic_blob_resize() {
-        let executor = deterministic::Runner::default();
-        test_blob_resize(executor);
-    }
-
-    #[test]
-    fn test_deterministic_many_partition_read_write() {
-        let executor = deterministic::Runner::default();
-        test_many_partition_read_write(executor);
-    }
-
-    #[test]
-    fn test_deterministic_blob_read_past_length() {
-        let executor = deterministic::Runner::default();
-        test_blob_read_past_length(executor);
-    }
-
-    #[test]
-    fn test_deterministic_blob_clone_and_concurrent_read() {
-        // Run test
-        let executor = deterministic::Runner::default();
-        test_blob_clone_and_concurrent_read(executor);
-    }
-
-    #[test]
-    fn test_deterministic_shutdown() {
-        let executor = deterministic::Runner::default();
-        test_shutdown(executor);
-    }
-
-    #[test]
-    fn test_deterministic_shutdown_multiple_signals() {
-        let executor = deterministic::Runner::default();
-        test_shutdown_multiple_signals(executor);
-    }
-
-    #[test]
-    fn test_deterministic_shutdown_timeout() {
-        let executor = deterministic::Runner::default();
-        test_shutdown_timeout(executor);
-    }
-
-    #[test]
-    fn test_deterministic_shutdown_multiple_stop_calls() {
-        let executor = deterministic::Runner::default();
-        test_shutdown_multiple_stop_calls(executor);
-    }
-
-    #[test]
-    fn test_deterministic_unfulfilled_shutdown() {
-        let executor = deterministic::Runner::default();
-        test_unfulfilled_shutdown(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_dedicated() {
-        let executor = deterministic::Runner::default();
-        test_spawn_dedicated(executor);
-    }
-
-    #[test]
-    fn test_deterministic_spawn() {
-        let runner = deterministic::Runner::default();
-        test_spawn(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_abort_on_parent_abort() {
-        let runner = deterministic::Runner::default();
-        test_spawn_abort_on_parent_abort(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_abort_on_parent_completion() {
-        let runner = deterministic::Runner::default();
-        test_spawn_abort_on_parent_completion(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_cascading_abort() {
-        let runner = deterministic::Runner::default();
-        test_spawn_cascading_abort(runner);
-    }
-
-    #[test]
-    fn test_deterministic_child_survives_sibling_completion() {
-        let runner = deterministic::Runner::default();
-        test_child_survives_sibling_completion(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_clone_chain() {
-        let runner = deterministic::Runner::default();
-        test_spawn_clone_chain(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_sparse_clone_chain() {
-        let runner = deterministic::Runner::default();
-        test_spawn_sparse_clone_chain(runner);
-    }
-
-    #[test]
-    fn test_deterministic_spawn_blocking() {
-        for dedicated in [false, true] {
-            let executor = deterministic::Runner::default();
-            test_spawn_blocking(executor, dedicated);
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "blocking task panicked")]
-    fn test_deterministic_spawn_blocking_panic() {
-        for dedicated in [false, true] {
-            let executor = deterministic::Runner::default();
-            test_spawn_blocking_panic(executor, dedicated);
-        }
-    }
-
-    #[test]
-    fn test_deterministic_spawn_blocking_panic_caught() {
-        for dedicated in [false, true] {
-            let cfg = deterministic::Config::default().with_catch_panics(true);
-            let executor = deterministic::Runner::new(cfg);
-            test_spawn_blocking_panic_caught(executor, dedicated);
-        }
-    }
-
-    #[test]
-    fn test_deterministic_spawn_blocking_abort() {
-        for (dedicated, blocking) in [(false, true), (true, false)] {
-            let executor = deterministic::Runner::default();
-            test_spawn_abort(executor, dedicated, blocking);
-        }
-    }
-
-    #[test]
-    fn test_deterministic_circular_reference_prevents_cleanup() {
-        let executor = deterministic::Runner::default();
-        test_circular_reference_prevents_cleanup(executor);
-    }
-
-    #[test]
-    fn test_deterministic_late_waker() {
-        let executor = deterministic::Runner::default();
-        test_late_waker(executor);
-    }
-
-    #[test]
-    fn test_deterministic_metrics() {
-        let executor = deterministic::Runner::default();
-        test_metrics(executor);
-    }
-
-    #[test]
-    fn test_deterministic_resolver() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Register DNS mappings
-            let ip1: IpAddr = "192.168.1.1".parse().unwrap();
-            let ip2: IpAddr = "192.168.1.2".parse().unwrap();
-            context.resolver_register("example.com", Some(vec![ip1, ip2]));
-
-            // Resolve registered hostname
-            let addrs = context.resolve("example.com").await.unwrap();
-            assert_eq!(addrs, vec![ip1, ip2]);
-
-            // Resolve unregistered hostname
-            let result = context.resolve("unknown.com").await;
-            assert!(matches!(result, Err(Error::ResolveFailed(_))));
-
-            // Remove mapping
-            context.resolver_register("example.com", None);
-            let result = context.resolve("example.com").await;
-            assert!(matches!(result, Err(Error::ResolveFailed(_))));
+            // Use the strategy to sum a vector of numbers.
+            let sum = strategy.fold(0..10000, || 0i32, |acc, n| acc + n, |a, b| a + b);
+            assert_eq!(sum, 10000 * 9999 / 2);
         });
     }
 
-    #[test]
-    fn test_tokio_error_future() {
-        let runner = tokio::Runner::default();
-        test_error_future(runner);
-    }
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_nested_strategy_runs_inline<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Strategizer + Metrics,
+    {
+        runner.start(|context| async move {
+            let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
 
-    #[test]
-    fn test_tokio_clock_sleep() {
-        let executor = tokio::Runner::default();
-        test_clock_sleep(executor);
-    }
+            let output = strategy
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .await;
 
-    #[test]
-    fn test_tokio_clock_sleep_until() {
-        let executor = tokio::Runner::default();
-        test_clock_sleep_until(executor);
-    }
-
-    #[test]
-    fn test_tokio_clock_sleep_until_far_future() {
-        let executor = tokio::Runner::default();
-        test_clock_sleep_until_far_future(executor);
-    }
-
-    #[test]
-    fn test_tokio_clock_timeout() {
-        let executor = tokio::Runner::default();
-        test_clock_timeout(executor);
-    }
-
-    #[test]
-    fn test_tokio_root_finishes() {
-        let executor = tokio::Runner::default();
-        test_root_finishes(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn_after_abort() {
-        let executor = tokio::Runner::default();
-        test_spawn_after_abort(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn_abort() {
-        let executor = tokio::Runner::default();
-        test_spawn_abort(executor, false, false);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_tokio_panic_aborts_root() {
-        let executor = tokio::Runner::default();
-        test_panic_aborts_root(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_tokio_panic_aborts_root_caught() {
-        let cfg = tokio::Config::default().with_catch_panics(true);
-        let executor = tokio::Runner::new(cfg);
-        test_panic_aborts_root(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "blah")]
-    fn test_tokio_panic_aborts_spawn() {
-        let executor = tokio::Runner::default();
-        test_panic_aborts_spawn(executor);
-    }
-
-    #[test]
-    fn test_tokio_panic_aborts_spawn_caught() {
-        let cfg = tokio::Config::default().with_catch_panics(true);
-        let executor = tokio::Runner::new(cfg);
-        test_panic_aborts_spawn_caught(executor);
-    }
-
-    #[test]
-    #[should_panic(expected = "boom")]
-    fn test_tokio_multiple_panics() {
-        let executor = tokio::Runner::default();
-        test_multiple_panics(executor);
-    }
-
-    #[test]
-    fn test_tokio_multiple_panics_caught() {
-        let cfg = tokio::Config::default().with_catch_panics(true);
-        let executor = tokio::Runner::new(cfg);
-        test_multiple_panics_caught(executor);
-    }
-
-    #[test]
-    fn test_tokio_select() {
-        let executor = tokio::Runner::default();
-        test_select(executor);
-    }
-
-    #[test]
-    fn test_tokio_select_loop() {
-        let executor = tokio::Runner::default();
-        test_select_loop(executor);
-    }
-
-    #[test]
-    fn test_tokio_storage_operations() {
-        let executor = tokio::Runner::default();
-        test_storage_operations(executor);
-    }
-
-    #[test]
-    fn test_tokio_blob_read_write() {
-        let executor = tokio::Runner::default();
-        test_blob_read_write(executor);
-    }
-
-    #[test]
-    fn test_tokio_blob_resize() {
-        let executor = tokio::Runner::default();
-        test_blob_resize(executor);
-    }
-
-    #[test]
-    fn test_tokio_many_partition_read_write() {
-        let executor = tokio::Runner::default();
-        test_many_partition_read_write(executor);
-    }
-
-    #[test]
-    fn test_tokio_blob_read_past_length() {
-        let executor = tokio::Runner::default();
-        test_blob_read_past_length(executor);
-    }
-
-    #[test]
-    fn test_tokio_blob_clone_and_concurrent_read() {
-        // Run test
-        let executor = tokio::Runner::default();
-        test_blob_clone_and_concurrent_read(executor);
-    }
-
-    #[test]
-    fn test_tokio_shutdown() {
-        let executor = tokio::Runner::default();
-        test_shutdown(executor);
-    }
-
-    #[test]
-    fn test_tokio_shutdown_multiple_signals() {
-        let executor = tokio::Runner::default();
-        test_shutdown_multiple_signals(executor);
-    }
-
-    #[test]
-    fn test_tokio_shutdown_timeout() {
-        let executor = tokio::Runner::default();
-        test_shutdown_timeout(executor);
-    }
-
-    #[test]
-    fn test_tokio_shutdown_multiple_stop_calls() {
-        let executor = tokio::Runner::default();
-        test_shutdown_multiple_stop_calls(executor);
-    }
-
-    #[test]
-    fn test_tokio_unfulfilled_shutdown() {
-        let executor = tokio::Runner::default();
-        test_unfulfilled_shutdown(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn_dedicated() {
-        let executor = tokio::Runner::default();
-        test_spawn_dedicated(executor);
-    }
-
-    #[test]
-    fn test_tokio_spawn() {
-        let runner = tokio::Runner::default();
-        test_spawn(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_abort_on_parent_abort() {
-        let runner = tokio::Runner::default();
-        test_spawn_abort_on_parent_abort(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_abort_on_parent_completion() {
-        let runner = tokio::Runner::default();
-        test_spawn_abort_on_parent_completion(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_cascading_abort() {
-        let runner = tokio::Runner::default();
-        test_spawn_cascading_abort(runner);
-    }
-
-    #[test]
-    fn test_tokio_child_survives_sibling_completion() {
-        let runner = tokio::Runner::default();
-        test_child_survives_sibling_completion(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_clone_chain() {
-        let runner = tokio::Runner::default();
-        test_spawn_clone_chain(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_sparse_clone_chain() {
-        let runner = tokio::Runner::default();
-        test_spawn_sparse_clone_chain(runner);
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking() {
-        for dedicated in [false, true] {
-            let executor = tokio::Runner::default();
-            test_spawn_blocking(executor, dedicated);
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "blocking task panicked")]
-    fn test_tokio_spawn_blocking_panic() {
-        for dedicated in [false, true] {
-            let executor = tokio::Runner::default();
-            test_spawn_blocking_panic(executor, dedicated);
-        }
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking_panic_caught() {
-        for dedicated in [false, true] {
-            let cfg = tokio::Config::default().with_catch_panics(true);
-            let executor = tokio::Runner::new(cfg);
-            test_spawn_blocking_panic_caught(executor, dedicated);
-        }
-    }
-
-    #[test]
-    fn test_tokio_spawn_blocking_abort() {
-        for (dedicated, blocking) in [(false, true), (true, false)] {
-            let executor = tokio::Runner::default();
-            test_spawn_abort(executor, dedicated, blocking);
-        }
-    }
-
-    #[test]
-    fn test_tokio_circular_reference_prevents_cleanup() {
-        let executor = tokio::Runner::default();
-        test_circular_reference_prevents_cleanup(executor);
-    }
-
-    #[test]
-    fn test_tokio_late_waker() {
-        let executor = tokio::Runner::default();
-        test_late_waker(executor);
-    }
-
-    #[test]
-    fn test_tokio_metrics() {
-        let executor = tokio::Runner::default();
-        test_metrics(executor);
-    }
-
-    #[test]
-    fn test_tokio_process_rss_metric() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            loop {
-                // Wait for RSS metric to be available
-                let metrics = context.encode();
-                if !metrics.contains("runtime_process_rss") {
-                    context.sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-
-                // Verify the RSS value is eventually populated (greater than 0)
-                for line in metrics.lines() {
-                    if line.starts_with("runtime_process_rss")
-                        && !line.starts_with("runtime_process_rss{")
-                    {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if parts.len() >= 2 {
-                            let rss_value: i64 =
-                                parts[1].parse().expect("Failed to parse RSS value");
-                            if rss_value > 0 {
-                                return;
-                            }
-                        }
-                    }
-                }
-            }
+            assert_eq!(output, vec![1, 2]);
         });
     }
 
-    #[test]
-    fn test_tokio_telemetry() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            // Define the server address
-            let address = SocketAddr::from_str("127.0.0.1:8000").unwrap();
-
-            // Configure telemetry
-            tokio::telemetry::init(
-                context.child("metrics"),
-                tokio::telemetry::Logs {
-                    level: Level::INFO,
-                    json: false,
-                },
-                Some(address),
-                None,
-            );
-
-            // Register a test metric
-            let counter: Counter<u64> = Counter::default();
-            let _registered = context.register("test_counter", "Test counter", counter.clone());
-            counter.inc();
-
-            // Helper functions to parse HTTP response
-            async fn read_line<St: Stream>(stream: &mut St) -> Result<String, Error> {
-                let mut line = Vec::new();
-                loop {
-                    let received = stream.recv(1).await?;
-                    let byte = received.coalesce().as_ref()[0];
-                    if byte == b'\n' {
-                        if line.last() == Some(&b'\r') {
-                            line.pop(); // Remove trailing \r
-                        }
-                        break;
-                    }
-                    line.push(byte);
-                }
-                String::from_utf8(line).map_err(|_| Error::ReadFailed)
-            }
-
-            async fn read_headers<St: Stream>(
-                stream: &mut St,
-            ) -> Result<HashMap<String, String>, Error> {
-                let mut headers = HashMap::new();
-                loop {
-                    let line = read_line(stream).await?;
-                    if line.is_empty() {
-                        break;
-                    }
-                    let parts: Vec<&str> = line.splitn(2, ": ").collect();
-                    if parts.len() == 2 {
-                        headers.insert(parts[0].to_string(), parts[1].to_string());
-                    }
-                }
-                Ok(headers)
-            }
-
-            async fn read_body<St: Stream>(
-                stream: &mut St,
-                content_length: usize,
-            ) -> Result<String, Error> {
-                let received = stream.recv(content_length).await?;
-                String::from_utf8(received.coalesce().into()).map_err(|_| Error::ReadFailed)
-            }
-
-            // Simulate a client connecting to the server
-            let client_handle = context.child("client").spawn(move |context| async move {
-                let (mut sink, mut stream) = loop {
-                    match context.dial(address).await {
-                        Ok((sink, stream)) => break (sink, stream),
-                        Err(e) => {
-                            // The client may be polled before the server is ready, that's alright!
-                            error!(err =?e, "failed to connect");
-                            context.sleep(Duration::from_millis(10)).await;
-                        }
-                    }
-                };
-
-                // Send a GET request to the server
-                let request = format!(
-                    "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
-                );
-                sink.send(Bytes::from(request)).await.unwrap();
-
-                // Read and verify the HTTP status line
-                let status_line = read_line(&mut stream).await.unwrap();
-                assert_eq!(status_line, "HTTP/1.1 200 OK");
-
-                // Read and parse headers
-                let headers = read_headers(&mut stream).await.unwrap();
-                println!("Headers: {headers:?}");
-                let content_length = headers
-                    .get("content-length")
-                    .unwrap()
-                    .parse::<usize>()
-                    .unwrap();
-
-                // Read and verify the body
-                let body = read_body(&mut stream, content_length).await.unwrap();
-                assert!(body.contains("test_counter_total 1"));
-            });
-
-            // Wait for the client task to complete
-            client_handle.await.unwrap();
-        });
-    }
-
-    #[test]
-    fn test_tokio_resolver() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            let addrs = context.resolve("localhost").await.unwrap();
-            assert!(!addrs.is_empty());
-            for addr in addrs {
-                assert!(
-                    addr == IpAddr::V4(Ipv4Addr::LOCALHOST)
-                        || addr == IpAddr::V6(Ipv6Addr::LOCALHOST)
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn test_create_thread_pool_tokio() {
-        let executor = tokio::Runner::default();
-        executor.start(|context| async move {
-            // Create a thread pool with 4 threads
-            let pool = context
-                .child("pool")
-                .create_thread_pool(NZUsize!(4))
-                .unwrap();
-
-            // Create a vector of numbers
-            let v: Vec<_> = (0..10000).collect();
-
-            // Use the thread pool to sum the numbers
-            pool.install(|| {
-                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
-            });
-        });
-    }
-
-    #[test]
-    fn test_create_thread_pool_deterministic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            // Create a thread pool with 4 threads
-            let pool = context
-                .child("pool")
-                .create_thread_pool(NZUsize!(4))
-                .unwrap();
-
-            // Create a vector of numbers
-            let v: Vec<_> = (0..10000).collect();
-
-            // Use the thread pool to sum the numbers
-            pool.install(|| {
-                assert_eq!(v.par_iter().sum::<i32>(), 10000 * 9999 / 2);
-            });
-        });
-    }
-
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default(), 4096, 64)]
+    #[case::deterministic_custom(
+        deterministic::Runner::new(
+            deterministic::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        ),
+        64,
+        8
+    )]
+    #[case::tokio(tokio::Runner::default(), 4096, 64)]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default(), 4096, 64)
+    )]
+    #[case::tokio_custom(
+        tokio::Runner::new(
+            tokio::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        ),
+        64,
+        8
+    )]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring_custom(
+        iouring::Runner::new(
+            iouring::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        ),
+        64,
+        8
+    ))]
     fn test_buffer_pooler<R: Runner>(
-        runner: R,
-        expected_network_max_per_class: u32,
-        expected_storage_max_per_class: u32,
+        #[case] runner: R,
+        #[case] expected_network_max_per_class: u32,
+        #[case] expected_storage_max_per_class: u32,
     ) where
         R::Context: BufferPooler,
     {
@@ -3940,46 +3740,20 @@ mod tests {
             assert!(storage_buf.capacity() >= 4096);
 
             // Verify pools have expected configurations
-            assert_eq!(
-                context.network_buffer_pool().config().max_per_class.get(),
-                expected_network_max_per_class
+            assert!(
+                context
+                    .network_buffer_pool()
+                    .config()
+                    .size_classes()
+                    .all(|class| class.max_buffers.get() == expected_network_max_per_class)
             );
-            assert_eq!(
-                context.storage_buffer_pool().config().max_per_class.get(),
-                expected_storage_max_per_class
+            assert!(
+                context
+                    .storage_buffer_pool()
+                    .config()
+                    .size_classes()
+                    .all(|class| class.max_buffers.get() == expected_storage_max_per_class)
             );
         });
-    }
-
-    #[test]
-    fn test_deterministic_buffer_pooler() {
-        test_buffer_pooler(deterministic::Runner::default(), 4096, 64);
-
-        let runner = deterministic::Runner::new(
-            deterministic::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        );
-        test_buffer_pooler(runner, 64, 8);
-    }
-
-    #[test]
-    fn test_tokio_buffer_pooler() {
-        test_buffer_pooler(tokio::Runner::default(), 4096, 64);
-
-        let runner = tokio::Runner::new(
-            tokio::Config::default()
-                .with_network_buffer_pool_config(
-                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
-                )
-                .with_storage_buffer_pool_config(
-                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
-                ),
-        );
-        test_buffer_pooler(runner, 64, 8);
     }
 }

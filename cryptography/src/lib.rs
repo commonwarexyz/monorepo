@@ -1,5 +1,11 @@
 //! Generate keys, sign arbitrary messages, and deterministically verify signatures.
 //!
+//! # Randomness
+//!
+//! Cryptographic operations that accept an RNG require a cryptographically secure and
+//! unpredictable source unless documented otherwise. A weak or predictable RNG may compromise
+//! security.
+//!
 //! # Status
 //!
 //! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.
@@ -15,12 +21,15 @@ extern crate alloc;
 
 // Modules containing #[macro_export] macros must use verbose cfg.
 // See rust-lang/rust#52234: macro-expanded macro_export macros cannot be referenced by absolute paths.
-#[cfg(not(any(
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // BETA
+#[cfg(all(
+    feature = "bls12381",
+    not(any(
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    ))
+))] // BETA
 pub mod bls12381;
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -44,6 +53,12 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
 
+    #[cfg(any(test, feature = "fuzz"))]
+    pub mod fuzz;
+
+    pub mod keccak256;
+    pub use crate::keccak256::{CoreKeccak256, Keccak256};
+
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
@@ -52,13 +67,16 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    use alloc::{sync::Arc, vec::Vec};
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
-    use rand::SeedableRng as _;
     use rand_chacha::ChaCha20Rng;
-    use rand_core::CryptoRngCore;
+    use rand_core::{CryptoRng, SeedableRng as _};
+    #[cfg(feature = "std")]
+    use std::{sync::Arc, vec::Vec};
 
     pub mod secret;
     pub use crate::secret::Secret;
@@ -108,7 +126,7 @@ commonware_macros::stability_scope!(BETA {
         /// This function is insecure and should only be used for examples
         /// and testing.
         fn from_seed(seed: u64) -> Self {
-            Self::random(&mut ChaCha20Rng::seed_from_u64(seed))
+            Self::random(ChaCha20Rng::seed_from_u64(seed))
         }
     }
 
@@ -155,8 +173,11 @@ commonware_macros::stability_scope!(BETA {
         /// The type of public keys that this verifier can accept.
         type PublicKey: PublicKey;
 
-        /// Create a new batch verifier.
-        fn new() -> Self;
+        /// Create a new batch verifier with capacity for at least `capacity` items.
+        ///
+        /// The capacity is a hint: more than `capacity` items may be added, and
+        /// implementations may ignore it.
+        fn new(capacity: usize) -> Self;
 
         /// Append item to the batch.
         ///
@@ -177,7 +198,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Verify all items added to the batch.
         ///
-        /// Returns `true` if all items are valid, `false` otherwise.
+        /// Returns `false` if no items were added or any item is invalid.
         ///
         /// # Why Randomness?
         ///
@@ -188,7 +209,7 @@ commonware_macros::stability_scope!(BETA {
         /// (`c_1 + d` and `c_2 - d`).
         ///
         /// You can read more about this [here](https://ethresear.ch/t/security-of-bls-batch-verification/10748#the-importance-of-randomness-4).
-        fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
+        fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool;
     }
 
     /// Specializes the [commonware_utils::Array] trait with the Copy trait for cryptographic digests
@@ -213,6 +234,14 @@ commonware_macros::stability_scope!(BETA {
         /// If many objects with [Digest]s are related (map to some higher-level
         /// group [Digest]), you should also implement [Committable].
         fn digest(&self) -> Self::Digest;
+    }
+
+    impl<T: Digestible> Digestible for Arc<T> {
+        type Digest = T::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.as_ref().digest()
+        }
     }
 
     /// An object that can produce a commitment of itself.
@@ -245,35 +274,44 @@ commonware_macros::stability_scope!(BETA {
     /// to use in STARK/SNARK proofs, or provide different levels of security (with some
     /// performance/size penalty).
     ///
-    /// This trait is required to implement the `Clone` trait because it is often
-    /// part of a struct that is cloned. In practice, implementations do not actually
-    /// clone the hasher state but users should not rely on this behavior and call `reset`
-    /// after cloning.
-    pub trait Hasher: Default + Clone + Send + Sync + 'static {
+    /// Hashers are cheap to construct: callers that need a fresh hasher should
+    /// create one with [`Default`] rather than duplicating an existing instance.
+    pub trait Hasher: Default + Send + Sync + 'static {
         /// Digest generated by the hasher.
         type Digest: Digest;
 
-        /// Create a new, empty hasher.
-        fn new() -> Self {
-            Self::default()
-        }
-
-        /// Append message to previously recorded data.
-        fn update(&mut self, message: &[u8]) -> &mut Self;
-
-        /// Hash all recorded data and reset the hasher
-        /// to the initial state.
-        fn finalize(&mut self) -> Self::Digest;
-
-        /// Reset the hasher without generating a hash.
+        /// Hash the concatenation of `parts` in a single shot.
         ///
-        /// This function does not need to be called after `finalize`.
-        fn reset(&mut self) -> &mut Self;
+        /// This is the preferred entrypoint for hashing data that is fully
+        /// available up-front. Implementations are free to specialize this for
+        /// small, fixed-shape inputs (e.g. hashing a pair of digests) to avoid
+        /// the overhead of the streaming machinery.
+        fn hash(parts: &[&[u8]]) -> Self::Digest;
 
-        /// Hash a single message with a one-time-use hasher.
-        fn hash(message: &[u8]) -> Self::Digest {
-            Self::new().update(message).finalize()
+        /// Hash two messages, each given as a concatenation of parts, in a
+        /// single shot.
+        ///
+        /// Must be equivalent to hashing each message with [`Hasher::hash`].
+        fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest);
+
+        /// Hash multiple independent byte slices.
+        ///
+        /// Returns one digest per input in the same order. Inputs may be empty,
+        /// differ in length, or overlap. Output position `i` is equivalent to
+        /// `Self::hash(&[messages[i].as_ref()])`.
+        fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+            messages
+                .iter()
+                .map(|message| Self::hash(&[message.as_ref()]))
+                .collect()
         }
+
+        /// Append `bytes` to the hasher's running state.
+        fn update(&mut self, bytes: &[u8]) -> &mut Self;
+
+        /// Consume the hasher, returning a freshly-reset hasher alongside the
+        /// digest of everything written so far.
+        fn finalize(self) -> (Self, Self::Digest);
     }
 });
 
@@ -284,13 +322,13 @@ mod tests {
     use commonware_utils::test_rng;
 
     fn test_validate<C: PrivateKey>() {
-        let private_key = C::random(&mut test_rng());
+        let private_key = C::random(test_rng());
         let public_key = private_key.public_key();
-        assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
+        assert!(C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).is_ok());
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
-        let result = C::PublicKey::decode(vec![0; 1024].as_ref());
+        let result = C::PublicKey::decode(vec![0; 1024]);
         assert!(result.is_err());
     }
 
@@ -400,46 +438,55 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_validate() {
         test_validate::<bls12381::PrivateKey>();
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_validate_invalid_public_key() {
         test_validate_invalid_public_key::<bls12381::PrivateKey>();
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_sign_and_verify() {
         test_sign_and_verify::<bls12381::PrivateKey>();
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_sign_and_verify_wrong_message() {
         test_sign_and_verify_wrong_message::<bls12381::PrivateKey>();
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_sign_and_verify_wrong_namespace() {
         test_sign_and_verify_wrong_namespace::<bls12381::PrivateKey>();
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_empty_namespace() {
         test_empty_namespace::<bls12381::PrivateKey>();
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_signature_determinism() {
         test_signature_determinism::<bls12381::PrivateKey>();
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_invalid_signature_publickey_pair() {
         test_invalid_signature_publickey_pair::<bls12381::PrivateKey>();
     }
 
     #[test]
+    #[cfg(feature = "bls12381")]
     fn test_bls12381_len() {
         assert_eq!(bls12381::PublicKey::SIZE, 48);
         assert_eq!(bls12381::Signature::SIZE, 96);
@@ -539,80 +586,39 @@ mod tests {
 
     fn test_hasher_multiple_runs<H: Hasher>() {
         // Generate initial hash
-        let mut hasher = H::new();
+        let mut hasher = H::default();
         hasher.update(b"hello world");
-        let digest = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
+        let (hasher, digest) = hasher.finalize();
+        assert!(H::Digest::decode(commonware_codec::Copying(digest.as_ref())).is_ok());
         assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
 
-        // Reuse hasher without reset
+        // Reuse the reset hasher returned by finalize
+        let mut hasher = hasher;
         hasher.update(b"hello world");
-        let digest_again = hasher.finalize();
-        assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
+        let (hasher, digest_again) = hasher.finalize();
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_again.as_ref())).is_ok());
         assert_eq!(digest, digest_again);
 
-        // Reuse hasher with reset
-        hasher.update(b"hello mars");
-        hasher.reset();
-        hasher.update(b"hello world");
-        let digest_reset = hasher.finalize();
-        assert!(H::Digest::decode(digest_reset.as_ref()).is_ok());
-        assert_eq!(digest, digest_reset);
+        // Hash via the one-shot API
+        let digest_oneshot = H::hash(&[b"hello world"]);
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_oneshot.as_ref())).is_ok());
+        assert_eq!(digest, digest_oneshot);
 
         // Hash different data
+        let mut hasher = hasher;
         hasher.update(b"hello mars");
-        let digest_mars = hasher.finalize();
-        assert!(H::Digest::decode(digest_mars.as_ref()).is_ok());
+        let (_, digest_mars) = hasher.finalize();
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_mars.as_ref())).is_ok());
         assert_ne!(digest, digest_mars);
     }
 
-    fn test_hasher_multiple_updates<H: Hasher>() {
-        // Generate initial hash
-        let mut hasher = H::new();
-        hasher.update(b"hello");
-        hasher.update(b" world");
-        let digest = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
-
-        // Generate hash in oneshot
-        let mut hasher = H::new();
-        hasher.update(b"hello world");
-        let digest_oneshot = hasher.finalize();
-        assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
-        assert_eq!(digest, digest_oneshot);
-    }
-
-    fn test_hasher_empty_input<H: Hasher>() {
-        let mut hasher = H::new();
-        let digest = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
-    }
-
-    fn test_hasher_large_input<H: Hasher>() {
-        let mut hasher = H::new();
-        let data = vec![1; 1024];
-        hasher.update(&data);
-        let digest = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
+    #[test]
+    fn test_keccak256_hasher_multiple_runs() {
+        test_hasher_multiple_runs::<Keccak256>();
     }
 
     #[test]
     fn test_sha256_hasher_multiple_runs() {
         test_hasher_multiple_runs::<Sha256>();
-    }
-
-    #[test]
-    fn test_sha256_hasher_multiple_updates() {
-        test_hasher_multiple_updates::<Sha256>();
-    }
-
-    #[test]
-    fn test_sha256_hasher_empty_input() {
-        test_hasher_empty_input::<Sha256>();
-    }
-
-    #[test]
-    fn test_sha256_hasher_large_input() {
-        test_hasher_large_input::<Sha256>();
     }
 }

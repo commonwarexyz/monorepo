@@ -1,18 +1,22 @@
 use crate::{
     merkle::{Family, Location},
-    qmdb::{any::value::ValueEncoding, operation::Committable},
+    qmdb::{
+        any::value::ValueEncoding,
+        operation::{Committable, Floored},
+    },
 };
-use commonware_codec::{Encode as _, Error as CodecError, Read, Write};
+use commonware_codec::{Buf, Encode as _, Error as CodecError, Read, Write};
 use commonware_formatting::hex;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use core::fmt::Display;
 
 pub(crate) mod fixed;
 pub(crate) mod variable;
 
-// Context byte prefixes for identifying the operation type.
-const COMMIT_CONTEXT: u8 = 0;
-const APPEND_CONTEXT: u8 = 1;
+/// Wire tag for [Operation::Commit].
+pub const COMMIT_CONTEXT: u8 = 0;
+/// Wire tag for [Operation::Append].
+pub const APPEND_CONTEXT: u8 = 1;
 
 /// Delegates Operation-level codec (Write, Read) to the value encoding.
 ///
@@ -68,6 +72,12 @@ impl<F: Family, V: Codec> Write for Operation<F, V> {
 impl<F: Family, V: Codec> Committable for Operation<F, V> {
     fn is_commit(&self) -> bool {
         matches!(self, Self::Commit(_, _))
+    }
+}
+
+impl<F: Family, V: ValueEncoding> Floored<F> for Operation<F, V> {
+    fn has_floor(&self) -> Option<Location<F>> {
+        self.has_floor()
     }
 }
 

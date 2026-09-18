@@ -1,7 +1,7 @@
 use crate::reed_solomon::{
+    DecoderResult, EncoderResult, Error, RecoveryDecoderResult,
     engine::DefaultEngine,
     rate::{DefaultRate, DefaultRateDecoder, DefaultRateEncoder, Rate, RateDecoder, RateEncoder},
-    DecoderResult, EncoderResult, Error, RecoveryDecoderResult,
 };
 
 // ======================================================================

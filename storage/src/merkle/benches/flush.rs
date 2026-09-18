@@ -9,19 +9,18 @@
 //! destroyed) every `cycles` flushes so the backing journal doesn't grow without bound over a run.
 //! `cycles` scales down as `n` grows so the peak on-disk size stays roughly constant.
 
-use commonware_cryptography::{sha256, Sha256};
+use commonware_cryptography::{Sha256, sha256};
 use commonware_math::algebra::Random as _;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
+    BufferPooler, Supervisor as _,
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _,
 };
-use commonware_storage::merkle::{self, full, Bagging::ForwardFold, Family};
-use commonware_utils::{NZUsize, NZU16, NZU64};
-use criterion::{criterion_group, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
+use commonware_storage::merkle::{self, Bagging::ForwardFold, Family, full};
+use commonware_utils::{NZU16, NZU64, NZUsize, test_rng};
+use criterion::{Criterion, criterion_group};
 use std::{
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     time::{Duration, Instant},
@@ -33,6 +32,7 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const PAGE_SIZE: NonZeroU16 = NZU16!(16384);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
 /// Rebuild the structure after roughly this many flushed nodes so the journal stays bounded on
 /// disk over a run (~32 bytes/node, so the live journal stays around 64 MiB).
@@ -49,6 +49,7 @@ fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential>
         metadata_partition: format!("metadata-bench-flush-{family}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: Sequential,
         page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
     }
@@ -63,14 +64,14 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
             b.to_async(&runner).iter_custom(move |iters| async move {
                 let ctx = context::get::<Context>();
                 let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-                let mut rng = StdRng::seed_from_u64(0);
+                let mut rng = test_rng();
                 let mut total = Duration::ZERO;
 
                 // `iters` is the number of flushes to time. Rebuild a fresh structure every
                 // `cycles` flushes so the journal it appends to never grows without bound.
                 let mut remaining = iters;
                 while remaining > 0 {
-                    let merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
+                    let mut merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
                         ctx.child(family),
                         &hasher,
                         merkle_cfg(&ctx, family),
@@ -86,11 +87,11 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
                             batch = batch.add(&hasher, &sha256::Digest::random(&mut rng));
                         }
                         let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
-                        merkle.apply_batch(&batch).unwrap();
+                        merkle = merkle.apply_batch(&batch).unwrap();
 
                         // Timed: flush the freshly applied nodes to the journal.
                         let start = Instant::now();
-                        merkle.flush().await.unwrap();
+                        merkle = merkle.flush().await.unwrap();
                         total += start.elapsed();
                     }
 

@@ -14,10 +14,11 @@ documentation = "https://docs.rs/commonware-cryptography"
 workspace = true
 
 [dependencies]
+ahash = { workspace = true, features = ["no-rng"] }
 anyhow = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 blake3 = { workspace = true, features = ["zeroize"] }
-blst = { workspace = true, features = ["no-threads"] }
+blst = { workspace = true, optional = true, features = ["no-threads"] }
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true
@@ -31,6 +32,7 @@ ctutils.workspace = true
 curve25519-dalek.workspace = true
 ecdsa.workspace = true
 fixedbitset.workspace = true
+hashbrown.workspace = true
 num-rational = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
 once_cell = { workspace = true, features = ["alloc", "race"] }
@@ -39,6 +41,7 @@ rand.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true
 sha2.workspace = true
+sha3.workspace = true
 thiserror.workspace = true
 x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
@@ -56,8 +59,14 @@ default-features = false
 features = ["alloc"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom]
-# Enable "js" feature when WASM is target
-version = "0.2.15"
+# Enable the JS backend for transitive dependencies that use getrandom on WASM.
+version = "0.4.3"
+features = ["wasm_js"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom_v2]
+# Enable the JS backend for transitive dependencies that still use getrandom 0.2 on WASM.
+package = "getrandom"
+version = "0.2"
 features = ["js"]
 
 [dev-dependencies]
@@ -76,6 +85,7 @@ bench = false
 
 [features]
 default = [ "std" ]
+bls12381 = [ "dep:blst" ]
 blake3-parallel = [ "blake3/rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
@@ -88,11 +98,12 @@ arbitrary = [
 ]
 fuzz = [ "arbitrary", "std" ]
 std = [
+	"ahash/std",
 	"anyhow?/std",
 	"blake3/std",
+	"bls12381",
 	"bytes/std",
 	"chacha20poly1305/getrandom",
-	"chacha20poly1305/std",
 	"commonware-codec/std",
 	"commonware-formatting/std",
 	"commonware-macros/std",
@@ -104,6 +115,7 @@ std = [
 	"ecdsa/std",
 	"fixedbitset/std",
 	"getrandom/std",
+	"getrandom_v2/std",
 	"num-rational",
 	"num-traits",
 	"num-traits?/std",
@@ -112,7 +124,6 @@ std = [
 	"rand/std",
 	"rand/std_rng",
 	"rand_chacha/std",
-	"rand_core/std",
 	"thiserror/std",
 	"zeroize/std",
 ]
@@ -121,6 +132,7 @@ std = [
 name = "bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
+required-features = [ "std" ]
 
 [[bench]]
 name = "ed25519"
@@ -161,3 +173,9 @@ path = "src/handshake/benches/bench.rs"
 name = "bloomfilter"
 harness = false
 path = "src/bloomfilter/benches/bench.rs"
+
+[[bench]]
+name = "bulletproofs"
+harness = false
+path = "src/zk/bulletproofs/benches/bench.rs"
+required-features = [ "std" ]

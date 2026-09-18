@@ -13,7 +13,7 @@
 //! ## Create Deployer Artifacts
 //!
 //! ```bash
-//! cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.xlarge --storage-size 10 --storage-class gp3 --worker-threads 4 --message-size 1024 --message-backlog 16384 --mailbox-size 16384 --dashboard dashboard.json --output assets
+//! cargo run --bin setup -- --peers 3 --bootstrappers 1 --regions us-west-2,us-east-1,eu-west-1 --instance-type c7g.xlarge --storage-size 10 --storage-class gp3 --worker-threads 4 --message-size 1024 --message-rate 16384 --mailbox-size 16384 --dashboard dashboard.json --output assets
 //! ```
 //!
 //! _We use 3 peers (instead of the 2 required to test connection performance) to demonstrate that peer discovery works._
@@ -103,7 +103,7 @@
 )]
 
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 
 /// Configuration for flood.
 #[derive(Deserialize, Serialize)]
@@ -114,7 +114,7 @@ pub struct Config {
     pub bootstrappers: Vec<String>,
     pub worker_threads: usize,
     pub message_size: u32,
-    pub message_backlog: usize,
+    pub message_rate: NonZeroU32,
     pub mailbox_size: NonZeroUsize,
     pub instrument: bool,
 }

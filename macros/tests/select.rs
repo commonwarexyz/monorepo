@@ -44,7 +44,7 @@ mod tests {
     struct MockSignaler;
 
     impl MockSignaler {
-        pub fn stopped(&self) -> impl Future<Output = ()> {
+        pub fn stopped(&self) -> impl Future<Output = ()> + use<> {
             futures::future::pending()
         }
     }
@@ -56,7 +56,7 @@ mod tests {
     struct MockSignalerResolves;
 
     impl MockSignalerResolves {
-        pub fn stopped(&self) -> impl Future<Output = ()> {
+        pub fn stopped(&self) -> impl Future<Output = ()> + use<> {
             futures::future::ready(())
         }
     }

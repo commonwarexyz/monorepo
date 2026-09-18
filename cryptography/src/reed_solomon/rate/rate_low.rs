@@ -1,9 +1,41 @@
 use crate::reed_solomon::{
-    engine::{self, Engine, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES},
-    rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
     DecoderResult, EncoderResult, Error,
+    engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, tables},
+    rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
 use core::marker::PhantomData;
+use fixedbitset::FixedBitSet;
+
+// Bound the quadratic calculation and its stack storage.
+const DIRECT_EVALUATION_LIMIT: usize = 512;
+
+/// Compute log erasure factors directly from the known positions in a small decoding domain.
+/// This avoids evaluating the erasure polynomial over the entire field.
+fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &FixedBitSet) {
+    let chunk_size = original_count.next_power_of_two();
+    let mut known = [0; DIRECT_EVALUATION_LIMIT];
+    let mut count = 0;
+    for i in 0..erasures.len() {
+        // Padded original positions are known zeros, even though no shard was received.
+        if received[i] || (original_count..chunk_size).contains(&i) {
+            known[count] = i;
+            count += 1;
+        }
+    }
+
+    // The product over the nonzero field elements is one. The erased-position
+    // product is therefore the reciprocal of the known-position product.
+    let log = &tables::get_exp_log().log;
+    for (i, erasure) in erasures.iter_mut().enumerate() {
+        // At most DIRECT_EVALUATION_LIMIT terms fit comfortably in u32.
+        let mut sum = 0u32;
+        for &j in &known[..count] {
+            // log[0] is GF_MODULUS, so the self term vanishes modulo GF_MODULUS.
+            sum += u32::from(log[i ^ j]);
+        }
+        *erasure = GF_MODULUS - (sum % u32::from(GF_MODULUS)) as GfElement;
+    }
+}
 
 // ======================================================================
 // LowRate - PUBLIC
@@ -184,25 +216,29 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
 
         // ERASURE LOCATIONS
 
-        let mut erasures = [0; GF_ORDER];
-
-        for i in 0..original_count {
-            if !received[i] {
-                erasures[i] = 1;
+        let mut direct_erasures;
+        let mut full_erasures;
+        let erasures = if recovery_end <= DIRECT_EVALUATION_LIMIT {
+            direct_erasures = [0; DIRECT_EVALUATION_LIMIT];
+            let erasures = &mut direct_erasures[..recovery_end];
+            eval_direct(erasures, original_count, received);
+            erasures
+        } else {
+            full_erasures = [0; GF_ORDER];
+            for i in 0..original_count {
+                if !received[i] {
+                    full_erasures[i] = 1;
+                }
             }
-        }
-
-        for i in chunk_size..recovery_end {
-            if !received[i] {
-                erasures[i] = 1;
+            for i in chunk_size..recovery_end {
+                if !received[i] {
+                    full_erasures[i] = 1;
+                }
             }
-        }
-
-        erasures[recovery_end..].fill(1);
-
-        // EVALUATE POLYNOMIAL
-
-        E::eval_poly(&mut erasures, GF_ORDER);
+            full_erasures[recovery_end..].fill(1);
+            E::eval_poly(&mut full_erasures, GF_ORDER);
+            &mut full_erasures[..recovery_end]
+        };
 
         // MULTIPLY SHARDS
 
@@ -337,7 +373,48 @@ impl<E: Engine> LowRateDecoder<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::test_util;
+    use crate::reed_solomon::{engine::NoSimd, test_util};
+    use commonware_utils::test_rng;
+    use rand::RngExt as _;
+
+    #[test]
+    fn direct_matches_transform() {
+        let mut rng = test_rng();
+        for (original_count, recovery_count) in [
+            (1usize, 1),
+            (3, 5),
+            (7, 13),
+            (34, 66),
+            (84, 166),
+            (128, 384),
+        ] {
+            let chunk_size = original_count.next_power_of_two();
+            let end = chunk_size + recovery_count;
+            for pattern in 0..18 {
+                let mut received = FixedBitSet::with_capacity(end.next_power_of_two());
+                let mut expected = [1; GF_ORDER];
+                expected[original_count..chunk_size].fill(0);
+                for i in (0..original_count).chain(chunk_size..end) {
+                    // Include both extremes as well as mixed and surplus shard sets.
+                    if pattern == 0 || (pattern > 1 && rng.random()) {
+                        received.insert(i);
+                        expected[i] = 0;
+                    }
+                }
+                NoSimd::eval_poly(&mut expected, GF_ORDER);
+                let mut actual = [0; DIRECT_EVALUATION_LIMIT];
+                eval_direct(&mut actual[..end], original_count, &received);
+                for i in 0..end {
+                    // Zero and GF_MODULUS represent the same logarithmic exponent.
+                    assert_eq!(
+                        actual[i] % GF_MODULUS,
+                        expected[i] % GF_MODULUS,
+                        "originals={original_count} recoveries={recovery_count} pattern={pattern} i={i}"
+                    );
+                }
+            }
+        }
+    }
 
     // ============================================================
     // ROUNDTRIPS - SINGLE ROUND
@@ -508,21 +585,17 @@ mod tests {
 
     mod low_rate {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{LowRate, Rate},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         #[test]
         fn decoder() {
-            assert!(LowRate::<NoSimd>::decoder(
-                4096,
-                61440,
-                SHARD_CHUNK_BYTES,
-                NoSimd::new(),
-                None
-            )
-            .is_ok());
+            assert!(
+                LowRate::<NoSimd>::decoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                    .is_ok()
+            );
 
             assert_eq!(
                 LowRate::<NoSimd>::decoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
@@ -536,14 +609,10 @@ mod tests {
 
         #[test]
         fn encoder() {
-            assert!(LowRate::<NoSimd>::encoder(
-                4096,
-                61440,
-                SHARD_CHUNK_BYTES,
-                NoSimd::new(),
-                None
-            )
-            .is_ok());
+            assert!(
+                LowRate::<NoSimd>::encoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                    .is_ok()
+            );
 
             assert_eq!(
                 LowRate::<NoSimd>::encoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
@@ -593,9 +662,9 @@ mod tests {
 
     mod low_rate_encoder {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{LowRateEncoder, RateEncoder},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         // ==================================================
@@ -651,9 +720,9 @@ mod tests {
 
     mod low_rate_decoder {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{LowRateDecoder, RateDecoder},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         // ==================================================

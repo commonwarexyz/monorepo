@@ -58,12 +58,11 @@
 use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
 use commonware_codec::{DecodeExt, Encode as _, Error as CodecError, FixedSize};
 use commonware_cryptography::{
-    handshake::{
-        self, dial_end, dial_start, listen_end, listen_start, Ack, Context,
-        Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck,
-    },
-    transcript::Transcript,
     Signer,
+    handshake::{
+        self, Ack, Context, Error as HandshakeError, RecvCipher, SendCipher, Syn, SynAck, dial_end,
+        dial_start, listen_end, listen_start,
+    },
 };
 use commonware_formatting::hex;
 use commonware_macros::select;
@@ -72,7 +71,7 @@ use commonware_runtime::{
     Stream,
 };
 use commonware_utils::SystemTimeExt;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
 
@@ -80,6 +79,9 @@ const TAG_SIZE: u32 = {
     assert!(handshake::TAG_SIZE <= u32::MAX as usize);
     handshake::TAG_SIZE as u32
 };
+
+/// Maximum supported plaintext message size.
+pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
 
 /// Errors that can occur when interacting with a stream.
 #[derive(Error, Debug)]
@@ -139,6 +141,8 @@ pub struct Config<S> {
 
     /// Maximum message size (in bytes). Prevents memory exhaustion DoS attacks.
     ///
+    /// The largest supported value is [`MAX_SIZE`].
+    ///
     /// Fixed-size handshake frames use their protocol-defined sizes instead of
     /// inheriting this limit.
     pub max_message_size: u32,
@@ -184,7 +188,7 @@ where
 
 /// Establishes an authenticated connection to a peer as the dialer.
 /// Returns sender and receiver for encrypted communication.
-pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream, O: Sink>(
+pub async fn dial<R: BufferPooler + CryptoRng + Clock, S: Signer, I: Stream, O: Sink>(
     ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
@@ -205,7 +209,7 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
         let (state, syn) = dial_start(
             ctx,
             Context::new(
-                &Transcript::new(&config.namespace),
+                &config.namespace,
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -244,7 +248,7 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
 /// Accepts an authenticated connection from a peer as the listener.
 /// Returns the peer's identity, sender, and receiver for encrypted communication.
 pub async fn listen<
-    R: BufferPooler + CryptoRngCore + Clock,
+    R: BufferPooler + CryptoRng + Clock,
     S: Signer,
     I: Stream,
     O: Sink,
@@ -271,7 +275,7 @@ pub async fn listen<
         let (state, syn_ack) = listen_start(
             ctx,
             Context::new(
-                &Transcript::new(&config.namespace),
+                &config.namespace,
                 current_time,
                 ok_timestamps,
                 config.signing_key,
@@ -392,7 +396,7 @@ impl<O: Sink> Sender<O> {
         let mut chunks = Vec::with_capacity(lower.max(1));
         let mut batch = Vec::new();
         let mut batch_total = 0usize;
-        let max_batch_size = self.pool.config().max_size.get();
+        let max_batch_size = self.pool.config().max_size().get();
 
         for buf in bufs {
             let msg = buf.into();
@@ -529,22 +533,27 @@ impl<I: Stream> Receiver<I> {
 mod test {
     use super::*;
     use commonware_codec::varint::UInt;
-    use commonware_cryptography::{ed25519::PrivateKey, Signer};
+    use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{
-        deterministic, mocks, BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _,
-        Spawner as _, Supervisor as _,
+        BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
+        Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{sync::Mutex, NZUsize};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
+
+    #[test]
+    fn test_max_message_size_bounds() {
+        assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
+    }
 
     fn transport_config(signing_key: PrivateKey) -> Config<PrivateKey> {
         Config {
@@ -799,8 +808,7 @@ mod test {
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
                     .with_pool_min_size(256)
-                    .with_min_size(NZUsize!(256))
-                    .with_max_size(NZUsize!(256)),
+                    .with_size_class_range(NZUsize!(256), NZUsize!(256), NZU32!(4096)),
             ),
         );
         executor.start(|context| async move {
@@ -870,8 +878,7 @@ mod test {
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
                     .with_pool_min_size(128)
-                    .with_min_size(NZUsize!(128))
-                    .with_max_size(NZUsize!(128)),
+                    .with_size_class_range(NZUsize!(128), NZUsize!(128), NZU32!(4096)),
             ),
         );
         executor.start(|context| async move {
@@ -1056,7 +1063,7 @@ mod test {
             let (_, syn) = dial_start(
                 context.child("dialer"),
                 Context::new(
-                    &Transcript::new(&dialer_config.namespace),
+                    &dialer_config.namespace,
                     current_time,
                     ok_timestamps.clone(),
                     dialer_config.signing_key.clone(),
@@ -1066,7 +1073,7 @@ mod test {
             let (_, syn_ack) = listen_start(
                 context.child("listener"),
                 Context::new(
-                    &Transcript::new(&dialer_config.namespace),
+                    &dialer_config.namespace,
                     current_time,
                     ok_timestamps,
                     listener_crypto,

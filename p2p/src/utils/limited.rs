@@ -105,11 +105,11 @@ where
         recipients: Recipients<S::PublicKey>,
     ) -> Result<CheckedSender<'_, S>, SystemTime> {
         let mut state = self.state.lock();
-        if matches!(&recipients, Recipients::All) {
-            if let Some(peers) = state.peer_subscription.next().now_or_never().flatten() {
-                state.known_peers = peers;
-                state.rate_limit.retain_recent();
-            }
+        if matches!(&recipients, Recipients::All)
+            && let Some(peers) = state.peer_subscription.next().now_or_never().flatten()
+        {
+            state.known_peers = peers;
+            state.rate_limit.retain_recent();
         }
 
         let recipients = match recipients {
@@ -219,9 +219,9 @@ impl<'a, S: UnlimitedSender> crate::CheckedSender for CheckedSender<'a, S> {
 mod tests {
     use super::*;
     use crate::CheckedSender as _;
-    use commonware_cryptography::{ed25519, Signer as _};
-    use commonware_runtime::{deterministic::Runner, IoBuf, Quota, Runner as _};
-    use commonware_utils::{channel::ring, NZUsize, NZU32};
+    use commonware_cryptography::{Signer as _, ed25519};
+    use commonware_runtime::{IoBuf, Quota, Runner as _, deterministic::Runner};
+    use commonware_utils::{NZU32, NZUsize, channel::ring};
     use futures::SinkExt;
 
     type PublicKey = ed25519::PublicKey;

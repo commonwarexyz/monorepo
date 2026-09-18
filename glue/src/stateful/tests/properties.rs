@@ -1,7 +1,7 @@
 use super::common::MockValidatorState;
 use crate::simulate::{processed::ProcessedHeight, property::Property, tracker::ProgressTracker};
 use commonware_consensus::marshal::core::Variant;
-use commonware_cryptography::{ed25519, sha256, Digestible};
+use commonware_cryptography::{Digestible, ed25519, sha256};
 use std::{future::Future, pin::Pin};
 
 /// Post-run property: all validators agree on the finalized block at `height`.
@@ -246,12 +246,10 @@ where
                 }
             }
 
-            Err(
-                format!(
-                    "no validator re-entered state sync after a crash and then advanced beyond the synced height; observed [{}]",
-                    observed.join(", "),
-                ),
-            )
+            Err(format!(
+                "no validator re-entered state sync after a crash and then advanced beyond the synced height; observed [{}]",
+                observed.join(", "),
+            ))
         })
     }
 }

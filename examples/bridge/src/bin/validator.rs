@@ -1,29 +1,31 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    application, APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX, application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
-        self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine, Floor,
+        self, Engine, Floor, ForwardPolicy, SkipPolicy, elector::RoundRobin,
+        scheme::bls12381_threshold::standard::Scheme,
     },
     types::{Epoch, ViewDelta},
 };
 use commonware_cryptography::{
+    Sha256, Signer as _,
     bls12381::primitives::{
         group,
         sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
-    ed25519, Sha256, Signer as _,
+    ed25519,
 };
 use commonware_formatting::from_hex;
-use commonware_p2p::{authenticated, Manager as _};
+use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
-    buffer::paged::CacheRef, tokio, Network, Quota, Runner, Supervisor as _, ThreadPooler,
+    Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::encrypted::{dial, Config as StreamConfig};
-use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
+use commonware_stream::encrypted::{Config as StreamConfig, dial};
+use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
@@ -95,6 +97,7 @@ fn main() {
         })
         .try_collect()
         .expect("public keys are unique");
+    let max_peers_per_set = authenticated::peer_set_limit(&validators, &signer.public_key());
 
     // Configure bootstrappers (if provided)
     let bootstrappers = matches.get_many::<String>("bootstrappers");
@@ -123,7 +126,7 @@ fn main() {
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Sharing<MinSig> = Sharing::decode_cfg(
-        identity.as_ref(),
+        identity,
         &(NZU32!(validators.len() as u32), ModeVersion::v0()),
     )
     .expect("Identity not well-formed");
@@ -131,7 +134,7 @@ fn main() {
         .get_one::<String>("share")
         .expect("Please provide share");
     let share = from_hex(share).expect("Share not well-formed");
-    let share = group::Share::decode(share.as_ref()).expect("Share not well-formed");
+    let share = group::Share::decode(share).expect("Share not well-formed");
 
     // Configure indexer
     let indexer = matches
@@ -149,8 +152,8 @@ fn main() {
         .get_one::<String>("other-public")
         .expect("Please provide other public");
     let other_public = from_hex(other_public).expect("Other identity not well-formed");
-    let other_public = <MinSig as Variant>::Public::decode(other_public.as_ref())
-        .expect("Other identity not well-formed");
+    let other_public =
+        <MinSig as Variant>::Public::decode(other_public).expect("Other identity not well-formed");
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
@@ -173,6 +176,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
+        max_peers_per_set,
         1024 * 1024, // 1MB
     );
 
@@ -199,36 +203,23 @@ fn main() {
 
         // Register consensus channels
         //
-        // If you want to maximize the number of views per second, increase the rate limit
-        // for this channel.
-        let (vote_sender, vote_receiver) = network.register(
-            0,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (certificate_sender, certificate_receiver) = network.register(
-            1,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
-        let (resolver_sender, resolver_receiver) = network.register(
-            2,
-            Quota::per_second(NZU32!(10)),
-            256, // 256 messages in flight
-        );
+        // To support more views per second, increase the rate.
+        let message_rate = Quota::per_second(NZU32!(10));
+        let (vote_sender, vote_receiver) = network.register(0, message_rate);
+        let (certificate_sender, certificate_receiver) = network.register(1, message_rate);
+        let (resolver_sender, resolver_receiver) = network.register(2, message_rate);
 
         // Initialize application
-        let strategy = context.create_strategy(NZUsize!(2)).unwrap();
+        let strategy = context.strategy(NZUsize!(2));
         let consensus_namespace = union(APPLICATION_NAMESPACE, CONSENSUS_SUFFIX);
         let this_network =
             Scheme::signer(&consensus_namespace, validators.clone(), identity, share)
                 .expect("share must be in participants");
         let other_network = Scheme::certificate_verifier(&consensus_namespace, other_public);
-        let (application, scheme, mailbox) = application::Application::new(
+        let (application, scheme, mailbox) = application::Application::<_, Sha256, _, _>::new(
             context.child("application"),
             application::Config {
                 indexer,
-                hasher: Sha256::default(),
                 this_network,
                 other_network,
                 mailbox_size: NZUsize!(1024),
@@ -255,12 +246,15 @@ fn main() {
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
-                activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
-                fetch_concurrent: NZUsize!(32),
+                view_retention: ViewDelta::new(10),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(11),
+                    budget: simplex::SkipBudget::Participants,
+                },
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
-                forwarding: simplex::ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
+                track_historical_votes: false,
             },
         );
 

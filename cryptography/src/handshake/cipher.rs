@@ -1,6 +1,6 @@
 use super::error::Error;
 use crate::Secret;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::vec::Vec;
 use zeroize::Zeroizing;
 
@@ -46,7 +46,7 @@ impl CounterNonce {
 
 cfg_if::cfg_if! {
     if #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
-        use aws_lc_rs::aead::{self, LessSafeKey, UnboundKey, CHACHA20_POLY1305};
+        use aws_lc_rs::aead::{self, CHACHA20_POLY1305, LessSafeKey, UnboundKey};
 
         struct Cipher(LessSafeKey);
 
@@ -83,7 +83,7 @@ cfg_if::cfg_if! {
             }
         }
     } else {
-        use chacha20poly1305::{aead::AeadInPlace, ChaCha20Poly1305, KeyInit as _};
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit as _, aead::AeadInOut};
 
         struct Cipher(ChaCha20Poly1305);
 
@@ -99,7 +99,7 @@ cfg_if::cfg_if! {
             ) -> Result<[u8; TAG_SIZE], Error> {
                 let tag = self
                     .0
-                    .encrypt_in_place_detached(nonce.into(), &[], data)
+                    .encrypt_inout_detached(nonce.into(), &[], data.into())
                     .map_err(|_| Error::EncryptionFailed)?;
                 Ok(tag.into())
             }
@@ -114,10 +114,10 @@ cfg_if::cfg_if! {
                     .try_into()
                     .map_err(|_| Error::DecryptionFailed)?;
                 self.0
-                    .decrypt_in_place_detached(
+                    .decrypt_inout_detached(
                         nonce.into(),
                         &[],
-                        &mut data[..plaintext_len],
+                        (&mut data[..plaintext_len]).into(),
                         &tag.into(),
                     )
                     .map_err(|_| Error::DecryptionFailed)?;
@@ -135,7 +135,7 @@ pub struct SendCipher {
 
 impl SendCipher {
     /// Creates a new sending cipher with a random key.
-    pub fn new(mut rng: impl CryptoRngCore) -> Self {
+    pub fn new(mut rng: impl CryptoRng) -> Self {
         let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
         rng.fill_bytes(key_bytes.as_mut());
         Self {
@@ -172,7 +172,7 @@ pub struct RecvCipher {
 
 impl RecvCipher {
     /// Creates a new receiving cipher with a random key.
-    pub fn new(mut rng: impl CryptoRngCore) -> Self {
+    pub fn new(mut rng: impl CryptoRng) -> Self {
         let mut key_bytes = Zeroizing::new([0u8; KEY_SIZE_BYTES]);
         rng.fill_bytes(key_bytes.as_mut());
         Self {
@@ -232,12 +232,12 @@ impl RecvCipher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::{test_rng, test_rng_seeded};
+    use commonware_utils::{TestRng, test_rng};
 
     #[test]
     fn test_send_recv_roundtrip() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         let plaintext = b"hello world";
         let ciphertext = send.send(plaintext).unwrap();
@@ -249,8 +249,8 @@ mod tests {
 
     #[test]
     fn test_recv_wrong_key_fails() {
-        let mut send = SendCipher::new(&mut test_rng_seeded(0));
-        let mut recv = RecvCipher::new(&mut test_rng_seeded(1));
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(TestRng::new(1));
 
         let ciphertext = send.send(b"hello").unwrap();
         assert!(matches!(
@@ -280,8 +280,8 @@ mod tests {
 
     #[test]
     fn test_send_recv_in_place_roundtrip() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         let plaintext = b"hello world";
         let mut buf = vec![0u8; plaintext.len() + TAG_SIZE];
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_recv_in_place_ciphertext_too_short() {
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         // Buffer smaller than tag size
         let mut buf = vec![0u8; TAG_SIZE - 1];
@@ -313,8 +313,8 @@ mod tests {
 
     #[test]
     fn test_send_in_place_recv_compatibility() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         let plaintext = b"cross-api test";
         let mut buf = vec![0u8; plaintext.len() + TAG_SIZE];
@@ -330,8 +330,8 @@ mod tests {
 
     #[test]
     fn test_send_recv_in_place_compatibility() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         let plaintext = b"cross-api test";
         let mut ciphertext = send.send(plaintext).unwrap();
@@ -343,8 +343,8 @@ mod tests {
 
     #[test]
     fn test_nonce_sync_after_truncated_recv() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         // Send message (sender nonce: 0 -> 1)
         let ciphertext = send.send(b"message 1").unwrap();
@@ -359,8 +359,8 @@ mod tests {
 
     #[test]
     fn test_nonce_sync_after_corrupted_recv() {
-        let mut send = SendCipher::new(&mut test_rng());
-        let mut recv = RecvCipher::new(&mut test_rng());
+        let mut send = SendCipher::new(test_rng());
+        let mut recv = RecvCipher::new(test_rng());
 
         // Send message (sender nonce: 0 -> 1)
         let ciphertext = send.send(b"message 1").unwrap();

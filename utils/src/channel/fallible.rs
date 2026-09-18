@@ -382,9 +382,10 @@ mod tests {
     fn test_send_or_reserve_lossy_success() {
         let (tx, mut rx) = mpsc::channel(1);
 
-        assert!(tx
-            .send_or_reserve_lossy(TestMessage::FireAndForget(42))
-            .is_none());
+        assert!(
+            tx.send_or_reserve_lossy(TestMessage::FireAndForget(42))
+                .is_none()
+        );
         assert!(matches!(rx.try_recv(), Ok(TestMessage::FireAndForget(42))));
     }
 
@@ -393,9 +394,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<TestMessage>(1);
         drop(rx);
 
-        assert!(tx
-            .send_or_reserve_lossy(TestMessage::FireAndForget(42))
-            .is_none());
+        assert!(
+            tx.send_or_reserve_lossy(TestMessage::FireAndForget(42))
+                .is_none()
+        );
     }
 
     #[test_async]

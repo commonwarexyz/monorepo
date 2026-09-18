@@ -1,16 +1,16 @@
 use crate::qmdb::{
     any::{
-        operation::{update::sealed::Sealed, Update as UpdateTrait},
-        value::{FixedEncoding, ValueEncoding, VariableEncoding},
         FixedValue, VariableValue,
+        operation::{Update as UpdateTrait, update::sealed::Sealed},
+        value::{FixedEncoding, ValueEncoding, VariableEncoding},
     },
     operation::Key,
 };
 use commonware_codec::{
-    Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    Buf, Encode as _, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
 use commonware_formatting::hex;
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::Array;
 use std::fmt;
 
@@ -36,12 +36,27 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = ();
 
+    /// An unordered delete just emits a `Delete` at the resolved location.
+    const STAGES_DELETES: bool = true;
+
+    /// An unordered staged read carries no cached payload, so ancestor-diff resolutions can
+    /// be staged directly.
+    const STAGES_ANCESTORS: Option<()> = Some(());
+
     fn key(&self) -> &K {
         &self.0
     }
 
+    fn into_key(self) -> K {
+        self.0
+    }
+
     fn value(&self) -> &V::Value {
         &self.1
+    }
+
+    fn into_value(self) -> V::Value {
+        self.1
     }
 
     fn cached(&self) {}

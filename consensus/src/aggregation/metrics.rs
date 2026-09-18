@@ -1,6 +1,6 @@
 use commonware_runtime::{
-    telemetry::metrics::{histogram, status, Counter, Gauge, MetricsExt as _},
     Metrics as RuntimeMetrics,
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _, histogram, status},
 };
 
 /// Metrics for the [super::Engine].

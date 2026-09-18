@@ -1,9 +1,19 @@
-//! Hex literal macro implementation.
+#![doc(hidden)]
+
+//! Implementation of the [`crate::hex!`] macro.
 //!
 //! Modified from the [`hex-literal`](https://github.com/RustCrypto/utils/tree/master/hex-literal)
 //! crate to allow `0x` prefixes.
 //!
 //! Vendored from [`alloy-primitives`](https://github.com/alloy-rs/core/tree/main/crates/primitives).
+//!
+//! This module is public only so that macro expansions can access it from downstream crates.
+//! Callers must not invoke its functions directly. For accepted input, the macro maintains these
+//! invariants:
+//!
+//! - Each literal has at most one leading `0x` or `0X` prefix removed.
+//! - The decoded length is computed from the same prefix-free literals that are decoded.
+//! - The computed length equals the number of bytes represented by those literals.
 
 const fn next_hex_char(string: &[u8], mut pos: usize) -> Option<(u8, usize)> {
     while pos < string.len() {
@@ -34,9 +44,10 @@ const fn next_byte(string: &[u8], pos: usize) -> Option<(u8, usize)> {
     Some(((half1 << 4) + half2, pos))
 }
 
-/// Strips the `0x` prefix from a hex string.
+/// Removes at most one leading `0x` or `0X` prefix from `string`.
 ///
-/// This function is an implementation detail and SHOULD NOT be called directly!
+/// All other input is returned unchanged. This function is an implementation detail and callers
+/// must not invoke it directly.
 #[doc(hidden)]
 pub const fn strip_hex_prefix(string: &[u8]) -> &[u8] {
     if let [b'0', b'x' | b'X', rest @ ..] = string {
@@ -46,9 +57,16 @@ pub const fn strip_hex_prefix(string: &[u8]) -> &[u8] {
     }
 }
 
-/// Compute length of a byte array which will be decoded from the strings.
+/// Computes the number of bytes represented by `strings`.
 ///
-/// This function is an implementation detail and SHOULD NOT be called directly!
+/// Each string must be prefix-free and contain an even number of hexadecimal digits after spaces,
+/// tabs, carriage returns, and newlines are ignored. This function is an implementation detail and
+/// callers must not invoke it directly.
+///
+/// # Panics
+///
+/// Panics if a string contains anything other than a hexadecimal digit, space, tab, carriage
+/// return, or newline, or if it contains an odd number of hexadecimal digits.
 #[doc(hidden)]
 pub const fn len(strings: &[&[u8]]) -> usize {
     let mut i = 0;
@@ -64,9 +82,17 @@ pub const fn len(strings: &[&[u8]]) -> usize {
     len
 }
 
-/// Decode hex strings into a byte array of pre-computed length.
+/// Decodes `strings` into a byte array with a precomputed length.
 ///
-/// This function is an implementation detail and SHOULD NOT be called directly!
+/// `LEN` must equal [`len(strings)`](len). The [`crate::hex!`] macro guarantees this by computing
+/// `LEN` from the same prefix-free strings passed to this function. This function is an
+/// implementation detail and callers must not invoke it directly.
+///
+/// # Panics
+///
+/// Panics if a string contains anything other than a hexadecimal digit, space, tab, carriage
+/// return, or newline, if it contains an odd number of hexadecimal digits, or if `LEN` differs from
+/// the number of decoded bytes.
 #[doc(hidden)]
 pub const fn decode<const LEN: usize>(strings: &[&[u8]]) -> [u8; LEN] {
     let mut i = 0;
@@ -87,8 +113,23 @@ pub const fn decode<const LEN: usize>(strings: &[&[u8]]) -> [u8; LEN] {
     buf
 }
 
-/// Macro for converting sequence of string literals containing hex-encoded data
-/// into an array of bytes.
+/// Converts string literals containing hexadecimal data into a byte array.
+///
+/// Each literal may begin with `0x` or `0X`; when present, the prefix must be its first two
+/// characters. Spaces, tabs, carriage returns, and newlines are ignored. Each literal must contain
+/// an even number of hexadecimal digits after its optional prefix and whitespace are removed.
+///
+/// The array length is computed from the same prefix-free literals that are decoded, so the output
+/// contains exactly the bytes represented by the input.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_formatting::hex;
+///
+/// const BYTES: [u8; 4] = hex!("0x12 34" "0Xab cd");
+/// assert_eq!(BYTES, [0x12, 0x34, 0xab, 0xcd]);
+/// ```
 #[macro_export]
 macro_rules! hex {
     ($($s:literal)*) => {const {
@@ -125,9 +166,31 @@ mod tests {
     }
 
     #[test]
-    fn can_strip_prefix() {
+    fn optional_prefix() {
+        assert_eq!(hex!("1a2b3c"), [0x1a, 0x2b, 0x3c]);
         assert_eq!(hex!("0x1a2b3c"), [0x1a, 0x2b, 0x3c]);
-        assert_eq!(hex!("0xa1" "0xb2" "0xc3"), [0xa1, 0xb2, 0xc3]);
+        assert_eq!(hex!("0X1a2b3c"), [0x1a, 0x2b, 0x3c]);
+        assert_eq!(hex!("0xa1" "b2" "0Xc3"), [0xa1, 0xb2, 0xc3]);
+    }
+
+    #[test]
+    fn strips_exactly_one_prefix() {
+        assert_eq!(super::strip_hex_prefix(b"0x12"), b"12");
+        assert_eq!(super::strip_hex_prefix(b"0X12"), b"12");
+        assert_eq!(super::strip_hex_prefix(b"0x0X12"), b"0X12");
+        assert_eq!(super::strip_hex_prefix(b"x012"), b"x012");
+    }
+
+    #[test]
+    fn computed_length_matches_decoded_bytes() {
+        const STRINGS: &[&[u8]] = &[
+            super::strip_hex_prefix(b"0x12 34"),
+            super::strip_hex_prefix(b"0Xab\ncd"),
+        ];
+        const LEN: usize = super::len(STRINGS);
+
+        assert_eq!(LEN, 4);
+        assert_eq!(super::decode::<LEN>(STRINGS), [0x12, 0x34, 0xab, 0xcd]);
     }
 
     #[test]

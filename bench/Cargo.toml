@@ -1,0 +1,34 @@
+[package]
+name = "commonware-bench"
+edition.workspace = true
+publish = true
+autobins = false
+version.workspace = true
+license.workspace = true
+description = "Abstract benchmark workloads."
+readme = "README.md"
+homepage.workspace = true
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/bench"
+documentation = "https://docs.rs/commonware-bench"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+commonware-macros.workspace = true
+glob.workspace = true
+gungraun = { workspace = true, optional = true, features = ["client_requests"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+shlex.workspace = true
+toml.workspace = true
+
+[[bin]]
+name = "benchmark-tracker"
+path = "src/bin/main.rs"
+
+[features]
+default = []
+gungraun = [ "dep:gungraun" ]

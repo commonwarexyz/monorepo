@@ -17,12 +17,13 @@ workspace = true
 arbitrary.workspace = true
 commonware-formatting = { workspace = true, features = ["std"] }
 commonware-macros.workspace = true
-rand = { workspace = true, features = ["std", "std_rng"] }
+rand = { workspace = true, features = ["sys_rng"] }
 rand_chacha.workspace = true
 rand_core.workspace = true
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
+rstest.workspace = true
 
 [lib]
 bench = false

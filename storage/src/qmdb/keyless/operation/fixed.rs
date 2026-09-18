@@ -1,24 +1,21 @@
 use crate::{
-    merkle::{Family, Location},
+    merkle::Family,
     qmdb::{
-        any::{value::FixedEncoding, FixedValue},
-        keyless::operation::{Codec, Operation, APPEND_CONTEXT, COMMIT_CONTEXT},
+        any::{FixedValue, value::FixedEncoding},
+        keyless::operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Codec, Operation},
+        operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
     },
 };
 use commonware_codec::{
+    Buf, Error as CodecError, FixedSize, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
-    Error as CodecError, FixedSize, ReadExt as _, Write,
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 
-/// Fixed padded operation size: `Commit` is always the larger variant.
-///
-/// - Append: 1 (context) + V::SIZE + padding
-/// - Commit: 1 (context) + 1 (option tag) + V::SIZE + u64::SIZE (floor)
-///
-/// Total = 2 + V::SIZE + u64::SIZE. Append pads to match.
+/// Fixed padded operation size: `Commit` is always the larger variant, so the uniform size is the
+/// commit size, which `Append` pads to match.
 const fn op_size<V: FixedSize>() -> usize {
-    2 + V::SIZE + u64::SIZE
+    commit_fixed_operation_size::<V>()
 }
 
 impl<V: FixedValue> Codec for FixedEncoding<V> {
@@ -35,13 +32,7 @@ impl<V: FixedValue> Codec for FixedEncoding<V> {
             }
             Operation::Commit(metadata, floor) => {
                 COMMIT_CONTEXT.write(buf);
-                if let Some(metadata) = metadata {
-                    true.write(buf);
-                    metadata.write(buf);
-                } else {
-                    buf.put_bytes(0, 1 + V::SIZE);
-                }
-                buf.put_slice(&floor.as_u64().to_be_bytes());
+                write_commit_fixed(metadata, *floor, buf);
             }
         }
     }
@@ -60,20 +51,7 @@ impl<V: FixedValue> Codec for FixedEncoding<V> {
                 Ok(Operation::Append(value))
             }
             COMMIT_CONTEXT => {
-                let is_some = bool::read(buf)?;
-                let metadata = if is_some {
-                    Some(V::read(buf)?)
-                } else {
-                    ensure_zeros(buf, V::SIZE)?;
-                    None
-                };
-                let floor = Location::<F>::new(u64::read(buf)?);
-                if !floor.is_valid() {
-                    return Err(CodecError::Invalid(
-                        "storage::qmdb::keyless::operation::fixed::Operation",
-                        "commit floor location overflow",
-                    ));
-                }
+                let (metadata, floor) = read_commit_fixed(buf)?;
                 Ok(Operation::Commit(metadata, floor))
             }
             e => Err(CodecError::InvalidEnum(e)),
@@ -88,7 +66,7 @@ impl<F: Family, V: FixedValue> FixedSize for Operation<F, FixedEncoding<V>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr;
+    use crate::merkle::{Location, mmr};
     use commonware_codec::{DecodeExt, Encode, FixedSize};
     use commonware_utils::sequence::U64;
 
@@ -136,7 +114,7 @@ mod tests {
         let mut buf = vec![0u8; Op::SIZE];
         buf[0] = 0xFF;
         assert!(matches!(
-            Op::decode(buf.as_ref()).unwrap_err(),
+            Op::decode(buf).unwrap_err(),
             CodecError::InvalidEnum(0xFF)
         ));
     }
@@ -148,7 +126,7 @@ mod tests {
         let mut buf: Vec<u8> = op.encode().to_vec();
         // Padding is the last byte (part of the floor gap).
         *buf.last_mut().unwrap() = 0x01;
-        assert!(Op::decode(buf.as_ref()).is_err());
+        assert!(Op::decode(buf).is_err());
     }
 
     #[test]
@@ -156,7 +134,7 @@ mod tests {
         let op = Op::Append(U64::new(1));
         let buf = op.encode();
         // One byte short.
-        assert!(Op::decode(&buf[..buf.len() - 1]).is_err());
+        assert!(Op::decode(buf.slice(..buf.len() - 1)).is_err());
     }
 
     #[test]
@@ -179,7 +157,20 @@ mod tests {
         let floor_offset = Op::SIZE - u64::SIZE;
         buf[floor_offset..].copy_from_slice(&floor_bytes);
         assert!(matches!(
-            Op::decode(buf.as_ref()).unwrap_err(),
+            Op::decode(buf).unwrap_err(),
+            CodecError::Invalid(_, _)
+        ));
+    }
+
+    #[test]
+    fn commit_nonzero_metadata_bytes_rejected() {
+        // Construct a Commit buffer by hand with option tag = false (None metadata) but a
+        // nonzero byte in the metadata region.
+        let mut buf = vec![0u8; Op::SIZE];
+        buf[0] = COMMIT_CONTEXT;
+        buf[2] = 0x01;
+        assert!(matches!(
+            Op::decode(buf).unwrap_err(),
             CodecError::Invalid(_, _)
         ));
     }

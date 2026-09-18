@@ -1,17 +1,16 @@
 use commonware_cryptography::{
+    Signer as _,
     bls12381::{
-        dkg::feldman_desmedt::{deal, Dealer, Info, Logs, Player},
-        primitives::variant::MinSig,
+        dkg::feldman_desmedt::{Dealer, Info, Logs, Player, Reveal, deal},
+        primitives::{sharing::Mode, variant::MinSig},
     },
     ed25519::{Batch, PrivateKey, PublicKey},
-    Signer as _,
 };
 use commonware_math::algebra::Random;
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::{ordered::Set, Faults, N3f1, NZUsize, TryCollect};
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
-use rand_core::CryptoRngCore;
+use commonware_utils::{Faults, N3f1, NZUsize, TryCollect, ordered::Set, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand_core::CryptoRng;
 use std::{collections::BTreeMap, hint::black_box};
 
 type V = MinSig;
@@ -23,7 +22,7 @@ struct Bench {
 }
 
 impl Bench {
-    fn new(mut rng: impl CryptoRngCore, reshare: bool, n: u32) -> Self {
+    fn new(mut rng: impl CryptoRng, reshare: bool, n: u32) -> Self {
         let private_keys = (0..n)
             .map(|_| PrivateKey::random(&mut rng))
             .collect::<Vec<_>>();
@@ -37,7 +36,8 @@ impl Bench {
 
         let (output, shares) = if reshare {
             let (o, s) =
-                deal::<V, PublicKey, N3f1>(&mut rng, Default::default(), dealers.clone()).unwrap();
+                deal::<V, PublicKey, N3f1>(&mut rng, Mode::NonZeroCounter, dealers.clone())
+                    .unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)
@@ -47,7 +47,8 @@ impl Bench {
             b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_BENCH",
             0,
             output,
-            Default::default(),
+            Mode::NonZeroCounter,
+            Reveal::V1,
             dealers,
             players,
         )
@@ -83,11 +84,11 @@ impl Bench {
             for (target_pk, priv_msg) in priv_msgs {
                 // The only missing player should be ourselves.
                 if let Some(player) = player_states.get_mut(&target_pk) {
-                    if let Some(ack) =
-                        player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
-                    {
-                        dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
-                    }
+                    let ack = player
+                        .dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
+                        .expect("dealer message must be valid")
+                        .expect("dealer message must be new");
+                    dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
                 }
             }
             logs.record(pk, dealer.finalize::<N3f1>().check(&info).unwrap().1);
@@ -121,7 +122,7 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
     } else {
         "_recovery"
     };
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     for &n in CONTRIBUTORS {
         let t = N3f1::quorum(n);
         let bench = Bench::new(&mut rng, reshare, n);
@@ -140,7 +141,7 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
                     b.iter_batched(
                         || bench.pre_finalize(),
                         |(player, logs)| {
-                            let mut finalize_rng = StdRng::seed_from_u64(0);
+                            let mut finalize_rng = test_rng();
                             if concurrency > 1 {
                                 black_box(
                                     player

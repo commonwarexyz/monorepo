@@ -1,6 +1,6 @@
-use super::{location::Location, Family};
-use bytes::{Buf, BufMut};
-use commonware_codec::{varint::UInt, ReadExt};
+use super::{Family, location::Location};
+use bytes::BufMut;
+use commonware_codec::{Buf, ReadExt, varint::UInt};
 use core::{
     fmt,
     marker::PhantomData,
@@ -357,7 +357,7 @@ mod tests {
     use super::{Location as GenericLocation, Position as GenericPosition};
     use crate::{
         merkle::{Bagging::ForwardFold, Family as _},
-        mmr::{self, mem::Mmr, StandardHasher as Standard},
+        mmr::{self, StandardHasher as Standard, mem::Mmr},
     };
     use commonware_cryptography::Sha256;
 
@@ -401,9 +401,11 @@ mod tests {
 
         // Exceeding MAX_NODES returns None, but MAX_NODES itself IS valid (inclusive bound)
         assert!(mmr::Family::MAX_NODES.checked_add(1).is_none());
-        assert!(Position::new(*mmr::Family::MAX_NODES - 5)
-            .checked_add(10)
-            .is_none());
+        assert!(
+            Position::new(*mmr::Family::MAX_NODES - 5)
+                .checked_add(10)
+                .is_none()
+        );
         // MAX_NODES - 10 + 10 = MAX_NODES, which IS valid (inclusive bound)
         assert_eq!(
             Position::new(*mmr::Family::MAX_NODES - 10)
@@ -569,37 +571,37 @@ mod tests {
 
         // Test zero
         let pos = Position::new(0);
-        let encoded = pos.encode();
-        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        let mut encoded = pos.encode();
+        let decoded = Position::read(&mut encoded).unwrap();
         assert_eq!(decoded, pos);
 
         // Test middle value
         let pos = Position::new(12345);
-        let encoded = pos.encode();
-        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        let mut encoded = pos.encode();
+        let decoded = Position::read(&mut encoded).unwrap();
         assert_eq!(decoded, pos);
 
         // MAX_NODES is a valid value (inclusive bound), so it should decode successfully
         let pos = mmr::Family::MAX_NODES;
-        let encoded = pos.encode();
-        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        let mut encoded = pos.encode();
+        let decoded = Position::read(&mut encoded).unwrap();
         assert_eq!(decoded, pos);
 
         // MAX_NODES - 1 is also valid
         let pos = mmr::Family::MAX_NODES - 1;
-        let encoded = pos.encode();
-        let decoded = Position::read(&mut encoded.as_ref()).unwrap();
+        let mut encoded = pos.encode();
+        let decoded = Position::read(&mut encoded).unwrap();
         assert_eq!(decoded, pos);
     }
 
     #[test]
     fn test_read_cfg_invalid_values() {
-        use commonware_codec::{varint::UInt, Encode, ReadExt};
+        use commonware_codec::{Encode, ReadExt, varint::UInt};
 
         // Encode MAX_NODES + 1 as a raw varint, then try to decode as Position
         let invalid_value = *mmr::Family::MAX_NODES + 1;
-        let encoded = UInt(invalid_value).encode();
-        let result = Position::read(&mut encoded.as_ref());
+        let mut encoded = UInt(invalid_value).encode();
+        let result = Position::read(&mut encoded);
         assert!(result.is_err());
         assert!(matches!(
             result,
@@ -607,8 +609,8 @@ mod tests {
         ));
 
         // Encode u64::MAX as a raw varint
-        let encoded = UInt(u64::MAX).encode();
-        let result = Position::read(&mut encoded.as_ref());
+        let mut encoded = UInt(u64::MAX).encode();
+        let result = Position::read(&mut encoded);
         assert!(result.is_err());
         assert!(matches!(
             result,

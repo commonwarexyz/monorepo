@@ -1,8 +1,8 @@
 #![no_main]
 
-use commonware_cryptography::{ed25519::PrivateKey, Signer};
-use commonware_runtime::{deterministic, mocks, Runner, Spawner, Supervisor as _};
-use commonware_stream::encrypted::{dial, listen, Config};
+use commonware_cryptography::{Signer, ed25519::PrivateKey};
+use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
+use commonware_stream::encrypted::{Config, dial, listen};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 

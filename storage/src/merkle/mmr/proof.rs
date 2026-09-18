@@ -3,20 +3,19 @@
 #[cfg(test)]
 mod tests {
     use crate::merkle::{
-        self as merkle,
-        mmr::{
-            iterator::PeakIterator, mem::Mmr, Error, Family, Location, Position,
-            StandardHasher as Standard,
-        },
-        proof::{nodes_required_for_multi_proof, Blueprint},
-        Bagging,
+        self as merkle, Bagging,
         Bagging::ForwardFold,
         Family as _, LocationRangeExt as _,
+        mmr::{
+            Error, Family, Location, Position, StandardHasher as Standard, iterator::PeakIterator,
+            mem::Mmr,
+        },
+        proof::{Blueprint, nodes_required_for_multi_proof},
     };
-    use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 
     fn test_digest(v: u8) -> Digest {
-        Sha256::hash(&[v])
+        Sha256::hash(&[&[v]])
     }
 
     #[test]
@@ -140,7 +139,7 @@ mod tests {
     fn test_max_location_is_provable() {
         // MAX_LEAVES is the largest valid leaf count.
         let max_loc = Family::MAX_LEAVES;
-        let max_loc_plus_1 = Location::new(*max_loc + 1);
+        let max_loc_plus_1 = max_loc + 1;
 
         let result = Blueprint::new(max_loc, 0, Bagging::ForwardFold, max_loc - 1..max_loc);
         assert!(
@@ -243,8 +242,7 @@ mod tests {
         let total_nodes = bp.fold_prefix.len() + bp.fetch_nodes.len();
 
         assert_eq!(
-            total_nodes,
-            EXPECTED_WORST_CASE,
+            total_nodes, EXPECTED_WORST_CASE,
             "Location 0 proof should require exactly {EXPECTED_WORST_CASE} digests (61 path + 61 peaks)",
         );
 
@@ -262,8 +260,7 @@ mod tests {
 
         let expected_last_leaf = NUM_PEAKS - 1;
         assert_eq!(
-            total_nodes,
-            expected_last_leaf,
+            total_nodes, expected_last_leaf,
             "Last leaf proof should require exactly {expected_last_leaf} digests (0 path + 61 peaks)",
         );
     }

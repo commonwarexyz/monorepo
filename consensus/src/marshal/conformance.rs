@@ -3,19 +3,19 @@
 use super::mocks::{
     application::Application,
     harness::{
-        self, CodingHarness, StandardHarness, TestHarness, ValidatorHandle, ValidatorSetup,
-        BLOCKS_PER_EPOCH, NAMESPACE, NUM_VALIDATORS, QUORUM, V,
+        self, BLOCKS_PER_EPOCH, CodingHarness, NAMESPACE, NUM_VALIDATORS, QUORUM, StandardHarness,
+        TestHarness, V, ValidatorHandle, ValidatorSetup,
     },
 };
 use crate::{
     simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
     types::{Epoch, Height, Round, View},
 };
-use commonware_conformance::{conformance_tests, Conformance};
-use commonware_cryptography::certificate::{mocks::Fixture, ConstantProvider};
-use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
+use commonware_conformance::{Conformance, conformance_tests};
+use commonware_cryptography::certificate::{ConstantProvider, mocks::Fixture};
+use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
 use commonware_utils::NZUsize;
-use rand::Rng;
+use rand::RngExt as _;
 use std::time::Duration;
 
 const CASES: usize = 32;
@@ -76,7 +76,7 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
         };
         let mut peers = Vec::<ValidatorHandle<H>>::new();
         let mut parent = H::genesis_block(NUM_VALIDATORS as u16);
-        let count = context.gen_range(1..=BLOCKS_PER_EPOCH.get().min(4));
+        let count = context.random_range(1..=BLOCKS_PER_EPOCH.get().min(4));
         for height in 1..=count {
             let height = Height::new(height);
             let round = Round::new(Epoch::zero(), View::new(height.get()));
@@ -87,7 +87,7 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
                 H::digest(&parent),
                 H::commitment(&parent),
                 height,
-                context.gen(),
+                context.random(),
                 NUM_VALIDATORS as u16,
             );
             H::verify(&mut handle, round, &block, &mut peers).await;

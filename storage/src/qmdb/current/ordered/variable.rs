@@ -4,25 +4,26 @@
 //! proofs (proving a key is currently inactive). Use [crate::qmdb::current::unordered::variable] if
 //! exclusion proofs are not needed.
 //!
-//! See [Db] for the main database type and [super::ExclusionProof] for proving key inactivity.
+//! See [Db] for the main database type and
+//! [ExclusionProof](super::proof::constant::ExclusionProof) for proving key inactivity.
 
-pub use super::db::KeyValueProof;
 use crate::{
+    Context,
     index::ordered::Index,
     journal::contiguous::variable::Journal,
     merkle::{Graftable, Location},
     qmdb::{
-        any::{ordered::variable::Operation, value::VariableEncoding, VariableValue},
+        Error,
+        any::{VariableValue, ordered::variable::Operation, value::VariableEncoding},
         current::VariableConfig as Config,
         operation::Key,
-        Error,
     },
     translator::Translator,
-    Context,
 };
-use commonware_codec::{Codec, Read};
+use commonware_codec::Read;
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
+use commonware_runtime::Spawner;
 
 pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
     F,
@@ -37,17 +38,17 @@ pub type Db<F, E, K, V, H, T, const N: usize, S> = super::db::Db<
 >;
 
 impl<
-        F: Graftable,
-        E: Context,
-        K: Key,
-        V: VariableValue,
-        H: Hasher,
-        T: Translator,
-        const N: usize,
-        S: Strategy,
-    > Db<F, E, K, V, H, T, N, S>
+    F: Graftable,
+    E: Context + Spawner,
+    K: Key,
+    V: VariableValue,
+    H: Hasher,
+    T: Translator,
+    const N: usize,
+    S: Strategy,
+> Db<F, E, K, V, H, T, N, S>
 where
-    Operation<F, K, V>: Codec,
+    Operation<F, K, V>: Read,
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
@@ -85,24 +86,23 @@ pub mod partitioned {
         >;
 
     impl<
-            F: Graftable,
-            E: Context,
-            K: Key,
-            V: VariableValue,
-            H: Hasher,
-            T: Translator,
-            const P: usize,
-            const N: usize,
-            S: Strategy,
-        > Db<F, E, K, V, H, T, P, N, S>
+        F: Graftable,
+        E: Context + Spawner,
+        K: Key,
+        V: VariableValue,
+        H: Hasher,
+        T: Translator,
+        const P: usize,
+        const N: usize,
+        S: Strategy,
+    > Db<F, E, K, V, H, T, P, N, S>
     where
-        Operation<F, K, V>: Codec,
+        Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
-        /// The configured [`Strategy`] is used to parallelize merkleization.
         pub async fn init(
             context: E,
-            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+            config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
         ) -> Result<Self, Error<F>> {
             crate::qmdb::current::init(context, config).await
         }
@@ -112,17 +112,18 @@ pub mod partitioned {
 #[cfg(test)]
 mod test {
     use crate::{
-        mmr,
+        merkle::Graftable,
+        mmb, mmr,
         qmdb::current::{ordered::tests as shared, tests::variable_config},
         translator::OneCap,
     };
-    use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::deterministic;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest = super::Db<
-        mmr::Family,
+    type CurrentTest<F = mmr::Family> = super::Db<
+        F,
         deterministic::Context,
         Digest,
         Digest,
@@ -143,33 +144,51 @@ mod test {
     }
 
     /// Return a [Db] database initialized with a variable config.
-    async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
+    async fn open_db<F: Graftable>(
+        context: deterministic::Context,
+        partition_prefix: String,
+    ) -> CurrentTest<F> {
         let cfg = variable_config::<OneCap>(&partition_prefix, &context);
-        CurrentTest::init(context, cfg).await.unwrap()
+        CurrentTest::<F>::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
-        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db);
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_range_proofs() {
-        shared::test_range_proofs(open_db);
+        shared::test_range_proofs(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_key_value_proof() {
-        shared::test_key_value_proof(open_db);
+        shared::test_key_value_proof(open_db::<mmr::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_key_value_proof_mmb() {
+        shared::test_key_value_proof(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_exclusion_proofs_mmb() {
+        shared::test_exclusion_proofs(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_inactive_proof_mmb() {
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmb::Family>);
     }
 
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
-        shared::test_proving_repeated_updates(open_db);
+        shared::test_proving_repeated_updates(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_exclusion_proofs() {
-        shared::test_exclusion_proofs(open_db);
+        shared::test_exclusion_proofs(open_db::<mmr::Family>);
     }
 }

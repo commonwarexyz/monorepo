@@ -1,4 +1,4 @@
-use crate::{types::Epoch, Monitor as M};
+use crate::{Monitor as M, types::Epoch};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc},
     sync::Mutex,

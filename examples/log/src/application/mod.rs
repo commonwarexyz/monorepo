@@ -21,16 +21,11 @@ pub fn genesis<H: Hasher>() -> H::Digest {
     //
     // Since this example does not verify that proposed messages link to a
     // parent, this only seeds the consensus floor.
-    let mut hasher = H::default();
-    hasher.update(GENESIS);
-    hasher.finalize()
+    H::hash(&[GENESIS])
 }
 
 /// Configuration for the application.
-pub struct Config<H: Hasher> {
-    /// Hashing scheme to use.
-    pub hasher: H,
-
+pub struct Config {
     /// Signing scheme for this network.
     pub scheme: Scheme,
 

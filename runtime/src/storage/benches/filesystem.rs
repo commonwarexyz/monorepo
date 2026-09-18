@@ -7,7 +7,7 @@ use crate::{
 use bytes::Bytes;
 #[cfg(target_os = "linux")]
 use commonware_formatting::hex;
-use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
+use commonware_runtime::{Blob, IoBuf, IoBufs, Storage, WriteOptions};
 use rand::Rng;
 use std::{
     fs, io,
@@ -21,7 +21,7 @@ use std::{fs::OpenOptions, os::fd::AsRawFd};
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
 pub const fn backend_name() -> &'static str {
-    if cfg!(feature = "iouring-storage") {
+    if cfg!(all(target_os = "linux", feature = "iouring")) {
         "iouring"
     } else {
         "tokio"
@@ -157,7 +157,8 @@ pub async fn prepare_filled_blob<S: Storage>(
         let len = ((file_size - offset) as usize).min(DEFAULT_FILL_CHUNK_SIZE);
         let mut payload = vec![0u8; len];
         rng.fill_bytes(&mut payload);
-        blob.write_at(offset, payload).await?;
+        blob.write_at(offset, payload, WriteOptions::default())
+            .await?;
         offset += len as u64;
     }
     blob.sync().await?;

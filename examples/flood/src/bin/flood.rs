@@ -1,27 +1,30 @@
 use clap::{Arg, Command};
 use commonware_codec::DecodeExt;
 use commonware_cryptography::{
-    ed25519::{PrivateKey, PublicKey},
     Signer as _,
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_deployer::aws::{Hosts, METRICS_PORT};
 use commonware_flood::Config;
 use commonware_formatting::from_hex;
-use commonware_p2p::{authenticated::discovery, Manager as _, Receiver, Recipients, Sender};
-use commonware_runtime::{
-    telemetry::metrics::{HistogramExt as _, MetricsExt as _},
-    tokio, Buf, Quota, Runner, Spawner, Supervisor as _,
+use commonware_p2p::{
+    CheckedSender as _, LimitedSender as _, Manager as _, Receiver, Recipients,
+    authenticated::{self, discovery},
 };
-use commonware_utils::{ordered::Set, union, TryCollect, NZU32};
-use futures::future::try_join_all;
-use rand::{rngs::SmallRng, RngCore, SeedableRng};
+use commonware_runtime::{
+    Buf, Clock as _, Handle, Quota, Runner, Spawner, Supervisor as _,
+    telemetry::metrics::{HistogramExt as _, MetricsExt as _},
+    tokio,
+};
+use commonware_utils::{TryCollect, ordered::Set, probability, union};
+use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     str::FromStr,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{error, info, Level};
+use tracing::{Level, error, info};
 
 /// Histogram buckets for latency measurement (in seconds).
 /// Range from 1ms to 1s for cross-machine network latency.
@@ -48,7 +51,7 @@ fn main() {
         .into_iter()
         .map(|host| {
             let key = from_hex(&host.name).expect("Could not parse host key");
-            let key = PublicKey::decode(key.as_ref()).expect("Peer key is invalid");
+            let key = PublicKey::decode(key).expect("Peer key is invalid");
             (key, host.ip)
         })
         .collect();
@@ -62,7 +65,7 @@ fn main() {
     // Parse config
     info!(peers = peers.len(), "loaded peers");
     let key = from_hex(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
+    let key = PrivateKey::decode(key).expect("Private key is invalid");
     let public_key = key.public_key();
 
     // Initialize runtime
@@ -79,7 +82,7 @@ fn main() {
             Some(tokio::tracing::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring.private),
                 name: public_key.to_string(),
-                rate: 1.0,
+                rate: probability!(1.0),
             })
         } else {
             None
@@ -116,7 +119,7 @@ fn main() {
         let mut bootstrappers = Vec::new();
         for bootstrapper in &config.bootstrappers {
             let key = from_hex(bootstrapper).expect("Could not parse bootstrapper key");
-            let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
+            let key = PublicKey::decode(key).expect("Bootstrapper key is invalid");
             let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
             let bootstrapper_socket = format!("{}:{}", ip, config.port);
             let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
@@ -125,12 +128,14 @@ fn main() {
         }
 
         // Configure network
+        let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
             key.clone(),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),
             bootstrappers,
+            max_peers_per_set,
             config.message_size,
         );
         p2p_cfg.mailbox_size = config.mailbox_size;
@@ -141,12 +146,10 @@ fn main() {
         // Provide authorized peers
         oracle.track(0, peer_keys.clone());
 
-        // Register flood channel
-        let (mut flood_sender, mut flood_receiver) = network.register(
-            0,
-            Quota::per_second(NZU32!(u32::MAX)),
-            config.message_backlog,
-        );
+        // Register the flood channel. The quota is the offered per-peer load and sizes the
+        // derived channel mailboxes, so raising it trades memory for saturation.
+        let (mut flood_sender, mut flood_receiver) =
+            network.register(0, Quota::per_second(config.message_rate));
 
         // Create network
         let p2p = network.start();
@@ -158,6 +161,15 @@ fn main() {
                 let mut rng = SmallRng::seed_from_u64(0);
                 let messages = context.counter("messages", "Sent messages");
                 loop {
+                    // Pace to the quota, sleeping while every connected peer is rate-limited
+                    let checked = match flood_sender.check(Recipients::All) {
+                        Ok(checked) => checked,
+                        Err(wait_until) => {
+                            context.sleep_until(wait_until).await;
+                            continue;
+                        }
+                    };
+
                     // Create message with timestamp in first 8 bytes
                     let mut msg = vec![0u8; config.message_size as usize];
                     let now = SystemTime::now()
@@ -167,9 +179,10 @@ fn main() {
                     msg[0..8].copy_from_slice(&now.to_le_bytes());
                     rng.fill_bytes(&mut msg[8..]);
 
-                    // Send to all peers
-                    flood_sender.send(Recipients::All, msg, true);
-                    messages.inc();
+                    // Send to all non-limited peers
+                    if checked.send(msg, true).accepted() {
+                        messages.inc();
+                    }
                 }
             });
         let flood_receiver = context
@@ -194,8 +207,8 @@ fn main() {
                 }
             });
 
-        // Wait for any task to error
-        if let Err(e) = try_join_all(vec![p2p, flood_sender, flood_receiver]).await {
+        // Stop the process when any long-lived task exits.
+        if let Err(e) = Handle::select([p2p, flood_sender, flood_receiver]).await {
             error!(?e, "task failed");
         }
     });

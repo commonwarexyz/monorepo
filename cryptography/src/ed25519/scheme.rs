@@ -1,21 +1,24 @@
 use crate::{
-    ed25519::core::{self as ed_core, VerificationKey},
     BatchVerifier, Secret,
+    ed25519::core::{self as ed_core, VerificationKey},
 };
 #[cfg(not(feature = "std"))]
-use alloc::borrow::{Cow, ToOwned};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use alloc::{
+    borrow::{Cow, ToOwned},
+    vec::Vec,
+};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
-use commonware_utils::{union_unique, Array, Span};
+use commonware_utils::{Array, Span, union_unique};
 use core::{
     fmt::{Debug, Display},
     hash::Hash,
     ops::Deref,
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 #[cfg(feature = "std")]
 use std::borrow::{Cow, ToOwned};
 use zeroize::Zeroizing;
@@ -59,7 +62,7 @@ impl PrivateKey {
 }
 
 impl Random for PrivateKey {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         let key = ed_core::SigningKey::new(rng);
         Self {
             key: Secret::new(key),
@@ -106,7 +109,7 @@ impl Display for PrivateKey {
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for PrivateKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         Ok(Self::random(&mut rand))
@@ -217,7 +220,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKey::random(&mut rand);
@@ -303,7 +306,7 @@ impl arbitrary::Arbitrary<'_> for Signature {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         use crate::Signer;
         use commonware_math::algebra::Random;
-        use rand::{rngs::StdRng, SeedableRng};
+        use rand::{SeedableRng, rngs::StdRng};
 
         let mut rand = StdRng::from_seed(u.arbitrary::<[u8; 32]>()?);
         let private_key = PrivateKey::random(&mut rand);
@@ -319,15 +322,15 @@ impl arbitrary::Arbitrary<'_> for Signature {
 
 /// Ed25519 Batch Verifier.
 pub struct Batch {
-    verifier: ed_core::batch::Verifier,
+    verifier: ed_core::batch::Verifier<Vec<u8>>,
 }
 
 impl BatchVerifier for Batch {
     type PublicKey = PublicKey;
 
-    fn new() -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
-            verifier: ed_core::batch::Verifier::new(),
+            verifier: ed_core::batch::Verifier::new(capacity),
         }
     }
 
@@ -338,32 +341,33 @@ impl BatchVerifier for Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        self.add_inner(Some(namespace), message, public_key, signature)
+        // Keep argument construction here so the signature can be written directly into the queue.
+        self.verifier.queue(
+            public_key.key,
+            ed_core::Signature::from(signature.raw),
+            union_unique(namespace, message),
+        );
+        true
     }
 
-    fn verify<R: CryptoRngCore>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
+    fn verify<R: CryptoRng>(self, rng: &mut R, strategy: &impl Strategy) -> bool {
         self.verifier.verify(rng, strategy).is_ok()
     }
 }
 
-impl Batch {
-    #[inline(always)]
-    fn add_inner(
+impl<P: AsRef<[u8]> + Sync> ed_core::batch::Verifier<P> {
+    /// Queues a signature over its already-framed payload.
+    pub(super) fn add_payload(
         &mut self,
-        namespace: Option<&[u8]>,
-        message: &[u8],
+        payload: P,
         public_key: &PublicKey,
         signature: &Signature,
-    ) -> bool {
-        let payload = namespace
-            .map(|ns| Cow::Owned(union_unique(ns, message)))
-            .unwrap_or_else(|| Cow::Borrowed(message));
-        self.verifier.queue((
+    ) {
+        self.queue(
             public_key.key,
             ed_core::Signature::from(signature.raw),
-            &payload,
-        ));
-        true
+            payload,
+        );
     }
 }
 
@@ -371,7 +375,7 @@ impl Batch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ed25519, Signer as _};
+    use crate::{Signer as _, ed25519};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
@@ -389,25 +393,15 @@ mod tests {
     }
 
     fn parse_private_key(private_key: &str) -> PrivateKey {
-        PrivateKey::decode(
-            commonware_formatting::from_hex(private_key)
-                .unwrap()
-                .as_ref(),
-        )
-        .unwrap()
+        PrivateKey::decode(commonware_formatting::from_hex(private_key).unwrap()).unwrap()
     }
 
     fn parse_public_key(public_key: &str) -> PublicKey {
-        PublicKey::decode(
-            commonware_formatting::from_hex(public_key)
-                .unwrap()
-                .as_ref(),
-        )
-        .unwrap()
+        PublicKey::decode(commonware_formatting::from_hex(public_key).unwrap()).unwrap()
     }
 
     fn parse_signature(signature: &str) -> Signature {
-        Signature::decode(commonware_formatting::from_hex(signature).unwrap().as_ref()).unwrap()
+        Signature::decode(commonware_formatting::from_hex(signature).unwrap()).unwrap()
     }
 
     fn vector_1() -> (PrivateKey, PublicKey, Vec<u8>, Signature) {
@@ -525,7 +519,7 @@ mod tests {
     #[should_panic]
     fn bad_signature() {
         let (private_key, public_key, message, _) = vector_1();
-        let private_key_2 = PrivateKey::random(&mut test_rng());
+        let private_key_2 = PrivateKey::random(test_rng());
         let bad_signature = private_key_2.sign_inner(None, &message);
         test_sign_and_verify(private_key, public_key, &message, bad_signature);
     }
@@ -700,10 +694,10 @@ mod tests {
         )
         .unwrap();
         test_sign_and_verify(
-            PrivateKey::decode(private_key.as_ref()).unwrap(),
-            PublicKey::decode(public_key.as_ref()).unwrap(),
+            PrivateKey::decode(private_key).unwrap(),
+            PublicKey::decode(public_key).unwrap(),
             &message,
-            Signature::decode(signature.as_ref()).unwrap(),
+            Signature::decode(signature).unwrap(),
         )
     }
 
@@ -711,9 +705,9 @@ mod tests {
     fn batch_verify_valid() {
         let v1 = vector_1();
         let v2 = vector_2();
-        let mut batch = ed25519::Batch::new();
-        assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
-        assert!(batch.add_inner(None, &v2.2, &v2.1, &v2.3));
+        let mut batch = ed25519::Batch::new(2);
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
     }
 
@@ -724,27 +718,52 @@ mod tests {
         let mut bad_signature = v2.3.to_vec();
         bad_signature[3] = 0xff;
 
-        let mut batch = Batch::new();
-        assert!(batch.add_inner(None, &v1.2, &v1.1, &v1.3));
-        assert!(batch.add_inner(
-            None,
-            &v2.2,
-            &v2.1,
-            &Signature::decode(bad_signature.as_ref()).unwrap()
-        ));
+        let mut batch = Batch::new(2);
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch
+            .verifier
+            .add_payload(v2.2, &v2.1, &Signature::decode(bad_signature).unwrap());
         assert!(!batch.verify(&mut test_rng(), &Sequential));
     }
 
     #[test]
     fn batch_verify_empty() {
-        let batch = Batch::new();
+        let batch = Batch::new(0);
+        assert!(!batch.verify(&mut test_rng(), &Sequential));
+    }
+
+    #[test]
+    fn batch_verify_capacity_hint() {
+        let v1 = vector_1();
+        let v2 = vector_2();
+        // The capacity is a hint: adding more items must still verify.
+        let mut batch = Batch::new(1);
+        batch.verifier.add_payload(v1.2, &v1.1, &v1.3);
+        batch.verifier.add_payload(v2.2, &v2.1, &v2.3);
         assert!(batch.verify(&mut test_rng(), &Sequential));
+    }
+
+    #[test]
+    fn batch_framing_matches_union_unique() {
+        // Namespaced batching must verify the same bytes as an explicitly framed raw signature.
+        let key = PrivateKey::random(test_rng());
+        let namespace = b"namespace";
+        let message = b"message";
+        let signature = key.sign_inner(None, &union_unique(namespace, message));
+        for supplied_namespace in [namespace.as_slice(), b"other"] {
+            let mut batch = Batch::new(1);
+            batch.add(supplied_namespace, message, &key.public_key(), &signature);
+            assert_eq!(
+                batch.verify(&mut test_rng(), &Sequential),
+                supplied_namespace == namespace,
+            );
+        }
     }
 
     #[test]
     fn test_zero_signature_fails() {
         let (_, public_key, message, _) = vector_1();
-        let zero_sig = Signature::decode(vec![0u8; Signature::SIZE].as_ref()).unwrap();
+        let zero_sig = Signature::decode(vec![0u8; Signature::SIZE]).unwrap();
         assert!(!public_key.verify_inner(None, &message, &zero_sig));
     }
 
@@ -753,7 +772,7 @@ mod tests {
         let (_, public_key, message, signature) = vector_1();
         let mut bad_signature = signature.to_vec();
         bad_signature[63] |= 0x80; // make S non-canonical
-        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
+        let bad_signature = Signature::decode(bad_signature).unwrap();
         assert!(!public_key.verify_inner(None, &message, &bad_signature));
     }
 
@@ -764,7 +783,7 @@ mod tests {
         for b in bad_signature.iter_mut().take(32) {
             *b = 0xff; // invalid R component
         }
-        let bad_signature = Signature::decode(bad_signature.as_ref()).unwrap();
+        let bad_signature = Signature::decode(bad_signature).unwrap();
         assert!(!public_key.verify_inner(None, &message, &bad_signature));
     }
 
@@ -778,7 +797,7 @@ mod tests {
 
     #[test]
     fn test_private_key_redacted() {
-        let private_key = PrivateKey::random(&mut test_rng());
+        let private_key = PrivateKey::random(test_rng());
         let debug = format!("{:?}", private_key);
         let display = format!("{}", private_key);
         assert!(debug.contains("REDACTED"));
@@ -787,7 +806,7 @@ mod tests {
 
     #[test]
     fn test_from_private_key_to_public_key() {
-        let private_key = PrivateKey::random(&mut test_rng());
+        let private_key = PrivateKey::random(test_rng());
         assert_eq!(private_key.public_key(), PublicKey::from(private_key));
     }
 

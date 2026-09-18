@@ -43,30 +43,30 @@ pub struct Config<B: Blocker, M: Monitor, H: Handler, RqC, RsC> {
 #[cfg(test)]
 mod tests {
     use super::{
+        Config, Engine, Mailbox,
         mocks::{
             handler::Handler as MockHandler,
             monitor::Monitor as MockMonitor,
             types::{Request, Response},
         },
-        Config, Engine, Mailbox,
     };
     use crate::{Handler, Monitor, Originator};
     use commonware_actor::Feedback;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Committable, Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        simulated::{Link, Network, Oracle, Receiver, Sender},
         Blocker, Manager as _, Recipients, Sender as _,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
-        deterministic, telemetry::metrics::count_running_tasks, Clock, Quota, Runner,
-        Supervisor as _,
+        Clock, Quota, Runner, Supervisor as _, deterministic,
+        telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{ordered::Set, NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize, ordered::Set, probability};
     use std::{num::NonZeroUsize, time::Duration};
 
     /// Default rate limit quota for tests (high enough to not interfere with normal operation)
@@ -76,12 +76,12 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
     const LINK_SLOW: Link = Link {
         latency: Duration::from_secs(1),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
 
     async fn setup_network_and_peers(
@@ -106,6 +106,7 @@ mod tests {
             context.child("network"),
             commonware_p2p::simulated::Config {
                 max_size: 1024 * 1024,
+                max_peers_per_set: NZUsize!(peer_seeds.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
             },

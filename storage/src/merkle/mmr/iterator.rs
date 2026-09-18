@@ -3,8 +3,8 @@
 //! new MMR variants or extensions.
 
 use crate::merkle::{
-    mmr::{Family, Position},
     Family as _,
+    mmr::{Family, Position},
 };
 
 /// A PeakIterator returns a (position, height) tuple for each peak in an MMR with the given size,
@@ -133,8 +133,8 @@ pub(crate) const fn pos_to_height(pos: Position) -> u32 {
 mod tests {
     use super::*;
     use crate::merkle::{
-        mmr::{mem::Mmr, Location, StandardHasher as Standard},
         Bagging::ForwardFold,
+        mmr::{Location, StandardHasher as Standard, mem::Mmr},
     };
     use commonware_cryptography::Sha256;
 

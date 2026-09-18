@@ -1,10 +1,10 @@
 use crate::types::Height;
 use commonware_cryptography::PublicKey;
 use commonware_utils::{
-    ordered::{Quorum, Set},
     N3f1,
+    ordered::{Quorum, Set},
 };
-use std::collections::{btree_map, BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, btree_map};
 
 /// A data structure that keeps track of the reported tip for each validator.
 /// It can efficiently query the `f`th highest tip, where `f` is the maximum number of faults
@@ -249,8 +249,8 @@ fn dec(entry: btree_map::Entry<'_, Height, usize>) {
 mod tests {
     use super::*;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_utils::TryCollect;
     use rstest::rstest;

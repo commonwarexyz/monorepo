@@ -1,16 +1,18 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{thread_rng, Rng};
+use commonware_utils::{NZUsize, TestRng, non_empty, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::RngExt as _;
 
 fn bench_batch_verify_same_signer(c: &mut Criterion) {
+    let mut rng = test_rng();
+    let mut verify_rng = TestRng::new(1);
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs: Vec<[u8; 32]> = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];
-            thread_rng().fill(&mut msg);
+            rng.fill(&mut msg);
             msgs.push(msg);
         }
         for concurrency in [1, 8] {
@@ -20,7 +22,7 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
+                            let (private, public) = ops::keypair::<_, MinSig>(&mut rng);
                             let entries: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| {
@@ -33,17 +35,17 @@ fn bench_batch_verify_same_signer(c: &mut Criterion) {
                         |(public, entries)| {
                             if concurrency > 1 {
                                 ops::batch::verify_same_signer::<_, MinSig, _>(
-                                    &mut thread_rng(),
+                                    &mut verify_rng,
                                     &public,
-                                    &entries,
+                                    non_empty![@entries],
                                     &strategy,
                                 )
                                 .unwrap();
                             } else {
                                 ops::batch::verify_same_signer::<_, MinSig, _>(
-                                    &mut thread_rng(),
+                                    &mut verify_rng,
                                     &public,
-                                    &entries,
+                                    non_empty![@entries],
                                     &Sequential,
                                 )
                                 .unwrap();

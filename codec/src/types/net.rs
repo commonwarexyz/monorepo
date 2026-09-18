@@ -1,7 +1,7 @@
 //! Codec implementations for network-related types
 
-use crate::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
-use bytes::{Buf, BufMut};
+use crate::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 impl Write for Ipv4Addr {
@@ -161,7 +161,7 @@ impl Read for SocketAddr {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{DecodeExt, Encode};
+    use crate::{Copying, DecodeExt, Encode};
     use bytes::Bytes;
 
     #[test]
@@ -183,7 +183,7 @@ mod test {
 
         // Test insufficient data
         let insufficient = vec![0, 0, 0]; // 3 bytes instead of 4
-        assert!(Ipv4Addr::decode(Bytes::from(insufficient)).is_err());
+        assert!(Ipv4Addr::decode(insufficient).is_err());
     }
 
     #[test]
@@ -273,18 +273,18 @@ mod test {
         // Test invalid version
         let invalid_version = [5];
         assert!(matches!(
-            IpAddr::decode(&invalid_version[..]),
+            IpAddr::decode(Copying(&invalid_version)),
             Err(Error::Invalid(_, _))
         ));
 
         // Test insufficient data for V4
         let insufficient_v4 = [4, 127, 0, 0]; // Version + 3 bytes instead of 4
-        assert!(IpAddr::decode(&insufficient_v4[..]).is_err());
+        assert!(IpAddr::decode(Copying(&insufficient_v4)).is_err());
 
         // Test insufficient data for V6
         let mut insufficient_v6 = vec![6];
         insufficient_v6.extend_from_slice(&[0; 15]); // 15 bytes instead of 16
-        assert!(IpAddr::decode(&insufficient_v6[..]).is_err());
+        assert!(IpAddr::decode(Copying(&insufficient_v6)).is_err());
     }
 
     #[test]
@@ -313,19 +313,19 @@ mod test {
         // Test invalid version
         let invalid_version = [5]; // Neither 4 nor 6
         assert!(matches!(
-            SocketAddr::decode(&invalid_version[..]),
+            SocketAddr::decode(Copying(&invalid_version)),
             Err(Error::Invalid(_, _))
         ));
 
         // Test insufficient data for V4
         let mut insufficient_v4 = vec![4]; // Version byte
         insufficient_v4.extend_from_slice(&[127, 0, 0, 1, 0x1f]); // IP + 1 byte of port (5 bytes total)
-        assert!(SocketAddr::decode(&insufficient_v4[..]).is_err());
+        assert!(SocketAddr::decode(Copying(&insufficient_v4)).is_err());
 
         // Test insufficient data for V6
         let mut insufficient_v6 = vec![6]; // Version byte
         insufficient_v6.extend_from_slice(&[0; 17]); // 17 bytes instead of 18
-        assert!(SocketAddr::decode(&insufficient_v6[..]).is_err());
+        assert!(SocketAddr::decode(Copying(&insufficient_v6)).is_err());
     }
 
     #[test]
@@ -349,10 +349,15 @@ mod test {
         let ipv6_test: Ipv6Addr = "2001:db8::ff00:42:8329".parse().unwrap();
         assert_eq!(
             ipv6_test.encode(),
-            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0xff, 0x00, 0, 0x42, 0x83, 0x29][..]
+            &[
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0xff, 0x00, 0, 0x42, 0x83, 0x29
+            ][..]
         );
         assert_eq!(
-            Ipv6Addr::new(0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff).encode(),
+            Ipv6Addr::new(
+                0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+            )
+            .encode(),
             &[0xff; 16][..]
         );
 
@@ -365,7 +370,9 @@ mod test {
             SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 8080, 0, 0);
         assert_eq!(
             sock_v6_1.encode(),
-            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1F, 0x90][..]
+            &[
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x1F, 0x90
+            ][..]
         );
 
         let sa_v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
@@ -373,7 +380,9 @@ mod test {
         let sa_v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1)), 443);
         assert_eq!(
             sa_v6.encode(),
-            &[0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB][..]
+            &[
+                0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x01, 0xBB
+            ][..]
         );
     }
 

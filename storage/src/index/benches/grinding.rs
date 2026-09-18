@@ -13,10 +13,10 @@
 use super::DummyMetrics;
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_storage::{
-    index::{partitioned, Unordered},
+    index::{Unordered, partitioned},
     translator::Cap,
 };
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::{
     hint::black_box,
     time::{Duration, Instant},
@@ -36,7 +36,7 @@ fn keys(items: usize, grinding: bool) -> Vec<[u8; 8]> {
             if grinding {
                 i.to_be_bytes()
             } else {
-                Sha256::hash(&i.to_be_bytes()).as_ref()[..8]
+                Sha256::hash(&[&i.to_be_bytes()]).as_ref()[..8]
                     .try_into()
                     .unwrap()
             }

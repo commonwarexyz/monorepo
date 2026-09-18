@@ -1,127 +1,99 @@
 //! Manages outstanding fetch requests with monotonically increasing request IDs.
 //!
-//! Each request is assigned a unique ID and remembers the tree size it was issued
-//! against. This prevents stale futures from colliding with fresh requests at the
-//! same location after a target update, and lets the engine reject replies that
-//! do not match the requested historical view.
+//! Each request is assigned a unique ID and keeps the request it was issued for, letting
+//! the engine check replies against what was requested. Removing a request aborts its future.
 
 use crate::{
     merkle::{Family, Location},
-    qmdb::sync::engine::IndexedFetchResult,
+    qmdb::sync::{Request, engine::IndexedFetchResult},
 };
 use commonware_cryptography::Digest;
-use commonware_utils::channel::oneshot;
-use futures::stream::FuturesUnordered;
+use commonware_utils::futures::{AbortablePool, Aborter};
+use futures::future::Aborted;
 use std::{
     collections::{BTreeMap, HashMap},
     future::Future,
-    pin::Pin,
+    ops::Range,
 };
-
-/// Boxed future that resolves to an [`IndexedFetchResult`].
-pub(super) type FetchFuture<F, Op, D, E> =
-    Pin<Box<dyn Future<Output = IndexedFetchResult<F, Op, D, E>> + Send>>;
 
 /// Unique identifier for a fetch request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct Id(u64);
 
-/// Immutable details about a tracked request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct RequestInfo<F: Family> {
-    /// The location of the first requested operation.
-    pub start_loc: Location<F>,
-    /// The database size the request asked the resolver to prove against.
-    pub target_size: Location<F>,
-}
-
 /// Mutable request state kept while the request is still tracked.
 struct TrackedRequest<F: Family> {
-    info: RequestInfo<F>,
-    _cancel_tx: oneshot::Sender<()>,
+    request: Request<F>,
+    _aborter: Aborter,
 }
 
 /// Manages outstanding fetch requests.
 pub(super) struct Requests<F: Family, Op, D: Digest, E> {
     /// Futures that will resolve to fetch results.
-    futures: FuturesUnordered<FetchFuture<F, Op, D, E>>,
+    futures: AbortablePool<'static, IndexedFetchResult<F, Op, D, E>>,
 
     /// Counter for assigning unique request IDs.
     next_id: u64,
 
-    /// Active requests keyed by ID. Removing an entry drops the cancel sender,
-    /// causing the resolver's `cancel_rx.await` to return `Err`.
+    /// Active requests keyed by ID. Removing an entry drops its [`Aborter`],
+    /// which aborts and drops the request's future.
     tracked: HashMap<Id, TrackedRequest<F>>,
 
     /// Reverse index from location to request ID, for gap detection.
     by_location: BTreeMap<Location<F>, Id>,
 }
 
-impl<F: Family, Op, D: Digest, E> Requests<F, Op, D, E> {
+impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
     pub fn new() -> Self {
         Self {
-            futures: FuturesUnordered::new(),
+            futures: AbortablePool::default(),
             next_id: 0,
             tracked: HashMap::new(),
             by_location: BTreeMap::new(),
         }
     }
 
-    /// Allocate the next request ID. Use with [`Self::insert`] after building
-    /// the future that embeds this ID.
-    pub const fn next_id(&mut self) -> Id {
+    /// Register a request, returning its assigned ID. If a request already exists at the same
+    /// start location, the old one is superseded and aborted.
+    pub fn insert<Fut>(&mut self, request: Request<F>, make: impl FnOnce(Id) -> Fut) -> Id
+    where
+        Fut: Future<Output = IndexedFetchResult<F, Op, D, E>> + Send + 'static,
+    {
         let id = Id(self.next_id);
         self.next_id += 1;
-        id
-    }
-
-    /// Register a request with a previously allocated ID. If a request already
-    /// exists at `start_loc`, the old one is superseded (its cancel sender is
-    /// dropped and its future will be discarded when it completes).
-    pub fn insert(
-        &mut self,
-        id: Id,
-        start_loc: Location<F>,
-        target_size: Location<F>,
-        cancel_tx: oneshot::Sender<()>,
-        future: FetchFuture<F, Op, D, E>,
-    ) {
-        if let Some(old_id) = self.by_location.insert(start_loc, id) {
+        if let Some(old_id) = self.by_location.insert(request.start(), id) {
             self.tracked.remove(&old_id);
         }
+        let aborter = self.futures.push(make(id));
         self.tracked.insert(
             id,
             TrackedRequest {
-                info: RequestInfo {
-                    start_loc,
-                    target_size,
-                },
-                _cancel_tx: cancel_tx,
+                request,
+                _aborter: aborter,
             },
         );
-        self.futures.push(future);
+        id
     }
 
-    /// Complete a request by ID. Returns its metadata if it was tracked.
-    pub fn remove(&mut self, id: Id) -> Option<RequestInfo<F>> {
+    /// Complete a request by ID. Returns the request if it was tracked.
+    pub fn remove(&mut self, id: Id) -> Option<Request<F>> {
         if let Some(TrackedRequest {
-            info,
-            _cancel_tx: _,
+            request,
+            _aborter: _,
         }) = self.tracked.remove(&id)
         {
             // Only remove from by_location if it still points to this ID.
             // A newer request may have superseded this location.
-            if self.by_location.get(&info.start_loc) == Some(&id) {
-                self.by_location.remove(&info.start_loc);
+            let start = request.start();
+            if self.by_location.get(&start) == Some(&id) {
+                self.by_location.remove(&start);
             }
-            Some(info)
+            Some(request)
         } else {
             None
         }
     }
 
-    /// Remove all requests at locations before `loc`. Dropped cancel senders
-    /// signal resolvers to abort.
+    /// Remove all requests at locations before `loc`, aborting their futures.
     pub fn remove_before(&mut self, loc: Location<F>) {
         let keep = self.by_location.split_off(&loc);
         for id in self.by_location.values() {
@@ -130,9 +102,18 @@ impl<F: Family, Op, D: Digest, E> Requests<F, Op, D, E> {
         self.by_location = keep;
     }
 
-    /// Iterate over outstanding request locations in ascending order.
-    pub fn locations(&self) -> impl Iterator<Item = &Location<F>> {
-        self.by_location.keys()
+    /// Iterate over the maximum operation ranges covered by outstanding requests, in ascending
+    /// order.
+    pub fn ranges(&self) -> impl Iterator<Item = Range<Location<F>>> + '_ {
+        self.by_location.values().map(|id| {
+            let request = &self
+                .tracked
+                .get(id)
+                .expect("location index must reference a tracked request")
+                .request;
+            let start = request.start();
+            start..start.checked_add(request.max_ops().get()).unwrap()
+        })
     }
 
     /// Check if a location has an outstanding request.
@@ -140,18 +121,19 @@ impl<F: Family, Op, D: Digest, E> Requests<F, Op, D, E> {
         self.by_location.contains_key(loc)
     }
 
-    /// Get a mutable reference to the futures stream.
-    pub fn futures_mut(&mut self) -> &mut FuturesUnordered<FetchFuture<F, Op, D, E>> {
-        &mut self.futures
+    /// Resolves to the next fetch result, or [`Aborted`] if the request was cancelled.
+    /// Never resolves once all completed and aborted results have been drained.
+    pub async fn next_completed(&mut self) -> Result<IndexedFetchResult<F, Op, D, E>, Aborted> {
+        self.futures.next_completed().await
     }
 
-    /// Get the number of outstanding requests
+    /// Get the number of outstanding requests, not including aborted ones.
     pub fn len(&self) -> usize {
         self.tracked.len()
     }
 }
 
-impl<F: Family, Op, D: Digest, E> Default for Requests<F, Op, D, E> {
+impl<F: Family, Op: Send, D: Digest, E: Send> Default for Requests<F, Op, D, E> {
     fn default() -> Self {
         Self::new()
     }

@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use commonware_codec::{EncodeSize, Write};
 use commonware_utils::bitmap::BitMap;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_write<const CHUNK_SIZE: usize>(c: &mut Criterion, size: u64) {

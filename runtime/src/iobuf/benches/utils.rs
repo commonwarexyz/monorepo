@@ -1,6 +1,6 @@
 //! Shared helpers for `iobuf` benchmarks.
 //!
-//! The benchmark modules in this directory share the same small set of
+//! The `allocation` and `freelist` benchmark modules share the same small set of
 //! threading presets and the same timing harness:
 //!
 //! - [`Threading`] defines the single-threaded and multi-threaded benchmark
@@ -9,14 +9,20 @@
 //!   - `Lockstep`: all workers enter the hot path together, maximizing
 //!     contention.
 //!   - `Staggered`: workers add a small variable spin delay between iterations
-//!     to decorrelate access timing.
+//!     to decorrelate access timing. The delay executes inside the timed
+//!     loop, so staggered results include its cost, and for operations
+//!     measured in nanoseconds it can dominate. Compare staggered numbers
+//!     against other staggered numbers, not against lockstep or
+//!     single-threaded ones.
 //! - [`measure`] runs the benchmark body under those presets, including the
 //!   barrier synchronization used by the multi-threaded cases.
+//! - [`start_pool`] constructs a `BufferPool` for the end-to-end pool suites.
 //!
-//! Keeping these helpers in one place ensures that the `pool` and `freelist`
-//! benchmarks use the same contention patterns and wall-clock measurement
-//! rules.
+//! Keeping these helpers in one place ensures that the `allocation` and
+//! `freelist` benchmarks use the same contention patterns and wall-clock
+//! measurement rules.
 
+use commonware_runtime::{BufferPool, BufferPoolConfig, BufferPooler, Runner as _, tokio};
 use std::{
     hint::spin_loop,
     sync::{Arc, Barrier},
@@ -115,9 +121,9 @@ pub fn measure<T>(
 
                     if matches!(pattern, Pattern::Staggered) {
                         // Desynchronize threads so they don't all hit the
-                        // allocator at once. This spreads access times apart
-                        // without adding enough delay to dominate the
-                        // measurement.
+                        // allocator at once. The spins run inside the timed
+                        // loop and their cost is included in the reported
+                        // time.
                         let spins = (iter as usize).wrapping_add(1).wrapping_mul(
                             thread_id
                                 .wrapping_mul(MAX_BENCH_THREADS - 1)
@@ -139,4 +145,12 @@ pub fn measure<T>(
     });
 
     start.elapsed()
+}
+
+pub fn start_pool(cfg: BufferPoolConfig) -> BufferPool {
+    let runner_cfg = tokio::Config::default()
+        .with_worker_threads(1)
+        .with_network_buffer_pool_config(cfg);
+
+    tokio::Runner::new(runner_cfg).start(|ctx| async move { ctx.network_buffer_pool().clone() })
 }

@@ -1,8 +1,8 @@
 //! Metrics for the stateful actor.
 
 use commonware_runtime::{
-    telemetry::metrics::{histogram::Timed, GaugeExt, Registered},
     Metrics as MetricsTrait,
+    telemetry::metrics::{GaugeExt, Registered, histogram::Timed},
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
 

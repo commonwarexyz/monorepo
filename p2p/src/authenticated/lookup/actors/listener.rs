@@ -1,22 +1,21 @@
 //! Listener
 
 use crate::authenticated::{
-    lookup::actors::{spawner, tracker},
     Mailbox as SpawnerMailbox,
+    lookup::actors::{spawner, tracker},
 };
 use commonware_actor::Feedback;
 use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    spawn_cell,
-    telemetry::metrics::{Counter, MetricsExt as _},
     BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
-    SinkOf, Spawner, StreamOf,
+    SinkOf, Spawner, StreamOf, spawn_cell,
+    telemetry::metrics::{Counter, MetricsExt as _},
 };
-use commonware_stream::encrypted::{listen, Config as StreamConfig};
-use commonware_utils::{channel::ring, concurrency::Limiter, net::SubnetMask, IpAddrExt, NZUsize};
+use commonware_stream::encrypted::{Config as StreamConfig, listen};
+use commonware_utils::{IpAddrExt, NZUsize, channel::ring, concurrency::Limiter, net::SubnetMask};
 use futures::{Sink, StreamExt};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::{
     collections::HashSet,
     fmt,
@@ -69,7 +68,7 @@ pub struct Config<C: Signer> {
     pub allowed_handshake_rate_per_subnet: Quota,
 }
 
-pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
+pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signer> {
     context: ContextCell<E>,
 
     address: SocketAddr,
@@ -87,7 +86,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
     handshakes_subnet_rate_limited: Counter,
 }
 
-impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + BufferPooler + Clock + Network + CryptoRng + Metrics, C: Signer> Actor<E, C> {
     pub fn new(context: E, cfg: Config<C>, updates: Updates) -> Self {
         // Create metrics
         let handshakes_blocked = context.counter(
@@ -302,9 +301,9 @@ mod tests {
     use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        deterministic, Error as RuntimeError, Runner as _, Stream, Supervisor as _,
+        Error as RuntimeError, Runner as _, Stream, Supervisor as _, deterministic,
     };
-    use commonware_utils::{NZUsize, NZU32};
+    use commonware_utils::{NZU32, NZUsize};
     use std::{
         net::{IpAddr, Ipv4Addr},
         time::Duration,

@@ -16,17 +16,23 @@
 //!   certificates regardless of committee size.
 
 use super::types::Item;
-use commonware_cryptography::{certificate, Digest};
+use commonware_cryptography::{Digest, certificate};
+use commonware_utils::N3f1;
 
 /// Marker trait for signing schemes compatible with `aggregation`.
 ///
-/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type used
-/// by the aggregation protocol. It is automatically implemented for any scheme
-/// whose subject type matches `&'a Item<D>`.
-pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {}
+/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type and
+/// [`N3f1`] fault model used by the aggregation protocol. It is automatically
+/// implemented for any compatible scheme.
+pub trait Scheme<D: Digest>:
+    for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>, Faults = N3f1>
+{
+}
 
-impl<D: Digest, S> Scheme<D> for S where S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>>
-{}
+impl<D: Digest, S> Scheme<D> for S where
+    S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>, Faults = N3f1>
+{
+}
 
 pub mod bls12381_multisig {
     //! BLS12-381 multi-signature implementation of the
@@ -37,8 +43,9 @@ pub mod bls12381_multisig {
 
     use crate::aggregation::types::{Item, Namespace};
     use commonware_cryptography::impl_certificate_bls12381_multisig;
+    use commonware_utils::N3f1;
 
-    impl_certificate_bls12381_multisig!(&'a Item<D>, Namespace);
+    impl_certificate_bls12381_multisig!(&'a Item<D>, Namespace, N3f1);
 }
 
 pub mod bls12381_threshold {
@@ -50,8 +57,9 @@ pub mod bls12381_threshold {
 
     use crate::aggregation::types::{Item, Namespace};
     use commonware_cryptography::impl_certificate_bls12381_threshold;
+    use commonware_utils::N3f1;
 
-    impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace);
+    impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace, N3f1);
 }
 
 pub mod ed25519 {
@@ -63,8 +71,9 @@ pub mod ed25519 {
 
     use crate::aggregation::types::{Item, Namespace};
     use commonware_cryptography::impl_certificate_ed25519;
+    use commonware_utils::N3f1;
 
-    impl_certificate_ed25519!(&'a Item<D>, Namespace);
+    impl_certificate_ed25519!(&'a Item<D>, Namespace, N3f1);
 }
 
 pub mod secp256r1 {
@@ -76,6 +85,7 @@ pub mod secp256r1 {
 
     use crate::aggregation::types::{Item, Namespace};
     use commonware_cryptography::impl_certificate_secp256r1;
+    use commonware_utils::N3f1;
 
-    impl_certificate_secp256r1!(&'a Item<D>, Namespace);
+    impl_certificate_secp256r1!(&'a Item<D>, Namespace, N3f1);
 }

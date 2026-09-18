@@ -1,5 +1,6 @@
 use crate::{BufferPool, IoBuf, IoBufMut};
 use bytes::BufMut;
+use commonware_codec::{FixedSize, Write};
 use std::ops::{Bound, RangeBounds};
 
 /// A buffer for caching data written to the tip of a blob.
@@ -48,7 +49,7 @@ impl Buffer {
     }
 
     /// Creates a new buffer seeded with existing logical bytes.
-    pub(super) fn from(offset: u64, data: IoBuf, capacity: usize, pool: BufferPool) -> Self {
+    pub(super) const fn from(offset: u64, data: IoBuf, capacity: usize, pool: BufferPool) -> Self {
         let len = data.len();
         Self {
             data,
@@ -199,13 +200,18 @@ impl Buffer {
         let mut writable = self.writable(end);
         let prev = writable.len();
 
-        // Extend logical length to end, zero-filling any gap.
-        if end > prev {
-            writable.put_bytes(0, end - prev);
-        }
+        if start == prev {
+            // Copy the provided data into the buffer.
+            writable.put_slice(data);
+        } else {
+            // Extend logical length to end, zero-filling any gap.
+            if end > prev {
+                writable.put_bytes(0, end - prev);
+            }
 
-        // Copy the provided data into the buffer.
-        writable.as_mut()[start..end].copy_from_slice(data.as_ref());
+            // Copy the provided data into the buffer.
+            writable.as_mut()[start..end].copy_from_slice(data.as_ref());
+        }
         self.len = writable.len();
         self.data = writable.freeze();
 
@@ -234,6 +240,16 @@ impl Buffer {
         self.len = writable.len();
         self.data = writable.freeze();
         over_capacity
+    }
+
+    /// Encode a fixed-size value into the tip. The caller must ensure it fits in capacity.
+    pub(super) fn append_value<T: FixedSize + Write>(&mut self, value: &T) {
+        let end = self.len + T::SIZE;
+        let mut dst = self.writable(end).limit(T::SIZE);
+        value.write(&mut dst);
+        assert_eq!(dst.remaining_mut(), 0, "encoded size must match FixedSize");
+        self.len = end;
+        self.data = dst.into_inner().freeze();
     }
 
     /// Removes `len` leading bytes from the buffered data while preserving the remaining suffix.
@@ -353,6 +369,50 @@ mod tests {
     }
 
     #[test]
+    fn test_tip_append_value_reuses_backing_and_preserves_shared_prefix() {
+        let mut buffer = Buffer::new(0, 32, test_pool());
+        buffer.append_value(&1u64);
+        let ptr = buffer.as_ref().as_ptr();
+        buffer.append_value(&2u64);
+        assert_eq!(buffer.as_ref().as_ptr(), ptr);
+        let snapshot = buffer.slice(..);
+        buffer.append_value(&3u64);
+        assert_ne!(buffer.as_ref().as_ptr(), ptr);
+        assert_eq!(
+            snapshot.as_ref(),
+            [1u64.to_be_bytes(), 2u64.to_be_bytes()].concat()
+        );
+        assert_eq!(buffer.len(), 24);
+        assert_eq!(&buffer.as_ref()[16..], &3u64.to_be_bytes());
+    }
+
+    struct IncorrectSize(usize);
+
+    impl FixedSize for IncorrectSize {
+        const SIZE: usize = 8;
+    }
+
+    impl Write for IncorrectSize {
+        fn write(&self, buf: &mut impl BufMut) {
+            buf.put_bytes(0, self.0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "encoded size must match FixedSize")]
+    fn test_tip_append_value_rejects_short_encoding() {
+        let mut buffer = Buffer::new(0, 32, test_pool());
+        buffer.append_value(&IncorrectSize(7));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_tip_append_value_rejects_long_encoding() {
+        let mut buffer = Buffer::new(0, 32, test_pool());
+        buffer.append_value(&IncorrectSize(9));
+    }
+
+    #[test]
     fn test_tip_first_merge_from_empty() {
         let pool = test_pool();
         let mut buffer = Buffer::new(0, 16, pool);
@@ -360,6 +420,51 @@ mod tests {
 
         assert!(buffer.merge(b"abc", 0));
         assert_eq!(buffer.data.as_ref(), b"abc");
+    }
+
+    #[test]
+    fn test_tip_merge_append_after_truncate() {
+        for shared in [false, true] {
+            let mut buffer = Buffer::new(50, 8, test_pool());
+            assert!(buffer.merge(b"abcdefgh", 50));
+            let snapshot = shared.then(|| buffer.slice(..));
+
+            assert!(buffer.resize(53).is_none());
+            assert!(buffer.merge(b"XYZ", 53));
+            assert_eq!(buffer.as_ref(), b"abcXYZ");
+            assert_eq!(buffer.size(), 56);
+
+            assert!(buffer.merge(b"12", 56));
+            assert_eq!(buffer.as_ref(), b"abcXYZ12");
+            assert!(buffer.merge(b"", 58));
+            assert!(!buffer.merge(b"!", 58));
+            assert_eq!(buffer.as_ref(), b"abcXYZ12");
+            assert_eq!(buffer.size(), 58);
+            if let Some(snapshot) = snapshot {
+                assert_eq!(snapshot.as_ref(), b"abcdefgh");
+            }
+        }
+    }
+
+    #[test]
+    fn test_tip_merge_append_after_drain_and_clear() {
+        let mut buffer = Buffer::new(50, 8, test_pool());
+        assert!(buffer.merge(b"abcdef", 50));
+        buffer.drop_prefix(3);
+        buffer.offset += 3;
+        assert!(buffer.merge(b"XYZ", 56));
+        assert_eq!(buffer.as_ref(), b"defXYZ");
+
+        let (snapshot, offset) = buffer.take().unwrap();
+        assert_eq!(offset, 53);
+        assert!(buffer.merge(b"12", 59));
+        assert_eq!(buffer.as_ref(), b"12");
+        assert_eq!(snapshot.as_ref(), b"defXYZ");
+
+        buffer.clear();
+        assert!(buffer.merge(b"!", 59));
+        assert_eq!(buffer.as_ref(), b"!");
+        assert_eq!(buffer.size(), 60);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
 use commonware_resolver::p2p;
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
-use rand::Rng;
+use rand_core::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
@@ -29,9 +29,6 @@ where
 
     /// The size of the request mailbox backlog.
     pub mailbox_size: NonZeroUsize,
-
-    /// Initial expected performance for new participants.
-    pub initial: Duration,
 
     /// Timeout for requests.
     pub timeout: Duration,
@@ -75,7 +72,6 @@ where
             producer: handler,
             mailbox_size: config.mailbox_size,
             me: Some(config.public_key),
-            initial: config.initial,
             timeout: config.timeout,
             fetch_retry_timeout: config.fetch_retry_timeout,
             priority_requests: config.priority_requests,

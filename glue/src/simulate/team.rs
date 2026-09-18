@@ -7,7 +7,7 @@ use super::{
     tracker::FinalizationUpdate,
 };
 use commonware_p2p::simulated::{Link, Oracle};
-use commonware_runtime::{deterministic, Handle, Supervisor as _};
+use commonware_runtime::{Handle, Supervisor as _, deterministic};
 use commonware_utils::channel::mpsc;
 use std::collections::{BTreeMap, HashSet};
 use tracing::info;
@@ -174,6 +174,14 @@ impl<D: EngineDefinition> Team<D> {
     /// Get the public keys of all currently active validators.
     pub fn active_keys(&self) -> Vec<D::PublicKey> {
         self.handles.keys().cloned().collect()
+    }
+
+    /// Get a validator's inspectable state if it is currently active.
+    pub fn active_state(&self, pk: &D::PublicKey) -> Option<&D::State> {
+        if !self.handles.contains_key(pk) {
+            return None;
+        }
+        self.states.get(pk)
     }
 
     /// All participants (including crashed ones).

@@ -4,7 +4,7 @@
 //! `Application` trait, suitable for testing the `Marshaled` wrapper in
 //! both standard and coding variants.
 
-use crate::{marshal::ancestry::Ancestry, CertifiableBlock, Epochable};
+use crate::{CertifiableBlock, Epochable, marshal::ancestry::Ancestry};
 use commonware_runtime::deterministic;
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -71,11 +71,13 @@ where
     type Block = B;
     type Context = B::Context;
     type SigningScheme = S;
+    type Input = ();
 
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
     ) -> Option<Self::Block> {
         self.propose_result.clone()
     }
@@ -126,11 +128,13 @@ where
     type Block = B;
     type Context = B::Context;
     type SigningScheme = S;
+    type Input = ();
 
     async fn propose(
         &mut self,
         _context: (deterministic::Context, Self::Context),
         _ancestry: impl Ancestry<Self::Block>,
+        _input: Self::Input,
     ) -> Option<Self::Block> {
         None
     }

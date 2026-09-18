@@ -1,10 +1,10 @@
 //! Re-exports of the generic verification module, specialized for the MMR [Family].
 
 use crate::merkle::{
+    Bagging,
     hasher::Hasher,
     mmr::{Error, Family, Location, Proof},
     storage::Storage,
-    Bagging,
 };
 use commonware_cryptography::Digest;
 use core::ops::Range;

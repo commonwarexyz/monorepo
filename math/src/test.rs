@@ -1,10 +1,10 @@
 use crate::algebra::{Additive, CryptoGroup, Field, Multiplicative, Object, Random, Ring, Space};
-use commonware_codec::{FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, FixedSize, Read, ReadExt, Write};
 use core::{
     fmt::Debug,
     ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
 };
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 
 const P: u64 = 4_611_686_018_427_389_243;
 const Q: u64 = 9_223_372_036_854_778_487;
@@ -34,10 +34,7 @@ impl Write for F {
 impl Read for F {
     type Cfg = ();
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let value = u64::read(buf)?;
         if value >= P {
             return Err(commonware_codec::Error::Invalid("F", "out of range"));
@@ -61,7 +58,7 @@ impl From<u64> for F {
 impl Object for F {}
 
 impl Random for F {
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut bytes = [0u8; 8];
         rng.fill_bytes(&mut bytes);
         Self(u64::from_le_bytes(bytes) % P)
@@ -167,10 +164,7 @@ impl Write for G {
 impl Read for G {
     type Cfg = ();
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        _cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
+    fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let value = u64::read(buf)?;
         if value >= Q {
             return Err(commonware_codec::Error::Invalid("G", "out of range"));
@@ -317,9 +311,9 @@ mod test {
         let random = F::random(&mut rng);
         assert!(random == F::zero() || random.inv() * &random == F::one());
 
-        assert!(F::read(&mut P.encode().as_ref()).is_err());
-        assert!(G::read(&mut Q.encode().as_ref()).is_err());
-        assert!(G::read(&mut 0u64.encode().as_ref()).is_err());
+        assert!(F::read(&mut P.encode()).is_err());
+        assert!(G::read(&mut Q.encode()).is_err());
+        assert!(G::read(&mut 0u64.encode()).is_err());
     }
 
     #[cfg(feature = "arbitrary")]

@@ -1,12 +1,12 @@
 use super::block::BlockFormat;
 use crate::Scheme;
-use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::simplex::types::Finalization;
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, Variant},
     Digest,
+    bls12381::primitives::variant::{MinSig, Variant},
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 
 /// Enum representing incoming messages from validators to the indexer.
 ///
@@ -213,7 +213,7 @@ impl EncodeSize for GetFinalization {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{DecodeExt, DecodeFixed, Encode};
     use commonware_consensus::{
         simplex::types::Proposal,
         types::{Epoch, Round, View},
@@ -230,18 +230,18 @@ mod tests {
     }
 
     fn new_digest() -> Sha256Digest {
-        Sha256Digest::decode(&[123u8; Sha256Digest::SIZE][..]).unwrap()
+        Sha256Digest::decode_fixed([123u8; Sha256Digest::SIZE]).unwrap()
     }
 
     fn new_group_public() -> <MinSig as Variant>::Public {
         let mut result = <MinSig as Variant>::Public::generator();
-        let scalar = group::Scalar::random(&mut test_rng());
+        let scalar = group::Scalar::random(test_rng());
         result *= &scalar;
         result
     }
 
     fn new_finalization() -> Finalization<Scheme, Sha256Digest> {
-        let scalar = group::Scalar::random(&mut test_rng());
+        let scalar = group::Scalar::random(test_rng());
         let mut signature = <MinSig as Variant>::Signature::generator();
         signature *= &scalar;
         Finalization {

@@ -7,15 +7,43 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
-    pub mod rng;
-    pub use rng::{test_rng, test_rng_seeded, FuzzRng};
-
-    pub mod thread_local;
-    pub use thread_local::Cached;
+    pub use rng::{Entropy, FuzzRng, ScriptedRng, TestRng, test_rng};
 });
 commonware_macros::stability_scope!(BETA {
     #[cfg(not(feature = "std"))]
     extern crate alloc;
+
+    /// Lossless integer conversions that std provides no [From] impl for
+    /// (for example `NonZeroU16` or `usize` into `u64`).
+    pub trait Widen<T> {
+        /// Convert without loss.
+        fn widen(self) -> T;
+    }
+
+    macro_rules! impl_widen {
+        ($($nz:ty => $($t:ty),+);+ $(;)?) => {$($(
+            impl Widen<$t> for $nz {
+                #[inline]
+                fn widen(self) -> $t {
+                    <$t>::from(self.get())
+                }
+            }
+        )+)+};
+    }
+    impl_widen!(
+        core::num::NonZeroU8 => u16, u32, u64, u128, usize;
+        core::num::NonZeroU16 => u32, u64, u128, usize;
+        core::num::NonZeroU32 => u64, u128;
+        core::num::NonZeroU64 => u128;
+    );
+
+    impl Widen<u64> for usize {
+        #[inline]
+        fn widen(self) -> u64 {
+            const { assert!(Self::BITS <= u64::BITS) };
+            self as u64
+        }
+    }
 
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, vec::Vec};
@@ -32,11 +60,15 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod bitmap;
     pub mod cache;
+    pub mod iter;
     pub mod ordered;
+    pub mod probability;
+    pub use probability::Probability;
     pub mod range;
 
-    use bytes::Buf;
-    use commonware_codec::{varint::UInt, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use commonware_codec::{
+        Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, varint::UInt,
+    };
 
     /// 64-bit golden-ratio-derived odd mixing constant.
     ///
@@ -204,6 +236,9 @@ commonware_macros::stability_scope!(BETA {
     }
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
+    pub mod rng;
+    pub use rng::sys_rng;
+
     pub mod acknowledgement;
     pub use acknowledgement::Acknowledgement;
 
@@ -223,6 +258,9 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod concurrency;
     pub mod futures;
     pub mod sync;
+
+    pub mod thread_local;
+    pub use thread_local::Cached;
 });
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -334,9 +372,10 @@ macro_rules! NZDuration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TestRng;
     use commonware_formatting::hex;
     use num_bigint::BigUint;
-    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use rand::RngExt as _;
 
     #[test]
     fn test_union() {
@@ -414,8 +453,8 @@ mod tests {
 
         // Test case 3: check equivalence with BigUint
         for i in 0..100 {
-            let mut rng = StdRng::seed_from_u64(i);
-            let bytes: [u8; 32] = rng.gen();
+            let mut rng = TestRng::new(i);
+            let bytes: [u8; 32] = rng.random();
 
             // 1-byte modulus
             let n = 11u64;

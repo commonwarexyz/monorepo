@@ -1,29 +1,25 @@
 use crate::{
+    Context,
     index::unordered::Index,
-    journal::{
-        authenticated,
-        contiguous::{Mutable, Reader as _},
-    },
+    journal::{authenticated, contiguous::Mutable},
     merkle::{
-        full::{self, Merkle},
         Family, Location,
+        full::{self, Merkle},
     },
     qmdb::{
-        self,
+        self, Error,
         any::ValueEncoding,
-        build_snapshot_from_log,
         immutable::{self, CompactDb, Metrics, Operation},
         operation::Key,
-        sync::{self},
-        Error,
+        sync,
     },
     translator::Translator,
-    Context,
 };
 use commonware_codec::{EncodeShared, Read};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_utils::range::NonEmptyRange;
+use std::num::NonZeroU64;
 
 impl<F, E, K, V, C, H, T, S> sync::Database for immutable::Immutable<F, E, K, V, C, H, T, S>
 where
@@ -68,7 +64,7 @@ where
         log: Self::Journal,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
-        apply_batch_size: usize,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
         let hasher = qmdb::hasher::<H>();
 
@@ -87,44 +83,31 @@ where
             merkle,
             log,
             hasher,
-            apply_batch_size as u64,
+            apply_batch_size.get(),
         )
         .await?;
 
         let mut snapshot: Index<T, Location<F>> =
             Index::new(context.child("snapshot"), db_config.translator.clone());
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.journal.reader().await;
-            let bounds = reader.bounds();
-            let last_commit_loc = Location::<F>::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
-            );
-            let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &reader,
-                Location::new(bounds.end),
-                |op| op.has_floor(),
-            )
-            .await?;
+        let size = journal.size();
+        if size == 0 {
+            return Err(Error::HistoricalFloorPruned(size));
+        }
+        let inactivity_floor_loc =
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&journal.journal, size).await?;
 
-            // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot_from_log::<F, _, _, _>(
-                inactivity_floor_loc,
-                &reader,
-                &mut snapshot,
-                |_, _| {},
-            )
-            .await?;
-
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(
-            F::location_to_position(Location::new(*last_commit_loc + 1)),
+        // Replay the log from the inactivity floor to build the snapshot. Every retained
+        // location is inserted, mirroring the live apply path, so a repeated key keeps
+        // serving one of its written values across restarts and rewinds.
+        immutable::build_snapshot(
             inactivity_floor_loc,
-        );
+            &journal.journal,
+            &mut snapshot,
+            db_config.init_buffer,
+        )
+        .await?;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -132,14 +115,42 @@ where
             journal,
             root,
             snapshot,
-            last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };
-        db.update_metrics().await;
+        db.update_metrics();
 
-        db.sync().await?;
-        Ok(db)
+        db.sync().await
+    }
+
+    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+        Ok(self)
+    }
+
+    async fn local_pinned_nodes(
+        context: Self::Context,
+        config: &Self::Config,
+        target: &sync::Target<F, Self::Digest>,
+        journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        if target.range.start() == Location::new(0)
+            || !sync::journal_covers_range(journal.bounds(), &target.range)
+        {
+            return Ok(None);
+        }
+
+        // The inactivity floor is carried by the last commit operation rather than being
+        // the target range's start.
+        let inactivity_floor =
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
+
+        sync::local_pinned_nodes::<F, _, H, S>(
+            context,
+            config.merkle_config.clone(),
+            target,
+            inactivity_floor,
+        )
+        .await
     }
 
     fn root(&self) -> Self::Digest {
@@ -147,7 +158,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, Cfg, S> sync::compact::Database for CompactDb<F, E, K, V, H, Cfg, S>
+impl<F, E, K, V, H, Cfg, S> sync::Database for CompactDb<F, E, K, V, H, Cfg, S>
 where
     F: Family,
     E: Context,
@@ -161,35 +172,46 @@ where
 {
     type Family = F;
     type Op = Operation<F, K, V>;
+    type Journal = sync::journal::Memory<F, E, Operation<F, K, V>>;
     type Config = immutable::CompactConfig<Cfg, S>;
     type Digest = H::Digest;
     type Context = E;
     type Hasher = H;
 
-    async fn from_validated_state(
+    async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
-        state: sync::compact::ValidatedState<Self::Family, Self::Op, Self::Digest>,
+        log: Self::Journal,
+        pinned_nodes: Option<Vec<Self::Digest>>,
+        range: NonEmptyRange<Location<F>>,
+        _apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
-        let journal: crate::qmdb::compact::witness::Journal<E, F, H::Digest> =
-            crate::journal::contiguous::variable::Journal::init(
-                context.child("witness"),
-                config.witness,
-            )
-            .await?;
-        Self::init_from_validated_state(config.strategy, journal, config.commit_codec_config, state)
+        crate::qmdb::compact::from_sync_result(
+            context,
+            config,
+            log,
+            pinned_nodes,
+            range,
+            Self::init_from_sync,
+        )
+        .await
     }
 
-    fn inactivity_floor(op: &Self::Op) -> Option<Location<Self::Family>> {
-        op.has_floor()
+    async fn persist_sync_result(self) -> Result<Self, Error<F>> {
+        self.sync().await
+    }
+
+    async fn local_pinned_nodes(
+        _context: Self::Context,
+        _config: &Self::Config,
+        _target: &sync::Target<F, Self::Digest>,
+        _journal: &Self::Journal,
+    ) -> Result<Option<Vec<Self::Digest>>, Error<F>> {
+        Ok(None)
     }
 
     fn root(&self) -> Self::Digest {
         self.root()
-    }
-
-    async fn persist_compact_state(&self) -> Result<(), Error<F>> {
-        self.sync().await
     }
 }
 

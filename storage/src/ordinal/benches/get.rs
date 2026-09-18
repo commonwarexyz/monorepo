@@ -1,14 +1,14 @@
-use super::utils::{append_random, init, Ordinal, ITEMS_PER_BLOB};
+use super::utils::{ITEMS_PER_BLOB, Ordinal, append_random, init};
 use commonware_runtime::{
+    Runner,
     benchmarks::{context, tokio},
     tokio::Config,
-    Runner,
 };
 use commonware_storage::utils::bits_for_indices;
-use commonware_utils::NZU64;
-use criterion::{criterion_group, Criterion};
-use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use commonware_utils::{NZU64, TestRng};
+use criterion::{Criterion, criterion_group};
+use futures::{StreamExt, stream::FuturesUnordered};
+use rand::RngExt as _;
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
@@ -16,10 +16,10 @@ const ITEMS: u64 = 250_000;
 
 /// Select random indices for benchmarking.
 pub fn select_indices(count: usize, items: u64) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = TestRng::new(42);
     let mut selected_indices = Vec::with_capacity(count);
     for _ in 0..count {
-        selected_indices.push(rng.gen_range(0..items));
+        selected_indices.push(rng.random_range(0..items));
     }
     selected_indices
 }
@@ -33,11 +33,13 @@ pub async fn read_serial_indices(store: &Ordinal, indices: &[u64]) {
 
 /// Read indices concurrently from an ordinal store.
 pub async fn read_concurrent_indices(store: &Ordinal, indices: &[u64]) {
-    let mut futures = Vec::with_capacity(indices.len());
+    let mut futures = FuturesUnordered::new();
     for idx in indices {
         futures.push(store.get(*idx));
     }
-    black_box(try_join_all(futures).await.unwrap());
+    while let Some(result) = futures.next().await {
+        black_box(result.unwrap().unwrap());
+    }
 }
 
 fn bench_get(c: &mut Criterion) {
@@ -47,9 +49,8 @@ fn bench_get(c: &mut Criterion) {
     // Create a shared on-disk store once so later setup is fast.
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
     let bits = builder.start(|ctx| async move {
-        let mut store = init(ctx, None).await;
-        let indices = append_random(&mut store, ITEMS).await;
-        store.sync().await.unwrap();
+        let store = init(ctx, None).await;
+        let (_, indices) = append_random(store, ITEMS).await;
         bits_for_indices(NZU64!(ITEMS_PER_BLOB), indices)
     });
 

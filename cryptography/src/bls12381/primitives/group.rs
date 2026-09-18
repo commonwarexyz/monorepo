@@ -5,20 +5,24 @@
 //!
 //! # Warning
 //!
-//! Ensure that points are checked to belong to the correct subgroup
-//! (G1 or G2) to prevent small subgroup attacks. This is particularly important
-//! when handling deserialized points or points received from untrusted sources. This
-//! is already taken care of for you if you use the provided `deserialize` function.
+//! Points received from untrusted sources must be checked for membership in the correct subgroup
+//! to prevent small-subgroup attacks. The [`Read`] implementations for [`G1`] and [`G2`] perform
+//! this check and also reject the identity.
+//!
+//! [`G1`] and [`G2`] include the identity because group operations require it. Values produced by
+//! group operations can still be the identity, so an API that treats it as invalid must reject it
+//! at its own boundary.
 
 use super::variant::Variant;
 use crate::Secret;
 #[cfg(not(feature = "std"))]
 use alloc::{vec, vec::Vec};
 use blst::{
-    blst_bendian_from_fp12, blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr,
-    blst_fr_add, blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse,
-    blst_fr_mul, blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen,
-    blst_p1, blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
+    BLS12_381_G1, BLS12_381_G2, BLST_ERROR, Pairing, blst_bendian_from_fp12,
+    blst_bendian_from_scalar, blst_expand_message_xmd, blst_fp12, blst_fr, blst_fr_add,
+    blst_fr_cneg, blst_fr_from_scalar, blst_fr_from_uint64, blst_fr_inverse, blst_fr_mul,
+    blst_fr_rshift, blst_fr_sub, blst_hash_to_g1, blst_hash_to_g2, blst_keygen, blst_p1,
+    blst_p1_add_or_double, blst_p1_affine, blst_p1_cneg, blst_p1_compress, blst_p1_double,
     blst_p1_from_affine, blst_p1_in_g1, blst_p1_is_inf, blst_p1_mult, blst_p1_to_affine,
     blst_p1_uncompress, blst_p1s_mult_pippenger, blst_p1s_mult_pippenger_scratch_sizeof,
     blst_p1s_tile_pippenger, blst_p1s_to_affine, blst_p2, blst_p2_add_or_double, blst_p2_affine,
@@ -26,11 +30,11 @@ use blst::{
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
     blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-    blst_scalar_from_fr, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar_from_fr,
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use commonware_codec::{
-    EncodeSize,
+    Buf, EncodeSize,
     Error::{self, Invalid},
     FixedArray, FixedSize, Read, ReadExt, Write,
 };
@@ -49,7 +53,7 @@ use core::{
     ptr,
 };
 use ctutils::{Choice, CtEq};
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 fn all_zero(bytes: &[u8]) -> Choice {
@@ -259,8 +263,8 @@ const SCALAR_BITS: usize = 255;
 
 /// Number of scalar bits for SmallScalar (128 bits).
 ///
-/// 128 bits provides sufficient security (2^-128 collision probability)
-/// while roughly halving MSM computation time compared to full 255-bit scalars.
+/// 128 bits provides a soundness error of at most 2^-128 for random
+/// linear-combination checks while roughly halving MSM computation time.
 const SMALL_SCALAR_BITS: usize = 128;
 
 /// Number of bytes for SmallScalar (16 bytes = 128 bits).
@@ -272,11 +276,10 @@ const IKM_LENGTH: usize = 64;
 /// Minimum number of points required to use parallel MSM.
 const MIN_PARALLEL_POINTS: usize = 32;
 
-/// A 128-bit scalar for use in batch verification random challenges.
+/// A 128-bit scalar in `[0, 2^128)`.
 ///
-/// This provides 128-bit security which is sufficient for preventing
-/// forgery attacks in batch verification while reducing computational cost
-/// compared to full 255-bit scalars.
+/// Every `SmallScalar` can be converted to a valid [`Scalar`]. Its reduced width
+/// roughly halves MSM computation time compared to full 255-bit scalars.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SmallScalar {
     /// Stored as blst_scalar with only lower 128 bits populated.
@@ -284,14 +287,20 @@ pub struct SmallScalar {
 }
 
 impl SmallScalar {
-    /// Generates a random 128-bit scalar.
-    pub fn random(mut rng: impl CryptoRngCore) -> Self {
-        // blst_scalar is 32 bytes
-        let mut bytes = [0u8; 32];
+    /// Generates a uniformly random scalar in `[0, 2^128)`.
+    ///
+    /// Zero is intentionally included. Predictable challenges are unsafe regardless of their value,
+    /// but zero from uniform, independent sampling does not weaken the check. An invalid random
+    /// linear-combination check has at least one non-zero error term. Fixing every other challenge
+    /// leaves at most one value in this range for that term that can make the check pass, so the
+    /// soundness error remains at most `2^-128`.
+    pub fn random(mut rng: impl CryptoRng) -> Self {
+        // blst_scalar is 32 bytes.
+        let mut bytes = [0u8; SCALAR_LENGTH];
         // Fill the last 16 bytes (128 bits) with entropy.
         // In big-endian, bytes[16..32] are the least significant.
         // Leaving bytes[0..16] as zero ensures the scalar is < 2^128.
-        rng.fill_bytes(&mut bytes[SMALL_SCALAR_LENGTH..]);
+        rng.fill_bytes(&mut bytes[(SCALAR_LENGTH - SMALL_SCALAR_LENGTH)..]);
 
         let mut scalar = blst_scalar::default();
         // SAFETY: bytes is a valid 32-byte array.
@@ -541,7 +550,7 @@ impl FixedSize for Private {
 }
 
 impl Random for Private {
-    fn random(rng: impl CryptoRngCore) -> Self {
+    fn random(rng: impl CryptoRng) -> Self {
         Self::new(Scalar::random(rng))
     }
 }
@@ -930,7 +939,7 @@ impl Field for Scalar {
 
 impl Random for Scalar {
     /// Returns a random **non-zero** scalar.
-    fn random(mut rng: impl CryptoRngCore) -> Self {
+    fn random(mut rng: impl CryptoRng) -> Self {
         let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
         rng.fill_bytes(ikm.as_mut());
         Self::from_ikm(&ikm)
@@ -1140,7 +1149,8 @@ impl G1 {
             return Self::zero();
         }
         let npoints = points_filtered.len();
-        let ncpus = strategy.parallelism_hint();
+        let manual = strategy.manual();
+        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1157,7 +1167,7 @@ impl G1 {
         }
 
         // Parallel MSM using tile_pippenger
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, &manual)
     }
 
     fn msm_sequential(affine_points: &[blst_p1_affine], scalars: &[u8], nbits: usize) -> Self {
@@ -1263,10 +1273,12 @@ impl Read for G1 {
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G1", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G1", "Not on curve")),
                 BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G1", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G1", "Type mismatch")),
-                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G1", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G1", "PK is Infinity")),
-                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G1", "Bad scalar")),
+                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
+                | BLST_ERROR::BLST_VERIFY_FAIL
+                | BLST_ERROR::BLST_PK_IS_INFINITY
+                | BLST_ERROR::BLST_BAD_SCALAR => {
+                    return Err(Invalid("G1", "Unexpected uncompress error"));
+                }
             }
             blst_p1_from_affine(&mut ret, &affine);
 
@@ -1560,7 +1572,8 @@ impl G2 {
             return Self::zero();
         }
         let npoints = points_filtered.len();
-        let ncpus = strategy.parallelism_hint();
+        let manual = strategy.manual();
+        let ncpus = manual.parallelism();
 
         // Convert to affine points
         let affine_points = Self::batch_to_affine(&points_filtered);
@@ -1577,7 +1590,7 @@ impl G2 {
         }
 
         // Parallel MSM using tile_pippenger
-        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, strategy)
+        Self::msm_parallel(&affine_points, &scalar_bytes, nbits, ncpus, &manual)
     }
 
     fn msm_sequential(affine_points: &[blst_p2_affine], scalars: &[u8], nbits: usize) -> Self {
@@ -1682,11 +1695,13 @@ impl Read for G2 {
                 BLST_ERROR::BLST_SUCCESS => {}
                 BLST_ERROR::BLST_BAD_ENCODING => return Err(Invalid("G2", "Bad encoding")),
                 BLST_ERROR::BLST_POINT_NOT_ON_CURVE => return Err(Invalid("G2", "Not on curve")),
-                BLST_ERROR::BLST_POINT_NOT_IN_GROUP => return Err(Invalid("G2", "Not in group")),
-                BLST_ERROR::BLST_AGGR_TYPE_MISMATCH => return Err(Invalid("G2", "Type mismatch")),
-                BLST_ERROR::BLST_VERIFY_FAIL => return Err(Invalid("G2", "Verify fail")),
-                BLST_ERROR::BLST_PK_IS_INFINITY => return Err(Invalid("G2", "PK is Infinity")),
-                BLST_ERROR::BLST_BAD_SCALAR => return Err(Invalid("G2", "Bad scalar")),
+                BLST_ERROR::BLST_POINT_NOT_IN_GROUP
+                | BLST_ERROR::BLST_AGGR_TYPE_MISMATCH
+                | BLST_ERROR::BLST_VERIFY_FAIL
+                | BLST_ERROR::BLST_PK_IS_INFINITY
+                | BLST_ERROR::BLST_BAD_SCALAR => {
+                    return Err(Invalid("G2", "Unexpected uncompress error"));
+                }
             }
             blst_p2_from_affine(&mut ret, &affine);
 
@@ -1895,14 +1910,16 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
+    use commonware_codec::{Copying, Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
-    use commonware_math::algebra::{test_suites, Random};
+    use commonware_math::algebra::{Random, test_suites};
     use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::test_rng;
+    use rand_core::{TryCryptoRng, TryRng, utils::fill_bytes_via_next_word};
     use std::{
         collections::{BTreeSet, HashMap},
+        convert::Infallible,
         num::NonZeroUsize,
     };
 
@@ -1939,7 +1956,7 @@ mod tests {
     #[test]
     fn basic_group() {
         // Reference: https://github.com/celo-org/celo-threshold-bls-rs/blob/b0ef82ff79769d085a5a7d3f4fe690b1c8fe6dc9/crates/threshold-bls/src/curve/bls12381.rs#L200-L220
-        let s = Scalar::random(&mut test_rng());
+        let s = Scalar::random(test_rng());
         let mut s2 = s.clone();
         s2.double();
 
@@ -1954,7 +1971,7 @@ mod tests {
 
     #[test]
     fn test_scalar_codec() {
-        let original = Scalar::random(&mut test_rng());
+        let original = Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode_cfg(&mut encoded, &ScalarReadCfg::RejectZero).unwrap();
@@ -2035,25 +2052,26 @@ mod tests {
     #[test]
     fn test_scalar_read_cfg_accepts_canonical_zero() {
         // Round-trips canonical encodings, including zero.
-        let s = Scalar::random(&mut test_rng());
+        let s = Scalar::random(test_rng());
         let bytes = s.encode_fixed::<{ Scalar::SIZE }>();
         assert_eq!(
-            Scalar::decode_cfg(bytes.as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::decode_cfg(Copying(&bytes), &ScalarReadCfg::AllowZero).unwrap(),
             s
         );
         assert_eq!(
-            Scalar::decode_cfg([0u8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::decode_cfg(Copying(&[0u8; Scalar::SIZE]), &ScalarReadCfg::AllowZero).unwrap(),
             Scalar::zero()
         );
         // Non-canonical encodings (>= r) are rejected.
         assert!(
-            Scalar::decode_cfg([0xffu8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).is_err()
+            Scalar::decode_cfg(Copying(&[0xffu8; Scalar::SIZE]), &ScalarReadCfg::AllowZero)
+                .is_err()
         );
     }
 
     #[test]
     fn test_g1_codec() {
-        let original = G1::generator() * &Scalar::random(&mut test_rng());
+        let original = G1::generator() * &Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G1::SIZE);
         let decoded = G1::decode(&mut encoded).unwrap();
@@ -2061,12 +2079,22 @@ mod tests {
     }
 
     #[test]
+    fn test_g1_codec_rejects_identity() {
+        assert!(G1::decode(G1::zero().encode()).is_err());
+    }
+
+    #[test]
     fn test_g2_codec() {
-        let original = G2::generator() * &Scalar::random(&mut test_rng());
+        let original = G2::generator() * &Scalar::random(test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), G2::SIZE);
         let decoded = G2::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_g2_codec_rejects_identity() {
+        assert!(G2::decode(G2::zero().encode()).is_err());
     }
 
     /// Naive calculation of Multi-Scalar Multiplication: sum(scalar * point)
@@ -2293,12 +2321,9 @@ mod tests {
         assert_eq!(g2_set.len(), NUM_ITEMS);
 
         // Verify that `BTreeSet` iteration is sorted, which relies on `Ord`.
-        let scalars: Vec<_> = scalar_set.iter().collect();
-        assert!(scalars.windows(2).all(|w| w[0] <= w[1]));
-        let g1s: Vec<_> = g1_set.iter().collect();
-        assert!(g1s.windows(2).all(|w| w[0] <= w[1]));
-        let g2s: Vec<_> = g2_set.iter().collect();
-        assert!(g2s.windows(2).all(|w| w[0] <= w[1]));
+        assert!(scalar_set.iter().is_sorted());
+        assert!(g1_set.iter().is_sorted());
+        assert!(g2_set.iter().is_sorted());
 
         // Test that we can use these types as keys in hash maps, which relies on `Hash` and `Eq`.
         let scalar_map: HashMap<_, _> = scalar_set.iter().cloned().zip(0..).collect();
@@ -2520,6 +2545,38 @@ mod tests {
         let scalar = Scalar::from(small.clone());
         let round_tripped = scalar.as_blst_scalar();
         assert_eq!(small.as_bytes(), round_tripped.b.as_slice());
+    }
+
+    #[test]
+    fn test_small_scalar_random_includes_zero() {
+        struct ZeroOnce(bool);
+
+        impl TryRng for ZeroOnce {
+            type Error = Infallible;
+
+            fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+                Ok(0)
+            }
+
+            fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+                Ok(u64::from(self.try_next_u32()?))
+            }
+
+            fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+                assert!(!self.0, "random sampled more than once");
+                self.0 = true;
+                fill_bytes_via_next_word(dst, || self.try_next_u64())
+            }
+        }
+
+        impl TryCryptoRng for ZeroOnce {}
+
+        let mut rng = ZeroOnce(false);
+        let scalar = SmallScalar::random(&mut rng);
+
+        assert!(rng.0);
+        assert_eq!(scalar, SmallScalar::zero());
+        assert_eq!(Scalar::from(scalar), Scalar::zero());
     }
 
     #[test]

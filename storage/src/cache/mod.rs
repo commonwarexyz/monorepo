@@ -15,9 +15,10 @@
 //!
 //! # Pruning
 //!
-//! [Cache] supports pruning up to a minimum `index` using the `prune` method. After `prune` is
-//! called on a `section`, all interaction with a `section` less than the pruned `section` will
-//! return an error. The pruning granularity is determined by `items_per_blob` in the configuration.
+//! [Cache] supports pruning up to a minimum `index` using the `prune` method. After pruning,
+//! `get` on a pruned index returns `None`, `prune` below the floor is a no-op, and `put` below
+//! the floor is satisfied without storing. The pruning granularity is determined by
+//! `items_per_blob` in the configuration.
 //!
 //! # Single Operation Reads
 //!
@@ -59,14 +60,14 @@
 //!     let mut cache = Cache::init(context, cfg).await.unwrap();
 //!
 //!     // Put data at index
-//!     cache.put(1, 100u32).await.unwrap();
+//!     cache = cache.put(1, 100u32).await.unwrap();
 //!
 //!     // Get data by index
 //!     let data: Option<u32> = cache.get(1).await.unwrap();
 //!     assert_eq!(data, Some(100));
 //!
 //!     // Check for gaps in the index space
-//!     cache.put(10, 200u32).await.unwrap();
+//!     cache = cache.put(10, 200u32).await.unwrap();
 //!     let (current_end, start_next) = cache.next_gap(5);
 //!     assert!(current_end.is_none());
 //!     assert_eq!(start_next, Some(10));
@@ -78,23 +79,11 @@
 
 use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
-use thiserror::Error;
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
 mod storage;
 pub use storage::Cache;
-
-/// Errors that can occur when interacting with the cache.
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("journal error: {0}")]
-    Journal(#[from] crate::journal::Error),
-    #[error("record corrupted")]
-    RecordCorrupted,
-    #[error("already pruned to: {0}")]
-    AlreadyPrunedTo(u64),
-    #[error("record too large")]
-    RecordTooLarge,
-}
 
 /// Configuration for [Cache] storage.
 #[derive(Clone)]
@@ -128,10 +117,11 @@ mod tests {
     use crate::journal::Error as JournalError;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::has_metric_value, Metrics as _, Runner, Supervisor as _,
+        Metrics as _, Runner, Supervisor as _, deterministic, mocks::RecordingContext,
+        telemetry::metrics::has_metric_value,
     };
-    use commonware_utils::{NZUsize, NZU16, NZU64};
-    use rand::Rng;
+    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use rand::RngExt as _;
     use std::{collections::BTreeMap, num::NonZeroU16};
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 65536;
@@ -162,11 +152,10 @@ mod tests {
             // Put the data
             let index = 1u64;
             let data = 1;
-            cache.put(index, data).await.expect("Failed to put data");
+            cache = cache.put(index, data).await.expect("Failed to put data");
 
             // Sync and drop the cache
             cache.sync().await.expect("Failed to sync cache");
-            drop(cache);
 
             // Initialize the cache again without compression
             let cfg = Config {
@@ -179,10 +168,7 @@ mod tests {
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let result = Cache::<_, i32>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(
-                result,
-                Err(Error::Journal(JournalError::Codec(_)))
-            ));
+            assert!(matches!(result, Err(JournalError::Codec(_))));
         });
     }
 
@@ -208,7 +194,7 @@ mod tests {
             // Insert multiple items across different sections
             let items = vec![(1u64, 1), (2u64, 2), (3u64, 3), (4u64, 4), (5u64, 5)];
             for (index, data) in &items {
-                cache.put(*index, *data).await.expect("Failed to put data");
+                cache = cache.put(*index, *data).await.expect("Failed to put data");
             }
             assert_eq!(cache.first(), Some(1));
 
@@ -217,7 +203,7 @@ mod tests {
             assert!(has_metric_value(&buffer, "items_tracked", 5));
 
             // Prune sections less than 3
-            cache.prune(3).await.expect("Failed to prune");
+            cache = cache.prune(3).await.expect("Failed to prune");
 
             // Ensure items 1 and 2 are no longer present
             for (index, data) in items {
@@ -235,16 +221,24 @@ mod tests {
             assert!(has_metric_value(&buffer, "items_tracked", 3));
 
             // Try to prune older section
-            cache.prune(2).await.expect("Failed to prune");
+            cache = cache.prune(2).await.expect("Failed to prune");
             assert_eq!(cache.first(), Some(3));
 
             // Try to prune current section again
-            cache.prune(3).await.expect("Failed to prune");
+            cache = cache.prune(3).await.expect("Failed to prune");
             assert_eq!(cache.first(), Some(3));
 
-            // Try to put older index
-            let result = cache.put(1, 1).await;
-            assert!(matches!(result, Err(Error::AlreadyPrunedTo(3))));
+            // A put below the prune floor is satisfied without storing
+            let cache = cache.put(1, 1).await.expect("Failed to put below floor");
+            assert_eq!(cache.get(1).await.expect("Failed to get data"), None);
+            assert!(!cache.has(1));
+
+            // put_sync below the prune floor skips the sync
+            let cache = cache
+                .put_sync(1, 1)
+                .await
+                .expect("Failed to put_sync below floor");
+            assert_eq!(cache.get(1).await.expect("Failed to get data"), None);
         });
     }
 
@@ -278,7 +272,7 @@ mod tests {
                 context.fill(&mut data);
                 items.insert(index, data);
 
-                cache.put(index, data).await.expect("Failed to put data");
+                cache = cache.put(index, data).await.expect("Failed to put data");
             }
 
             // Ensure all items can be retrieved
@@ -297,7 +291,6 @@ mod tests {
 
             // Sync and drop the cache
             cache.sync().await.expect("Failed to sync cache");
-            drop(cache);
 
             // Reinitialize the cache
             let cfg = Config {
@@ -328,7 +321,7 @@ mod tests {
 
             // Prune first half
             let min = (items.len() / 2) as u64;
-            cache.prune(min).await.expect("Failed to prune");
+            cache = cache.prune(min).await.expect("Failed to prune");
 
             // Ensure all items can be retrieved that haven't been pruned
             let min = (min / items_per_blob) * items_per_blob;
@@ -358,6 +351,43 @@ mod tests {
 
             context.auditor().state()
         })
+    }
+
+    #[test_traced]
+    fn test_cache_clean_restart_reads_journal_once() {
+        deterministic::Runner::default().start(|context| async move {
+            let (context, recordings) = RecordingContext::new(context);
+            let config = |context: &RecordingContext<_>| Config {
+                partition: "clean-restart-single-pass".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(256),
+                replay_buffer: NZUsize!(1024),
+                items_per_blob: NZU64!(64),
+                page_cache: CacheRef::from_pooler(context, NZU16!(64), NZUsize!(10)),
+            };
+
+            let mut cache = Cache::<_, u64>::init(context.child("seed"), config(&context))
+                .await
+                .expect("failed to initialize cache");
+            for index in 0..15 {
+                cache = cache.put(index, index).await.expect("failed to put");
+            }
+            cache = cache.sync().await.expect("failed to sync");
+            drop(cache);
+
+            recordings.clear();
+            let cache = Cache::<_, u64>::init(context.child("reopen"), config(&context))
+                .await
+                .expect("failed to reopen cache");
+            for index in 0..15 {
+                assert!(cache.has(index));
+            }
+
+            // The 150 logical bytes occupy three pages. Writer construction reads the tail page,
+            // then one replay prefetch validates and decodes all three pages.
+            assert_eq!(recordings.snapshot().reads.len(), 2);
+        });
     }
 
     #[test_group("slow")]
@@ -395,10 +425,10 @@ mod tests {
             assert_eq!(cache.first(), None);
 
             // Insert values with gaps
-            cache.put(1, 1).await.unwrap();
-            cache.put(10, 10).await.unwrap();
-            cache.put(11, 11).await.unwrap();
-            cache.put(14, 14).await.unwrap();
+            cache = cache.put(1, 1).await.unwrap();
+            cache = cache.put(10, 10).await.unwrap();
+            cache = cache.put(11, 11).await.unwrap();
+            cache = cache.put(14, 14).await.unwrap();
 
             // Check gaps
             let (current_end, start_next) = cache.next_gap(0);
@@ -451,11 +481,11 @@ mod tests {
             assert_eq!(cache.missing_items(100, 10), Vec::<u64>::new());
 
             // Test 2: Insert values with gaps
-            cache.put(1, 1).await.unwrap();
-            cache.put(2, 2).await.unwrap();
-            cache.put(5, 5).await.unwrap();
-            cache.put(6, 6).await.unwrap();
-            cache.put(10, 10).await.unwrap();
+            cache = cache.put(1, 1).await.unwrap();
+            cache = cache.put(2, 2).await.unwrap();
+            cache = cache.put(5, 5).await.unwrap();
+            cache = cache.put(6, 6).await.unwrap();
+            cache = cache.put(10, 10).await.unwrap();
 
             // Test 3: Find missing items from the beginning
             assert_eq!(cache.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
@@ -476,7 +506,7 @@ mod tests {
             assert_eq!(cache.missing_items(100, 10), Vec::<u64>::new());
 
             // Test 7: Large gap scenario
-            cache.put(1000, 1000).await.unwrap();
+            cache = cache.put(1000, 1000).await.unwrap();
 
             // Gap between 10 and 1000
             let items = cache.missing_items(11, 10);
@@ -490,13 +520,13 @@ mod tests {
             );
 
             // Test 8: After syncing (data should remain consistent)
-            cache.sync().await.unwrap();
+            cache = cache.sync().await.unwrap();
             assert_eq!(cache.missing_items(0, 5), vec![0, 3, 4, 7, 8]);
             assert_eq!(cache.missing_items(3, 3), vec![3, 4, 7]);
 
             // Test 9: Cross-section boundary scenario
-            cache.put(DEFAULT_ITEMS_PER_BLOB - 1, 99).await.unwrap();
-            cache.put(DEFAULT_ITEMS_PER_BLOB + 1, 101).await.unwrap();
+            cache = cache.put(DEFAULT_ITEMS_PER_BLOB - 1, 99).await.unwrap();
+            cache = cache.put(DEFAULT_ITEMS_PER_BLOB + 1, 101).await.unwrap();
 
             // Find missing items across section boundary
             let items = cache.missing_items(DEFAULT_ITEMS_PER_BLOB - 2, 5);
@@ -527,9 +557,9 @@ mod tests {
                     .await
                     .expect("Failed to initialize cache");
 
-                cache.put(0, 0).await.expect("Failed to put data");
-                cache.put(100, 100).await.expect("Failed to put data");
-                cache.put(1000, 1000).await.expect("Failed to put data");
+                cache = cache.put(0, 0).await.expect("Failed to put data");
+                cache = cache.put(100, 100).await.expect("Failed to put data");
+                cache = cache.put(1000, 1000).await.expect("Failed to put data");
 
                 cache.sync().await.expect("Failed to sync cache");
             }
@@ -574,10 +604,10 @@ mod tests {
                 .expect("Failed to initialize cache");
 
             // Insert values across multiple sections
-            cache.put(50, 50).await.unwrap();
-            cache.put(150, 150).await.unwrap();
-            cache.put(250, 250).await.unwrap();
-            cache.put(350, 350).await.unwrap();
+            cache = cache.put(50, 50).await.unwrap();
+            cache = cache.put(150, 150).await.unwrap();
+            cache = cache.put(250, 250).await.unwrap();
+            cache = cache.put(350, 350).await.unwrap();
 
             // Check gaps before pruning
             let (current_end, start_next) = cache.next_gap(0);
@@ -585,7 +615,7 @@ mod tests {
             assert_eq!(start_next, Some(50));
 
             // Prune sections less than 200
-            cache.prune(200).await.expect("Failed to prune");
+            cache = cache.prune(200).await.expect("Failed to prune");
 
             // Check that pruned indices are not accessible
             assert!(!cache.has(50));
@@ -634,7 +664,7 @@ mod tests {
             ];
 
             for (index, value) in &indices {
-                cache.put(*index, *value).await.expect("Failed to put data");
+                cache = cache.put(*index, *value).await.expect("Failed to put data");
             }
 
             // Check that intermediate indices don't exist
@@ -653,7 +683,7 @@ mod tests {
             assert_eq!(start_next, Some(500));
 
             // Sync and verify
-            cache.sync().await.expect("Failed to sync");
+            cache = cache.sync().await.expect("Failed to sync");
 
             for (index, value) in &indices {
                 let retrieved = cache
@@ -684,7 +714,7 @@ mod tests {
                 .expect("Failed to initialize cache");
 
             // Test edge case: single item
-            cache.put(42, 42).await.unwrap();
+            cache = cache.put(42, 42).await.unwrap();
 
             let (current_end, start_next) = cache.next_gap(42);
             assert_eq!(current_end, Some(42));
@@ -699,15 +729,15 @@ mod tests {
             assert!(start_next.is_none());
 
             // Test edge case: consecutive items
-            cache.put(43, 43).await.unwrap();
-            cache.put(44, 44).await.unwrap();
+            cache = cache.put(43, 43).await.unwrap();
+            cache = cache.put(44, 44).await.unwrap();
 
             let (current_end, start_next) = cache.next_gap(42);
             assert_eq!(current_end, Some(44));
             assert!(start_next.is_none());
 
             // Test edge case: boundary values
-            cache.put(u64::MAX - 1, 999).await.unwrap();
+            cache = cache.put(u64::MAX - 1, 999).await.unwrap();
 
             let (current_end, start_next) = cache.next_gap(u64::MAX - 2);
             assert!(current_end.is_none());
@@ -737,12 +767,12 @@ mod tests {
                 .expect("Failed to initialize cache");
 
             // Insert initial value
-            cache.put(10, 10).await.unwrap();
+            cache = cache.put(10, 10).await.unwrap();
             assert!(cache.has(10));
             assert_eq!(cache.get(10).await.unwrap(), Some(10));
 
             // Try to insert duplicate - should be no-op
-            cache.put(10, 20).await.unwrap();
+            cache = cache.put(10, 20).await.unwrap();
             assert!(cache.has(10));
             assert_eq!(cache.get(10).await.unwrap(), Some(10)); // Should still be original value
 
@@ -752,8 +782,8 @@ mod tests {
             assert!(start_next.is_none());
 
             // Insert adjacent values
-            cache.put(9, 9).await.unwrap();
-            cache.put(11, 11).await.unwrap();
+            cache = cache.put(9, 9).await.unwrap();
+            cache = cache.put(11, 11).await.unwrap();
 
             // Verify intervals updated correctly
             let (current_end, start_next) = cache.next_gap(9);

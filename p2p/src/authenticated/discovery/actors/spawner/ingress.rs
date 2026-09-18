@@ -1,5 +1,5 @@
-use crate::authenticated::{discovery::actors::tracker::Reservation, Mailbox};
-use commonware_actor::{mailbox::UnreliablePolicy, Feedback, Unreliable};
+use crate::authenticated::{Mailbox, discovery::actors::tracker::Reservation};
+use commonware_actor::{Feedback, Unreliable, mailbox::UnreliablePolicy};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
@@ -53,13 +53,13 @@ mod tests {
     use crate::authenticated::discovery::actors::tracker::{self, Metadata};
     use commonware_actor::mailbox;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Signer as _,
+        ed25519::{PrivateKey, PublicKey},
     };
-    use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::encrypted::{
-        dial, listen, Config as StreamConfig, Receiver as EncryptedReceiver,
-        Sender as EncryptedSender,
+        Config as StreamConfig, Receiver as EncryptedReceiver, Sender as EncryptedSender, dial,
+        listen,
     };
     use commonware_utils::NZUsize;
     use futures::FutureExt as _;

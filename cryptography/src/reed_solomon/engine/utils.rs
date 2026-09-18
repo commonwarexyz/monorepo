@@ -3,7 +3,7 @@
 //! [`Engine`]: crate::reed_solomon::engine::Engine
 
 use crate::reed_solomon::engine::{
-    fwht, tables, Engine, GfElement, ShardsRefMut, GF_BITS, GF_ORDER, SHARD_CHUNK_BYTES,
+    Engine, GF_BITS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, ShardsRefMut, fwht, tables,
 };
 use core::iter::zip;
 

@@ -1,44 +1,41 @@
 use super::{
-    ingress::{Mailbox, Message},
     Config,
+    ingress::{Mailbox, Message},
 };
 use crate::{
+    Scheme,
     types::{
         block::BlockFormat,
         inbound::{self, Inbound},
         outbound::Outbound,
     },
-    Scheme,
 };
 use commonware_actor::mailbox::{self, Receiver as ActorReceiver};
 use commonware_codec::{DecodeExt, Encode};
-use commonware_consensus::{simplex::types::Activity, Viewable};
+use commonware_consensus::{Viewable, simplex::types::Activity};
 use commonware_cryptography::{
-    bls12381::primitives::variant::{MinSig, Variant},
     Hasher,
+    bls12381::primitives::variant::{MinSig, Variant},
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Metrics, Sink, Spawner, Stream};
 use commonware_stream::encrypted::{Receiver, Sender};
-use rand::Rng;
-use rand_core::CryptoRngCore;
+use rand::RngExt as _;
+use rand_core::CryptoRng;
 use tracing::{debug, info};
 
 /// Application actor.
-pub struct Application<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> {
+pub struct Application<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> {
     context: R,
     indexer: (Sender<Si>, Receiver<St>),
     this_network: <MinSig as Variant>::Public,
     other_network: Scheme,
-    hasher: H,
     mailbox: ActorReceiver<Message<H::Digest>>,
 }
 
-impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
-    Application<R, H, Si, St>
-{
+impl<R: CryptoRng + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream> Application<R, H, Si, St> {
     /// Create a new application actor.
-    pub fn new(context: R, config: Config<H, Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
+    pub fn new(context: R, config: Config<Si, St>) -> (Self, Scheme, Mailbox<H::Digest>) {
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         let this_network = *config.this_network.identity();
         (
@@ -47,7 +44,6 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
                 indexer: config.indexer,
                 this_network,
                 other_network: config.other_network,
-                hasher: config.hasher,
                 mailbox,
             },
             config.this_network,
@@ -62,10 +58,10 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
             match message {
                 Message::Propose { round, response } => {
                     // Either propose a random message (prefix=0) or include a consensus certificate (prefix=1)
-                    let block = match self.context.gen_bool(0.5) {
+                    let block = match self.context.random_bool(0.5) {
                         true => {
                             // Generate a random message
-                            BlockFormat::<H::Digest>::Random(self.context.gen())
+                            BlockFormat::<H::Digest>::Random(self.context.random())
                         }
                         false => {
                             // Fetch a certificate from the indexer for the other network
@@ -109,8 +105,7 @@ impl<R: CryptoRngCore + Spawner + Metrics, H: Hasher, Si: Sink, St: Stream>
                     };
 
                     // Hash the message
-                    self.hasher.update(&block.encode());
-                    let digest = self.hasher.finalize();
+                    let digest = H::hash(&[&block.encode()]);
                     info!(?block, payload = ?digest, "proposed");
 
                     // Publish to indexer

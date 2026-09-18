@@ -1,8 +1,8 @@
 //! Service configuration for Prometheus, Loki, Grafana, Promtail, tracer, and a caller-provided binary
 
 use crate::aws::{
-    s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
     Architecture,
+    s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
 };
 
 // Binary artifacts and user SSH state live under this directory. NVMe-backed instances mount
@@ -26,9 +26,6 @@ pub const DOCKER_VERSION: &str = "29.6.0";
 
 /// Version of Samply to download and install
 pub const SAMPLY_VERSION: &str = "0.13.1";
-
-/// Version of libjemalloc2 package for Ubuntu 24.04
-pub const LIBJEMALLOC2_VERSION: &str = "5.3.0-2build1";
 
 /// Version of logrotate package for Ubuntu 24.04
 pub const LOGROTATE_VERSION: &str = "3.21.0-2build1";
@@ -61,7 +58,7 @@ pub const PYROSCOPE_IMAGE: &str = "grafana/pyroscope:1.12.0";
 pub const GRAFANA_IMAGE: &str = "grafana/grafana:11.5.2";
 
 /// Image for Tracer trace viewing
-pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:0.1.1";
+pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:0.2.1";
 
 #[derive(Clone, Copy)]
 struct ImageService {
@@ -358,13 +355,8 @@ pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> St
         Architecture::Arm64 => "aarch64",
         Architecture::X86_64 => "x86_64",
     };
-    format!("{TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz")
-}
-
-pub(crate) fn libjemalloc_bin_s3_key(version: &str, architecture: Architecture) -> String {
     format!(
-        "{TOOLS_BINARIES_PREFIX}/libjemalloc2/{version}/linux-{arch}/libjemalloc2_{version}_{arch}.deb",
-        arch = architecture.as_str()
+        "{TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz"
     )
 }
 
@@ -483,18 +475,6 @@ const fn docker_static_arch(architecture: Architecture) -> &'static str {
         Architecture::Arm64 => "aarch64",
         Architecture::X86_64 => "x86_64",
     }
-}
-
-/// Returns the download URL for libjemalloc2 from Ubuntu archive
-pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/universe/j/jemalloc/libjemalloc2_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
 }
 
 /// Returns the download URL for logrotate from Ubuntu archive
@@ -676,6 +656,36 @@ fn image_download_block(images: &[(&'static str, String)]) -> String {
         "; do\n    if [ ! -s \"/home/ubuntu/images/$f\" ]; then\n        echo \"ERROR: Failed to download image $f\" >&2\n        exit 1\n    fi\ndone\n",
     );
     cmd
+}
+
+/// Returns a command that disables automatic APT upgrades and waits for active package operations.
+pub(crate) const fn disable_automatic_apt_upgrades_cmd() -> &'static str {
+    r#"set -e
+sudo timeout 10m cloud-init status --wait
+sudo systemctl mask --now apt-daily.timer apt-daily-upgrade.timer
+sudo tee /etc/apt/apt.conf.d/99-disable-periodic.conf >/dev/null <<'EOF'
+APT::Periodic::Enable "0";
+APT::Periodic::Update-Package-Lists "0";
+APT::Periodic::Unattended-Upgrade "0";
+EOF
+
+# Let active package operations finish instead of interrupting them.
+sudo timeout 10m sh -c '
+while
+    ! systemctl show --property=ActiveState --value apt-daily.service | grep -Eq "^(inactive|failed)$" ||
+    ! systemctl show --property=ActiveState --value apt-daily-upgrade.service | grep -Eq "^(inactive|failed)$" ||
+    fuser -s /var/lib/apt/daily_lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock; do
+    sleep 1
+done
+'
+
+for timer in apt-daily.timer apt-daily-upgrade.timer; do
+    [ "$(systemctl is-enabled "$timer" 2>/dev/null || true)" = masked ]
+done
+for setting in Enable Update-Package-Lists Unattended-Upgrade; do
+    [ "$(apt-config shell VALUE "APT::Periodic::$setting/i")" = "VALUE='0'" ]
+done
+"#
 }
 
 /// Phase 1: Download files from S3 on monitoring instance
@@ -868,7 +878,6 @@ pub struct InstanceUrls {
     pub pyroscope_service: String,
     pub pyroscope_timer: String,
     pub docker_tgz: String,
-    pub libjemalloc_deb: String,
     pub logrotate_deb: String,
     pub images: Vec<(&'static str, String)>,
 }
@@ -908,7 +917,7 @@ pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
 rm -f /home/ubuntu/binary /home/ubuntu/config.conf /home/ubuntu/hosts.yaml \
       /home/ubuntu/promtail.yml /home/ubuntu/binary.service \
       /home/ubuntu/pyroscope-agent.sh /home/ubuntu/pyroscope-agent.service \
-      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/docker.tgz /home/ubuntu/libjemalloc2.deb \
+      /home/ubuntu/pyroscope-agent.timer /home/ubuntu/docker.tgz \
       /home/ubuntu/logrotate.deb
 
 # Unmask services in case previous attempt left them masked
@@ -924,14 +933,13 @@ sudo systemctl unmask docker promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/pyroscope-agent.service '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
 {WGET} -O /home/ubuntu/docker.tgz '{}' &
-{WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
 {WGET} -O /home/ubuntu/logrotate.deb '{}' &
 wait
 
 # Verify all downloads succeeded
 for f in binary config.conf hosts.yaml promtail.yml binary.service \
          pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
-         docker.tgz libjemalloc2.deb logrotate.deb; do
+         docker.tgz logrotate.deb; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -947,7 +955,6 @@ done
         urls.pyroscope_service,
         urls.pyroscope_timer,
         urls.docker_tgz,
-        urls.libjemalloc_deb,
         urls.logrotate_deb,
     );
     cmd.push_str(&image_download_block(&urls.images));
@@ -1028,7 +1035,7 @@ sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
 }
 
 /// Phase 3: Setup and start services on binary instances
-pub(crate) fn install_binary_setup_cmd(profiling: bool, _architecture: Architecture) -> String {
+pub(crate) fn install_binary_setup_cmd(profiling: bool) -> String {
     let image_services = install_image_services_cmd(BINARY_IMAGE_SERVICES);
     let perf_setup = if profiling {
         r#"
@@ -1049,13 +1056,47 @@ sudo mv /home/ubuntu/pyroscope-agent.timer /etc/systemd/system/pyroscope-agent.t
     format!(
         r#"set -e
 
-# Enable BBR congestion control
-echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+# Enable BBR congestion control and tune TCP buffers for cross-region flows
+echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\nnet.core.rmem_max=16777216\nnet.core.wmem_max=16777216\nnet.ipv4.tcp_rmem=4096 2097152 16777216\nnet.ipv4.tcp_wmem=4096 262144 16777216\nnet.ipv4.tcp_slow_start_after_idle=0" | sudo tee /etc/sysctl.d/99-bbr.conf >/dev/null && sudo sysctl -p /etc/sysctl.d/99-bbr.conf
+
+# The default_qdisc sysctl only applies to interfaces attached after it is
+# set, so install fq (which enforces BBR's pacing) on every tx queue of the
+# primary interface explicitly and persist the setup across reboots.
+sudo tee /usr/local/bin/setup-qdisc.sh >/dev/null <<'EOF'
+#!/bin/bash
+set -e
+IFACE=$(ip -o route get 8.8.8.8 | awk '{{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}}')
+# Single-queue interfaces reject mq, so pace on the root instead.
+if tc qdisc replace dev "$IFACE" root handle 1: mq; then
+  NQ=$(ls -d "/sys/class/net/$IFACE/queues/tx-"* | wc -l)
+  for h in $(seq 1 "$NQ"); do
+    tc qdisc del dev "$IFACE" parent "1:$(printf '%x' "$h")" 2>/dev/null || true
+    tc qdisc add dev "$IFACE" parent "1:$(printf '%x' "$h")" fq
+  done
+else
+  tc qdisc replace dev "$IFACE" root fq
+fi
+EOF
+sudo chmod +x /usr/local/bin/setup-qdisc.sh
+sudo tee /etc/systemd/system/setup-qdisc.service >/dev/null <<'EOF'
+[Unit]
+Description=Install fq pacing qdisc on the primary interface
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-qdisc.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now setup-qdisc.service
 
 {image_services}
 
 # Install deb packages
-sudo dpkg -i /home/ubuntu/libjemalloc2.deb
 sudo dpkg -i /home/ubuntu/logrotate.deb
 
 # Setup Promtail
@@ -1112,10 +1153,10 @@ scrape_configs:
       - targets:
           - localhost
         labels:
-          deployer_name: {instance_name}
-          deployer_ip: {ip}
-          deployer_region: {region}
-          deployer_arch: {arch}
+          deployer_name: '{instance_name}'
+          deployer_ip: '{ip}'
+          deployer_region: '{region}'
+          deployer_arch: '{arch}'
           __path__: /var/log/binary.log
 "#
     )
@@ -1173,15 +1214,13 @@ pub const LOGROTATE_CONF: &str = r#"
 "#;
 
 /// Generates systemd service file content for the deployed binary
-pub(crate) fn binary_service(architecture: Architecture) -> String {
-    let lib_arch = architecture.linux_lib();
-    format!(
+pub(crate) fn binary_service() -> String {
+    String::from(
         r#"[Unit]
 Description=Deployed Binary Service
 After=network.target
 
 [Service]
-Environment="LD_PRELOAD=/usr/lib/{lib_arch}/libjemalloc.so.2"
 ExecStart=/home/ubuntu/binary --hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf
 TimeoutStopSec=60
 Restart=always
@@ -1192,7 +1231,7 @@ StandardError=append:/var/log/binary.log
 
 [Install]
 WantedBy=multi-user.target
-"#
+"#,
     )
 }
 
@@ -1324,11 +1363,63 @@ mod tests {
             pyroscope_service: "pyroscope-service".to_string(),
             pyroscope_timer: "pyroscope-timer".to_string(),
             docker_tgz: "docker".to_string(),
-            libjemalloc_deb: "libjemalloc".to_string(),
             logrotate_deb: "logrotate".to_string(),
             images: binary_images()
                 .map(|image| (image, format!("image-url-{image}")))
                 .collect(),
+        }
+    }
+
+    #[test]
+    fn test_disables_automatic_apt_upgrades() {
+        let cmd = disable_automatic_apt_upgrades_cmd();
+        let positions = [
+            "cloud-init status --wait",
+            "systemctl mask --now apt-daily.timer apt-daily-upgrade.timer",
+            "99-disable-periodic.conf",
+            "systemctl show --property=ActiveState --value apt-daily.service",
+            "systemctl is-enabled",
+            "apt-config shell",
+        ]
+        .map(|step| cmd.find(step).unwrap());
+        assert!(positions.is_sorted());
+        for setting in ["Enable", "Update-Package-Lists", "Unattended-Upgrade"] {
+            assert!(cmd.contains(&format!("APT::Periodic::{setting} \"0\";")));
+        }
+        assert!(cmd.contains("fuser -s /var/lib/apt/daily_lock /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock"));
+        assert!(!cmd.contains("fuser -k"));
+        for service in [
+            "apt-daily",
+            "apt-daily.service",
+            "apt-daily-upgrade",
+            "apt-daily-upgrade.service",
+        ] {
+            assert!(!cmd.lines().any(|line| {
+                let mut args = line.split_whitespace();
+                args.any(|arg| arg == "systemctl")
+                    && args.any(|arg| arg == "stop")
+                    && args.any(|arg| arg == service)
+            }));
+        }
+    }
+
+    #[test]
+    fn test_cloud_init_wait_requires_clean_completion() {
+        let mut lines = disable_automatic_apt_upgrades_cmd().lines();
+        let errexit = lines.next().unwrap();
+        assert_eq!(errexit, "set -e");
+        let wait_suffix = lines
+            .next()
+            .unwrap()
+            .strip_prefix("sudo timeout 10m cloud-init status --wait")
+            .unwrap();
+        for (code, accepted) in [(0, true), (1, false), (2, false), (124, false)] {
+            let wait = format!("sh -c 'exit {code}'{wait_suffix}");
+            let status = std::process::Command::new("sh")
+                .args(["-c", &format!("{errexit}\n{wait}\ntrue")])
+                .status()
+                .unwrap();
+            assert_eq!(status.success(), accepted);
         }
     }
 
@@ -1342,10 +1433,6 @@ mod tests {
         assert_eq!(
             samply_bin_s3_key("0.13.1", arch),
             "tools/binaries/samply/0.13.1/linux-aarch64/samply-aarch64-unknown-linux-gnu.tar.xz"
-        );
-        assert_eq!(
-            libjemalloc_bin_s3_key("5.3.0-2build1", arch),
-            "tools/binaries/libjemalloc2/5.3.0-2build1/linux-arm64/libjemalloc2_5.3.0-2build1_arm64.deb"
         );
         assert_eq!(
             logrotate_bin_s3_key("3.21.0-2build1", arch),
@@ -1363,10 +1450,6 @@ mod tests {
         assert_eq!(
             samply_bin_s3_key("0.13.1", arch),
             "tools/binaries/samply/0.13.1/linux-x86_64/samply-x86_64-unknown-linux-gnu.tar.xz"
-        );
-        assert_eq!(
-            libjemalloc_bin_s3_key("5.3.0-2build1", arch),
-            "tools/binaries/libjemalloc2/5.3.0-2build1/linux-amd64/libjemalloc2_5.3.0-2build1_amd64.deb"
         );
         assert_eq!(
             logrotate_bin_s3_key("3.21.0-2build1", arch),
@@ -1388,7 +1471,9 @@ mod tests {
         );
         assert_eq!(
             grafana_node_exporter_dashboard_s3_key(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
-            format!("tools/configs/{version}/grafana/node-exporter-full-revision-{GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION}.json")
+            format!(
+                "tools/configs/{version}/grafana/node-exporter-full-revision-{GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION}.json"
+            )
         );
         assert_eq!(
             loki_config_s3_key(),
@@ -1531,8 +1616,6 @@ mod tests {
         assert!(download.contains("-O /home/ubuntu/promtail.yml"));
         assert!(download.contains("-O /home/ubuntu/docker.tgz"));
         assert!(download.contains("-O /home/ubuntu/logrotate.deb"));
-        assert!(!download.contains("promtail.zip"));
-        assert!(!download.contains("node_exporter.tar.gz"));
         assert!(download.contains(&format!(
             "-O /home/ubuntu/images/{}",
             image_file_name(PROMTAIL_IMAGE)
@@ -1542,7 +1625,7 @@ mod tests {
             image_file_name(NODE_EXPORTER_IMAGE)
         )));
 
-        let setup = install_binary_setup_cmd(false, Architecture::Arm64);
+        let setup = install_binary_setup_cmd(false);
         assert!(setup.contains(&format!(
             "sudo docker load -i /home/ubuntu/images/{}",
             image_file_name(PROMTAIL_IMAGE)
@@ -1568,6 +1651,10 @@ mod tests {
         assert!(setup.contains("sudo systemctl enable node_exporter"));
         assert!(setup.contains("sudo systemctl enable promtail"));
         assert!(setup.contains("sudo systemctl enable binary"));
+        assert!(setup.contains("tc qdisc replace dev \"$IFACE\" root handle 1: mq"));
+        assert!(setup.contains("tc qdisc replace dev \"$IFACE\" root fq"));
+        assert!(setup.contains("sudo systemctl enable --now setup-qdisc.service"));
+        assert!(setup.contains("net.ipv4.tcp_rmem=4096 2097152 16777216"));
         assert!(setup.contains("sudo systemctl start node_exporter"));
         assert!(setup.contains("sudo systemctl start promtail"));
         assert!(setup.contains("sudo systemctl start binary || true"));

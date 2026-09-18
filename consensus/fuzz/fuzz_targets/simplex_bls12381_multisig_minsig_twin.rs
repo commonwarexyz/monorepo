@@ -1,6 +1,6 @@
 #![no_main]
 
-use commonware_consensus_fuzz::{fuzz, FuzzInput, SimplexBls12381MultisigMinSig, Twinable};
+use commonware_consensus_fuzz::{FuzzInput, SimplexBls12381MultisigMinSig, Twinable, fuzz};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: FuzzInput| {

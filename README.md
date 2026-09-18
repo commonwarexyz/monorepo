@@ -42,7 +42,6 @@ _Examples may include insecure code (i.e. deriving keypairs from an integer argu
 * [flood](./examples/flood/README.md): Spam peers deployed to AWS EC2 with random messages.
 * [log](./examples/log/README.md): Commit to a secret log and agree to its hash.
 * [reshare](./examples/reshare/README.md): Reshare a threshold secret over an epoched log.
-* [sync](./examples/sync/README.md): Synchronize state between a server and client.
 
 ## Miscellaneous
 
@@ -55,6 +54,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
+* [sol](./sol/README.md): Verify proofs and certificates in Solidity.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
 ## Stability
@@ -80,6 +80,14 @@ RUSTFLAGS="--cfg commonware_stability_BETA" RUSTDOCFLAGS="--cfg commonware_stabi
 # Check if your application only uses commonware APIs with stability >= BETA
 RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ```
+
+## Platform Compatibility
+
+The Commonware Library supports Linux and macOS, although only Linux is recommended for production use. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
+
+x86-64 SIMD extensions (AVX2, AVX-512) are detected at runtime. AArch64 builds assume NEON.
+
+_Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 
 ## Licensing
 

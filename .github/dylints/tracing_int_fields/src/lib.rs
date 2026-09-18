@@ -11,8 +11,8 @@ use rustc_hir::{Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::{self, Ty};
 use rustc_span::{
-    hygiene::{ExpnKind, MacroKind},
     Span,
+    hygiene::{ExpnKind, MacroKind},
 };
 
 const SPAN_MACROS: &[&str] = &[

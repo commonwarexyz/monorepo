@@ -10,8 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(ALPHA {
-    use bytes::Buf;
-    use commonware_codec::{Codec, FixedSize, Read, Write};
+    use commonware_codec::{Buf, Codec, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
     use std::{fmt::Debug, num::NonZeroU16};
@@ -171,12 +170,14 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
+        /// The input is a stream of bytes and may borrow its storage.
+        ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
         /// should equal `config.minimum_shards + config.extra_shards`.
         #[allow(clippy::type_complexity)]
         fn encode(
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
 
@@ -190,6 +191,21 @@ commonware_macros::stability_scope!(ALPHA {
             index: u16,
             shard: &Self::Shard,
         ) -> Result<Self::CheckedShard, Self::Error>;
+
+        /// Check the integrity of multiple shards.
+        ///
+        /// Returns one result per input in the same order. Each result is equivalent
+        /// to calling [`Self::check`] independently with that input's index and shard.
+        fn check_many(
+            config: &Config,
+            commitment: &Self::Commitment,
+            shards: &[(u16, &Self::Shard)],
+            strategy: &impl Strategy,
+        ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
+            strategy.map_collect_vec(shards, |&(index, shard)| {
+                Self::check(config, commitment, index, shard)
+            })
+        }
 
         /// Decode the data from shards received from other participants.
         ///
@@ -307,6 +323,8 @@ commonware_macros::stability_scope!(ALPHA {
 
         /// Encode a piece of data, returning a commitment, along with shards, and proofs.
         ///
+        /// The input is a stream of bytes and may borrow its storage.
+        ///
         /// Each shard and proof is intended for exactly one participant. The number of shards returned
         /// should equal `config.minimum_shards + config.extra_shards`.
         ///
@@ -317,7 +335,7 @@ commonware_macros::stability_scope!(ALPHA {
         fn encode(
             namespace: &[u8],
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::StrongShard>), Self::Error>;
 
@@ -422,7 +440,7 @@ commonware_macros::stability_scope!(ALPHA {
 
         fn encode(
             config: &Config,
-            data: impl Buf,
+            data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
             P::encode(b"", config, data, strategy).map_err(PhasedAsSchemeError::Scheme)
@@ -529,7 +547,7 @@ mod test {
 
     mod scheme {
         use super::*;
-        use crate::{reed_solomon::ReedSolomon, PhasedAsScheme, Scheme, Zoda};
+        use crate::{PhasedAsScheme, Scheme, Zoda, reed_solomon::ReedSolomon};
         use commonware_codec::Encode;
         use commonware_parallel::Sequential;
 

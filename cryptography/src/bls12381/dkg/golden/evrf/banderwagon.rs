@@ -37,10 +37,10 @@
 
 pub use crate::banderwagon::{F, G};
 use crate::{
-    banderwagon::GVar,
-    bls12381::primitives::group::{Scalar, DST},
+    banderwagon::{GVar, scalar_bits_le},
+    bls12381::primitives::group::{DST, Scalar},
     zk::{
-        bulletproofs::circuit::{zkc_to_circuit, zkc_to_circuit_and_witness, Circuit, Witness},
+        bulletproofs::circuit::{Circuit, Witness, zkc_to_circuit, zkc_to_circuit_and_witness},
         circuit::{self as zk, BoolVar, Var},
     },
 };
@@ -51,6 +51,9 @@ use std::sync::LazyLock;
 
 const BETA_DST: DST = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_BANDERWAGON_BETA";
 const POINT_DST: DST = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_BANDERWAGON_POINT_HASH";
+
+const SECRET_WINDOW: usize = 4;
+const OUTPUT_WINDOW: usize = 3;
 
 /// The fixed field element mixing the two hashed generators into the output.
 static BETA: LazyLock<Scalar> = LazyLock::new(|| Scalar::map(BETA_DST, b""));
@@ -146,17 +149,22 @@ fn build_circuit<'ctx>(
     // Bind the *full* public key, not just its abscissa: the quotient-aware
     // equality (see `GVar::assert_eq`) rejects `-x`, whose product is the
     // negation `-sender` and shares a (squared) abscissa.
-    G::generator()
-        .scalar_mul_bits(&x_bits)
-        .assert_eq(&GVar::constant(sender));
+    let mut x_bases = Vec::with_capacity(receivers.len() + 1);
+    x_bases.push(G::generator());
+    x_bases.extend_from_slice(receivers);
+    let mut x_points = G::scalar_mul_many_in_circuit::<SECRET_WINDOW>(&x_bases, &x_bits);
+    let shared_points = x_points.split_off(1);
+    x_points[0].assert_eq(&GVar::constant(sender));
 
     let beta = Var::native(BETA.clone());
-    for (i, receiver) in receivers.iter().enumerate() {
+    for (i, (receiver, shared)) in receivers.iter().zip(shared_points).enumerate() {
         let (t0, t1) = point_hash(sender, receiver, msg);
         // Squared shared abscissa, representative-independent (see module docs).
-        let k = receiver.scalar_mul_x_squared_bits(&x_bits);
-        let t0k = t0.scalar_mul_x_squared(ctx, &k);
-        let t1k = t1.scalar_mul_x_squared(ctx, &k);
+        let k = shared.x_squared();
+        let k_bits = scalar_bits_le(ctx, &k);
+        let t_points = G::scalar_mul_many_in_circuit::<OUTPUT_WINDOW>(&[t0, t1], &k_bits);
+        let t0k = t_points[0].x_squared();
+        let t1k = t_points[1].x_squared();
         let out = beta.clone() * &t0k + &t1k;
         out.assert_eq(&output_vars[i]);
     }
@@ -184,6 +192,17 @@ pub fn vrf_batch_checked(msg: &[u8], x: &F, receivers: &[G]) -> (Circuit<Scalar>
 
 /// The verifier-side circuit matching [`vrf_batch_checked`].
 pub fn vrf_batch_checked_circuit(msg: &[u8], sender: &G, receivers: &[G]) -> Circuit<Scalar> {
+    vrf_batch_checked_circuit_with_windows::<SECRET_WINDOW, OUTPUT_WINDOW>(msg, sender, receivers)
+}
+
+fn vrf_batch_checked_circuit_with_windows<
+    const SECRET_WINDOW: usize,
+    const OUTPUT_WINDOW: usize,
+>(
+    msg: &[u8],
+    sender: &G,
+    receivers: &[G],
+) -> Circuit<Scalar> {
     let (circuit, committed) =
         zk::build(|ctx| build_circuit(ctx, sender, receivers, msg, None, None));
     zkc_to_circuit(circuit, &committed)
@@ -194,8 +213,8 @@ mod tests {
     use super::*;
     use crate::{
         bls12381::primitives::group::G1,
-        transcript::Transcript,
-        zk::bulletproofs::circuit::{prove, verify, Setup},
+        transcript::{Transcript, Version},
+        zk::bulletproofs::circuit::{Setup, prove, verify},
     };
     use commonware_macros::test_group;
     use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
@@ -370,7 +389,7 @@ mod tests {
         let setup = Setup::hashed(TEST_DST, lg_len, G1::generator());
         let claim = witness.claim(&setup);
 
-        let mut prover_t = Transcript::new(TEST_DST);
+        let mut prover_t = Transcript::new(TEST_DST, Version::V1);
         let proof = prove(
             &mut rng,
             &mut prover_t,
@@ -382,7 +401,7 @@ mod tests {
         )
         .expect("proving should succeed");
 
-        let mut verifier_t = Transcript::new(TEST_DST);
+        let mut verifier_t = Transcript::new(TEST_DST, Version::V1);
         let verified = setup
             .eval(
                 |vs| {

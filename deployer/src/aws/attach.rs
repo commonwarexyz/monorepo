@@ -1,8 +1,8 @@
 //! `attach` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory, utils::ssh_attach, Error, Hosts, Metadata, CREATED_FILE_NAME,
-    DESTROYED_FILE_NAME, METADATA_FILE_NAME, MONITORING_REGION,
+    CREATED_FILE_NAME, DESTROYED_FILE_NAME, Error, Hosts, METADATA_FILE_NAME, MONITORING_REGION,
+    Metadata, deployer_directory, utils::ssh_attach,
 };
 use std::{
     fs::{self, File},
@@ -134,7 +134,7 @@ fn find_host_match(tag: &str, hosts: Hosts, ip: &str) -> Option<InstanceMatch> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_host_match, normalize_ip, InstanceMatch};
+    use super::{InstanceMatch, find_host_match, normalize_ip};
     use crate::aws::{Host, Hosts, Ips, MONITORING_REGION};
     use std::net::IpAddr;
 

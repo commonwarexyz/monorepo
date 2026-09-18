@@ -73,10 +73,10 @@ pub async fn link_peers<P: PublicKey, E: Clock>(
             if v2 == v1 {
                 continue;
             }
-            if let Some(f) = filter {
-                if !f(validators.len(), i1, i2) {
-                    continue;
-                }
+            if let Some(f) = filter
+                && !f(validators.len(), i1, i2)
+            {
+                continue;
             }
             match action {
                 Action::Update(_) | Action::Unlink => {

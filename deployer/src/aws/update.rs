@@ -1,12 +1,11 @@
 //! `update` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory,
+    CREATED_FILE_NAME, Config, DESTROYED_FILE_NAME, Error, InstanceConfig, MONITORING_NAME,
+    MONITORING_REGION, deployer_directory,
     ec2::{self, *},
     s3::{self, *},
     utils::*,
-    Config, Error, InstanceConfig, CREATED_FILE_NAME, DESTROYED_FILE_NAME, MONITORING_NAME,
-    MONITORING_REGION,
 };
 use aws_sdk_ec2::types::Filter;
 use futures::{

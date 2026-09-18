@@ -1,17 +1,17 @@
 use crate::Scheme;
 use commonware_actor::{
-    mailbox::{Policy, Sender},
     Feedback,
+    mailbox::{Policy, Sender},
 };
 use commonware_consensus::{
+    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re, Reporter,
     simplex::{
-        types::{Activity, Context},
         Plan,
+        types::{Activity, Context},
     },
     types::Round,
-    Automaton as Au, CertifiableAutomaton as CAu, Relay as Re, Reporter,
 };
-use commonware_cryptography::{ed25519::PublicKey, Digest};
+use commonware_cryptography::{Digest, ed25519::PublicKey};
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 

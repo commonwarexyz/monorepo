@@ -1,12 +1,13 @@
-use clap::{value_parser, Arg, Command};
+use clap::{Arg, Command, value_parser};
 use commonware_codec::Encode;
-use commonware_cryptography::{ed25519, Signer as _};
+use commonware_cryptography::{Signer as _, ed25519};
 use commonware_deployer::aws;
 use commonware_flood::Config;
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use rand::{rngs::OsRng, seq::IteratorRandom};
-use std::num::NonZeroUsize;
+use commonware_utils::sys_rng;
+use rand::seq::IteratorRandom;
+use std::num::{NonZeroU32, NonZeroUsize};
 use tracing::info;
 use uuid::Uuid;
 
@@ -77,10 +78,11 @@ fn main() {
                 .value_parser(value_parser!(u32)),
         )
         .arg(
-            Arg::new("message-backlog")
-                .long("message-backlog")
+            Arg::new("message-rate")
+                .long("message-rate")
                 .required(true)
-                .value_parser(value_parser!(usize)),
+                .help("Offered messages per second per peer (sizes the derived channel mailboxes)")
+                .value_parser(value_parser!(NonZeroU32)),
         )
         .arg(
             Arg::new("mailbox-size")
@@ -122,8 +124,9 @@ fn main() {
         bootstrappers <= peers,
         "bootstrappers must be less than peers"
     );
+    let mut rng = sys_rng();
     let peer_schemes = (0..peers)
-        .map(|_| ed25519::PrivateKey::random(&mut OsRng))
+        .map(|_| ed25519::PrivateKey::random(&mut rng))
         .collect::<Vec<_>>();
     let allowed_peers: Vec<String> = peer_schemes
         .iter()
@@ -131,7 +134,7 @@ fn main() {
         .collect();
     let bootstrappers = allowed_peers
         .iter()
-        .choose_multiple(&mut OsRng, bootstrappers)
+        .sample(&mut rng, bootstrappers)
         .into_iter()
         .cloned()
         .collect::<Vec<_>>();
@@ -153,7 +156,7 @@ fn main() {
     let storage_throughput = matches.get_one::<i32>("storage_throughput").copied();
     let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
     let message_size = *matches.get_one::<u32>("message-size").unwrap();
-    let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
+    let message_rate = *matches.get_one::<NonZeroU32>("message-rate").unwrap();
     let mailbox_size = *matches.get_one::<NonZeroUsize>("mailbox-size").unwrap();
     let instrument = *matches.get_one::<bool>("instrument").unwrap();
     let mut instance_configs = Vec::new();
@@ -169,7 +172,7 @@ fn main() {
             bootstrappers: bootstrappers.clone(),
             worker_threads,
             message_size,
-            message_backlog,
+            message_rate,
             mailbox_size,
             instrument,
         };

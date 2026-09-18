@@ -22,7 +22,6 @@ commonware-p2p.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-stream.workspace = true
 commonware-utils.workspace = true
-rand.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

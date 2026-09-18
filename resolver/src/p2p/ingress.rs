@@ -1,7 +1,7 @@
-use crate::{ingress, Fetch, Resolver, TargetedResolver};
-use commonware_actor::{mailbox::Sender, Feedback};
+use crate::{Fetch, Resolver, TargetedResolver, ingress};
+use commonware_actor::{Feedback, mailbox::Sender};
 use commonware_cryptography::PublicKey;
-use commonware_utils::{vec::NonEmptyVec, Span};
+use commonware_utils::{Span, vec::NonEmptyVec};
 
 /// A key to fetch data for, optionally with target peers.
 pub type FetchKey<K, P, S> = ingress::FetchKey<K, S, Option<NonEmptyVec<P>>>;
@@ -109,8 +109,7 @@ where
     /// To clear targeting and fall back to any peer, call [`fetch`](Self::fetch).
     ///
     /// Targets are automatically cleared when the fetch succeeds or is canceled.
-    /// When a peer is blocked for invalid data, only that peer is removed from
-    /// the target set.
+    /// A target blocked for invalid data is skipped until the network unblocks it.
     ///
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(

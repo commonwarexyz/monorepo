@@ -10,8 +10,8 @@ use futures::task::AtomicWaker;
 use std::{
     future::Future,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -37,7 +37,7 @@ pub trait Acknowledgement: Clone + Send + Sync + Debug + 'static {
 
 /// [Acknowledgement] that returns after all instances are acknowledged.
 ///
-/// If any acknowledgement is not handled, the acknowledgement will be cancelled.
+/// Dropping an acknowledgement cancels the waiter.
 pub struct Exact {
     state: Arc<ExactState>,
     acknowledged: bool,
@@ -170,7 +170,7 @@ impl ExactState {
 #[cfg(test)]
 mod tests {
     use super::{Acknowledgement, Exact};
-    use futures::{future::FusedFuture, FutureExt};
+    use futures::{FutureExt, future::FusedFuture};
     use std::sync::atomic::Ordering;
 
     #[test]

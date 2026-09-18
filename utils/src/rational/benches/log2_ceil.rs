@@ -1,5 +1,5 @@
 use commonware_utils::rational::BigRationalExt;
-use criterion::{criterion_group, Criterion};
+use criterion::{Criterion, criterion_group};
 use num_rational::BigRational;
 
 fn bench_log2_ceil(c: &mut Criterion) {

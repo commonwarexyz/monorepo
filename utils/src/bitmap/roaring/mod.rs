@@ -75,8 +75,8 @@ mod prunable;
 
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use container::Container;
 use core::ops::Range;
 pub use prunable::Prunable;
@@ -133,13 +133,13 @@ pub struct Bitmap {
 
 impl Bitmap {
     fn from_containers(containers: BTreeMap<u64, Container>) -> Result<Self, CodecError> {
-        if let Some((&max_key, _)) = containers.last_key_value() {
-            if max_key > MAX_KEY {
-                return Err(CodecError::Invalid(
-                    "Bitmap",
-                    "container key exceeds 48-bit range",
-                ));
-            }
+        if let Some((&max_key, _)) = containers.last_key_value()
+            && max_key > MAX_KEY
+        {
+            return Err(CodecError::Invalid(
+                "Bitmap",
+                "container key exceeds 48-bit range",
+            ));
         }
 
         if containers.values().any(|c| c.is_empty()) {

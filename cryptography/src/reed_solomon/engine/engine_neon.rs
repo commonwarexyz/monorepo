@@ -1,6 +1,7 @@
 use crate::reed_solomon::engine::{
+    Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, ShardsRefMut,
     tables::{self, Mul128, Multiply128lutT, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES,
+    utils,
 };
 use core::{arch::aarch64::*, iter::zip};
 
@@ -28,8 +29,7 @@ impl Neon {
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
-        cpufeatures::new!(has_neon_for_engine, "neon");
-        assert!(has_neon_for_engine::get());
+        assert!(super::cpu_features::neon());
 
         let mul128 = tables::get_mul128();
         let skew = tables::get_skew();

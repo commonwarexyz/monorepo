@@ -40,8 +40,8 @@ pub mod run;
 use alloc::{boxed::Box, vec::Vec};
 pub use array::Array;
 pub use bitmap::Bitmap;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write};
 use core::ops::Range;
 pub use run::Run;
 
@@ -1125,7 +1125,7 @@ mod tests {
 
     #[cfg(feature = "arbitrary")]
     mod conformance {
-        use commonware_codec::{conformance::CodecConformance, Decode, Encode};
+        use commonware_codec::{Decode, Encode, conformance::CodecConformance};
         use commonware_conformance::Conformance;
 
         struct ContainerTransitionsConformance;

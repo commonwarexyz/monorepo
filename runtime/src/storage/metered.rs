@@ -1,12 +1,15 @@
 use crate::{
-    telemetry::metrics::{raw, Counter, Gauge, Register},
-    Buf, Error, Handle, IoBufs, IoBufsMut,
+    BlobVersion, Buf, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    telemetry::{
+        metrics::{Counter, Gauge, Register, raw},
+        traces::TracedExt as _,
+    },
 };
 use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
 };
-use tracing::{field::Empty, Instrument as _, Span};
+use tracing::{Instrument as _, Span, field::Empty};
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -89,8 +92,8 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
         Ok((
@@ -150,10 +153,15 @@ impl Drop for MetricsHandle {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(len as u64);
-        self.inner.read_at(offset, len).await
+        self.inner.read_at(offset, len, options).await
     }
 
     async fn read_at_buf(
@@ -161,45 +169,38 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(len as u64);
-        self.inner.read_at_buf(offset, len, bufs).await
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
     #[tracing::instrument(
         name = "runtime.storage.blob.write_at",
         level = "info",
         skip_all,
-        fields(partition = %self.partition, bytes = Empty)
+        fields(
+            partition = %self.partition,
+            bytes = Empty,
+            options = options.0.traced(),
+        )
     )]
-    async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let bufs_len = bufs.remaining();
-        self.metrics.storage_writes.inc();
-        self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
-        Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at(offset, bufs).await
-    }
-
-    #[tracing::instrument(
-        name = "runtime.storage.blob.write_at_sync",
-        level = "info",
-        skip_all,
-        fields(partition = %self.partition, bytes = Empty)
-    )]
-    async fn write_at_sync(
+    async fn write_at(
         &self,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let bufs_len = bufs.remaining();
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
-        self.metrics.storage_syncs.inc();
+        if options.contains(WriteOptions::SYNC) {
+            self.metrics.storage_syncs.inc();
+        }
         Span::current().record("bytes", bufs_len as u64);
-        self.inner.write_at_sync(offset, bufs).await
+        self.inner.write_at(offset, bufs, options).await
     }
 
     #[tracing::instrument(
@@ -245,22 +246,63 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 mod tests {
     use super::*;
     use crate::{
+        Blob, BufferPool, BufferPoolConfig, IoBufMut, Runner, Spawner, Storage as _,
+        mocks::RecordingContext,
         storage::{memory::Storage as MemoryStorage, tests::run_storage_tests},
         telemetry::metrics::Registry,
-        Blob, BufferPool, BufferPoolConfig, Storage as _,
     };
+    use rstest::rstest;
 
     fn test_pool(scope: &mut impl Register) -> BufferPool {
         BufferPool::new(BufferPoolConfig::for_storage(), scope)
     }
 
-    #[tokio::test]
-    async fn test_metered_storage() {
-        let mut registry = crate::telemetry::metrics::Registry::default();
-        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
-        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_metered_storage<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let mut registry = crate::telemetry::metrics::Registry::default();
+            let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+            let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
-        run_storage_tests(storage).await;
+            run_storage_tests(context, storage).await;
+        });
+    }
+
+    #[tokio::test]
+    async fn test_metered_blob_forwards_read_options_and_counts_reads() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let (inner, recordings) = RecordingContext::new(inner);
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"data", WriteOptions::default())
+            .await
+            .unwrap();
+        recordings.clear();
+
+        // Both read entry points forward DONT_CACHE while contributing to the same metrics.
+        let read = blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
+        assert_eq!(read.coalesce(), b"data");
+        let read = blob
+            .read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::DONT_CACHE)
+            .await
+            .unwrap();
+        assert_eq!(read.coalesce(), b"data");
+
+        assert_eq!(
+            recordings.snapshot().reads,
+            vec![ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE]
+        );
+        assert_eq!(storage.metrics.storage_reads.get(), 2);
+        assert_eq!(storage.metrics.storage_read_bytes.get(), 8);
     }
 
     /// Test that a failed open does not count an open blob.
@@ -278,7 +320,11 @@ mod tests {
 
         // Reopen with a disjoint version range
         let result = storage
-            .open_versioned("partition", b"test_blob", 7..=7)
+            .open_versioned(
+                "partition",
+                b"test_blob",
+                BlobVersion::new(7)..=BlobVersion::new(7),
+            )
             .await;
         assert!(matches!(result, Err(Error::BlobVersionMismatch { .. })));
         assert_eq!(
@@ -306,7 +352,9 @@ mod tests {
         );
 
         // Write data to the blob
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
         let writes = storage.metrics.storage_writes.get();
         let write_bytes = storage.metrics.storage_write_bytes.get();
         assert_eq!(
@@ -319,7 +367,7 @@ mod tests {
         );
 
         // Read data from the blob
-        let read = blob.read_at(0, 11).await.unwrap();
+        let read = blob.read_at(0, 11, ReadOptions::default()).await.unwrap();
         assert_eq!(read.coalesce(), b"hello world");
         let reads = storage.metrics.storage_reads.get();
         let read_bytes = storage.metrics.storage_read_bytes.get();
@@ -341,16 +389,18 @@ mod tests {
         );
 
         // Write and sync in a single call
-        blob.write_at_sync(11, b" again").await.unwrap();
+        blob.write_at(11, b" again", WriteOptions::SYNC)
+            .await
+            .unwrap();
         assert_eq!(
             storage.metrics.storage_writes.get(),
             2,
-            "storage_writes metric was not incremented after write_at_sync"
+            "storage_writes metric was not incremented after write_at(SYNC)"
         );
         assert_eq!(
             storage.metrics.storage_syncs.get(),
             2,
-            "storage_syncs metric was not incremented after write_at_sync"
+            "storage_syncs metric was not incremented after write_at(SYNC)"
         );
 
         // Resize the blob
@@ -380,7 +430,9 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
-        blob.write_at(0, b"hello world").await.unwrap();
+        blob.write_at(0, b"hello world", WriteOptions::default())
+            .await
+            .unwrap();
 
         blob.start_sync().await.await.unwrap();
         assert_eq!(
@@ -460,10 +512,15 @@ mod tests {
         );
 
         // Use the clones for some operations to verify they share metrics
-        blob.write_at(0, b"hello").await.unwrap();
-        clone1.write_at(5, b"world").await.unwrap();
-        let _ = clone1.read_at(0, 10).await.unwrap();
-        let _ = clone2.read_at(0, 10).await.unwrap();
+        blob.write_at(0, b"hello", WriteOptions::default())
+            .await
+            .unwrap();
+        clone1
+            .write_at(5, b"world", WriteOptions::default())
+            .await
+            .unwrap();
+        let _ = clone1.read_at(0, 10, ReadOptions::default()).await.unwrap();
+        let _ = clone2.read_at(0, 10, ReadOptions::default()).await.unwrap();
 
         // Verify that operations on clones update the shared metrics
         assert_eq!(

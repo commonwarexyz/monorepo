@@ -1,34 +1,29 @@
-use super::{Operation, COMMIT_CONTEXT, SET_CONTEXT};
+use super::{COMMIT_CONTEXT, Operation, SET_CONTEXT};
 use crate::{
-    merkle::{Family, Location},
-    qmdb::any::{value::FixedEncoding, FixedValue},
+    merkle::Family,
+    qmdb::{
+        any::{FixedValue, value::FixedEncoding},
+        operation::{commit_fixed_operation_size, read_commit_fixed, write_commit_fixed},
+    },
 };
 use commonware_codec::{
+    Buf, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
     util::{at_least, ensure_zeros},
-    Error as CodecError, FixedSize, Read, ReadExt as _, Write,
 };
-use commonware_runtime::{Buf, BufMut};
+use commonware_runtime::BufMut;
 use commonware_utils::Array;
 
 /// `max(a, b)` in a const context.
 const fn const_max(a: usize, b: usize) -> usize {
-    if a > b {
-        a
-    } else {
-        b
-    }
+    if a > b { a } else { b }
 }
 
 const fn set_op_size<K: Array, V: FixedSize>() -> usize {
     1 + K::SIZE + V::SIZE
 }
 
-const fn commit_op_size<V: FixedSize>() -> usize {
-    1 + 1 + V::SIZE + u64::SIZE
-}
-
 const fn total_op_size<K: Array, V: FixedSize>() -> usize {
-    const_max(set_op_size::<K, V>(), commit_op_size::<V>())
+    const_max(set_op_size::<K, V>(), commit_fixed_operation_size::<V>())
 }
 
 impl<F: Family, K: Array, V: FixedValue> FixedSize for Operation<F, K, FixedEncoding<V>> {
@@ -47,14 +42,8 @@ impl<F: Family, K: Array, V: FixedValue> Write for Operation<F, K, FixedEncoding
             }
             Self::Commit(v, floor_loc) => {
                 COMMIT_CONTEXT.write(buf);
-                if let Some(v) = v {
-                    true.write(buf);
-                    v.write(buf);
-                } else {
-                    buf.put_bytes(0, 1 + V::SIZE);
-                }
-                buf.put_slice(&floor_loc.to_be_bytes());
-                buf.put_bytes(0, total - commit_op_size::<V>());
+                write_commit_fixed(v, *floor_loc, buf);
+                buf.put_bytes(0, total - commit_fixed_operation_size::<V>());
             }
         }
     }
@@ -75,21 +64,8 @@ impl<F: Family, K: Array, V: FixedValue> Read for Operation<F, K, FixedEncoding<
                 Ok(Self::Set(key, value))
             }
             COMMIT_CONTEXT => {
-                let is_some = bool::read(buf)?;
-                let value = if is_some {
-                    Some(V::read(buf)?)
-                } else {
-                    ensure_zeros(buf, V::SIZE)?;
-                    None
-                };
-                let floor_loc = Location::new(u64::read(buf)?);
-                if !floor_loc.is_valid() {
-                    return Err(CodecError::Invalid(
-                        "storage::qmdb::immutable::operation::fixed::Operation",
-                        "commit floor location overflow",
-                    ));
-                }
-                ensure_zeros(buf, total - commit_op_size::<V>())?;
+                let (value, floor_loc) = read_commit_fixed(buf)?;
+                ensure_zeros(buf, total - commit_fixed_operation_size::<V>())?;
                 Ok(Self::Commit(value, floor_loc))
             }
             e => Err(CodecError::InvalidEnum(e)),
@@ -100,7 +76,7 @@ impl<F: Family, K: Array, V: FixedValue> Read for Operation<F, K, FixedEncoding<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr;
+    use crate::merkle::{Location, mmr};
     use commonware_codec::{DecodeExt, Encode};
     use commonware_utils::sequence::U64;
 
@@ -145,7 +121,7 @@ mod tests {
     fn test_invalid_context() {
         let mut invalid = vec![0xFF];
         invalid.resize(FixedOp::SIZE, 0);
-        let decoded = FixedOp::decode(invalid.as_ref());
+        let decoded = FixedOp::decode(invalid);
         assert!(matches!(
             decoded.unwrap_err(),
             CodecError::InvalidEnum(0xFF)
@@ -155,7 +131,7 @@ mod tests {
     #[test]
     fn test_insufficient_buffer() {
         let invalid = vec![SET_CONTEXT];
-        let decoded = FixedOp::decode(invalid.as_ref());
+        let decoded = FixedOp::decode(invalid);
         assert!(matches!(decoded.unwrap_err(), CodecError::EndOfBuffer));
     }
 
@@ -167,7 +143,7 @@ mod tests {
         if set_op_size::<U64, U64>() < total_op_size::<U64, U64>() {
             let last = encoded.len() - 1;
             encoded[last] = 0xFF;
-            let decoded = FixedOp::decode(encoded.as_ref());
+            let decoded = FixedOp::decode(encoded);
             assert!(decoded.is_err());
         }
     }

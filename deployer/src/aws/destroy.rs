@@ -1,14 +1,13 @@
 //! `destroy` subcommand for `ec2`
 
 use crate::aws::{
-    deployer_directory,
+    Config, DESTROYED_FILE_NAME, Error, LOGS_PORT, METADATA_FILE_NAME, MONITORING_REGION, Metadata,
+    PROFILES_PORT, TRACES_PORT, deployer_directory,
     ec2::{self, *},
     s3::{
-        self, delete_prefix, get_bucket_name_if_exists, is_no_such_bucket_error, Region,
-        DEPLOYMENTS_PREFIX,
+        self, DEPLOYMENTS_PREFIX, Region, delete_prefix, get_bucket_name_if_exists,
+        is_no_such_bucket_error,
     },
-    Config, Error, Metadata, DESTROYED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME, MONITORING_REGION,
-    PROFILES_PORT, TRACES_PORT,
 };
 use futures::future::try_join_all;
 use std::{

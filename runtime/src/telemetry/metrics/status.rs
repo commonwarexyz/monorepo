@@ -1,6 +1,6 @@
 //! Recording metrics with a status.
 
-use super::{raw, EncodeLabelSet, EncodeLabelValue, Registered};
+use super::{EncodeLabelSet, EncodeLabelValue, Registered, raw};
 
 /// Metric label that indicates status.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -14,6 +14,8 @@ pub struct Label {
 pub enum Status {
     /// Processed successfully.
     Success,
+    /// Processing produced one of multiple valid results but did not satisfy the request.
+    Ambiguous,
     /// Processing failed.
     Failure,
     /// Input was malformed or invalid in some way. Indicates a client error.

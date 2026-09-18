@@ -1,7 +1,7 @@
 use crate::Originator;
 use commonware_actor::{
-    mailbox::{self, Policy},
     Feedback,
+    mailbox::{self, Policy},
 };
 use commonware_codec::Codec;
 use commonware_cryptography::{Committable, Digestible, PublicKey};
@@ -65,8 +65,8 @@ mod tests {
     use super::{Message, Policy};
     use crate::p2p::mocks::types::Request;
     use commonware_cryptography::{
-        ed25519::{PrivateKey, PublicKey},
         Committable, Signer,
+        ed25519::{PrivateKey, PublicKey},
     };
     use commonware_p2p::Recipients;
     use std::collections::VecDeque;

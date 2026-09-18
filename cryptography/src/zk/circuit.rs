@@ -320,9 +320,7 @@ impl<'ctx, F> Context<'ctx, F> {
     fn witness(self, init: impl for<'a> FnOnce(Values<'a, F>) -> F) -> CircuitIdx {
         self.allocate(|values| Some(init(values)), Circuit::next_witness)
     }
-}
 
-impl<'ctx, F> Context<'ctx, F> {
     fn constant(self, x: F) -> CircuitIdx {
         self.allocate(|_| None, |circuit| circuit.next_constant(x))
     }
@@ -485,7 +483,7 @@ impl<'ctx, F: Clone> Var<'ctx, F> {
             (VarInner::Native(a), VarInner::Native(b)) => {
                 return Self {
                     inner: VarInner::Native(combine(&a, b)),
-                }
+                };
             }
             (VarInner::Native(ref a), &VarInner::Circuit { ctx, idx: b_idx })
             | (VarInner::Circuit { ctx, idx: b_idx }, &VarInner::Native(ref a)) => {
@@ -599,7 +597,7 @@ impl<'ctx, F: Field> Div<&Self> for Var<'ctx, F> {
             (VarInner::Native(a), VarInner::Native(b)) => {
                 return Self {
                     inner: VarInner::Native(a.clone() * &b.inv()),
-                }
+                };
             }
             (VarInner::Circuit { ctx, .. }, _) | (_, VarInner::Circuit { ctx, .. }) => ctx,
         };
@@ -729,6 +727,15 @@ impl<'ctx, F: Ring> BoolVar<'ctx, F> {
     pub fn assert_eq(&self, other: &Self) {
         self.var.assert_eq(other.var());
     }
+
+    /// Select between two vars based on this bit.
+    ///
+    /// Returns `on_true` when the bit is `1` and `on_false` when it is `0`,
+    /// computed as `on_false + b * (on_true - on_false)` with a single
+    /// multiplication.
+    pub fn select(&self, on_true: &Var<'ctx, F>, on_false: &Var<'ctx, F>) -> Var<'ctx, F> {
+        on_false.clone() + &(self.var.clone() * &(on_true.clone() - on_false))
+    }
 }
 
 impl<'ctx, F: Ring + PartialEq> BoolVar<'ctx, F> {
@@ -768,17 +775,6 @@ impl<'ctx, F: Ring + PartialEq> BoolVar<'ctx, F> {
     /// `var * (1 - var) == 0`).
     fn enforce(var: &Var<'ctx, F>) {
         (var.clone() * var).assert_eq(var);
-    }
-}
-
-impl<'ctx, F: Ring> BoolVar<'ctx, F> {
-    /// Select between two vars based on this bit.
-    ///
-    /// Returns `on_true` when the bit is `1` and `on_false` when it is `0`,
-    /// computed as `on_false + b * (on_true - on_false)` with a single
-    /// multiplication.
-    pub fn select(&self, on_true: &Var<'ctx, F>, on_false: &Var<'ctx, F>) -> Var<'ctx, F> {
-        on_false.clone() + &(self.var.clone() * &(on_true.clone() - on_false))
     }
 }
 
@@ -823,6 +819,70 @@ impl<'ctx, F: Ring> BitOr for BoolVar<'ctx, F> {
         Self {
             var: self.var.clone() + &rhs.var - &(self.var * &rhs.var),
         }
+    }
+}
+
+/// A tool for selecting among multiple items.
+///
+/// This is a generalization of using a [`BoolVar`] to select among two items,
+/// letting you use `k` bits to select among `2^k` items.
+pub struct Selector<'ctx, F> {
+    monomials: Vec<Var<'ctx, F>>,
+}
+
+impl<'ctx, F: Ring> Selector<'ctx, F> {
+    /// Create a new selector, using a given number of in-circuit bits.
+    ///
+    /// This selector will then be able to select among exactly `2^k` items,
+    /// where `k` is the number of bits passed in here.
+    ///
+    /// It is more efficient to create one selector and reuse it.
+    ///
+    /// The selection is made in ascending order, i.e. 0..00, 0..01, 0..10, ...
+    /// In other words, if you pass in, e.g. 010 to this function, you then
+    /// will always get the 3rd (index 2) of 8 items.
+    pub fn new(bits: &[BoolVar<'ctx, F>]) -> Self {
+        let mut monomials = vec![Var::one(); 1usize << bits.len()];
+        for mask in 1..monomials.len() {
+            let bit = mask.trailing_zeros() as usize;
+            let prev = mask ^ (1usize << bit);
+            monomials[mask] = if prev == 0 {
+                bits[bit].var().clone()
+            } else {
+                monomials[prev].clone() * bits[bit].var()
+            };
+        }
+        Self { monomials }
+    }
+
+    /// Select a constant value among `2^k` possibilities.
+    pub fn select_constant(&self, constants: &[F]) -> Var<'ctx, F> {
+        assert_eq!(
+            self.monomials.len(),
+            constants.len(),
+            "constants len must match selectors len"
+        );
+
+        let values = {
+            let mut values = constants.to_vec();
+            let len = values.len().trailing_zeros() as usize;
+            for bit in 0..len {
+                for mask in 0..values.len() {
+                    if mask & (1usize << bit) != 0 {
+                        let prev = values[mask ^ (1usize << bit)].clone();
+                        values[mask] -= &prev;
+                    }
+                }
+            }
+            values
+        };
+
+        values
+            .into_iter()
+            .zip(&self.monomials)
+            .map(|(v_i, m_i)| Var::native(v_i) * m_i)
+            .reduce(|acc, x| acc + &x)
+            .expect("values is non empty")
     }
 }
 

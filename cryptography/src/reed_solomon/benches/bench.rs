@@ -3,14 +3,14 @@ use commonware_cryptography::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use commonware_cryptography::reed_solomon::engine::{Avx2, Ssse3};
 use commonware_cryptography::reed_solomon::{
-    engine::{DefaultEngine, Engine, Naive, NoSimd, ShardsRefMut, GF_ORDER},
+    Decoder, Encoder, SHARD_CHUNK_BYTES,
+    engine::{DefaultEngine, Engine, GF_ORDER, Naive, NoSimd, ShardsRefMut},
     rate::{
         HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder, RateDecoder, RateEncoder,
     },
-    Decoder, Encoder, SHARD_CHUNK_BYTES,
 };
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rand::{Rng, RngCore, SeedableRng};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
 
@@ -52,13 +52,13 @@ fn encode_recovery(
     for shard in original {
         encoder.add_original_shard(shard).unwrap();
     }
-    let recovery = encoder
+
+    encoder
         .encode()
         .unwrap()
         .recovery_iter()
         .map(<[u8]>::to_vec)
-        .collect();
-    recovery
+        .collect()
 }
 
 // ======================================================================
@@ -389,7 +389,7 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
     let shard_chunk_count = SHARD_BYTES / SHARD_CHUNK_BYTES;
 
     let mut rng = ChaCha8Rng::from_seed([0; 32]);
-    let mut data = [(); GF_ORDER].map(|_| rng.gen());
+    let mut data = [(); GF_ORDER].map(|_| rng.random());
 
     c.bench_function(
         &format!("reed_solomon::engine_eval_poly/engine={engine_name} elems={GF_ORDER}"),

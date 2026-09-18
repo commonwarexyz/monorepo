@@ -8,8 +8,10 @@
 //! Reads through an invalidated `MerkleizedBatch` (see its "Branch validity" docs) return
 //! inconsistent bytes; callers must drop invalid batches.
 
+#[cfg(test)]
+use commonware_utils::bitmap::Readable as _;
 use commonware_utils::{
-    bitmap::{self, Readable as _},
+    bitmap,
     sync::{RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
@@ -49,40 +51,14 @@ impl<const N: usize> Shared<N> {
     /// (the test oracle): set bits in the committed prefix are returned in order via one
     /// `ones_iter_from`, then locations at or beyond the committed boundary are returned
     /// sequentially.
-    pub(crate) fn fill_candidates(
+    pub(crate) fn fill_candidates<T: From<u64>>(
         &self,
         scan_from: u64,
         tip: u64,
         limit: usize,
-        out: &mut Vec<u64>,
+        out: &mut Vec<T>,
     ) -> u64 {
-        let guard = self.read();
-        let bitmap_len = bitmap::Readable::<N>::len(&*guard);
-        let committed_end = bitmap_len.min(tip);
-
-        let mut scan = scan_from;
-        if scan < committed_end {
-            let mut ones = guard.ones_iter_from(scan);
-            while out.len() < limit {
-                match ones.next() {
-                    Some(idx) if idx < committed_end => {
-                        out.push(idx);
-                        scan = idx + 1;
-                    }
-                    _ => break,
-                }
-            }
-        }
-        while out.len() < limit {
-            let candidate = scan.max(bitmap_len);
-            if candidate >= tip {
-                scan = candidate;
-                break;
-            }
-            out.push(candidate);
-            scan = candidate + 1;
-        }
-        scan
+        fill_from(&*self.read(), scan_from, tip, limit, out)
     }
 
     /// Return the number of pruned bits. Acquires the read lock briefly.
@@ -96,6 +72,51 @@ impl<const N: usize> Shared<N> {
     pub(crate) fn get_bit(&self, loc: u64) -> bool {
         self.read().get_bit(loc)
     }
+}
+
+/// Core floor-raise scan over any [`bitmap::Readable`]: set bits in `[scan_from, min(len, tip))`
+/// ascending via one `ones_iter_from`, then locations in `[max(scan_from, len), tip)`
+/// sequentially. Fills `out` with up to `limit` candidates and returns the next `scan_from`.
+///
+/// The bitmap is read once per chunk (through the iterator), so a `B` whose reads go through
+/// interior mutability must not be mutated for the duration of the call.
+pub(crate) fn fill_from<B: bitmap::Readable<N>, T: From<u64>, const N: usize>(
+    bitmap: &B,
+    scan_from: u64,
+    tip: u64,
+    limit: usize,
+    out: &mut Vec<T>,
+) -> u64 {
+    let bitmap_len = bitmap.len();
+    let committed_end = bitmap_len.min(tip);
+
+    let mut scan = scan_from;
+    if scan < committed_end {
+        let mut ones = bitmap.ones_iter_from(scan);
+        while out.len() < limit {
+            match ones.next() {
+                Some(idx) if idx < committed_end => {
+                    out.push(idx.into());
+                    scan = idx + 1;
+                }
+                _ => break,
+            }
+        }
+    }
+    while out.len() < limit {
+        let candidate = scan.max(bitmap_len);
+        if candidate >= tip {
+            // Advance only through the span the ones scan verified clear. When `tip < len`
+            // (a layered bitmap scanned with a committed-boundary tip), bits in
+            // `[committed_end, len)` were never examined and a later call with a larger
+            // `tip` must still see them.
+            scan = scan.max(committed_end);
+            break;
+        }
+        out.push(candidate.into());
+        scan = candidate + 1;
+    }
+    scan
 }
 
 impl<const N: usize> std::fmt::Debug for Shared<N> {

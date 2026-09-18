@@ -1,21 +1,21 @@
 //! Test fixtures for Ed25519 certificate signing schemes.
 
 use crate::{
-    certificate::{mocks::Fixture, Scheme},
-    ed25519::{PrivateKey, PublicKey},
     Signer as _,
+    certificate::{Scheme, mocks::Fixture},
+    ed25519::{PrivateKey, PublicKey},
 };
 use commonware_math::algebra::Random;
 use commonware_utils::{
-    ordered::{Map, Set},
     TryCollect as _,
+    ordered::{Map, Set},
 };
-use rand::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 /// Generates ed25519 identity participants.
 pub fn participants<R>(rng: &mut R, n: u32) -> Map<PublicKey, PrivateKey>
 where
-    R: RngCore + CryptoRng,
+    R: CryptoRng,
 {
     (0..n)
         .map(|_| {
@@ -36,7 +36,7 @@ pub fn fixture<S, R>(
     verifier: impl Fn(&[u8], Set<PublicKey>) -> S,
 ) -> Fixture<S>
 where
-    R: RngCore + CryptoRng,
+    R: CryptoRng,
     S: Scheme<PublicKey = PublicKey>,
 {
     assert!(n > 0);

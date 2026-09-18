@@ -1,15 +1,14 @@
 //! Handshake conformance tests
 
 use crate::{
-    ed25519::PrivateKey,
-    handshake::{dial_end, dial_start, listen_end, listen_start, Context},
-    transcript::Transcript,
     Signer,
+    ed25519::PrivateKey,
+    handshake::{Context, dial_end, dial_start, listen_end, listen_start},
 };
 use commonware_codec::Encode;
-use commonware_conformance::{conformance_tests, Conformance};
+use commonware_conformance::{Conformance, conformance_tests};
 use commonware_math::algebra::Random;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE_CONFORMANCE_TESTS";
@@ -27,7 +26,7 @@ impl Conformance for Handshake {
         let (dialer_state, dialer_greeting) = dial_start(
             &mut rng,
             Context::new(
-                &Transcript::new(NAMESPACE),
+                NAMESPACE,
                 0,
                 0..1,
                 dialer_key.clone(),
@@ -38,13 +37,7 @@ impl Conformance for Handshake {
 
         let (listener_state, listener_greeting_ack) = listen_start(
             &mut rng,
-            Context::new(
-                &Transcript::new(NAMESPACE),
-                0,
-                0..1,
-                listener_key,
-                dialer_key.public_key(),
-            ),
+            Context::new(NAMESPACE, 0, 0..1, listener_key, dialer_key.public_key()),
             dialer_greeting,
         )
         .unwrap();
@@ -57,7 +50,7 @@ impl Conformance for Handshake {
         let (mut listener_tx, mut listener_rx) = listen_end(listener_state, dialer_ack).unwrap();
 
         // Generate a random message to send to the listener from the dialer.
-        let mut random_msg = vec![0u8; rng.gen_range(0..256)];
+        let mut random_msg = vec![0u8; rng.random_range(0..256)];
         rng.fill(&mut random_msg[..]);
         log.extend(random_msg.encode());
 
@@ -70,7 +63,7 @@ impl Conformance for Handshake {
         log.extend(received_msg.encode());
 
         // Generate a random message to send to the dialer from the listener.
-        let mut random_msg = vec![0u8; rng.gen_range(0..256)];
+        let mut random_msg = vec![0u8; rng.random_range(0..256)];
         rng.fill(&mut random_msg[..]);
         log.extend(random_msg.encode());
 

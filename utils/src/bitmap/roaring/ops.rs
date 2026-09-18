@@ -4,9 +4,9 @@
 //! when a result limit is reached, along with the boolean predicates `is_subset` and
 //! `intersects` which short-circuit on first conclusive observation.
 
+use super::Bitmap;
 #[cfg(test)]
 use super::container::Container;
-use super::Bitmap;
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
 use core::cmp::Ordering;
@@ -25,8 +25,8 @@ impl Bitmap {
         let mut b_iter = other.containers.iter().peekable();
 
         while remaining > 0 {
-            let a_key = a_iter.peek().map(|(&key, _)| key);
-            let b_key = b_iter.peek().map(|(&key, _)| key);
+            let a_key = a_iter.peek().map(|&(&key, _)| key);
+            let b_key = b_iter.peek().map(|&(&key, _)| key);
             let Some(key) = next_key(a_key, b_key) else {
                 break;
             };

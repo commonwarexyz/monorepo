@@ -11,8 +11,8 @@
 use super::{array, bitmap};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error as CodecError, RangeCfg, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, RangeCfg, Read, Write};
 use core::ops::Range;
 
 /// Maximum number of runs in a Run container.
@@ -339,6 +339,11 @@ impl Run {
     pub fn max(&self) -> Option<u16> {
         self.runs.last().map(|&(_, end)| end)
     }
+
+    pub(crate) fn from_runs_checked(runs: Vec<(u16, u16)>) -> Result<Self, CodecError> {
+        validate_runs(&runs)?;
+        Ok(Self { runs })
+    }
 }
 
 impl Write for Run {
@@ -366,26 +371,19 @@ impl Read for Run {
     }
 }
 
-impl Run {
-    pub(crate) fn from_runs_checked(runs: Vec<(u16, u16)>) -> Result<Self, CodecError> {
-        validate_runs(&runs)?;
-        Ok(Self { runs })
-    }
-}
-
 fn validate_runs(runs: &[(u16, u16)]) -> Result<(), CodecError> {
     let mut prev_end: Option<u16> = None;
     for &(start, end) in runs {
         if start > end {
             return Err(CodecError::Invalid("Run", "start must be <= end"));
         }
-        if let Some(p) = prev_end {
-            if start <= p.saturating_add(1) {
-                return Err(CodecError::Invalid(
-                    "Run",
-                    "runs must be sorted, non-overlapping, and non-adjacent",
-                ));
-            }
+        if let Some(p) = prev_end
+            && start <= p.saturating_add(1)
+        {
+            return Err(CodecError::Invalid(
+                "Run",
+                "runs must be sorted, non-overlapping, and non-adjacent",
+            ));
         }
         prev_end = Some(end);
     }

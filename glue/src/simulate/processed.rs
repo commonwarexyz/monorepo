@@ -13,3 +13,9 @@ impl ProcessedHeight for () {
         0
     }
 }
+
+impl ProcessedHeight for bool {
+    async fn processed_height(&self) -> u64 {
+        0
+    }
+}

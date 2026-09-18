@@ -1,12 +1,12 @@
 #![no_main]
 
-use commonware_cryptography::{ed25519::PrivateKey, handshake::TAG_SIZE, Signer};
-use commonware_runtime::{deterministic, mocks, Handle, Runner as _, Spawner, Supervisor as _};
+use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::TAG_SIZE};
+use commonware_runtime::{Handle, Runner as _, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
-    encrypted::{dial, listen, Config, Error, Receiver, Sender},
+    encrypted::{Config, Error, Receiver, Sender, dial, listen},
     utils::codec::{recv_frame, send_frame},
 };
-use futures::future::{select, Either};
+use futures::future::{Either, select};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 

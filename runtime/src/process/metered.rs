@@ -1,6 +1,6 @@
 //! Process metrics collection.
 
-use crate::telemetry::metrics::{raw, Gauge, GaugeExt, Register};
+use crate::telemetry::metrics::{Gauge, GaugeExt, Register, raw};
 use std::{future::Future, time::Duration};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -73,7 +73,6 @@ impl Metrics {
 }
 
 #[cfg(test)]
-#[cfg(not(target_os = "windows"))]
 mod tests {
     use super::*;
 

@@ -1,7 +1,7 @@
 use crate::reed_solomon::{
+    DecoderResult, EncoderResult, Error,
     engine::{self, Engine, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
-    DecoderResult, EncoderResult, Error,
 };
 use core::marker::PhantomData;
 
@@ -512,9 +512,9 @@ mod tests {
 
     mod high_rate {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{HighRate, Rate},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         #[test]
@@ -528,14 +528,10 @@ mod tests {
                 })
             );
 
-            assert!(HighRate::<NoSimd>::decoder(
-                61440,
-                4096,
-                SHARD_CHUNK_BYTES,
-                NoSimd::new(),
-                None
-            )
-            .is_ok());
+            assert!(
+                HighRate::<NoSimd>::decoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                    .is_ok()
+            );
         }
 
         #[test]
@@ -549,14 +545,10 @@ mod tests {
                 })
             );
 
-            assert!(HighRate::<NoSimd>::encoder(
-                61440,
-                4096,
-                SHARD_CHUNK_BYTES,
-                NoSimd::new(),
-                None
-            )
-            .is_ok());
+            assert!(
+                HighRate::<NoSimd>::encoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                    .is_ok()
+            );
         }
 
         #[test]
@@ -597,9 +589,9 @@ mod tests {
 
     mod high_rate_encoder {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{HighRateEncoder, RateEncoder},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         // ==================================================
@@ -655,9 +647,9 @@ mod tests {
 
     mod high_rate_decoder {
         use crate::reed_solomon::{
+            Error, SHARD_CHUNK_BYTES,
             engine::NoSimd,
             rate::{HighRateDecoder, RateDecoder},
-            Error, SHARD_CHUNK_BYTES,
         };
 
         // ==================================================

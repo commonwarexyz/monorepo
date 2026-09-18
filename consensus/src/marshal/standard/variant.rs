@@ -4,20 +4,20 @@
 //! receives the full block directly from the proposer or via gossip.
 
 use crate::{
+    Block,
     marshal::{
         ancestry::BlockProvider,
-        core::{Buffer, CommitmentFallback, Mailbox, Variant},
+        core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Retirement, Variant},
     },
     simplex::scheme::Scheme as SimplexScheme,
     types::Round,
-    Block,
 };
-use commonware_broadcast::{buffered, Broadcaster};
+use commonware_broadcast::buffered;
 use commonware_codec::Read;
-use commonware_cryptography::{certificate::Scheme, Digestible, PublicKey};
+use commonware_cryptography::{Digestible, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -30,8 +30,8 @@ where
     B: Block,
 {
     type ApplicationBlock = B;
-    type Block = B;
-    type StoredBlock = B;
+    type Block = Arc<B>;
+    type StoredBlock = Arc<B>;
     type Commitment = <B as Digestible>::Digest;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
@@ -62,12 +62,12 @@ where
 
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
-        _expected: Self::Commitment,
+        _expected: ExpectedCommitment<Self::Commitment>,
     ) -> <Self::Block as Read>::Cfg {
         block_cfg.clone()
     }
 
-    fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
+    fn into_shared(block: Self::Block) -> Arc<Self::ApplicationBlock> {
         block
     }
 
@@ -75,7 +75,7 @@ where
         block: Self::ApplicationBlock,
         _payload: Self::Commitment,
     ) -> Self::Block {
-        block
+        Arc::new(block)
     }
 }
 
@@ -86,30 +86,26 @@ where
 {
     type PublicKey = K;
 
-    async fn find_by_digest(&self, digest: B::Digest) -> Option<B> {
+    async fn find_by_digest(&self, digest: B::Digest) -> Option<Arc<B>> {
         self.get(digest).await
     }
 
-    async fn find_by_commitment(&self, commitment: B::Digest) -> Option<B> {
+    async fn find_by_commitment(&self, commitment: B::Digest) -> Option<Arc<B>> {
         self.find_by_digest(commitment).await
     }
 
-    fn subscribe_by_digest(&self, digest: B::Digest) -> Option<oneshot::Receiver<B>> {
-        let (tx, rx) = oneshot::channel();
-        self.subscribe_prepared(digest, tx);
-        Some(rx)
+    fn subscribe_by_digest(&self, digest: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
+        Some(self.subscribe(digest))
     }
 
-    fn subscribe_by_commitment(&self, commitment: B::Digest) -> Option<oneshot::Receiver<B>> {
+    fn subscribe_by_commitment(&self, commitment: B::Digest) -> Option<oneshot::Receiver<Arc<B>>> {
         self.subscribe_by_digest(commitment)
     }
 
-    fn finalized(&self, _commitment: B::Digest) {
-        // No cleanup needed in standard mode - the buffer handles its own pruning
-    }
+    fn retire(&self, _update: Retirement<B::Digest>) {}
 
-    fn send(&self, _round: Round, block: B, recipients: Recipients<K>) {
-        Broadcaster::broadcast(self, recipients, block);
+    fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
+        self.broadcast_shared(recipients, block);
     }
 }
 
@@ -123,7 +119,7 @@ where
     fn subscribe_parent(
         &self,
         block: &Self::Block,
-    ) -> impl Future<Output = Option<Self::Block>> + Send + 'static {
+    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
         let receiver = block.height().previous().map(|parent_height| {
             self.subscribe_by_commitment(
                 block.parent(),
@@ -132,9 +128,6 @@ where
                 },
             )
         });
-        async move {
-            let receiver = receiver?;
-            receiver.await.ok()
-        }
+        async move { receiver?.await.ok() }
     }
 }

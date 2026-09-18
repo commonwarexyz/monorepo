@@ -2,14 +2,14 @@
 
 use super::SyncResult;
 use crate::stateful::{
-    db::{Anchor, DatabaseSet, TipUpdate},
     Application,
+    db::{Anchor, DatabaseSet, TipUpdate},
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::channel::oneshot;
-use rand::Rng;
+use rand_core::Rng;
 
 type SyncTargets<E, A> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 type BlockDigest<E, A> = <<A as Application<E>>::Block as Digestible>::Digest;
@@ -38,10 +38,10 @@ where
     where
         F: FnMut(Message<E, A>) -> Self,
     {
-        if let Some(message) = self.take() {
-            if let Some(message) = push(message) {
-                *self = Some(message);
-            }
+        if let Some(message) = self.take()
+            && let Some(message) = push(message)
+        {
+            *self = Some(message);
         }
     }
 }
@@ -98,10 +98,9 @@ where
             {
                 Some(artifact) => return Some(artifact),
                 None => {
-                    // The caller acknowledges marshal after this returns. Wait until the
-                    // live sync coordinator has actually recorded the new tip update;
-                    // enqueueing it into Syncer is not enough to prove the eventual sync
-                    // artifact includes this finalized block.
+                    // Wait until the live sync coordinator has recorded the new tip update.
+                    // Enqueueing it into Syncer is not enough to prove the eventual sync
+                    // artifact includes the target or to discard its handoff state.
                     if observed.await.is_ok() {
                         return None;
                     }
@@ -120,10 +119,10 @@ mod tests {
     use super::{Mailbox, Message};
     use crate::stateful::{
         actor::syncer::SyncResult,
-        tests::mocks::{anchor, test_databases, TestApp},
+        tests::mocks::{TestApp, anchor, test_databases},
     };
     use commonware_actor::mailbox as actor_mailbox;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
     use futures::FutureExt;
 
@@ -186,7 +185,7 @@ mod tests {
 
             assert!(update_targets.as_mut().now_or_never().is_none());
 
-            let _ = update.record();
+            update.record(|_, _| {});
 
             assert!(update_targets.await.is_none());
         });

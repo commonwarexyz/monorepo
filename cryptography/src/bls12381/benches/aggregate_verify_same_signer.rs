@@ -1,16 +1,17 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
 use commonware_parallel::{Rayon, Sequential};
-use commonware_utils::NZUsize;
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{thread_rng, Rng};
+use commonware_utils::{NZUsize, non_empty, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
+use rand::RngExt as _;
 
 fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
+    let mut rng = test_rng();
     let namespace = b"namespace";
     for n in [2, 10, 100, 1000, 10000].into_iter() {
         let mut msgs = Vec::with_capacity(n);
         for _ in 0..n {
             let mut msg = [0u8; 32];
-            thread_rng().fill(&mut msg);
+            rng.fill(&mut msg);
             msgs.push(msg);
         }
         for concurrency in [1, 8].into_iter() {
@@ -20,12 +21,14 @@ fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
                 |b| {
                     b.iter_batched(
                         || {
-                            let (private, public) = ops::keypair::<_, MinSig>(&mut thread_rng());
+                            let (private, public) = ops::keypair::<_, MinSig>(&mut rng);
                             let sigs: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| ops::sign_message::<MinSig>(&private, namespace, msg))
                                 .collect();
-                            let agg_sig = ops::aggregate::combine_signatures::<MinSig, _>(&sigs);
+                            let agg_sig = ops::aggregate::combine_signatures::<MinSig, _>(
+                                non_empty![@sigs.iter()],
+                            );
                             let messages: Vec<_> = msgs
                                 .iter()
                                 .map(|msg| (namespace.as_ref(), msg.as_ref()))
@@ -35,10 +38,13 @@ fn bench_aggregate_verify_same_signer(c: &mut Criterion) {
                         |(public, messages, agg_sig)| {
                             #[allow(clippy::option_if_let_else)]
                             let combined_msg = if let Some(rayon) = rayon.as_ref() {
-                                ops::aggregate::combine_messages::<MinSig, _>(&messages, rayon)
+                                ops::aggregate::combine_messages::<MinSig, _>(
+                                    non_empty![@messages.iter()],
+                                    rayon,
+                                )
                             } else {
                                 ops::aggregate::combine_messages::<MinSig, _>(
-                                    &messages,
+                                    non_empty![@messages.iter()],
                                     &Sequential,
                                 )
                             };

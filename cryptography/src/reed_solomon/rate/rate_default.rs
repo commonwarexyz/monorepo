@@ -1,10 +1,10 @@
 use crate::reed_solomon::{
+    DecoderResult, EncoderResult, Error,
     engine::{Engine, GF_ORDER},
     rate::{
         DecoderWork, EncoderWork, HighRate, HighRateDecoder, HighRateEncoder, LowRate,
         LowRateDecoder, LowRateEncoder, Rate, RateDecoder, RateEncoder,
     },
-    DecoderResult, EncoderResult, Error,
 };
 use core::{cmp::Ordering, marker::PhantomData};
 

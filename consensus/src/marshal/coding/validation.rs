@@ -4,16 +4,16 @@
 //! block verification, and reconstruction.
 
 use crate::{
+    CertifiableBlock, Epochable,
     marshal::{
-        application::validation::{has_contiguous_height, is_block_in_expected_epoch},
+        ancestry::has_contiguous_height, application::validation::is_block_in_expected_epoch,
         coding::types::hash_context,
     },
-    types::{coding::Commitment, Epocher},
-    CertifiableBlock, Epochable,
+    types::{Epocher, coding::Commitment},
 };
 use commonware_codec::{EncodeSize, Write};
-use commonware_coding::Config as CodingConfig;
-use commonware_cryptography::{Committable, Digest, Hasher};
+use commonware_coding::{Config as CodingConfig, Scheme};
+use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
 
 /// Validation failures for coding proposal verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,35 +45,43 @@ pub(crate) enum ReconstructionError<D: Digest> {
 /// Consolidated validation for coding proposal checks.
 ///
 /// If `context` is `None`, only coding-config validation is applied.
-pub(crate) fn validate_proposal<H: Hasher, C: EncodeSize + Write>(
-    payload: Commitment,
+pub(crate) fn validate_proposal<B, C, H, X>(
+    payload: Commitment<B, C, H>,
     expected_config: CodingConfig,
-    context: Option<&C>,
-) -> Result<(), ProposalError> {
+    context: Option<&X>,
+) -> Result<(), ProposalError>
+where
+    B: Digestible,
+    C: Scheme,
+    H: Hasher,
+    X: EncodeSize + Write,
+{
     if payload.config() != expected_config {
         return Err(ProposalError::CodingConfig);
     }
-    if let Some(context) = context {
-        if payload.context::<H::Digest>() != hash_context::<H, _>(context) {
-            return Err(ProposalError::ContextDigest);
-        }
+    if let Some(context) = context
+        && payload.context() != hash_context::<H, _>(context)
+    {
+        return Err(ProposalError::ContextDigest);
     }
     Ok(())
 }
 
 /// Consolidated validation for coding block verification.
-pub(crate) fn validate_block<H, ES, B>(
+pub(crate) fn validate_block<H, ES, B, CB, C>(
     epocher: &ES,
     block: &B,
     parent: &B,
     context: &B::Context,
-    commitment: Commitment,
-    parent_commitment: Commitment,
+    commitment: Commitment<CB, C, H>,
+    parent_commitment: Commitment<CB, C, H>,
 ) -> Result<(), BlockError>
 where
     H: Hasher,
     ES: Epocher,
-    B: CertifiableBlock + Committable<Commitment = Commitment>,
+    B: CertifiableBlock + Committable<Commitment = Commitment<CB, C, H>>,
+    CB: Digestible<Digest = B::Digest>,
+    C: Scheme,
     B::Context: Epochable + EncodeSize + Write + PartialEq,
 {
     if block.commitment() != commitment {
@@ -92,7 +100,7 @@ where
         return Err(BlockError::Height);
     }
     let block_context = block.context();
-    if commitment.context::<H::Digest>() != hash_context::<H, _>(&block_context) {
+    if commitment.context() != hash_context::<H, _>(&block_context) {
         return Err(BlockError::ContextDigest);
     }
     if block_context != *context {
@@ -102,14 +110,15 @@ where
 }
 
 /// Consolidated validation for reconstructed coded blocks.
-pub(crate) fn validate_reconstruction<H, B>(
+pub(crate) fn validate_reconstruction<H, B, C>(
     block: &B,
     config: CodingConfig,
-    commitment: Commitment,
+    commitment: Commitment<B, C, H>,
 ) -> Result<(), ReconstructionError<H::Digest>>
 where
     H: Hasher,
     B: CertifiableBlock,
+    C: Scheme,
     B::Context: EncodeSize + Write,
 {
     if block.digest() != commitment.block() {
@@ -118,7 +127,7 @@ where
     if config != commitment.config() {
         return Err(ReconstructionError::CodingConfig);
     }
-    let commitment_context = commitment.context::<H::Digest>();
+    let commitment_context = commitment.context();
     let block_context = hash_context::<H, _>(&block.context());
     if commitment_context != block_context {
         return Err(ReconstructionError::ContextDigest(
@@ -136,12 +145,15 @@ mod tests {
         marshal::coding::types::coding_config_for_participants,
         types::{Epoch, FixedEpocher, Height, Round, View},
     };
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use bytes::BufMut;
+    use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
-        sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
+        Committable, Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest,
     };
     use commonware_utils::NZU64;
+
+    type TestCommitment = Commitment<TestBlock, ReedSolomon<Sha256>, Sha256>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct TestBlock {
@@ -149,7 +161,7 @@ mod tests {
         parent: Sha256Digest,
         height: Height,
         context: Round,
-        commitment: Commitment,
+        commitment: TestCommitment,
     }
 
     impl Write for TestBlock {
@@ -180,7 +192,7 @@ mod tests {
             let parent = Sha256Digest::read(buf)?;
             let height = Height::read(buf)?;
             let context = Round::read(buf)?;
-            let commitment = Commitment::read(buf)?;
+            let commitment = TestCommitment::read(buf)?;
             Ok(Self {
                 digest,
                 parent,
@@ -220,7 +232,7 @@ mod tests {
     }
 
     impl Committable for TestBlock {
-        type Commitment = Commitment;
+        type Commitment = TestCommitment;
 
         fn commitment(&self) -> Self::Commitment {
             self.commitment
@@ -232,8 +244,8 @@ mod tests {
         block: TestBlock,
         parent: TestBlock,
         context: Round,
-        commitment: Commitment,
-        parent_commitment: Commitment,
+        commitment: TestCommitment,
+        parent_commitment: TestCommitment,
         config: CodingConfig,
     }
 
@@ -242,10 +254,10 @@ mod tests {
         context: Round,
         config: CodingConfig,
         root_label: &[u8],
-    ) -> Commitment {
-        Commitment::from((
+    ) -> TestCommitment {
+        TestCommitment::from((
             digest,
-            Sha256::hash(root_label),
+            Sha256::hash(&[root_label]),
             hash_context::<Sha256, _>(&context),
             config,
         ))
@@ -258,8 +270,8 @@ mod tests {
         let parent_context = Round::new(Epoch::new(0), View::new(6));
         let context = Round::new(Epoch::new(0), View::new(7));
 
-        let parent_digest = Sha256::hash(b"parent");
-        let digest = Sha256::hash(b"block");
+        let parent_digest = Sha256::hash(&[b"parent"]);
+        let digest = Sha256::hash(&[b"block"]);
 
         let parent_commitment =
             commitment_for(parent_digest, parent_context, config, b"parent_root");
@@ -267,7 +279,7 @@ mod tests {
 
         let parent = TestBlock {
             digest: parent_digest,
-            parent: Sha256::hash(b"grandparent"),
+            parent: Sha256::hash(&[b"grandparent"]),
             height: Height::new(6),
             context: parent_context,
             commitment: parent_commitment,
@@ -295,7 +307,7 @@ mod tests {
     fn test_validate_block_ok() {
         let fixture = baseline_fixture();
         assert_eq!(
-            validate_block::<Sha256, _, _>(
+            validate_block(
                 &fixture.epocher,
                 &fixture.block,
                 &fixture.parent,
@@ -311,11 +323,7 @@ mod tests {
     fn test_validate_proposal_ok() {
         let fixture = baseline_fixture();
         assert_eq!(
-            validate_proposal::<Sha256, _>(
-                fixture.commitment,
-                fixture.config,
-                Some(&fixture.context)
-            ),
+            validate_proposal(fixture.commitment, fixture.config, Some(&fixture.context)),
             Ok(())
         );
     }
@@ -324,11 +332,7 @@ mod tests {
     fn test_validate_reconstruction_ok() {
         let fixture = baseline_fixture();
         assert_eq!(
-            validate_reconstruction::<Sha256, _>(
-                &fixture.block,
-                fixture.config,
-                fixture.commitment
-            ),
+            validate_reconstruction(&fixture.block, fixture.config, fixture.commitment),
             Ok(())
         );
     }
@@ -337,13 +341,13 @@ mod tests {
     fn test_validate_block_commitment_error() {
         let fixture = baseline_fixture();
         let wrong = commitment_for(
-            Sha256::hash(b"other_block"),
+            Sha256::hash(&[b"other_block"]),
             fixture.context,
             fixture.config,
             b"other_root",
         );
         assert_eq!(
-            validate_block::<Sha256, _, _>(
+            validate_block(
                 &fixture.epocher,
                 &fixture.block,
                 &fixture.parent,
@@ -359,13 +363,13 @@ mod tests {
     fn test_validate_block_parent_commitment_error() {
         let fixture = baseline_fixture();
         let wrong = commitment_for(
-            Sha256::hash(b"other_parent"),
+            Sha256::hash(&[b"other_parent"]),
             fixture.parent.context,
             fixture.config,
             b"other_parent_root",
         );
         assert_eq!(
-            validate_block::<Sha256, _, _>(
+            validate_block(
                 &fixture.epocher,
                 &fixture.block,
                 &fixture.parent,
@@ -382,7 +386,7 @@ mod tests {
         let fixture = baseline_fixture();
         let wrong_context = Round::new(Epoch::new(1), View::new(7));
         assert_eq!(
-            validate_block::<Sha256, _, _>(
+            validate_block(
                 &fixture.epocher,
                 &fixture.block,
                 &fixture.parent,
@@ -398,9 +402,9 @@ mod tests {
     fn test_validate_block_parent_digest_error() {
         let fixture = baseline_fixture();
         let mut block = fixture.block.clone();
-        block.parent = Sha256::hash(b"wrong_parent");
+        block.parent = Sha256::hash(&[b"wrong_parent"]);
         assert_eq!(
-            validate_block::<Sha256, _, _>(
+            validate_block(
                 &fixture.epocher,
                 &block,
                 &fixture.parent,
@@ -418,7 +422,7 @@ mod tests {
         let mut block = fixture.block.clone();
         block.height = Height::new(9);
         assert_eq!(
-            validate_block::<Sha256, _, _>(
+            validate_block(
                 &fixture.epocher,
                 &block,
                 &fixture.parent,
@@ -439,7 +443,7 @@ mod tests {
             commitment_for(block.digest(), wrong_context, fixture.config, b"block_root");
         block.commitment = wrong_commitment;
         assert_eq!(
-            validate_block::<Sha256, _, _>(
+            validate_block(
                 &fixture.epocher,
                 &block,
                 &fixture.parent,
@@ -456,7 +460,7 @@ mod tests {
         let fixture = baseline_fixture();
         let wrong_context = Round::new(Epoch::new(0), View::new(8));
         assert_eq!(
-            validate_block::<Sha256, _, _>(
+            validate_block(
                 &fixture.epocher,
                 &fixture.block,
                 &fixture.parent,
@@ -473,7 +477,7 @@ mod tests {
         let fixture = baseline_fixture();
         let wrong = coding_config_for_participants(7);
         assert_eq!(
-            validate_proposal::<Sha256, _>(fixture.commitment, wrong, Some(&fixture.context)),
+            validate_proposal(fixture.commitment, wrong, Some(&fixture.context)),
             Err(ProposalError::CodingConfig)
         );
     }
@@ -483,28 +487,29 @@ mod tests {
         let fixture = baseline_fixture();
         let wrong_context = Round::new(Epoch::new(0), View::new(8));
         assert_eq!(
-            validate_proposal::<Sha256, _>(
-                fixture.commitment,
-                fixture.config,
-                Some(&wrong_context)
-            ),
+            validate_proposal(fixture.commitment, fixture.config, Some(&wrong_context)),
             Err(ProposalError::ContextDigest)
         );
     }
 
     #[test]
-    fn test_validate_proposal_none_context_skips_context_digest_check() {
+    fn test_validate_proposal_reproposal_exception_not_valid_in_later_context() {
         let fixture = baseline_fixture();
-        let wrong_context = Round::new(Epoch::new(0), View::new(8));
-        let payload_with_wrong_context = commitment_for(
-            fixture.block.digest(),
-            wrong_context,
-            fixture.config,
-            b"block_root",
-        );
+        let later_context = Round::new(Epoch::new(0), View::new(8));
+
+        // Re-proposals deliberately skip the context-digest check because the
+        // commitment retains the original proposal context.
         assert_eq!(
-            validate_proposal::<Sha256, Round>(payload_with_wrong_context, fixture.config, None),
+            validate_proposal(fixture.commitment, fixture.config, None::<&Round>),
             Ok(())
+        );
+
+        // The same commitment cannot also be accepted as a normal proposal in
+        // a later context. This prevents the re-proposal exception from
+        // aliasing a distinct context-dependent certification outcome.
+        assert_eq!(
+            validate_proposal(fixture.commitment, fixture.config, Some(&later_context)),
+            Err(ProposalError::ContextDigest)
         );
     }
 
@@ -513,7 +518,7 @@ mod tests {
         let fixture = baseline_fixture();
         let wrong = coding_config_for_participants(7);
         assert_eq!(
-            validate_proposal::<Sha256, Round>(fixture.commitment, wrong, None),
+            validate_proposal(fixture.commitment, wrong, None::<&Round>),
             Err(ProposalError::CodingConfig)
         );
     }
@@ -522,13 +527,13 @@ mod tests {
     fn test_validate_reconstruction_block_digest_error() {
         let fixture = baseline_fixture();
         let wrong_commitment = commitment_for(
-            Sha256::hash(b"wrong_block_digest"),
+            Sha256::hash(&[b"wrong_block_digest"]),
             fixture.context,
             fixture.config,
             b"block_root",
         );
         assert_eq!(
-            validate_reconstruction::<Sha256, _>(&fixture.block, fixture.config, wrong_commitment),
+            validate_reconstruction(&fixture.block, fixture.config, wrong_commitment),
             Err(ReconstructionError::BlockDigest)
         );
     }
@@ -544,7 +549,7 @@ mod tests {
             b"block_root",
         );
         assert_eq!(
-            validate_reconstruction::<Sha256, _>(&fixture.block, fixture.config, wrong_commitment),
+            validate_reconstruction(&fixture.block, fixture.config, wrong_commitment),
             Err(ReconstructionError::CodingConfig)
         );
     }
@@ -560,7 +565,7 @@ mod tests {
             b"block_root",
         );
         assert_eq!(
-            validate_reconstruction::<Sha256, _>(&fixture.block, fixture.config, wrong_commitment),
+            validate_reconstruction(&fixture.block, fixture.config, wrong_commitment),
             Err(ReconstructionError::ContextDigest(
                 wrong_commitment.context(),
                 hash_context::<Sha256, _>(&fixture.block.context),

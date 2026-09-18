@@ -11,21 +11,21 @@
 //! over elements whose activity state is reflected by the bitmap.
 
 use crate::{
+    Context,
     merkle::{
+        Family as _,
         hasher::Hasher,
         mmr::{
-            self,
+            self, Error, Location, Position, Proof,
             mem::{Config, Mmr},
-            verification, Error, Location, Position, Proof,
+            verification,
         },
         storage::Storage,
-        Family as _,
     },
     metadata::{Config as MConfig, Metadata},
-    Context,
 };
 use ahash::AHashSet;
-use commonware_codec::DecodeExt;
+use commonware_codec::{Copying, DecodeExt};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -45,7 +45,7 @@ pub(crate) fn partial_chunk_root<H: Hasher<mmr::Family>, const N: usize>(
     assert!(next_bit > 0);
     assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
     let next_bit = next_bit.to_be_bytes();
-    hasher.hash([
+    hasher.hash(&[
         mmr_root.as_ref(),
         next_bit.as_slice(),
         last_chunk_digest.as_ref(),
@@ -75,7 +75,7 @@ pub struct Unmerkleized {
     ///
     /// Each dirty chunk is identified by its absolute index, including pruned chunks.
     ///
-    /// Invariant: Indices are always in the range [pruned_chunks, authenticated_len).
+    /// Invariant: Indices are always in the range [pruned_chunks, mmr.leaves()).
     dirty_chunks: AHashSet<usize>,
 }
 
@@ -108,10 +108,6 @@ pub type UnmerkleizedBitMap<E, D, const N: usize, S> = BitMap<E, D, N, Unmerklei
 pub struct BitMap<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> {
     /// The underlying bitmap.
     bitmap: PrunableBitMap<N>,
-
-    /// Invariant: Chunks in range [0, authenticated_len) are in `mmr`.
-    /// This is an absolute index that includes pruned chunks.
-    authenticated_len: usize,
 
     /// A Merkle tree with each leaf representing an N*8 bit "chunk" of the bitmap.
     ///
@@ -172,13 +168,7 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
     /// The returned index is absolute and includes pruned chunks.
     #[inline]
     fn complete_chunks(&self) -> usize {
-        let chunks_len = self.bitmap.chunks_len();
-        if self.bitmap.is_chunk_aligned() {
-            chunks_len
-        } else {
-            // Last chunk is partial
-            chunks_len.checked_sub(1).unwrap()
-        }
+        self.bitmap.complete_chunks()
     }
 
     /// Return the last chunk of the bitmap and its size in bits. The size can be 0 (meaning the
@@ -330,7 +320,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             let cached_root = mmr.root(hasher, 0)?;
             return Ok(Self {
                 bitmap: PrunableBitMap::new(),
-                authenticated_len: 0,
                 mmr,
                 strategy,
                 metadata,
@@ -348,7 +337,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
                 error!(?pruned_loc, ?pos, "missing pinned node");
                 return Err(Error::MissingNode(pos));
             };
-            let digest = D::decode(bytes.as_ref());
+            let digest = D::decode(Copying(bytes));
             let Ok(digest) = digest else {
                 error!(?pruned_loc, ?pos, "could not convert node bytes to digest");
                 return Err(Error::MissingNode(pos));
@@ -367,8 +356,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
         let cached_root = mmr.root(hasher, 0)?;
         Ok(Self {
             bitmap,
-            // Pruned chunks are already authenticated in the MMR
-            authenticated_len: pruned_chunks,
             mmr,
             strategy,
             metadata,
@@ -383,7 +370,10 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     /// Write the information necessary to restore the bitmap in its fully pruned state at its last
     /// pruning boundary. Restoring the entire bitmap state is then possible by replaying the
     /// retained elements.
-    pub async fn write_pruned(&mut self) -> Result<(), Error> {
+    ///
+    /// Consumes the bitmap and returns it only on success: an error (or a dropped future)
+    /// destroys the handle.
+    pub async fn write_pruned(mut self) -> Result<Self, Error> {
         self.metadata.clear();
 
         // Write the number of pruned chunks.
@@ -403,7 +393,8 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             self.metadata.put(key, digest.to_vec());
         }
 
-        self.metadata.sync().await.map_err(Error::Metadata)
+        self.metadata = self.metadata.sync().await.map_err(Error::Metadata)?;
+        Ok(self)
     }
 
     /// Destroy the bitmap metadata from disk.
@@ -426,9 +417,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
 
         // Prune inner bitmap
         self.bitmap.prune_to_bit(bit);
-
-        // Update authenticated length
-        self.authenticated_len = self.complete_chunks();
 
         self.mmr.prune(Location::new(chunk as u64))?;
         Ok(())
@@ -507,7 +495,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     pub fn into_dirty(self) -> UnmerkleizedBitMap<E, D, N, S> {
         UnmerkleizedBitMap {
             bitmap: self.bitmap,
-            authenticated_len: self.authenticated_len,
             mmr: self.mmr,
             strategy: self.strategy,
             state: Unmerkleized {
@@ -539,26 +526,9 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
 
         // If the updated chunk is already in the MMR, mark it as dirty.
         let chunk = PrunableBitMap::<N>::to_chunk_index(bit);
-        if chunk < self.authenticated_len {
+        if chunk < *self.mmr.leaves() as usize {
             self.state.dirty_chunks.insert(chunk);
         }
-    }
-
-    /// The chunks that have been modified or added since the last call to `merkleize`.
-    pub fn dirty_chunks(&self) -> Vec<Location> {
-        let mut chunks: Vec<Location> = self
-            .state
-            .dirty_chunks
-            .iter()
-            .map(|&chunk| Location::new(chunk as u64))
-            .collect();
-
-        // Include complete chunks that haven't been authenticated yet
-        for i in self.authenticated_len..self.complete_chunks() {
-            chunks.push(Location::new(i as u64));
-        }
-
-        chunks
     }
 
     /// Merkleize all updates not yet reflected in the bitmap's root.
@@ -568,12 +538,11 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
     ) -> Result<MerkleizedBitMap<E, D, N, S>, Error> {
         // Build a batch backed by the configured strategy.
         let mut batch = self.mmr.new_batch_with_strategy(self.strategy.clone());
-        let start = self.authenticated_len;
+        let start = *self.mmr.leaves() as usize;
         let end = self.complete_chunks();
         for i in start..end {
             batch = batch.add(hasher, self.bitmap.get_chunk(i));
         }
-        self.authenticated_len = end;
 
         // Pre-hash dirty chunks into digests and update in the batch.
         let updates: Vec<(Location, &[u8; N])> = self
@@ -611,7 +580,6 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
 
         Ok(MerkleizedBitMap {
             bitmap: self.bitmap,
-            authenticated_len: self.authenticated_len,
             mmr: self.mmr,
             strategy: self.strategy,
             metadata: self.metadata,
@@ -625,7 +593,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> Storage<mmr::Family>
 {
     type Digest = D;
 
-    async fn size(&self) -> Position {
+    fn size(&self) -> Position {
         self.size()
     }
 
@@ -639,10 +607,10 @@ mod tests {
     use super::*;
     use crate::merkle::Bagging::ForwardFold;
     use commonware_codec::FixedSize;
-    use commonware_cryptography::{sha256, Hasher, Sha256};
+    use commonware_cryptography::{Hasher, Sha256, sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use mmr::StandardHasher;
 
     const SHA256_SIZE: usize = sha256::Digest::SIZE;
@@ -679,7 +647,7 @@ mod tests {
         assert_eq!(N % 32, 0);
         let mut vec: Vec<u8> = Vec::new();
         for _ in 0..N / 32 {
-            vec.extend(Sha256::hash(s).iter());
+            vec.extend(Sha256::hash(&[s]).iter());
         }
 
         vec.try_into().unwrap()

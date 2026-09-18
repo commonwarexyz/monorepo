@@ -1,8 +1,8 @@
 //! Benchmark sequential append performance.
 
-use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE};
+use super::{CACHE_SIZE, PAGE_SIZE, create_append, destroy_append};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Runner, Storage,
+    BufferPooler, Runner, Storage, buffer::paged::CacheRef, deterministic, tokio,
 };
 use commonware_utils::NZUsize;
 use criterion::Criterion;
@@ -23,7 +23,7 @@ where
                 let executor = R::default();
                 executor.start(|ctx| async move {
                     let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
-                    let append = create_append(&ctx, &name, cache_ref).await;
+                    let mut append = create_append(&ctx, &name, cache_ref).await;
 
                     let start = Instant::now();
                     for _ in 0..iters {

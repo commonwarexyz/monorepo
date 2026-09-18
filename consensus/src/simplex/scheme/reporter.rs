@@ -19,14 +19,14 @@
 //! This wrapper prevents that attack by suppressing peer activities for non-attributable schemes.
 
 use crate::{
-    simplex::{scheme::Scheme, types::Activity},
     Reporter,
+    simplex::{scheme::Scheme, types::Activity},
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{certificate, Digest};
+use commonware_cryptography::{Digest, certificate};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::Mutex;
-use rand_core::CryptoRngCore;
+use rand_core::CryptoRng;
 use std::sync::Arc;
 
 /// Reporter wrapper that filters and verifies activities based on scheme attributability.
@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// activities. It prevents signature forgery attacks on non-attributable schemes while ensuring
 /// all activities are cryptographically valid before reporting.
 pub struct AttributableReporter<
-    E: CryptoRngCore + Send + 'static,
+    E: CryptoRng + Send + 'static,
     S: certificate::Scheme,
     D: Digest,
     T: Strategy,
@@ -54,12 +54,12 @@ pub struct AttributableReporter<
 }
 
 impl<
-        E: CryptoRngCore + Send + 'static,
-        S: certificate::Scheme + Clone,
-        D: Digest,
-        T: Strategy,
-        R: Reporter<Activity = Activity<S, D>>,
-    > Clone for AttributableReporter<E, S, D, T, R>
+    E: CryptoRng + Send + 'static,
+    S: certificate::Scheme + Clone,
+    D: Digest,
+    T: Strategy,
+    R: Reporter<Activity = Activity<S, D>>,
+> Clone for AttributableReporter<E, S, D, T, R>
 {
     fn clone(&self) -> Self {
         Self {
@@ -73,12 +73,12 @@ impl<
 }
 
 impl<
-        E: CryptoRngCore + Send + 'static,
-        S: certificate::Scheme,
-        D: Digest,
-        T: Strategy,
-        R: Reporter<Activity = Activity<S, D>>,
-    > AttributableReporter<E, S, D, T, R>
+    E: CryptoRng + Send + 'static,
+    S: certificate::Scheme,
+    D: Digest,
+    T: Strategy,
+    R: Reporter<Activity = Activity<S, D>>,
+> AttributableReporter<E, S, D, T, R>
 {
     /// Creates a new `AttributableReporter` that wraps an inner reporter.
     pub fn new(rng: E, scheme: S, reporter: R, strategy: T, verify: bool) -> Self {
@@ -93,12 +93,12 @@ impl<
 }
 
 impl<
-        E: CryptoRngCore + Send + 'static,
-        S: Scheme<D>,
-        D: Digest,
-        T: Strategy,
-        R: Reporter<Activity = Activity<S, D>>,
-    > Reporter for AttributableReporter<E, S, D, T, R>
+    E: CryptoRng + Send + 'static,
+    S: Scheme<D>,
+    D: Digest,
+    T: Strategy,
+    R: Reporter<Activity = Activity<S, D>>,
+> Reporter for AttributableReporter<E, S, D, T, R>
 {
     type Activity = Activity<S, D>;
 
@@ -148,14 +148,14 @@ mod tests {
         types::{Epoch, Round, View},
     };
     use commonware_cryptography::{
+        Hasher, Sha256,
         bls12381::primitives::variant::MinPk,
-        certificate::{self, mocks::Fixture, Scheme as _},
+        certificate::{self, Scheme as _, mocks::Fixture},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
-        Hasher, Sha256,
     };
     use commonware_parallel::Sequential;
-    use commonware_utils::{sync::Mutex, test_rng, N3f1};
+    use commonware_utils::{non_empty, sync::Mutex, test_rng};
     use std::sync::Arc;
 
     const NAMESPACE: &[u8] = b"test-reporter";
@@ -192,7 +192,7 @@ mod tests {
 
     fn create_proposal(epoch: u64, view: u64) -> Proposal<Sha256Digest> {
         let data = format!("proposal-{epoch}-{view}");
-        let hash = Sha256::hash(data.as_bytes());
+        let hash = Sha256::hash(&[data.as_bytes()]);
         let epoch = Epoch::new(epoch);
         let view = View::new(view);
         Proposal::new(Round::new(epoch, view), view, hash)
@@ -314,7 +314,7 @@ mod tests {
             .collect();
 
         let certificate = schemes[0]
-            .assemble::<_, N3f1>(votes, &Sequential)
+            .assemble(non_empty![@votes], &Sequential)
             .expect("failed to assemble certificate");
 
         let notarization = Notarization {

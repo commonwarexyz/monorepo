@@ -10,10 +10,12 @@ pub struct Peer<P: PublicKey> {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, EncodeLabelValue)]
 pub enum TimeoutReason {
+    Retry,
     Inactivity,
     LeaderNullify,
     LeaderTimeout,
     CertificationTimeout,
+    StallTimeout,
     MissingProposal,
     IgnoredProposal,
     InvalidProposal,
@@ -27,10 +29,12 @@ impl TimeoutReason {
     /// metric series share the same string.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Retry => "Retry",
             Self::Inactivity => "Inactivity",
             Self::LeaderNullify => "LeaderNullify",
             Self::LeaderTimeout => "LeaderTimeout",
             Self::CertificationTimeout => "CertificationTimeout",
+            Self::StallTimeout => "StallTimeout",
             Self::MissingProposal => "MissingProposal",
             Self::IgnoredProposal => "IgnoredProposal",
             Self::InvalidProposal => "InvalidProposal",

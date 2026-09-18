@@ -1,15 +1,16 @@
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::journal::contiguous::{
+    Mutable,
     fixed::{Config as FixedConfig, Journal as FixedJournal},
     variable::{Config as VariableConfig, Journal as VariableJournal},
-    Mutable,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{NZU16, NZU64, NZUsize, sequence::FixedBytes, test_rng};
 use criterion::criterion_main;
-use rand::{rngs::StdRng, RngCore, SeedableRng};
+use rand::Rng;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 mod fixed_append;
+mod fixed_append_buffered;
 mod fixed_read_random;
 mod fixed_read_sequential;
 mod fixed_replay;
@@ -18,6 +19,7 @@ mod variable_replay;
 
 criterion_main!(
     fixed_append::benches,
+    fixed_append_buffered::benches,
     fixed_read_random::benches,
     fixed_read_sequential::benches,
     fixed_replay::benches,
@@ -27,6 +29,9 @@ criterion_main!(
 
 /// The size of the write buffer used by the journal.
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
+
+/// The size of the buffer used to replay the journal.
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
@@ -52,29 +57,33 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         partition: partition_name.into(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
+        replay_buffer: REPLAY_BUFFER,
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
 }
 
 /// Append `items_to_write` random items to the given fixed journal, syncing the changes before returning.
-async fn append_fixed_random_data<C, const ITEM_SIZE: usize>(journal: &mut C, items_to_write: u64)
+async fn append_fixed_random_data<C, const ITEM_SIZE: usize>(
+    mut journal: C,
+    items_to_write: u64,
+) -> C
 where
     C: Mutable<Item = FixedBytes<ITEM_SIZE>>,
 {
     // Append `items_to_write` random items to the journal.
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let mut arr = [0; ITEM_SIZE];
     for _ in 0..items_to_write {
         rng.fill_bytes(&mut arr);
-        journal
+        (journal, _) = journal
             .append(&FixedBytes::new(arr))
             .await
             .expect("failed to append data");
     }
 
     // Sync the journal to ensure all data is written to disk.
-    journal.sync().await.expect("failed to sync journal");
+    journal.sync().await.expect("failed to sync journal")
 }
 
 /// Open and return a temp variable journal with the given config parameters.
@@ -91,6 +100,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         codec_config: (),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
+        replay_buffer: REPLAY_BUFFER,
     };
     VariableJournal::init(context, journal_config)
         .await

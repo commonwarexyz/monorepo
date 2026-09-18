@@ -1,19 +1,18 @@
 use commonware_cryptography::{
+    Signer,
     bls12381::{
         dkg::feldman_desmedt::deal,
         primitives::{self, sharing::Mode, variant::MinSig},
     },
     ed25519::PrivateKey,
-    Signer,
 };
 use commonware_parallel::Sequential;
-use commonware_utils::{Faults, N3f1, TryCollect};
-use criterion::{criterion_group, BatchSize, Criterion};
-use rand::{rngs::StdRng, SeedableRng};
+use commonware_utils::{Faults, N3f1, TryCollect, test_rng};
+use criterion::{BatchSize, Criterion, criterion_group};
 use std::hint::black_box;
 
 fn bench_threshold_recover(c: &mut Criterion) {
-    let mut rng = StdRng::seed_from_u64(0);
+    let mut rng = test_rng();
     let namespace = b"benchmark";
     let msg = b"hello";
     for mode in [Mode::NonZeroCounter, Mode::RootsOfUnity] {
@@ -45,7 +44,7 @@ fn bench_threshold_recover(c: &mut Criterion) {
                         },
                         |(public, partials)| {
                             black_box(
-                                primitives::ops::threshold::recover::<MinSig, _, N3f1>(
+                                primitives::ops::threshold::recover(
                                     public.public(),
                                     &partials,
                                     &Sequential,

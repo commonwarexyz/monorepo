@@ -4,7 +4,7 @@ use bytes::Bytes;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::{channel::mpsc, sync::Mutex};
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::collections::{BTreeMap, btree_map::Entry};
 use tracing::{error, warn};
 
 /// Relay is a mock for distributing artifacts between applications.
@@ -71,10 +71,10 @@ impl<D: Digest, P: PublicKey> Relay<D, P> {
                     }
                 }
                 Recipients::One(public_key) => {
-                    if public_key != *sender {
-                        if let Some(channel) = registered.get(&public_key) {
-                            channels.push((public_key, channel.clone()));
-                        }
+                    if public_key != *sender
+                        && let Some(channel) = registered.get(&public_key)
+                    {
+                        channels.push((public_key, channel.clone()));
                     }
                 }
             }
