@@ -936,8 +936,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn append(&mut self, item: &A) -> Result<u64, Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
-        self.append_many_inner(Many::Flat(std::slice::from_ref(item)))
-            .await
+        let new_size = self.bounds.end.checked_add(1).ok_or(Error::SizeOverflow)?;
+        if self.blobs.tail_writer().try_append_value(item).is_none() {
+            return self
+                .append_many_inner(Many::Flat(std::slice::from_ref(item)))
+                .await;
+        }
+        self.advance_tail(new_size).await?;
+        Ok(self.finish_append())
     }
 
     /// See [Journal::append_many].
@@ -1020,21 +1026,30 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 .tail_writer()
                 .append_owned(items_buf.slice(start..end))
                 .await?;
-            self.bounds.end = new_size;
+            self.advance_tail(new_size).await?;
             written += batch_count;
-
-            // Seal the just-filled tail, start syncing it, and open the next blob as the new tail.
-            if new_size.is_multiple_of(self.items_per_blob.get()) {
-                self.blobs.seal_tail().await?;
-            }
         }
 
+        Ok(self.finish_append())
+    }
+
+    // Advance appended bounds and rotate a full tail. Both append paths use the same ordering.
+    async fn advance_tail(&mut self, new_size: u64) -> Result<(), Error> {
+        self.bounds.end = new_size;
+        if new_size.is_multiple_of(self.items_per_blob.get()) {
+            self.blobs.seal_tail().await?;
+        }
+        Ok(())
+    }
+
+    // Record state metrics once after a successful append, including multi-blob batches.
+    fn finish_append(&self) -> u64 {
         self.metrics.update(
             self.bounds.end,
             self.bounds.start,
             self.items_per_blob.get(),
         );
-        Ok(self.bounds.end - 1)
+        self.bounds.end - 1
     }
 
     /// See [Journal::rewind].
@@ -1767,6 +1782,53 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test_traced]
+    fn test_fixed_append_buffer_fallback_rotation_and_snapshot() {
+        for write_buffer in [NZUsize!(44), NZUsize!(2048)] {
+            deterministic::Runner::default().start(|context| async move {
+                let mut cfg = test_cfg(&context, NZU64!(7));
+                cfg.write_buffer = write_buffer;
+                let mut journal = Journal::<_, Digest>::init(context.child("initial"), cfg.clone())
+                    .await
+                    .unwrap();
+                for i in 0..3 {
+                    let position;
+                    (journal, position) = journal.append(&test_digest(i)).await.unwrap();
+                    assert_eq!(position, i);
+                }
+                let snapshot;
+                (journal, snapshot) = journal.snapshot().await.unwrap();
+
+                // Mix direct and prepared appends across buffer and blob boundaries.
+                for i in 3..20 {
+                    let position;
+                    if i % 3 == 0 {
+                        let item = test_digest(i);
+                        let prepared = journal.prepare_append(Many::Flat(&[item]));
+                        (journal, position) = journal.append_prepared(prepared).await.unwrap();
+                    } else {
+                        (journal, position) = journal.append(&test_digest(i)).await.unwrap();
+                    }
+                    assert_eq!(position, i);
+                    assert_eq!(journal.size(), i + 1);
+                }
+                for i in 0..3 {
+                    assert_eq!(snapshot.read(i).await.unwrap(), test_digest(i));
+                }
+                journal = journal.sync().await.unwrap();
+                drop(snapshot);
+                drop(journal);
+
+                let journal = Journal::<_, Digest>::init(context, cfg).await.unwrap();
+                assert_eq!(journal.size(), 20);
+                for i in 0..20 {
+                    assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+                }
+                journal.destroy().await.unwrap();
+            });
+        }
     }
 
     #[test_traced]

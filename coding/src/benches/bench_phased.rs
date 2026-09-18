@@ -24,7 +24,7 @@ pub(crate) fn bench_encode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                 let strategy = Rayon::new(NZUsize!(conc)).unwrap();
                 c.bench_function(
                     &format!(
-                        "{name}/msg_len={data_length} chunks={chunks} minimum_shards={min} conc={conc}"
+                        "{name}/msg_len={data_length} chunks={chunks} min_shards={min} conc={conc}"
                     ),
                     |b| {
                         b.iter_batched(
@@ -66,7 +66,7 @@ pub(crate) fn bench_decode_generic<S: PhasedScheme>(name: &str, c: &mut Criterio
                     let sel = selection.label();
                     c.bench_function(
                         &format!(
-                            "{name}/msg_len={data_length} chunks={chunks} minimum_shards={min} conc={conc} shard_selection={sel}"
+                            "{name}/msg_len={data_length} chunks={chunks} min_shards={min} conc={conc} shard_selection={sel}"
                         ),
                         |b| {
                             b.iter_batched(
