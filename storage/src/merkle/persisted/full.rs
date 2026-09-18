@@ -433,8 +433,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///    - Discards existing data and creates a new [Journal] at `range.start`
     ///
     /// If interrupted, retry [Self::init_sync] with the authoritative range and pins. When the
-    /// range starts beyond the existing tree, ordinary [Self::init] may fail until that retry
-    /// completes the reset.
+    /// range starts outside the retained tree, beyond its end or below its retained start,
+    /// ordinary [Self::init] may fail with [Error::MissingNode] until that retry completes the
+    /// reset.
     pub async fn init_sync(context: E, cfg: SyncConfig<F, D, S>) -> Result<Self, Error<F>> {
         let prune_pos = Position::try_from(cfg.range.start())?;
         let end_pos = Position::try_from(cfg.range.end())?;
@@ -1140,6 +1141,41 @@ mod tests {
     fn test_empty_journal_rejects_pruned_metadata_mmb() {
         deterministic::Runner::default()
             .start(empty_journal_rejects_pruned_metadata::<mmb::Family>);
+    }
+
+    async fn malformed_pruned_metadata_is_corruption<F: Family>(context: deterministic::Context) {
+        let cfg = test_config(&context);
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
+            context.child("metadata"),
+            MConfig {
+                partition: cfg.metadata_partition.clone(),
+                codec_config: ((0..).into(), ()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // The pruning boundary must decode as exactly eight big-endian bytes.
+        metadata
+            .put_sync(U64::new(PRUNED_TO_PREFIX, 0), vec![0; 7])
+            .await
+            .unwrap();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let result =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("open"), &hasher, cfg).await;
+        assert!(matches!(result, Err(Error::DataCorrupted(_))));
+    }
+
+    #[test]
+    fn test_malformed_pruned_metadata_is_corruption_mmr() {
+        deterministic::Runner::default()
+            .start(malformed_pruned_metadata_is_corruption::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_malformed_pruned_metadata_is_corruption_mmb() {
+        deterministic::Runner::default()
+            .start(malformed_pruned_metadata_is_corruption::<mmb::Family>);
     }
 
     async fn full_empty_inner<F: Family>(context: deterministic::Context) {

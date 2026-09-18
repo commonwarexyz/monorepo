@@ -367,7 +367,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Open a database at the latest checkpoint at or below `expected`, when supplied.
     ///
     /// Implementations durably discard state beyond the selected checkpoint before returning.
-    /// Returns [`InitError::TargetMismatch`] if the recovered sync target differs from `expected`.
+    /// Returns [`InitError::Database`] if the database fails to open, including when the
+    /// selected checkpoint or the history it needs has been pruned. Returns
+    /// [`InitError::TargetMismatch`] if the recovered sync target differs from `expected`.
     fn init(
         context: E,
         config: Self::Config,
@@ -548,6 +550,7 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Construct the database set from its configuration.
     ///
     /// Every returned database must match its expected target when one is supplied.
+    /// Implementations panic if a database fails to initialize or does not match its target.
     fn init(
         context: E,
         config: Self::Config,

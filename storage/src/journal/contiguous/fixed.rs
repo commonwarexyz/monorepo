@@ -675,6 +675,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
         let first = first_in_blob(self.bounds.start, blob, self.cfg.items_per_blob.get())?;
         let offset = Inner::<E, A>::items_to_bytes(pos - first)?;
+
         // `bounds.end` is derived by walking `pending`, and every mutation keeps `pending`
         // contiguous over `bounds`, so a position inside `bounds` always has a blob.
         let writer = self
@@ -1405,6 +1406,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Unlike `destroy`, this keeps the journal alive so it can be reused. After clearing, the
     /// journal will behave as if initialized with `init_at_size(new_size)`.
     ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end. A live handle never
+    /// moves the end backward. Use bounded initialization for that. Returns [Error::SizeOverflow]
+    /// if `new_size` is `u64::MAX`.
+    ///
     /// # Crash Safety
     ///
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
@@ -1453,6 +1460,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end and
+    /// [Error::SizeOverflow] if it is `u64::MAX`.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
@@ -1531,6 +1543,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Discard all items and reposition the journal at `new_size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end and
+    /// [Error::SizeOverflow] if it is `u64::MAX`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
@@ -1581,7 +1598,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
-    /// Close storage-backed snapshots before reopening these partitions for bounded initialization.
+    /// Close storage-backed snapshots before reopening these partitions.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
@@ -2234,6 +2251,13 @@ mod tests {
                 result.is_ok(),
                 "unbounded recovery must trim a hole after capacity: {result:?}"
             );
+
+            // The two items within capacity survive intact.
+            let journal = result.unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            let item = u64::from_be_bytes([1; 8]);
+            assert_eq!(journal.read(0).await.unwrap(), item);
+            assert_eq!(journal.read(1).await.unwrap(), item);
         });
     }
 
@@ -2855,11 +2879,23 @@ mod tests {
             blob.resize(1).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
+            let (context, recordings) = RecordingContext::new(context);
             let journal = Journal::<_, u64>::init_at_most(context.child("storage"), cfg.clone(), 7)
                 .await
                 .unwrap();
             assert_eq!(journal.bounds(), 0..7);
             drop(journal);
+
+            // The discarded blob above the cap is never opened.
+            let partition = blob_partition(&cfg);
+            assert!(
+                !recordings.storage_events().iter().any(|event| matches!(
+                    event,
+                    StorageEvent::Opened { partition: opened, name, .. }
+                        if *opened == partition && name.as_slice() == 3u64.to_be_bytes()
+                )),
+                "discarded blob 3 was opened"
+            );
             let journal = Journal::<_, u64>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();

@@ -656,7 +656,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
     /// Other sections are unaffected.
     /// The value size is derived from the last entry after truncating the index.
     ///
-    /// Both truncations are made durable before returning (see [Oversized::init_at_most]).
+    /// Both truncations are made durable before returning (see the module docs on crash recovery).
     async fn truncate_pending_section(
         mut self,
         section: u64,

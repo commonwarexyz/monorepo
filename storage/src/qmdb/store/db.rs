@@ -638,6 +638,7 @@ mod test {
                     .finalize(Some(vec![10]));
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let first_size = db.size();
+                let first_floor = db.inactivity_floor_loc();
                 let batch = db
                     .new_batch()
                     .update(a, vec![3])
@@ -646,6 +647,7 @@ mod test {
                     .finalize(Some(vec![20]));
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let latest_size = db.size();
+                let latest_floor = db.inactivity_floor_loc();
                 _ = db.sync().await.unwrap();
                 let cap = match cap_case {
                     0 => first_size,
@@ -656,10 +658,12 @@ mod test {
                 assert!(first_size + 1 < latest_size);
                 let old = cap_case < 2;
                 let expected_size = if old { first_size } else { latest_size };
+                let expected_floor = if old { first_floor } else { latest_floor };
                 let db = TestStore::init(context.child("cap"), cfg.clone(), Some(cap))
                     .await
                     .unwrap();
                 assert_eq!(db.size(), expected_size);
+                assert_eq!(db.inactivity_floor_loc(), expected_floor);
                 assert_eq!(
                     db.get_metadata().await.unwrap(),
                     Some(vec![if old { 10 } else { 20 }])
@@ -675,6 +679,7 @@ mod test {
                     .await
                     .unwrap();
                 assert_eq!(db.size(), expected_size);
+                assert_eq!(db.inactivity_floor_loc(), expected_floor);
                 assert_eq!(
                     db.get(&a).await.unwrap(),
                     Some(vec![if old { 1 } else { 3 }])

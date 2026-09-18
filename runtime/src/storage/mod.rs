@@ -88,10 +88,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     #[derive(Default)]
     pub(crate) struct Pending {
         entries: Mutex<HashMap<(String, Vec<u8>), Entry>>,
-        /// Names this instance has created or flushed. Nothing flushes the filesystem at startup
-        /// here, so the first open of any other existing name owes a flush before trusting the
-        /// file. Removing a name drops it: a later open of that name creates the blob and owes
-        /// nothing.
+        /// Names whose first open through this instance has been accounted for: created here, or
+        /// an existing blob whose first-open flush was issued, with its outcome retained in
+        /// `entries`. Nothing flushes the filesystem at startup here, so the first open of any
+        /// other existing name owes a flush before trusting the file. Removing a name drops it: a
+        /// later open of that name creates the blob and owes nothing.
         #[cfg(not(target_os = "linux"))]
         flushed: Mutex<HashSet<(String, Vec<u8>)>>,
         #[cfg(test)]
@@ -180,11 +181,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Attach a fresh open to a name while the backend holds its namespace lock.
         ///
         /// Returns [Error::BlobAlreadyOpen] while a handle from an earlier open is alive. Returns
-        /// the name's retained failure until the name is removed. Otherwise returns the open's generation,
-        /// the receiver that fires once a still-settling predecessor has finished its operations,
-        /// and whether the name carries debt or outstanding work the open must observe through
-        /// [Self::debt] before trusting the file. Descriptor metadata must be observed after
-        /// attachment, or after awaiting the returned receiver.
+        /// the name's retained failure until the name is removed or recreated. Otherwise returns
+        /// the open's generation, the receiver that fires once a still-settling predecessor has
+        /// finished its operations, and whether the name carries debt or outstanding work the
+        /// open must observe through [Self::debt] before trusting the file. Descriptor metadata
+        /// must be observed after attachment, or after awaiting the returned receiver.
         pub(crate) fn attach(
             self: &Arc<Self>,
             partition: &str,

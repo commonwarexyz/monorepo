@@ -101,8 +101,8 @@ impl<E: Context> Checkpoint<E> {
         if self.watermark() != Some(watermark) {
             self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
         }
-        // Always sync, even if this call staged nothing: `lower_watermark` stages without syncing,
-        // so skipping the sync when our own entries are unchanged could drop that pending change.
+        // Always sync, even if this call staged nothing, so an in-flight `start_watermark_sync`
+        // is joined and its failure surfaces here.
         self.sync().await
     }
 

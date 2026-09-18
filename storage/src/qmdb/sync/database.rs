@@ -120,8 +120,9 @@ where
 {
     let hasher = crate::qmdb::hasher::<H>();
 
-    // A crash can persist a node-journal reset before its replacement metadata.
-    // Missing local pins then use a peer-authenticated boundary. Other errors still propagate.
+    // A crash can persist the replacement metadata (boundary and pins) before the node-journal
+    // reset that follows it. Missing local pins then use a peer-authenticated boundary. Other
+    // errors still propagate.
     let merkle = match full::Merkle::<F, _, _, S>::init(context, &hasher, config).await {
         Ok(merkle) => merkle,
         Err(crate::merkle::Error::MissingNode(_)) => return Ok(None),
@@ -212,8 +213,9 @@ mod tests {
             let merkle = merkle.sync().await.unwrap();
             drop(merkle);
 
-            // Model a crash after an incompatible reset durably cleared the node journal but
-            // before it replaced the prior target's pinned metadata.
+            // Plant metadata whose boundary and pins the node journal cannot serve. A crash in
+            // Merkle::init_sync between its metadata sync and the node-journal reset that follows
+            // leaves the same kind of disagreement, with the metadata ahead instead.
             let restart = Location::new(7);
             let journal_config = fixed::Config {
                 partition: config.journal_partition.clone(),

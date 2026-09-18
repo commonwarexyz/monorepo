@@ -1133,12 +1133,18 @@ pub trait BackingRecovery: Send + Sync + Sized {
     ) -> impl Future<Output = Result<<Self::Journal as Contiguous>::Item, JournalError>> + Send;
 
     /// Discard stored items and establish an empty journal at `size` during initialization.
+    /// Returns [JournalError::SizeOverflow] for `u64::MAX`.
     fn reset(self, size: u64) -> impl Future<Output = Result<Self, JournalError>> + Send;
 
     /// Durably retain at most `size` items and publish the live journal.
     fn finish(self, size: u64) -> impl Future<Output = Result<Self::Journal, JournalError>> + Send;
 
     /// Select the latest retained item satisfying `predicate` below an exclusive ceiling.
+    ///
+    /// Returns the size ending at the selected item (its position plus one), or `Ok(0)` when
+    /// nothing matches and history was never pruned. Returns [JournalError::ItemPruned] with
+    /// `ceiling` when it lies below the retained start, and with the retained start when pruned
+    /// history retains no match.
     fn last_matching<P>(
         &self,
         ceiling: u64,
@@ -2019,8 +2025,8 @@ mod tests {
             ops
         }
 
-        // A three-operation branch is flushed whole and a five-operation branch only in part,
-        // so recovery sees the new commit in the first case and only A's commit in the second.
+        // The crash may keep any flushed prefix of the branch. Recovery must land within
+        // `A..=A + len` and every retained position must hold the operation written there.
         for len in [3u64, 5] {
             let suffix = format!("equal-length-branch-{len}");
             let crash_suffix = suffix.clone();

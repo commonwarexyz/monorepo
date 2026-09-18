@@ -603,7 +603,6 @@ mod tests {
 
             first.abort().await;
             drop(marshal);
-            context.sleep(Duration::from_millis(1)).await;
 
             let MarshalFixture {
                 mailbox: marshal,
@@ -682,7 +681,6 @@ mod tests {
             }
             first.abort().await;
             drop(marshal);
-            context.sleep(Duration::from_millis(1)).await;
 
             let newer_block = TestBlock::new(8, 8);
             let newer_finalization = fixtures::finalization(&fixture, 8, Sha256::fill(8));
@@ -710,7 +708,6 @@ mod tests {
             assert!(marshal.get_block(Height::new(8)).await.is_some());
             second.abort().await;
             drop(marshal);
-            context.sleep(Duration::from_millis(1)).await;
 
             let MarshalFixture {
                 mailbox: marshal,
