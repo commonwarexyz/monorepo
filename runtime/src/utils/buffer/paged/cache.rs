@@ -594,7 +594,7 @@ mod tests {
     use crate::{
         BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufs, IoBufsMut, Runner as _,
         Spawner as _, Storage as _, Supervisor as _, WriteOptions, buffer::paged::CHECKSUM_SIZE,
-        deterministic, telemetry::metrics::Registry, utils::reschedule,
+        deterministic, mocks::MigratingReadBlob, telemetry::metrics::Registry,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::{select, test_traced};
@@ -607,7 +607,6 @@ mod tests {
             Arc,
             atomic::{AtomicUsize, Ordering},
         },
-        task::Poll,
         time::Duration,
     };
 
@@ -755,78 +754,6 @@ mod tests {
 
         async fn start_sync(&self) -> Handle<()> {
             Handle::ready(self.sync().await)
-        }
-    }
-
-    /// Wraps a real backend read and forces its outer future to yield after the first poll.
-    #[derive(Clone)]
-    struct MigratingReadBlob<B> {
-        /// Runtime-provided blob whose read future crosses the cache-waiter handoff.
-        inner: B,
-        /// Whether the first backend poll must have registered pending native I/O.
-        require_pending_first_poll: bool,
-        /// Number of physical reads issued beneath the cache.
-        reads: Arc<AtomicUsize>,
-    }
-
-    impl<B: Blob> Blob for MigratingReadBlob<B> {
-        async fn read_at(
-            &self,
-            offset: u64,
-            len: usize,
-            options: ReadOptions,
-        ) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
-                .await
-        }
-
-        async fn read_at_buf(
-            &self,
-            offset: u64,
-            len: usize,
-            bufs: impl Into<IoBufsMut> + Send,
-            options: ReadOptions,
-        ) -> Result<IoBufsMut, Error> {
-            self.reads.fetch_add(1, Ordering::Relaxed);
-            let mut read = Box::pin(self.inner.read_at_buf(offset, len, bufs, options));
-
-            // Capture exactly one real backend poll, then yield before exposing its result. The
-            // wrapper therefore remains unresolved for handoff even when a backend completes the
-            // read immediately, while native I/O must prove that its first poll registered work.
-            let first_poll = poll!(&mut read);
-            if self.require_pending_first_poll {
-                assert!(
-                    first_poll.is_pending(),
-                    "native blob read completed before registering pending I/O"
-                );
-            }
-            reschedule().await;
-
-            match first_poll {
-                Poll::Ready(result) => result,
-                Poll::Pending => read.await,
-            }
-        }
-
-        async fn write_at(
-            &self,
-            offset: u64,
-            bufs: impl Into<IoBufs> + Send,
-            options: WriteOptions,
-        ) -> Result<(), Error> {
-            self.inner.write_at(offset, bufs, options).await
-        }
-
-        async fn resize(&self, len: u64) -> Result<(), Error> {
-            self.inner.resize(len).await
-        }
-
-        async fn sync(&self) -> Result<(), Error> {
-            self.inner.sync().await
-        }
-
-        async fn start_sync(&self) -> Handle<()> {
-            self.inner.start_sync().await
         }
     }
 
@@ -1008,12 +935,7 @@ mod tests {
                 .unwrap();
 
             // Count reads beneath an empty cache so duplicate physical misses remain observable.
-            let reads = Arc::new(AtomicUsize::new(0));
-            let blob = MigratingReadBlob {
-                inner: blob,
-                require_pending_first_poll,
-                reads: reads.clone(),
-            };
+            let blob = MigratingReadBlob::new(blob, require_pending_first_poll);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
             let blob_id = cache_ref.next_id();
 
@@ -1084,7 +1006,7 @@ mod tests {
             // Both waiters must receive the validated logical page from one physical backend read.
             assert_eq!(first_buf, logical_page);
             assert_eq!(second_buf, logical_page);
-            assert_eq!(reads.load(Ordering::Relaxed), 1);
+            assert_eq!(blob.reads(), 1);
             context.remove(partition, None).await.unwrap();
         });
     }

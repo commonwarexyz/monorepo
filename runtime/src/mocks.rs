@@ -22,6 +22,14 @@ use std::{
     task::Poll,
 };
 
+cfg_if::cfg_if! {
+    if #[cfg(any(test, feature = "test-utils"))] {
+        use crate::{IoBufMut, utils::reschedule};
+        use futures::poll;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+    }
+}
+
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
 const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
@@ -668,6 +676,98 @@ impl<B: Blob> Blob for RecordingBlob<B> {
         options: WriteOptions,
     ) -> Result<(), Error> {
         self.recordings.write(options);
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
+/// Blob wrapper that yields after the first backend poll of each read, allowing a test to
+/// hand the unresolved read future to another task even when the backend completes immediately.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct MigratingReadBlob<B> {
+    /// Wrapped blob.
+    inner: B,
+    /// Whether each read must remain pending after its first backend poll.
+    require_pending_first_poll: bool,
+    /// Reads started across all clones.
+    reads: Arc<AtomicUsize>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<B> MigratingReadBlob<B> {
+    /// Wrap `inner`, optionally requiring the first backend poll of each read to return pending.
+    /// Set `require_pending_first_poll` when a test must exercise registered backend I/O.
+    pub fn new(inner: B, require_pending_first_poll: bool) -> Self {
+        Self {
+            inner,
+            require_pending_first_poll,
+            reads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Number of reads started across all clones.
+    pub fn reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<B: Blob> Blob for MigratingReadBlob<B> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
+            .await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let mut read = Box::pin(self.inner.read_at_buf(offset, len, bufs, options));
+
+        // Capture exactly one backend poll, then yield before exposing its result. Requiring a
+        // pending result lets a test establish that a task handoff carries unresolved backend I/O.
+        let first_poll = poll!(&mut read);
+        if self.require_pending_first_poll {
+            assert!(
+                first_poll.is_pending(),
+                "blob read completed before registering pending I/O"
+            );
+        }
+        reschedule().await;
+
+        match first_poll {
+            Poll::Ready(result) => result,
+            Poll::Pending => read.await,
+        }
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
         self.inner.write_at(offset, bufs, options).await
     }
 

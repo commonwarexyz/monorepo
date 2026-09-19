@@ -341,15 +341,22 @@ impl Waiters {
     pub fn close(&mut self, deferred: &mut Deferred) -> Vec<WaiterId> {
         let mut cancel = Vec::new();
         for index in 0..self.entries.slots() {
-            if let Some(id) = self.entries.id_at(index).map(WaiterId) {
-                if let Some(waiter) = self.get_mut(id)
-                    && let Observer::Local(waker) = &mut waiter.observer
-                {
-                    deferred.wakes.extend(waker.take());
-                }
-                if self.orphan(id, deferred) {
-                    cancel.push(id);
-                }
+            let Some(id) = self.entries.id_at(index).map(WaiterId) else {
+                continue;
+            };
+
+            // Take local wakers before orphaning so shared futures can notify surviving
+            // observers. Callbacks run after the worker borrow is released.
+            if let Some(waiter) = self.get_mut(id)
+                && let Observer::Local(waker) = &mut waiter.observer
+            {
+                deferred.wakes.extend(waker.take());
+            }
+
+            // Orphaning reports closure to forwarded observers and releases retained
+            // results. Writes and syncs keep running without requesting cancellation.
+            if self.orphan(id, deferred) {
+                cancel.push(id);
             }
         }
         cancel
