@@ -1,49 +1,28 @@
 //! Completion handles for I/O registered on one worker.
 //!
 //! Adapters register requests inside their async bodies, then await an
-//! [`Operation`] containing only its waiter ID and weak worker identity.
-//! The driver retains both pending requests and completed results in one slab.
+//! [`Operation`] containing its waiter ID and weak worker identity. The driver
+//! retains both pending requests and completed results in one slab. A poll on
+//! another thread forwards observation through a completion channel while the
+//! request stays on its original worker.
 //!
-//! A registered operation must be polled on its owning worker, but may be
-//! dropped on any thread. Dropping it releases its observer. The driver decides
-//! whether to cancel the request or finish retained work such as writes and syncs.
+//! An operation may be polled or dropped on any thread after registration.
+//! Dropping it releases its observer. The driver decides whether to cancel the
+//! request or finish retained work such as writes and syncs.
 
 use super::{
-    mailbox::{Mailbox, Message},
+    mailbox::Message,
+    registration::{Key, Observation, Registration},
     request::{Request, RequestOutput, SyncRequest},
     runtime::Local,
-    waiter::{Observation, Observer, WaiterId},
+    waiter::{Observer, WaiterId},
 };
 use crate::Error;
 use commonware_utils::channel::oneshot;
-use std::{
-    future::Future,
-    mem,
-    pin::Pin,
-    sync::{Arc, Weak},
-    task::{Context, Poll},
-};
+use std::{sync::Arc, task::Waker};
 
-/// Registration identity retained until observation ends.
-enum State {
-    /// Registered request whose result has not been consumed.
-    Waiting {
-        /// Weak identity of the owning worker, checked before every poll.
-        mailbox: Weak<Mailbox>,
-        /// Slot holding the pending request or its retained result.
-        waiter_id: WaiterId,
-    },
-    /// Registration was rejected because the worker was closing.
-    Closed,
-    /// The result was taken or the registration was released.
-    Done,
-}
-
-/// Handle to an ordinary request and its result in the worker's waiter slab.
-pub(crate) struct Operation {
-    /// Registration identity, or the terminal state once observation ends.
-    state: State,
-}
+/// Handle to an I/O request registered on a worker.
+pub(crate) type Operation = Registration<WaiterId>;
 
 impl Operation {
     /// Register on the current worker and return a handle to its result.
@@ -54,17 +33,12 @@ impl Operation {
     pub fn register(request: Request) -> Self {
         let owner = Local::current().expect("io_uring I/O requires a current worker");
         let mut local = owner.borrow_mut();
-
         if local.closing {
             // Request owners may run destructors that reenter the worker.
             drop(local);
             drop(request);
-
-            return Self {
-                state: State::Closed,
-            };
+            return Self::closed();
         }
-
         let mailbox = Arc::downgrade(&local.mailbox);
 
         // The driver takes ownership even when the SQ is full. Polling installs
@@ -75,94 +49,31 @@ impl Operation {
             now,
             ..
         } = &mut *local;
-        let waiter_id =
-            driver
-                .as_mut()
-                .unwrap()
-                .admit(request, Observer::Ordinary(None), *now, deferred);
-
-        Self {
-            state: State::Waiting { mailbox, waiter_id },
-        }
-    }
-
-    /// Release this observer once, routing cleanup to the owning worker.
-    ///
-    /// The caller must release any worker borrow before calling this method.
-    fn release(&mut self) {
-        if let State::Waiting { mailbox, waiter_id } = mem::replace(&mut self.state, State::Done) {
-            // Orphaning also releases an already completed result. The driver
-            // decides whether unfinished work must continue.
-            Local::cancel(&mailbox, Message::Orphan(waiter_id));
-        }
-    }
-}
-
-impl Future for Operation {
-    type Output = Result<RequestOutput, Error>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-
-        // Validate affinity before changing ownership, so a rejected foreign
-        // poll retains the identity needed by Drop.
-        let (mailbox, waiter_id) = match &this.state {
-            State::Waiting { mailbox, waiter_id } => (mailbox, *waiter_id),
-            State::Closed => {
-                this.state = State::Done;
-                return Poll::Ready(Err(Error::Closed));
-            }
-            State::Done => panic!("io_uring operation polled after completion"),
-        };
-        let owner = match Local::bound(mailbox) {
-            Ok(owner) => owner,
-            Err(error) => {
-                this.release();
-                return Poll::Ready(Err(error));
-            }
-        };
-
-        let mut local = owner.borrow_mut();
-        if local.closing {
-            drop(local);
-            this.release();
-            return Poll::Ready(Err(Error::Closed));
-        }
-
-        // Inspect before cloning: ready results and matching wakers require
-        // no callback.
-        match local
-            .driver
+        let id = driver
             .as_mut()
             .unwrap()
-            .observe(waiter_id, cx.waker())
-        {
-            Observation::Ready(output) => {
-                this.state = State::Done;
-                return Poll::Ready(Ok(output));
-            }
-            Observation::Pending => return Poll::Pending,
-            Observation::Refresh => {}
-        }
-
-        // Worker service cannot run during this poll. Clone outside its borrow,
-        // retaining the cancellation identity if the callback panics.
-        drop(local);
-        let waker = cx.waker().clone();
-        let mut local = owner.borrow_mut();
-        let Local {
-            driver, deferred, ..
-        } = &mut *local;
-        deferred
-            .drops
-            .extend(driver.as_mut().unwrap().set_waker(waiter_id, waker));
-        Poll::Pending
+            .admit(request, Observer::Local(None), *now, deferred);
+        Self::new(mailbox, id)
     }
 }
 
-impl Drop for Operation {
-    fn drop(&mut self) {
-        self.release();
+impl Key for WaiterId {
+    type Output = RequestOutput;
+
+    fn observe(self, local: &mut Local, waker: &Waker) -> Observation<RequestOutput> {
+        local.driver.as_mut().unwrap().observe(self, waker)
+    }
+
+    fn refresh(self, local: &mut Local, waker: Waker) -> Option<Waker> {
+        local.driver.as_mut().unwrap().set_waker(self, waker)
+    }
+
+    fn forward(self, sender: oneshot::Sender<Result<RequestOutput, Error>>) -> Message {
+        Message::Forward(self, sender)
+    }
+
+    fn cancel(self) -> Message {
+        Message::Orphan(self)
     }
 }
 
@@ -202,7 +113,8 @@ pub fn start_sync(request: SyncRequest) -> oneshot::Receiver<Result<(), Error>> 
 pub mod tests {
     use super::*;
     use crate::{
-        Blob as _, Clock as _, IoBufMut, IoBufs, Runner as _, Storage as _,
+        Blob as _, Clock as _, IoBufMut, IoBufs, ReadOptions, Runner as _, Storage as _,
+        WriteOptions,
         iouring::{
             Config, RingConfig, Runner,
             request::{RecvRequest, SendRequest},
@@ -212,12 +124,14 @@ pub mod tests {
     };
     use futures::{FutureExt as _, future::pending, poll};
     use std::{
+        future::Future,
         io::Write as _,
+        mem,
         os::{fd::OwnedFd, unix::net::UnixStream},
         panic::{AssertUnwindSafe, catch_unwind},
         pin::pin,
         sync::atomic::{AtomicUsize, Ordering},
-        task::{RawWaker, RawWakerVTable, Waker},
+        task::{Context, Poll, RawWaker, RawWakerVTable},
         thread,
         time::{Duration, Instant},
     };
@@ -231,7 +145,7 @@ pub mod tests {
         /// Number of cloned wakers, including clones that panic.
         clones: AtomicUsize,
         /// Number of consuming and borrowed wakes.
-        wakes: AtomicUsize,
+        pub wakes: AtomicUsize,
         /// Number of waker destructors invoked.
         pub drops: AtomicUsize,
         /// Callback that should panic once, or zero when no panic is armed.
@@ -328,6 +242,23 @@ pub mod tests {
         let (local, peer) = UnixStream::pair().unwrap();
         local.set_nonblocking(true).unwrap();
         (Arc::new(local.into()), peer)
+    }
+
+    /// Poll elsewhere while the owning worker cannot service the handoff.
+    pub fn poll_on_foreign_thread<F: Future + Send + Unpin + 'static>(
+        mut future: F,
+        waker: Waker,
+    ) -> F {
+        thread::spawn(move || {
+            assert!(
+                future
+                    .poll_unpin(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            future
+        })
+        .join()
+        .unwrap()
     }
 
     /// Register a one-byte send on the current worker.
@@ -448,7 +379,7 @@ pub mod tests {
             ));
             assert_eq!(callbacks.clones.load(Ordering::Relaxed), 0);
 
-            // New ordinary and detached requests must also reject closure.
+            // New operations and detached syncs must also reject closure.
             let mut rejected = recv(fd, None);
             assert!(matches!(
                 rejected.poll_unpin(&mut cx),
@@ -602,10 +533,7 @@ pub mod tests {
                 assert!(poll!(&mut operation).is_pending());
                 reschedule().await;
 
-                let registration = match &operation.state {
-                    State::Waiting { waiter_id, .. } => *waiter_id,
-                    _ => panic!("operation did not register"),
-                };
+                let registration = operation.key();
                 callbacks
                     .panic_callback
                     .store(Reentrant::CLONE, Ordering::Relaxed);
@@ -615,7 +543,7 @@ pub mod tests {
                 .expect_err("observer clone must panic");
                 assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
                 assert!(
-                    matches!(operation.state, State::Waiting { waiter_id, .. } if waiter_id == registration),
+                    operation.key() == registration,
                     "clone panic lost cancellation identity"
                 );
 
@@ -750,6 +678,193 @@ pub mod tests {
     }
 
     #[test]
+    fn test_operation_can_move_between_threads() {
+        for (in_flight, completed) in [(false, false), (true, false), (true, true)] {
+            for return_to_owner in [false, true] {
+                runner().start(|_| async move {
+                    let (fd, mut peer) = socket();
+                    let mut operation = recv(fd, None);
+                    assert!(poll!(&mut operation).is_pending());
+                    if in_flight {
+                        reschedule().await;
+                    }
+                    if completed {
+                        peer.write_all(b"x").unwrap();
+                        drained().await;
+                    }
+
+                    let operation = poll_on_foreign_thread(operation, Waker::noop().clone());
+
+                    if !completed {
+                        peer.write_all(b"x").unwrap();
+                    }
+                    let output = if return_to_owner {
+                        operation.await.unwrap()
+                    } else {
+                        let (sender, receiver) = oneshot::channel();
+                        let thread = thread::spawn(move || {
+                            let output = futures::executor::block_on(operation);
+                            assert!(sender.send(output).is_ok());
+                        });
+                        let output = receiver.await.unwrap().unwrap();
+                        thread.join().unwrap();
+                        output
+                    };
+                    let RequestOutput::Recv(Ok((buffer, len))) = output else {
+                        panic!("receive failed after moving between threads");
+                    };
+                    assert_eq!(len, 1);
+                    assert_eq!(buffer.as_ref(), b"x");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn test_local_drop_overtakes_forwarding() {
+        for in_flight in [false, true] {
+            runner().start(|_| async move {
+                let (fd, _peer) = socket();
+                let mut operation = recv(fd.clone(), None);
+                assert!(poll!(&mut operation).is_pending());
+                if in_flight {
+                    reschedule().await;
+                }
+                let old = operation.key();
+                let operation = poll_on_foreign_thread(operation, Waker::noop().clone());
+
+                // Local cancellation runs before the queued forwarding message.
+                // A new request can reuse a queued operation's released slot.
+                drop(operation);
+                let replacement = send(fd);
+                if !in_flight {
+                    let current = replacement.key();
+                    assert_eq!(old.0.index, current.0.index);
+                    assert_ne!(old.0.generation, current.0.generation);
+                }
+                assert!(matches!(replacement.await, Ok(RequestOutput::Send(Ok(())))));
+                drained().await;
+            });
+        }
+    }
+
+    #[test]
+    fn test_forwarded_observer_callbacks_and_shutdown() {
+        for (promoted, completed) in [(false, false), (true, false), (true, true)] {
+            let callbacks = Arc::new(Reentrant::default());
+            let (operation,) = runner().start(|_| async {
+                let (fd, mut peer) = socket();
+                let mut operation = recv(fd, None);
+                let waker = callbacks.waker();
+                assert!(
+                    operation
+                        .poll_unpin(&mut Context::from_waker(&waker))
+                        .is_pending()
+                );
+                let operation = poll_on_foreign_thread(operation, callbacks.waker());
+                if promoted {
+                    reschedule().await;
+                    assert!(callbacks.drops.load(Ordering::Relaxed) >= 2);
+                }
+                if completed {
+                    peer.write_all(b"x").unwrap();
+                    drained().await;
+                }
+                (operation,)
+            });
+
+            // Once the owner processes the handoff, completion or closure wakes the receiver.
+            // Before that, the queued sender can independently notify it when dropped.
+            if promoted {
+                assert!(callbacks.wakes.load(Ordering::Relaxed) > 0);
+            }
+            let output = futures::executor::block_on(operation);
+            if completed {
+                let Ok(RequestOutput::Recv(Ok((buffer, len)))) = output else {
+                    panic!("forwarded completion lost during shutdown");
+                };
+                assert_eq!(len, 1);
+                assert_eq!(buffer.as_ref(), b"x");
+            } else {
+                assert!(matches!(output, Err(Error::Closed)));
+            }
+            assert_eq!(Arc::strong_count(&callbacks), 1);
+        }
+    }
+
+    #[test]
+    fn test_forwarded_receive_cancelled_after_promotion() {
+        runner().start(|_| async {
+            let (fd, _peer) = socket();
+            let mut operation = recv(fd, None);
+            assert!(poll!(&mut operation).is_pending());
+            let operation = poll_on_foreign_thread(operation, Waker::noop().clone());
+            reschedule().await;
+            thread::spawn(move || drop(operation)).join().unwrap();
+            drained().await;
+        });
+    }
+
+    #[test]
+    fn test_forwarded_write_finishes_after_drop() {
+        for promoted in [false, true] {
+            runner().start(|context| async move {
+                let (blob, _) = context.open("forwarded_write", b"file").await.unwrap();
+                let (fd, _peer) = socket();
+                let mut blocker = recv(fd, None);
+                assert!(poll!(&mut blocker).is_pending());
+                reschedule().await;
+
+                let writer = blob.clone();
+                let mut write = async move {
+                    writer
+                        .write_at(0, b"retained", WriteOptions::default())
+                        .await
+                }
+                .boxed();
+                assert!(poll!(&mut write).is_pending());
+                let write = poll_on_foreign_thread(write, Waker::noop().clone());
+                if promoted {
+                    reschedule().await;
+                }
+                drop(write);
+                drop(blocker);
+                drained().await;
+
+                let bytes = blob.read_at(0, 8, ReadOptions::default()).await.unwrap();
+                assert_eq!(bytes.coalesce(), b"retained");
+                context.remove("forwarded_write", None).await.unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn test_forwarded_observer_clone_panic_keeps_cancellation() {
+        runner().start(|_| async {
+            let (fd, _peer) = socket();
+            let mut operation = recv(fd, None);
+            assert!(poll!(&mut operation).is_pending());
+            let callbacks = Arc::new(Reentrant::default());
+            callbacks
+                .panic_callback
+                .store(Reentrant::CLONE, Ordering::Relaxed);
+            let operation = thread::spawn(move || {
+                let waker = callbacks.waker();
+                let panic = catch_unwind(AssertUnwindSafe(|| {
+                    operation.poll_unpin(&mut Context::from_waker(&waker))
+                }))
+                .expect_err("receiver waker clone must panic");
+                assert_eq!(extract_panic_message(&*panic), "waker callback panic 1");
+                operation
+            })
+            .join()
+            .unwrap();
+            drop(operation);
+            drained().await;
+        });
+    }
+
+    #[test]
     fn test_foreign_drop_releases_registration() {
         for (in_flight, poll_first) in [(false, false), (false, true), (true, false), (true, true)]
         {
@@ -766,13 +881,14 @@ pub mod tests {
 
                 thread::spawn(move || {
                     if poll_first {
-                        let result = catch_unwind(AssertUnwindSafe(|| {
-                            operation.poll_unpin(&mut Context::from_waker(Waker::noop()))
-                        }));
-                        assert!(result.is_err());
+                        assert!(
+                            operation
+                                .poll_unpin(&mut Context::from_waker(Waker::noop()))
+                                .is_pending()
+                        );
                     }
-                    // Both ordinary destruction and destruction after a rejected
-                    // poll must publish the original registration identity.
+                    // Destruction must release the original registration whether
+                    // or not its observer has moved to another thread.
                     drop(operation);
                 })
                 .join()

@@ -9,12 +9,14 @@
 //! ever destroyed under the lock.
 
 use super::{
+    request::RequestOutput,
     sleep::TimerId,
     task::{BoxedTask, Target},
     waiter::WaiterId,
     waker::Waker,
 };
-use commonware_utils::sync::Mutex;
+use crate::Error;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::mem;
 
 /// Owned work delivered to the worker without borrowing its local state.
@@ -25,6 +27,10 @@ pub enum Message {
     Spawn(BoxedTask),
     /// Stop observing an admitted operation or retained result.
     Orphan(WaiterId),
+    /// Deliver an I/O operation's result through a thread-safe channel.
+    Forward(WaiterId, oneshot::Sender<Result<RequestOutput, Error>>),
+    /// Deliver timer completion through a thread-safe channel.
+    ForwardTimer(TimerId, oneshot::Sender<Result<(), Error>>),
     /// Cancel a timer whose sleep future was dropped.
     CancelTimer(TimerId),
 }

@@ -3,10 +3,12 @@
 //!
 //! ## Architecture
 //!
-//! Reads, writes, and syncs bind to the current worker on their first poll.
-//! Empty reads and writes return without touching the ring. Storage and blob
-//! handles retain no ring identity, so resources can move between workers
-//! between operations. Metadata and resize remain synchronous.
+//! Reads, writes, and syncs register requests with the worker that first polls them.
+//! Requests stay on that worker, with completion forwarded when their futures are
+//! polled elsewhere. Storage and blob handles retain no ring identity and can move
+//! between workers. Moving a future does not keep its original worker alive.
+//! Empty reads and writes return without touching the ring. Metadata and resize
+//! remain synchronous.
 //!
 //! A shared directory hold follows each blob's file into registered requests.
 //! Dropping a caller never releases that hold while the kernel can still access
@@ -62,7 +64,7 @@ pub struct Config {
     pub blob_layouts: RangeInclusive<Layout>,
 }
 
-/// Filesystem storage whose data operations execute on the current worker.
+/// Filesystem storage whose requests execute on the worker that registers them.
 #[derive(Clone)]
 pub struct Storage {
     /// Serialize metadata operations across cloned contexts and workers.
