@@ -197,7 +197,7 @@ contract LibSimplexBLS12381MultisigTest is Test {
         args[7] = subject.kind == Simplex.Kind.Notarization
             ? "notarize"
             : subject.kind == Simplex.Kind.Nullification ? "nullify" : "finalize";
-        args[8] = "--namespace-hex";
+        args[8] = "--namespace";
         args[9] = vm.toString(namespace);
         args[10] = "--epoch";
         args[11] = vm.toString(uint256(subject.epoch));
@@ -207,7 +207,7 @@ contract LibSimplexBLS12381MultisigTest is Test {
         if (subject.kind != Simplex.Kind.Nullification) {
             args[offset++] = "--parent";
             args[offset++] = vm.toString(uint256(subject.parent));
-            args[offset++] = "--payload-hex";
+            args[offset++] = "--payload";
             args[offset++] = vm.toString(subject.payload);
         }
         args[offset++] = "--participants";

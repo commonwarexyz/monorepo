@@ -42,15 +42,18 @@ abstract contract LibQMDBLifecycleTest is QMDBTest {
             : LibQMDBCurrentMMR.verify(root, operation, proof, 32, _hasher());
     }
 
-    /// @dev Expose fixed-width exclusion with the fixture's 32-byte bitmap chunks.
-    function verifyExclusion(bytes32 root, bytes32 key, bytes memory operation, LibQMDBCurrent.Proof calldata proof)
-        external
-        view
-        returns (bool)
-    {
+    /// @dev Expose fixed-width exclusion with the fixture's 32-byte fields and bitmap chunks.
+    function verifyExclusion(
+        bytes32 root,
+        bytes memory key,
+        bytes memory operation,
+        LibQMDBCurrent.Proof calldata proof
+    ) external view returns (bool) {
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(LibQMDBCurrent.OperationEncoding.Fixed, 32, 32);
         return _family() == LibMerkle.Family.MMB
-            ? LibQMDBCurrentMMB.verifyExclusion(root, key, operation, proof, 32, _hasher())
-            : LibQMDBCurrentMMR.verifyExclusion(root, key, operation, proof, 32, _hasher());
+            ? LibQMDBCurrentMMB.verifyExclusion(root, key, operation, proof, encoding, 32, _hasher())
+            : LibQMDBCurrentMMR.verifyExclusion(root, key, operation, proof, encoding, 32, _hasher());
     }
 
     /// @dev Map the Rust ABI tuple into the verifier's calldata proof structure.
@@ -93,19 +96,23 @@ abstract contract LibQMDBLifecycleTest is QMDBTest {
                 "recovered membership"
             );
             assertTrue(
-                this.verifyExclusion(c.excluded.root, c.excludedKey, c.excluded.operation, _proof(c.excluded)),
+                this.verifyExclusion(
+                    c.excluded.root, abi.encodePacked(c.excludedKey), c.excluded.operation, _proof(c.excluded)
+                ),
                 "deleted key exclusion"
             );
             assertTrue(
-                this.verifyExclusion(c.empty.root, c.emptyKey, c.empty.operation, _proof(c.empty)),
+                this.verifyExclusion(c.empty.root, abi.encodePacked(c.emptyKey), c.empty.operation, _proof(c.empty)),
                 "empty database exclusion"
             );
             assertTrue(
-                this.verifyExclusion(c.empty.root, c.excludedKey, c.empty.operation, _proof(c.empty)),
+                this.verifyExclusion(c.empty.root, abi.encodePacked(c.excludedKey), c.empty.operation, _proof(c.empty)),
                 "empty database excludes every key"
             );
             assertFalse(
-                this.verifyExclusion(c.excluded.root, c.emptyKey, c.excluded.operation, _proof(c.excluded)),
+                this.verifyExclusion(
+                    c.excluded.root, abi.encodePacked(c.emptyKey), c.excluded.operation, _proof(c.excluded)
+                ),
                 "live key cannot be excluded"
             );
             c.before.root = c.afterOverwrite.root;

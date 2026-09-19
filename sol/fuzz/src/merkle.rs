@@ -66,8 +66,9 @@ pub(crate) enum Command {
     Check {
         #[arg(long, value_enum)]
         family: TreeKind,
+        /// Hex-encoded ABI input.
         #[arg(long)]
-        abi_hex: String,
+        abi: String,
         #[command(flatten)]
         policy: Policy,
     },
@@ -92,8 +93,9 @@ pub(crate) enum Command {
     CheckMulti {
         #[arg(long, value_enum)]
         family: TreeKind,
+        /// Hex-encoded ABI input.
         #[arg(long)]
-        abi_hex: String,
+        abi: String,
         #[command(flatten)]
         policy: Policy,
     },
@@ -420,10 +422,10 @@ impl Command {
         let (family, range, mode) = match self {
             Self::Check {
                 family,
-                abi_hex,
+                abi,
                 policy,
             } => {
-                let encoded = const_hex::decode(abi_hex.strip_prefix("0x").unwrap_or(&abi_hex))
+                let encoded = const_hex::decode(abi.strip_prefix("0x").unwrap_or(&abi))
                     .map_err(|error| format!("invalid ABI hex: {error}"))?;
                 let accepted = match family {
                     TreeKind::Mmr => check::<mmr::Family, H>(&encoded, policy),
@@ -433,10 +435,10 @@ impl Command {
             }
             Self::CheckMulti {
                 family,
-                abi_hex,
+                abi,
                 policy,
             } => {
-                let encoded = const_hex::decode(abi_hex.strip_prefix("0x").unwrap_or(&abi_hex))
+                let encoded = const_hex::decode(abi.strip_prefix("0x").unwrap_or(&abi))
                     .map_err(|error| format!("invalid ABI hex: {error}"))?;
                 let accepted = match family {
                     TreeKind::Mmr => multi::check::<mmr::Family, H>(&encoded, policy),
@@ -543,7 +545,7 @@ mod tests {
                         "check",
                         "--family",
                         family,
-                        "--abi-hex",
+                        "--abi",
                         &hex,
                         "--bagging",
                         "forward",
@@ -601,7 +603,7 @@ mod tests {
                 "check",
                 "--family",
                 "mmr",
-                "--abi-hex",
+                "--abi",
                 "00",
                 "--bagging",
                 "forward",
@@ -642,7 +644,7 @@ mod tests {
                 "check-multi",
                 "--family",
                 "mmb",
-                "--abi-hex",
+                "--abi",
                 "00",
                 "--bagging",
                 "forward",
@@ -920,7 +922,7 @@ mod tests {
                             "check",
                             "--family",
                             family,
-                            "--abi-hex",
+                            "--abi",
                             &hex,
                             "--bagging",
                             "forward",
@@ -993,8 +995,8 @@ mod tests {
                 "--seed",
                 "42",
             ],
-            vec!["check", "--family", "mmr", "--abi-hex", "00"],
-            vec!["check-multi", "--family", "mmb", "--abi-hex", "00"],
+            vec!["check", "--family", "mmr", "--abi", "00"],
+            vec!["check-multi", "--family", "mmb", "--abi", "00"],
         ] {
             for bagging in ["forward", "backward"] {
                 for inactive in ["0", "1"] {
@@ -1055,7 +1057,7 @@ mod tests {
             "0",
         ];
         let check = [
-            "--abi-hex",
+            "--abi",
             "00",
             "--bagging",
             "forward",

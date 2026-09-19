@@ -634,7 +634,7 @@ mod tests {
                             "check-multi",
                             "--family",
                             family,
-                            "--abi-hex",
+                            "--abi",
                             &hex,
                             "--bagging",
                             "backward",

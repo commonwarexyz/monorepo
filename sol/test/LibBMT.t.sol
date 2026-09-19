@@ -497,7 +497,7 @@ abstract contract LibBMTTest is HashTest {
         args[2] = "check";
         args[3] = "--mode";
         args[4] = mode == ProofKind.Single ? "single" : mode == ProofKind.Range ? "range" : "multi";
-        args[5] = "--abi-hex";
+        args[5] = "--abi";
         args[6] = vm.toString(abi.encode(c.root, c.leaves, c.start, c.indices, c.elements, c.proof));
         result = verifyCase(c, mode);
         assertEq(result, abi.decode(_ffi(args), (bool)), "Rust disagreement");

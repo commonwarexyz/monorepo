@@ -48,9 +48,17 @@ library LibQMDBCurrent {
         bytes32 partialDigest;
     }
 
-    /// @dev Field byte sizes with `VARIABLE_SIZE` selecting length-prefixed byte vectors.
-    /// Lengths use Commonware's canonical unsigned 32-bit varint. Keys use raw byte lexicographic ordering.
+    /// @dev Operation framing is independent of whether individual fields have fixed widths.
+    enum OperationEncoding {
+        Fixed,
+        Variable
+    }
+
+    /// @dev Fixed operations use 32-byte keys and fixed-size values. Variable operations accept
+    /// fixed-width fields or `VARIABLE_SIZE` byte vectors with canonical unsigned 32-bit varint lengths.
+    /// Keys use raw byte lexicographic ordering. All fields describe the authenticated database schema.
     struct ExclusionEncoding {
+        OperationEncoding operation;
         uint256 keySize;
         uint256 valueSize;
     }
@@ -58,45 +66,20 @@ library LibQMDBCurrent {
     /// @dev Select a length-prefixed byte vector in `ExclusionEncoding`.
     uint256 internal constant VARIABLE_SIZE = type(uint256).max;
 
-    /// @notice Verify key exclusion in an ordered current QMDB with fixed operation encoding.
-    /// @dev The authenticated database uses 32-byte keys and fixed values of size `V`.
-    /// Updates encode tag, key, value, and next key in `65 + V` bytes. Commits encode tag,
-    /// metadata flag, `V` metadata bytes, big-endian `uint64` floor, and 55 zero bytes.
+    /// @notice Verify ordered key exclusion in a current QMDB.
+    /// @dev Fixed commits reserve metadata bytes, encode the floor as a big-endian uint64, and pad with zeros.
+    /// Variable commits omit absent metadata and encode the floor as a canonical unsigned 64-bit varint.
     /// Exclusion framing is checked before the operation and its active bit are authenticated.
-    /// @param root Authenticated root of a database with this fixed ordered schema.
-    /// @param key Key whose absence is being proven.
+    /// @param root Authenticated root of an ordered current QMDB with the specified schema.
+    /// @param key Raw key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Single-operation proof with an activity chunk.
+    /// @param proof Active operation membership proof.
+    /// @param encoding Trusted operation framing and field sizes bound to `root`.
     /// @param family Append family of the authenticated database.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
     function verifyExclusion(
-        bytes32 root,
-        bytes32 key,
-        bytes memory operation,
-        Proof calldata proof,
-        LibMerkle.Family family,
-        uint256 chunkBytes,
-        address hasher
-    ) internal view returns (bool) {
-        return _excludes(key, operation, proof.location) && verify(root, operation, proof, family, chunkBytes, hasher);
-    }
-
-    /// @notice Verify ordered key exclusion in a current QMDB with variable operation encoding.
-    /// @dev Keys use raw byte lexicographic ordering. The trusted schema selects fixed-width
-    /// fields or byte vectors with canonical unsigned 32-bit varint lengths.
-    /// Exclusion framing is checked before the operation and its active bit are authenticated.
-    /// @param root Authenticated root of an ordered current QMDB using variable operation encoding.
-    /// @param key Raw key whose absence is being proven.
-    /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Active operation membership proof.
-    /// @param encoding Trusted key and value encoding configuration bound to `root`.
-    /// @param family Append family of the authenticated database.
-    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
-    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
-    /// @return True when the active operation proves that `key` is absent under `root`.
-    function verifyExclusionVariable(
         bytes32 root,
         bytes memory key,
         bytes memory operation,
@@ -106,39 +89,19 @@ library LibQMDBCurrent {
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return _excludesVariable(key, operation, proof.location, encoding)
-            && verify(root, operation, proof, family, chunkBytes, hasher);
-    }
-
-    /// @dev An active update excludes the open cyclic interval between its keys, including
-    /// every other key when both endpoints match. An empty database's commit floor is its location.
-    function _excludes(bytes32 key, bytes memory operation, uint256 location) private pure returns (bool) {
-        uint256 length = operation.length;
-        if (length < 65) return false;
-        if (operation[0] == 0xd2) {
-            bytes32 start;
-            bytes32 end;
-            assembly ("memory-safe") {
-                start := mload(add(operation, 33))
-                end := mload(add(operation, length))
-            }
-            return start < end ? key > start && key < end : key > start || key < end;
+        bool excluded;
+        if (encoding.operation == OperationEncoding.Fixed) {
+            // The key length check makes the fixed parser's bytes32 conversion exact.
+            if (
+                encoding.keySize != 32 || key.length != 32 || operation.length < 65
+                    || encoding.valueSize != operation.length - 65
+            ) return false;
+            // forge-lint: disable-next-line(unsafe-typecast)
+            excluded = _excludesFixed(bytes32(key), operation, proof.location);
+        } else {
+            excluded = _excludesVariable(key, operation, proof.location, encoding);
         }
-        if (operation[0] != 0xd3 || uint8(operation[1]) > 1) return false;
-        uint256 floor;
-        uint256 padding;
-        assembly ("memory-safe") {
-            let data := add(operation, 32)
-            floor := shr(192, mload(add(data, sub(length, 63))))
-            padding := or(mload(add(data, sub(length, 55))), mload(add(data, sub(length, 32))))
-        }
-        if (floor != location || padding != 0) return false;
-        if (operation[1] == 0) {
-            for (uint256 i = 2; i < length - 63; ++i) {
-                if (operation[i] != 0) return false;
-            }
-        }
-        return true;
+        return excluded && verify(root, operation, proof, family, chunkBytes, hasher);
     }
 
     /// @dev Authenticate operation bytes and every touched activity chunk. Inactive operations are valid.
@@ -320,6 +283,37 @@ library LibQMDBCurrent {
             }
         }
         return LibMerkle.hash(input, hasher);
+    }
+
+    /// @dev An active update excludes the open cyclic interval between its keys, including
+    /// every other key when both endpoints match. An empty database's commit floor is its location.
+    /// The caller validates the fixed schema and exact operation length before parsing.
+    function _excludesFixed(bytes32 key, bytes memory operation, uint256 location) private pure returns (bool) {
+        uint256 length = operation.length;
+        if (operation[0] == 0xd2) {
+            bytes32 start;
+            bytes32 end;
+            assembly ("memory-safe") {
+                start := mload(add(operation, 33))
+                end := mload(add(operation, length))
+            }
+            return start < end ? key > start && key < end : key > start || key < end;
+        }
+        if (operation[0] != 0xd3 || uint8(operation[1]) > 1) return false;
+        uint256 floor;
+        uint256 padding;
+        assembly ("memory-safe") {
+            let data := add(operation, 32)
+            floor := shr(192, mload(add(data, sub(length, 63))))
+            padding := or(mload(add(data, sub(length, 55))), mload(add(data, sub(length, 32))))
+        }
+        if (floor != location || padding != 0) return false;
+        if (operation[1] == 0) {
+            for (uint256 i = 2; i < length - 63; ++i) {
+                if (operation[i] != 0) return false;
+            }
+        }
+        return true;
     }
 
     /// @dev Parse variable operation framing before interpreting an authenticated cyclic key interval.

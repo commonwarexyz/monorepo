@@ -60,8 +60,9 @@ pub(crate) enum Command {
     Check {
         #[arg(long, value_enum)]
         mode: Mode,
+        /// Hex-encoded ABI input.
         #[arg(long)]
-        abi_hex: String,
+        abi: String,
     },
 }
 
@@ -310,8 +311,8 @@ impl Command {
                 index,
                 seed,
             } => synthetic::<H>(leaves, index, seed)?,
-            Self::Check { mode, abi_hex } => {
-                let encoded = const_hex::decode(abi_hex.strip_prefix("0x").unwrap_or(&abi_hex))
+            Self::Check { mode, abi } => {
+                let encoded = const_hex::decode(abi.strip_prefix("0x").unwrap_or(&abi))
                     .map_err(|error| format!("invalid ABI hex: {error}"))?;
                 return Ok(check::<H>(mode, &encoded).abi_encode());
             }
@@ -503,7 +504,7 @@ mod tests {
                 "check",
                 "--mode",
                 "multi",
-                "--abi-hex",
+                "--abi",
                 &hex,
             ])
             .unwrap()
@@ -561,14 +562,7 @@ mod tests {
                 let hex = const_hex::encode(&encoded);
                 for check_hash in ["keccak256", "sha256"] {
                     let accepted = Cli::try_parse_from([
-                        "fuzz",
-                        "bmt",
-                        "--hash",
-                        check_hash,
-                        "check",
-                        "--mode",
-                        "multi",
-                        "--abi-hex",
+                        "fuzz", "bmt", "--hash", check_hash, "check", "--mode", "multi", "--abi",
                         &hex,
                     ])
                     .unwrap()
@@ -607,7 +601,7 @@ mod tests {
                 "--seed",
                 "42",
             ],
-            vec!["check", "--mode", "single", "--abi-hex", "00"],
+            vec!["check", "--mode", "single", "--abi", "00"],
         ] {
             assert!(Cli::try_parse_from(["fuzz", "bmt"].into_iter().chain(args)).is_err());
         }

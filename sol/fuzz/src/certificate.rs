@@ -25,10 +25,12 @@ pub(crate) enum Command {
     Hash {
         #[arg(long, value_enum)]
         variant: BlsVariant,
+        /// Hex-encoded namespace bytes.
         #[arg(long)]
-        namespace_hex: String,
+        namespace: String,
+        /// Hex-encoded message bytes.
         #[arg(long)]
-        message_hex: String,
+        message: String,
     },
 }
 
@@ -127,11 +129,11 @@ impl Command {
             Self::Multisig(command) => command.execute(),
             Self::Hash {
                 variant,
-                namespace_hex,
-                message_hex,
+                namespace,
+                message,
             } => {
-                let namespace = decode_hex(&namespace_hex)?;
-                let message = decode_hex(&message_hex)?;
+                let namespace = decode_hex(&namespace)?;
+                let message = decode_hex(&message)?;
                 let framed = frame(&namespace, &message)?;
                 let point = match variant {
                     BlsVariant::Minsig => compact(&ops::hash::<MinSig>(MinSig::MESSAGE, &framed))?,
@@ -188,9 +190,9 @@ mod tests {
                 "hash",
                 "--variant",
                 variant,
-                "--namespace-hex",
+                "--namespace",
                 "0x74657374",
-                "--message-hex",
+                "--message",
                 "0x6d657373616765",
             ])
             .unwrap()

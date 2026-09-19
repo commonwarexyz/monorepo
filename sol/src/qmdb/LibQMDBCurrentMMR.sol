@@ -69,40 +69,18 @@ library LibQMDBCurrentMMR {
         return LibQMDBCurrent.verifyOpsMulti(root, operations, proof, witness, LibMerkle.Family.MMR, chunkBytes, hasher);
     }
 
-    /// @notice Verify key exclusion against a trusted ordered current MMR root.
-    /// @dev The database uses 32-byte keys and fixed values of size `V`. Operations have `65 + V` bytes.
-    /// Updates encode tag, key, value, then next key. Commits encode tag, metadata flag,
-    /// `V` metadata bytes, big-endian `uint64` floor, then 55 zero bytes. The trusted schema determines `V`.
+    /// @notice Verify ordered key exclusion under a trusted current MMR root.
+    /// @dev The trusted schema selects operation framing and fixed-width or length-prefixed fields.
+    /// Keys use raw byte lexicographic ordering.
     /// @param root Authenticated current QMDB MMR root with the specified schema and chunk size.
     /// @param key Raw key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
     /// @param proof Single-operation membership proof with an activity chunk.
+    /// @param encoding Trusted operation framing and field sizes bound to `root`.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
     function verifyExclusion(
-        bytes32 root,
-        bytes32 key,
-        bytes memory operation,
-        LibQMDBCurrent.Proof calldata proof,
-        uint256 chunkBytes,
-        address hasher
-    ) internal view returns (bool) {
-        return LibQMDBCurrent.verifyExclusion(root, key, operation, proof, LibMerkle.Family.MMR, chunkBytes, hasher);
-    }
-
-    /// @notice Verify ordered key exclusion under a current MMR root with variable operation encoding.
-    /// @dev Keys use raw byte lexicographic ordering. The trusted schema selects fixed-width fields
-    /// or byte vectors with canonical unsigned 32-bit varint lengths using `LibQMDBCurrent.VARIABLE_SIZE`.
-    /// @param root Authenticated current QMDB MMR root with the specified schema and chunk size.
-    /// @param key Raw key whose absence is being proven.
-    /// @param operation Exact encoded adjacent-key update or empty-database commit.
-    /// @param proof Single-operation membership proof with an activity chunk.
-    /// @param encoding Trusted key and value encoding configuration bound to `root`.
-    /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
-    /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
-    /// @return True when the active operation proves that `key` is absent under `root`.
-    function verifyExclusionVariable(
         bytes32 root,
         bytes memory key,
         bytes memory operation,
@@ -111,7 +89,7 @@ library LibQMDBCurrentMMR {
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return LibQMDBCurrent.verifyExclusionVariable(
+        return LibQMDBCurrent.verifyExclusion(
             root, key, operation, proof, encoding, LibMerkle.Family.MMR, chunkBytes, hasher
         );
     }

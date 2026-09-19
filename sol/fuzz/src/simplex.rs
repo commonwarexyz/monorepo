@@ -46,8 +46,9 @@ pub(crate) struct GenerateArgs {
     variant: BlsVariant,
     #[arg(long, value_enum)]
     kind: Kind,
+    /// Hex-encoded namespace bytes.
     #[arg(long)]
-    namespace_hex: String,
+    namespace: String,
     #[arg(long)]
     epoch: u64,
     #[arg(long)]
@@ -58,25 +59,25 @@ pub(crate) struct GenerateArgs {
         required_if_eq("kind", "finalize")
     )]
     parent: Option<u64>,
-    /// A 32-byte digest.
+    /// Hex-encoded 32-byte digest.
     #[arg(
         long,
         required_if_eq("kind", "notarize"),
         required_if_eq("kind", "finalize")
     )]
-    payload_hex: Option<String>,
+    payload: Option<String>,
     #[arg(long)]
     seed: u64,
 }
 
 impl GenerateArgs {
     fn subject(&self) -> Result<(Vec<u8>, Vec<u8>), String> {
-        let namespace = Namespace::new(&certificate::decode_hex(&self.namespace_hex)?);
+        let namespace = Namespace::new(&certificate::decode_hex(&self.namespace)?);
         let round = Round::new(Epoch::new(self.epoch), View::new(self.view));
         match self.kind {
             Kind::Nullify => {
-                if self.parent.is_some() || self.payload_hex.is_some() {
-                    return Err("--parent and --payload-hex are invalid for nullify".to_string());
+                if self.parent.is_some() || self.payload.is_some() {
+                    return Err("--parent and --payload are invalid for nullify".to_string());
                 }
                 let subject = Subject::<keccak256::Digest>::Nullify { round };
                 Ok((
@@ -87,9 +88,9 @@ impl GenerateArgs {
             kind @ (Kind::Notarize | Kind::Finalize) => {
                 let parent = self.parent.ok_or("--parent is required for proposals")?;
                 let payload = self
-                    .payload_hex
+                    .payload
                     .as_deref()
-                    .ok_or("--payload-hex is required for proposals")?;
+                    .ok_or("--payload is required for proposals")?;
                 let payload = certificate::decode_hex(payload)?;
                 let payload: [u8; 32] =
                     payload.try_into().map_err(|_| "payload must be 32 bytes")?;
@@ -165,11 +166,11 @@ mod tests {
         GenerateArgs {
             variant: BlsVariant::Minsig,
             kind,
-            namespace_hex: const_hex::encode(b"test"),
+            namespace: const_hex::encode(b"test"),
             epoch: 127,
             view: 128,
             parent: proposal.then_some(u64::MAX),
-            payload_hex: proposal.then(|| const_hex::encode([0xa5; 32])),
+            payload: proposal.then(|| const_hex::encode([0xa5; 32])),
             seed: 7,
         }
     }
@@ -189,7 +190,7 @@ mod tests {
             variant,
             "--kind",
             kind,
-            "--namespace-hex",
+            "--namespace",
             "0x74657374",
             "--epoch",
             "127",
@@ -200,7 +201,7 @@ mod tests {
             args.extend([
                 "--parent",
                 "0",
-                "--payload-hex",
+                "--payload",
                 "0000000000000000000000000000000000000000000000000000000000000000",
             ]);
         }
@@ -230,7 +231,7 @@ mod tests {
         }
 
         let mut input = args(Kind::Nullify);
-        input.namespace_hex = const_hex::encode([0; 120]);
+        input.namespace = const_hex::encode([0; 120]);
         assert_eq!(&threshold_output(&input).message[..2], &[0x80, 0x01]);
     }
 
@@ -306,7 +307,7 @@ mod tests {
                 });
                 if kind != "nullify" {
                     input.parent = Some(0);
-                    input.payload_hex = Some(const_hex::encode([0; 32]));
+                    input.payload = Some(const_hex::encode([0; 32]));
                 }
                 let (namespace, subject_message) = input.subject().unwrap();
                 assert_eq!(
@@ -325,7 +326,7 @@ mod tests {
                 let mut required = vec![
                     "--variant",
                     "--kind",
-                    "--namespace-hex",
+                    "--namespace",
                     "--epoch",
                     "--view",
                     "--seed",
@@ -381,7 +382,7 @@ mod tests {
                 }
                 complete.extend(["--seed", "7"]);
 
-                for option in ["--parent", "--payload-hex"] {
+                for option in ["--parent", "--payload"] {
                     let mut missing = complete.clone();
                     let index = missing
                         .iter()
@@ -409,7 +410,7 @@ mod tests {
             for fields in [
                 ["--parent", "0"],
                 [
-                    "--payload-hex",
+                    "--payload",
                     "0000000000000000000000000000000000000000000000000000000000000000",
                 ],
             ] {

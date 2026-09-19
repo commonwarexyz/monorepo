@@ -121,9 +121,9 @@ contract LibBLS12381ThresholdTest is Test {
         args[2] = "hash";
         args[3] = "--variant";
         args[4] = variant == BLSVariant.MinSig ? "minsig" : "minpk";
-        args[5] = "--namespace-hex";
+        args[5] = "--namespace";
         args[6] = vm.toString(namespace);
-        args[7] = "--message-hex";
+        args[7] = "--message";
         args[8] = vm.toString(message);
         bytes memory expected = abi.decode(vm.ffi(args), (bytes));
         assertEq(harness.checkedHash(variant, namespace, message), expected);
@@ -209,9 +209,9 @@ contract LibBLS12381ThresholdTest is Test {
         args[3] = "generate";
         args[4] = "--variant";
         args[5] = variant == BLSVariant.MinSig ? "minsig" : "minpk";
-        args[6] = "--namespace-hex";
+        args[6] = "--namespace";
         args[7] = vm.toString(namespace);
-        args[8] = "--message-hex";
+        args[8] = "--message";
         args[9] = vm.toString(message);
         args[10] = "--seed";
         args[11] = vm.toString(uint256(seed));
@@ -229,13 +229,13 @@ contract LibBLS12381ThresholdTest is Test {
         args[3] = "check";
         args[4] = "--variant";
         args[5] = variant == BLSVariant.MinSig ? "minsig" : "minpk";
-        args[6] = "--public-key-hex";
+        args[6] = "--public-key";
         args[7] = vm.toString(c.key);
-        args[8] = "--namespace-hex";
+        args[8] = "--namespace";
         args[9] = vm.toString(namespace);
-        args[10] = "--message-hex";
+        args[10] = "--message";
         args[11] = vm.toString(message);
-        args[12] = "--signature-hex";
+        args[12] = "--signature";
         args[13] = vm.toString(c.signature);
         assertEq(abi.decode(vm.ffi(args), (bool)), expected, "Commonware result");
         (bool ok, bytes memory result) = address(harness).staticcall{ gas: 1_000_000 }(

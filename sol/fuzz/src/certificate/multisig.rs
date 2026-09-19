@@ -44,18 +44,22 @@ pub(crate) enum Command {
     Check {
         #[arg(long, value_enum)]
         variant: BlsVariant,
+        /// Concatenated public keys, hex-encoded.
         #[arg(long)]
-        public_keys_hex: String,
+        public_keys: String,
         #[arg(long)]
         signers: String,
         #[arg(long)]
         quorum: String,
+        /// Hex-encoded namespace bytes.
         #[arg(long)]
-        namespace_hex: String,
+        namespace: String,
+        /// Hex-encoded message bytes.
         #[arg(long)]
-        message_hex: String,
+        message: String,
+        /// Hex-encoded signature.
         #[arg(long)]
-        signature_hex: String,
+        signature: String,
     },
 }
 
@@ -63,10 +67,12 @@ pub(crate) enum Command {
 pub(crate) struct GenerateArgs {
     #[arg(long, value_enum)]
     variant: BlsVariant,
+    /// Hex-encoded namespace bytes.
     #[arg(long)]
-    namespace_hex: String,
+    namespace: String,
+    /// Hex-encoded message bytes.
     #[arg(long)]
-    message_hex: String,
+    message: String,
     #[arg(long)]
     participants: u32,
     #[arg(long)]
@@ -257,8 +263,8 @@ impl Command {
                 if args.participants > MAX_PARTICIPANTS {
                     return Err(format!("participants exceeds {MAX_PARTICIPANTS}"));
                 }
-                let namespace = decode_hex(&args.namespace_hex)?;
-                let message = decode_hex(&args.message_hex)?;
+                let namespace = decode_hex(&args.namespace)?;
+                let message = decode_hex(&args.message)?;
                 let signers = decode_hex(&args.signers)?;
                 Ok(encode_output(generate_variant(
                     args.variant,
@@ -271,18 +277,18 @@ impl Command {
             }
             Self::Check {
                 variant,
-                public_keys_hex,
+                public_keys,
                 signers,
                 quorum,
-                namespace_hex,
-                message_hex,
-                signature_hex,
+                namespace,
+                message,
+                signature,
             } => {
-                let public_keys = decode_hex(&public_keys_hex)?;
+                let public_keys = decode_hex(&public_keys)?;
                 let signers = decode_hex(&signers)?;
-                let namespace = decode_hex(&namespace_hex)?;
-                let message = decode_hex(&message_hex)?;
-                let signature = decode_hex(&signature_hex)?;
+                let namespace = decode_hex(&namespace)?;
+                let message = decode_hex(&message)?;
+                let signature = decode_hex(&signature)?;
                 let accepted = quorum.parse::<u32>().is_ok_and(|quorum| match variant {
                     BlsVariant::Minsig => check::<MinSig>(
                         &public_keys,
@@ -496,9 +502,9 @@ mod tests {
                 "generate",
                 "--variant",
                 variant,
-                "--namespace-hex",
+                "--namespace",
                 "0x74657374",
-                "--message-hex",
+                "--message",
                 "0x6d657373616765",
                 "--participants",
                 "4",
@@ -525,17 +531,17 @@ mod tests {
                 "check",
                 "--variant",
                 variant,
-                "--public-keys-hex",
+                "--public-keys",
                 &const_hex::encode(&decoded.public_keys),
                 "--signers",
                 &const_hex::encode(&decoded.signers),
                 "--quorum",
                 "2",
-                "--namespace-hex",
+                "--namespace",
                 "0x74657374",
-                "--message-hex",
+                "--message",
                 "0x6d657373616765",
-                "--signature-hex",
+                "--signature",
                 &const_hex::encode(&decoded.signature),
             ])
             .unwrap()
@@ -551,17 +557,17 @@ mod tests {
                 "check",
                 "--variant",
                 variant,
-                "--public-keys-hex",
+                "--public-keys",
                 &const_hex::encode(&decoded.public_keys),
                 "--signers",
                 &const_hex::encode(&decoded.signers),
                 "--quorum",
                 "115792089237316195423570985008687907853269984665640564039457584007913129639935",
-                "--namespace-hex",
+                "--namespace",
                 "0x74657374",
-                "--message-hex",
+                "--message",
                 "0x6d657373616765",
-                "--signature-hex",
+                "--signature",
                 &const_hex::encode(&decoded.signature),
             ])
             .unwrap()

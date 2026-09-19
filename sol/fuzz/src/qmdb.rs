@@ -23,7 +23,6 @@ use commonware_storage::{
         },
         current::{
             grafting,
-            ordered::proof::ExclusionProof,
             proof::{OpsRootWitness, operation},
         },
         immutable, keyless,
@@ -117,9 +116,7 @@ pub(crate) enum Command {
     /// Build an operations tree and its activity-grafted tree, then prove one active update.
     Current(CurrentArgs),
     /// Prove exclusion using a cyclic key interval or an empty database commit.
-    Exclude(ExcludeArgs),
-    /// Prove exclusion with independently fixed or vector byte fields.
-    ExcludeVariable(exclusion::ExcludeVariableArgs),
+    Exclude(exclusion::ExcludeArgs),
 }
 
 #[derive(Args, Clone, Copy)]
@@ -286,18 +283,6 @@ enum ExclusionMode {
     Interval,
     Single,
     Empty,
-}
-
-#[derive(Args)]
-pub(crate) struct ExcludeArgs {
-    #[command(flatten)]
-    tree: ExclusionTreeArgs,
-    #[arg(long)]
-    key_hex: String,
-    #[arg(long, value_enum)]
-    mode: ExclusionMode,
-    #[arg(long)]
-    metadata: bool,
 }
 
 fn key(index: u64) -> FixedBytes<32> {
@@ -841,62 +826,11 @@ fn current<F: Graftable, H: Hasher>(args: &CurrentArgs) -> Result<OperationOutpu
     .map(|fixture| fixture.output)
 }
 
-fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, String> {
-    let query = const_hex::decode(args.key_hex.strip_prefix("0x").unwrap_or(&args.key_hex))
-        .map_err(|e| e.to_string())?;
-    let query = FixedBytes::<32>::new(query.try_into().map_err(|_| "key must be 32 bytes")?);
-    if args.metadata && !matches!(args.mode, ExclusionMode::Empty) {
-        return Err("metadata requires empty mode".into());
-    }
-    if matches!(args.mode, ExclusionMode::Empty | ExclusionMode::Single)
-        && args.tree.leaves.checked_sub(1) != Some(args.tree.location)
-    {
-        return Err("empty and single modes require location = leaves - 1".into());
-    }
-    let tree = args.tree.tree(args.mode);
-    let op = |index| match args.mode {
-        ExclusionMode::Empty => Operation::<F>::CommitFloor(
-            args.metadata
-                .then(|| FixedBytes::new(leaf(tree.seed, index))),
-            Location::new(index),
-        ),
-        ExclusionMode::Interval | ExclusionMode::Single => Operation::Update(fixed::Update {
-            key: key(2
-                * (match args.mode {
-                    ExclusionMode::Single => tree.location,
-                    _ => index,
-                } + 1)),
-            value: FixedBytes::new(leaf(tree.seed, index)),
-            next_key: key(2
-                * (match args.mode {
-                    ExclusionMode::Single => tree.location,
-                    _ => (index + 1) % tree.leaves,
-                } + 1)),
-        }),
-    };
-    let Materialized {
-        output,
-        proof,
-        root,
-        ..
-    } = materialize::<F, H, _>(&tree, args.tree.chunk_bytes, op, |index| {
-        matches!(args.mode, ExclusionMode::Interval) || index == tree.location
-    })?;
-    let exclusion: ExclusionProof<F, FixedBytes<32>, FixedEncoding<FixedBytes<32>>, H::Digest, _> =
-        match op(tree.location) {
-            Operation::Update(update) => ExclusionProof::KeyValue(proof, update),
-            Operation::CommitFloor(metadata, _) => ExclusionProof::Commit(proof, metadata),
-            _ => unreachable!(),
-        };
-    let expected = exclusion.verify::<H>(&query, &root);
-    Ok(current_output(output, expected))
-}
-
 impl Command {
     pub(crate) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         match self {
             Self::Lifecycle(args) => args.execute(hash),
-            Self::ExcludeVariable(args) => args.execute(hash),
+            Self::Exclude(args) => args.execute(hash),
             Self::Range(args) => args.execute(hash),
             Self::Multi(args) => args.execute(hash),
             Self::Unordered(args) => match (args.tree.family, hash) {
@@ -941,12 +875,6 @@ impl Command {
                 }?;
                 Ok(output.abi_encode_params())
             }
-            Self::Exclude(args) => match (args.tree.family, hash) {
-                (TreeKind::Mmr, Hash::Keccak256) => exclude::<mmr::Family, Keccak256>(&args),
-                (TreeKind::Mmr, Hash::Sha256) => exclude::<mmr::Family, Sha256>(&args),
-                (TreeKind::Mmb, Hash::Keccak256) => exclude::<mmb::Family, Keccak256>(&args),
-                (TreeKind::Mmb, Hash::Sha256) => exclude::<mmb::Family, Sha256>(&args),
-            },
         }
     }
 }
@@ -1074,23 +1002,12 @@ mod tests {
                     "3",
                     "--location",
                     "1",
-                    "--key-hex",
+                    "--key",
                     "00",
                     "--mode",
                     "interval",
-                ],
-            ),
-            (
-                "exclude-variable",
-                vec![
-                    "--leaves",
-                    "3",
-                    "--location",
-                    "1",
-                    "--key-hex",
-                    "00",
-                    "--mode",
-                    "interval",
+                    "--encoding",
+                    "variable",
                     "--key-size",
                     "variable",
                     "--value-size",
@@ -1145,7 +1062,7 @@ mod tests {
                     "current" => {
                         args.extend(["--inactivity-floor", "0", "--chunk-bytes", "32"]);
                     }
-                    "exclude" | "exclude-variable" => {
+                    "exclude" => {
                         args.extend(["--chunk-bytes", "32"]);
                     }
                     "lifecycle" => {}
@@ -1173,7 +1090,7 @@ mod tests {
                             | "--start"
                             | "--count"
                             | "--locations"
-                            | "--key-hex"
+                            | "--key"
                     ) {
                         let mut positional = args.clone();
                         positional.remove(index);
@@ -1405,10 +1322,18 @@ mod tests {
             "mmb",
             "--chunk-bytes",
             "32",
-            "--key-hex",
+            "--key",
             "00",
             "--mode",
             "single",
+            "--encoding",
+            "fixed",
+            "--key-size",
+            "32",
+            "--value-size",
+            "32",
+            "--keys",
+            "00",
             "--inactivity-floor",
             "0",
         ])
@@ -1442,6 +1367,14 @@ mod tests {
             "00",
             "--mode",
             "single",
+            "--encoding",
+            "fixed",
+            "--key-size",
+            "32",
+            "--value-size",
+            "32",
+            "--keys",
+            "00",
         ])
         .err()
         .unwrap();
@@ -2582,6 +2515,16 @@ mod tests {
                                 }
                                 let start = 2 * (location + 1);
                                 let end = 2 * ((location + 1) % leaves + 1);
+                                let keys = match mode {
+                                    "interval" => Some(
+                                        (1..=leaves)
+                                            .map(|index| const_hex::encode(key(2 * index)))
+                                            .collect::<Vec<_>>()
+                                            .join(","),
+                                    ),
+                                    "single" => Some(const_hex::encode(key(start))),
+                                    _ => None,
+                                };
                                 for query in [0, start - 1, start, start + 1, end, u64::MAX] {
                                     let query_hex = const_hex::encode(key(query));
                                     let mut arguments = vec![
@@ -2596,15 +2539,26 @@ mod tests {
                                         location.to_string(),
                                         "--seed".into(),
                                         "42".into(),
-                                        "--key-hex".into(),
+                                        "--key".into(),
                                         query_hex,
                                         "--family".into(),
                                         family.into(),
                                         "--mode".into(),
                                         mode.into(),
+                                        "--encoding".into(),
+                                        "fixed".into(),
+                                        "--key-size".into(),
+                                        "32".into(),
+                                        "--value-size".into(),
+                                        "32".into(),
                                         "--chunk-bytes".into(),
                                         "32".into(),
                                     ];
+                                    if let Some(keys) = &keys {
+                                        arguments.extend(["--keys".into(), keys.clone()]);
+                                    } else {
+                                        arguments.push("--derive-keys".into());
+                                    }
                                     if metadata {
                                         arguments.push("--metadata".into());
                                     }

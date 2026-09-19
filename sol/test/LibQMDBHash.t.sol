@@ -12,6 +12,7 @@ import { LibQMDBKeylessMMB } from "../src/qmdb/LibQMDBKeylessMMB.sol";
 import { LibQMDBKeylessMMR } from "../src/qmdb/LibQMDBKeylessMMR.sol";
 import { LibQMDBImmutableMMB } from "../src/qmdb/LibQMDBImmutableMMB.sol";
 import { LibQMDBImmutableMMR } from "../src/qmdb/LibQMDBImmutableMMR.sol";
+import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
 import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
 
@@ -108,13 +109,15 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
 
     /// @dev Query an interior key in the fixed-width exclusion fixtures.
     function singleCurrentExclusion(QMDBCase calldata c, address hasher) external view returns (bool) {
+        LibQMDBCurrent.ExclusionEncoding memory encoding =
+            LibQMDBCurrent.ExclusionEncoding(LibQMDBCurrent.OperationEncoding.Fixed, 32, 0);
         return _family() == LibMerkle.Family.MMB
             ? LibQMDBCurrentMMB.verifyExclusion(
-                c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
+                c.root, abi.encodePacked(bytes32(uint256(15))), c.operation, c.proof, encoding, c.chunkBytes, hasher
             )
             : LibQMDBCurrentMMR.verifyExclusion(
-                    c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
-                );
+                c.root, abi.encodePacked(bytes32(uint256(15))), c.operation, c.proof, encoding, c.chunkBytes, hasher
+            );
     }
 
     /// @dev Singleton facades use identical ABI tuple fields, allowing one shared fixture.

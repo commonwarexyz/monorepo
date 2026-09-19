@@ -704,7 +704,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[2] = "check";
         args[3] = "--family";
         args[4] = family == LibMerkle.Family.MMB ? "mmb" : "mmr";
-        args[5] = "--abi-hex";
+        args[5] = "--abi";
         args[6] = vm.toString(abi.encode(c.root, c.leaves, start, c.elements, c.proof));
         args[7] = "--bagging";
         args[8] = "forward";
@@ -931,7 +931,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[2] = c.proofKind == ProofKind.Multi ? "check-multi" : "check";
         args[3] = "--family";
         args[4] = c.family == LibMerkle.Family.MMB ? "mmb" : "mmr";
-        args[5] = "--abi-hex";
+        args[5] = "--abi";
         args[6] = c.proofKind == ProofKind.Multi
             ? vm.toString(abi.encode(c.root, c.leaves, c.indices, c.elements, c.proof, c.positions))
             : vm.toString(abi.encode(c.root, c.leaves, c.start, c.elements, c.proof));
