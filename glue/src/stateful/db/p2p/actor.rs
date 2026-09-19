@@ -1294,9 +1294,10 @@ mod tests {
             let (mut actor, _mailbox) =
                 TestActor::new(context.child("actor"), test_config(Some(actor_db)));
 
-            // Admit one serve and check that a second request is dropped immediately.
+            // Start the first serve while database access is blocked, then try to admit a second.
             let (first_tx, mut first_rx) = oneshot::channel();
             actor.handle_produce(test_request_at(size), first_tx);
+            assert!(actor.serves.next_completed().now_or_never().is_none());
             assert!(matches!(
                 first_rx.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)

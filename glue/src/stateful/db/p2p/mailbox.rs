@@ -152,7 +152,8 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
 
 /// Client-facing resolver mailbox used by the QMDB sync engine.
 ///
-/// Callers sharing a mailbox verify responses against the same QMDB history.
+/// Callers sharing a mailbox must verify responses against the same QMDB history.
+/// Verifiers run synchronously on the resolver actor's task.
 pub struct Mailbox<DB, F: Family, Op, D: Digest> {
     sender: Sender<Message<DB, F, Op, D>>,
 }
@@ -228,6 +229,81 @@ mod tests {
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_storage::mmr;
     use commonware_utils::{NZU64, NZUsize};
+
+    #[test]
+    fn overflow_keeps_latest_database_and_orders_live_requests() {
+        deterministic::Runner::default().start(|_| async move {
+            let mut overflow = Pending::<u64, mmr::Family, u64, sha256::Digest>::default();
+            let request = Request::Operations {
+                size: mmr::Location::new(10),
+                start: mmr::Location::new(3),
+                max_ops: NZU64!(2),
+            };
+            Message::handle(
+                &mut overflow,
+                Message::AttachDatabase(Shared::new("overflow_old", 1)),
+            );
+
+            // A canceled caller can leave both its request and cancellation in overflow.
+            let (response, canceled) = oneshot::channel();
+            Message::handle(
+                &mut overflow,
+                Message::GetOperations {
+                    request,
+                    response: Box::new(Reply::new(Some, response)),
+                },
+            );
+            drop(canceled);
+            Message::handle(&mut overflow, Message::CancelOperations { request });
+
+            // A later caller for the same request must remain behind the cancellation.
+            let (response, _waiting) = oneshot::channel();
+            Message::handle(
+                &mut overflow,
+                Message::GetOperations {
+                    request,
+                    response: Box::new(Reply::new(Some, response)),
+                },
+            );
+            Message::handle(
+                &mut overflow,
+                Message::AttachDatabase(Shared::new("overflow_new", 2)),
+            );
+
+            // A full ready queue must preserve both the attachment and the first queued message.
+            overflow.drain(Some);
+            let mut messages = VecDeque::new();
+            overflow.drain(|message| {
+                if matches!(&message, Message::AttachDatabase(_)) {
+                    messages.push_back(message);
+                    None
+                } else {
+                    Some(message)
+                }
+            });
+
+            overflow.drain(|message| {
+                messages.push_back(message);
+                None
+            });
+            assert!(overflow.is_empty());
+
+            let Some(Message::AttachDatabase(database)) = messages.pop_front() else {
+                panic!("expected the latest database before queued requests");
+            };
+            assert_eq!(*database.read().await, 2);
+            assert!(matches!(
+                messages.pop_front(),
+                Some(Message::CancelOperations { request: canceled }) if canceled == request
+            ));
+            assert!(matches!(
+                messages.pop_front(),
+                Some(Message::GetOperations { request: queued, response })
+                    if queued == request && !response.is_closed()
+            ));
+            assert!(messages.is_empty());
+        });
+    }
 
     /// A caller that abandons its fetch drops the future, which retracts the request from the
     /// actor.

@@ -211,9 +211,8 @@ where
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
     pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
-    /// Maximum number of previous roots to retain for verifying in-flight
-    /// requests after target updates. Set to 0 to disable (all retained
-    /// requests will be re-fetched).
+    /// Maximum number of previous targets whose pending operation requests may be reused
+    /// after a target update. Set to 0 to cancel all pending requests on each target update.
     pub max_retained_roots: usize,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
@@ -240,7 +239,7 @@ where
     /// Each fetch owns the root it authenticates against.
     retained_sizes: BTreeSet<Location<DB::Family>>,
 
-    /// Maximum number of historical roots to retain
+    /// Maximum number of previous targets eligible for operation request reuse.
     max_retained_roots: usize,
 
     /// The current sync target (root digest and operation bounds)

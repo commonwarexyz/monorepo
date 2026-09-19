@@ -398,9 +398,12 @@ pub trait Source: Send + Sync {
 
     /// Serve a request, returning the first value produced by `verify`.
     ///
-    /// Returning `None` from `verify` marks the candidate as invalid. The source may try
-    /// further candidates before returning. `Ok(None)` means it finished without an accepted
-    /// candidate. A caller cancels unwanted work by dropping this future.
+    /// `verify` returns `Some(value)` to accept a response, in which case `serve` returns
+    /// `Ok(Some(value))`. Returning `None` rejects that response as invalid. The source may
+    /// try another response within the same `serve` call.
+    ///
+    /// `serve` returns `Ok(None)` when it stops without an accepted response.
+    /// Dropping the returned future cancels the request.
     #[allow(clippy::type_complexity)]
     fn serve<'a, T: Send + 'static>(
         &'a self,
