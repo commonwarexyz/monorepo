@@ -33,7 +33,7 @@ impl<const N: usize> Shared<N> {
     }
 
     /// Acquire an exclusive write guard. By convention only the inner-`any` mutators
-    /// (`apply_batch`, `prune_bitmap`, `rewind`) hold the write lock.
+    /// (`apply_batch`, `prune_bitmap_to_log_boundary`, `rewind`) hold the write lock.
     pub(crate) fn write(&self) -> RwLockWriteGuard<'_, bitmap::Prunable<N>> {
         self.inner.write()
     }

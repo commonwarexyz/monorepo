@@ -542,9 +542,11 @@ where
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
     ///
-    /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
-    /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
-    /// tree advance to the sync boundary regardless of `prune_loc`.
+    /// `prune_loc` must be at most [`Self::sync_boundary`], the youngest boundary at which the
+    /// grafted tree can be pruned safely. The bitmap and grafted tree are then pruned only as far
+    /// as the ops log lands, never further: rewinding to a commit restores the activity bits
+    /// within that commit's active range, so pruning the bitmap past the retained log would make
+    /// every commit the log still holds unrewindable.
     ///
     /// # Errors
     ///
@@ -570,8 +572,11 @@ where
         // initialize the bitmap.
         self.any.log = self.any.log.commit().await?;
 
-        // Prune the bitmap to the sync boundary (most aggressive safe location).
-        self.any.prune_bitmap(sync_boundary);
+        // Prune the bitmap only as far as the ops log will be pruned, never to the sync
+        // boundary. Every bit below the sync boundary is inactive at the current tip, but
+        // rewinding to an earlier commit flips the bits of its active range back on, and those
+        // chunks must still exist for every commit the log retains.
+        let boundary = self.any.prune_bitmap_to_log_boundary(prune_loc)?;
         self.prune_grafted_tree_to_bitmap()?;
 
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
@@ -586,7 +591,12 @@ where
             std::future::pending::<()>().await;
         }
 
-        (self.any, _) = self.any.prune_log(prune_loc).await?;
+        let pruned_to;
+        (self.any, pruned_to) = self.any.prune_log(prune_loc).await?;
+        assert_eq!(
+            pruned_to, boundary,
+            "log and bitmap pruned to different boundaries"
+        );
         self.any.update_metrics();
         self.update_metrics();
         Ok(self)
@@ -1631,7 +1641,14 @@ mod tests {
             assert_eq!(db.bounds(), bounds);
             assert_eq!(db.inactivity_floor_loc(), floor);
             assert_eq!(db.root(), root);
-            assert!(db.any.bitmap.pruned_bits() > *durable_floor);
+            let pruned_bits = db.any.bitmap.pruned_bits();
+            assert!(pruned_bits > *durable_floor);
+
+            // The persisted bitmap boundary sits ahead of the unpruned log. A later prune that
+            // lands below it leaves the bitmap where it is instead of failing.
+            let db = db.prune(Location::new(1)).await.unwrap();
+            assert_eq!(db.any.bitmap.pruned_bits(), pruned_bits);
+            assert_eq!(db.bounds().start, Location::new(0));
             db.destroy().await.unwrap();
         });
     }
