@@ -13,8 +13,8 @@ use std::collections::VecDeque;
 /// callbacks, re-routed so the actor processes them on its own task.
 pub(super) enum EngineMessage<F: Family> {
     /// A peer delivered a response for a previously fetched key.
-    /// The actor decodes the value, fans it out to waiting subscribers,
-    /// and reports acceptance back through `response`.
+    /// The actor decodes the value, hands it to the local callers behind the
+    /// delivered subscribers, and reports a verification result through `response`.
     Deliver {
         delivery: Delivery<Request<F>, u64>,
         value: Bytes,

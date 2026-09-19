@@ -111,7 +111,7 @@ where
     pending: PendingSubs<F, DB>,
     /// Next identity to allocate when opening a request group.
     next_subscriber: u64,
-    /// Collective verdicts for groups that have received their responses.
+    /// Verification results for groups that have received their responses.
     approvals: FuturesPool<'static, (Request<F>, u64, Option<bool>)>,
     serves: FuturesPool<'static, ()>,
 }
@@ -285,7 +285,7 @@ where
         }
     }
 
-    /// Decode a peer's response and record the waiting callers' collective verdict.
+    /// Deliver a decoded response to waiting callers and collect verification feedback.
     fn handle_deliver(
         &mut self,
         delivery: Delivery<Request<F>, u64>,
@@ -344,27 +344,20 @@ where
             return;
         }
 
+        // Callers verify the same response against the same QMDB history, so
+        // one explicit verdict is enough. Dropped feedback is neutral.
         self.approvals.push(async move {
-            let mut verdict = None;
             for approval in approvals {
-                match approval.await {
-                    Ok(true) => verdict = Some(true),
-                    Ok(false) => {
-                        verdict = Some(false);
-                        break;
-                    }
-                    Err(_) => {}
+                if let Ok(verdict) = approval.await {
+                    feedback_tx.send_lossy(verdict);
+                    return (key, subscriber, Some(verdict));
                 }
             }
-
-            if let Some(verdict) = verdict {
-                feedback_tx.send_lossy(verdict);
-            }
-            (key, subscriber, verdict)
+            (key, subscriber, None)
         });
     }
 
-    /// Retire completed request groups and record their collective verdicts.
+    /// Retire completed request groups and record their verification results.
     fn handle_approval<R>(
         &mut self,
         resolver: &mut R,
@@ -940,6 +933,50 @@ mod tests {
     }
 
     #[test]
+    fn partial_caller_cancellation_preserves_live_group() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
+            let mut resolver = RecordingResolver::default();
+            let request = test_request_at(Location::new(1));
+            let (canceled, canceled_rx) = oneshot::channel();
+            let (live, live_rx) = oneshot::channel();
+            for response in [canceled, live] {
+                actor.handle_mailbox_message(
+                    &mut resolver,
+                    mailbox::Message::GetOperations { request, response },
+                );
+            }
+            assert_eq!(resolver.fetches.len(), 1);
+            let subscriber = resolver.fetches[0].1;
+
+            drop(canceled_rx);
+            actor.handle_mailbox_message(
+                &mut resolver,
+                mailbox::Message::CancelOperations { request },
+            );
+            assert_eq!(resolver.retains, 0);
+            let pending = actor.pending.get(&request).unwrap();
+            assert_eq!(pending.subscriber, subscriber);
+            assert_eq!(pending.responses.len(), 1);
+
+            let payload = encoded_fetch_payload();
+            let (feedback, verdict) = oneshot::channel();
+            actor.handle_deliver(
+                test_delivery(request, subscriber),
+                payload.clone(),
+                feedback,
+            );
+            let (response, approval) = live_rx.await.unwrap();
+            assert_eq!(response.encode(), payload);
+            approval.send(true).unwrap();
+            let completion = actor.approvals.next_completed().await;
+            actor.handle_approval(&mut resolver, completion);
+            assert!(verdict.await.unwrap());
+            assert!(actor.pending.is_empty());
+        });
+    }
+
+    #[test]
     fn request_id_exhaustion_precedes_submission() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
@@ -1315,7 +1352,7 @@ mod tests {
     }
 
     #[test]
-    fn late_same_key_subscriber_completes_after_approval() {
+    fn late_same_key_subscribers_complete_after_one_approval() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // A distinct key provides an ordering barrier through the same resolver mailbox.
             const PREFIX: &str = "late_subscriber_live";
@@ -1332,8 +1369,15 @@ mod tests {
             let barrier_expected = expected_payload(&pair.databases[1], barrier_request).await;
 
             // Hold the first delivery's verdict while a new waiting group forms for its key.
-            let (first, first_feedback) = pair.mailboxes[0].serve(request).await.unwrap();
+            let (first, delayed) = futures::future::join(
+                pair.mailboxes[0].serve(request),
+                pair.mailboxes[0].serve(request),
+            )
+            .await;
+            let (first, first_feedback) = first.unwrap();
+            let (delayed_response, delayed_feedback) = delayed.unwrap();
             assert_operations_response(&first, request, &expected);
+            assert_eq!(pair.metrics[0].fetch_requests.get(), 1);
 
             let second = pair.mailboxes[0].serve(request);
             futures::pin_mut!(second);
@@ -1369,6 +1413,10 @@ mod tests {
                 second_feedback.take().unwrap().send_lossy(true);
                 third_feedback.take().unwrap().send_lossy(true);
             }
+
+            // Validation of the retained response belongs to the delayed caller.
+            assert_operations_response(&delayed_response, request, &expected);
+            delayed_feedback.unwrap().send_lossy(true);
 
             // Check task cleanup even when late delivery times out.
             shutdown_pair(&context, PREFIX, pair.handles).await;
@@ -1459,7 +1507,8 @@ mod tests {
     fn rejected_response_does_not_outlive_canceled_successor() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             const PREFIX: &str = "rejected_then_canceled";
-            let pair = spawn_live_pair(&context.child(PREFIX), PREFIX).await;
+            let pair_context = context.child(PREFIX);
+            let pair = spawn_live_pair(&pair_context, PREFIX).await;
             let size = pair.databases[1].read().await.bounds().end;
             let request = test_request_at(size);
             let expected = expected_payload(&pair.databases[1], request).await;
