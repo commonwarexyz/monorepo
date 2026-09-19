@@ -144,7 +144,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         ProofKind proofKind,
         RootKind rootKind,
         bytes32[] memory chunks
-    ) internal pure returns (BatchCase memory c) {
+    ) public pure returns (BatchCase memory c) {
         require(chunks.length == (rootKind == RootKind.Current ? (n + 255) / 256 : 0), "root chunk count");
         c.rootKind = rootKind;
         c.chunkBytes = c.rootKind == RootKind.Current ? 32 : 0;
