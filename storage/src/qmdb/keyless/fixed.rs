@@ -3,17 +3,9 @@
 //! For variable-size values, use [super::variable].
 
 use crate::{
-    Context,
     journal::contiguous::fixed::{self, Config as JournalConfig},
-    merkle::Family,
-    qmdb::{
-        Error,
-        any::value::{FixedEncoding, FixedValue},
-        keyless::operation::Operation as BaseOperation,
-    },
+    qmdb::{any::value::FixedEncoding, keyless::operation::Operation as BaseOperation},
 };
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
 
 /// Keyless operation for fixed-size values.
 pub type Operation<F, V> = BaseOperation<F, FixedEncoding<V>>;
@@ -30,14 +22,6 @@ pub type Config<S> = super::Config<JournalConfig, S>;
 
 /// Configuration for a fixed-size [keyless](super) compact db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
-
-impl<F: Family, E: Context, V: FixedValue, H: Hasher, S: Strategy> CompactDb<F, E, V, H, S> {
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -133,7 +117,7 @@ mod tests {
             },
             commit_codec_config: (),
         };
-        TestCompactDb::init(context, cfg).await.unwrap()
+        TestCompactDb::init(context, cfg, None).await.unwrap()
     }
 
     async fn bounded_standard<F: Family>(context: deterministic::Context) {
@@ -202,6 +186,89 @@ mod tests {
     #[test_traced]
     fn test_standard_bounded_initialization_mmb() {
         deterministic::Runner::default().start(bounded_standard::<mmb::Family>);
+    }
+
+    async fn bounded_compact<F: Family>(context: deterministic::Context) {
+        for cap in [0, 1, 2, 3, 4, 6, 7, 8, 12, 13, 14, 100] {
+            let cfg = CompactConfig {
+                strategy: Sequential,
+                witness: crate::journal::contiguous::variable::Config {
+                    partition: format!("caps-{cap}"),
+                    items_per_section: NZU64!(3),
+                    compression: None,
+                    codec_config: (),
+                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+                commit_codec_config: (),
+            };
+            let mut db = TestCompactDb::<F>::init(context.child("create"), cfg.clone(), None)
+                .await
+                .unwrap();
+            let mut commits = vec![(db.size(), db.root())];
+            for count in [1, 3, 5] {
+                let mut batch = db.new_batch();
+                for value in 0..count {
+                    batch = batch.append(U64::new(value));
+                }
+                let batch = batch.merkleize(&db, None, Location::new(0)).await;
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                commits.push((db.size(), db.root()));
+            }
+            db = db.sync().await.unwrap();
+            let tip = *commits.last().unwrap();
+            drop(db);
+            let opened = TestCompactDb::<F>::init(
+                context.child("cap"),
+                cfg.clone(),
+                Some(Location::new(cap)),
+            )
+            .await;
+            if cap == 0 {
+                assert!(matches!(opened, Err(Error::InvalidInitializationBound)));
+                let db = TestCompactDb::<F>::init(context.child("unchanged"), cfg, None)
+                    .await
+                    .unwrap();
+                assert_eq!((db.size(), db.root()), tip);
+                continue;
+            }
+            let expected = *commits
+                .iter()
+                .rev()
+                .find(|(size, _)| **size <= cap)
+                .unwrap();
+            let db = opened.unwrap();
+            assert_eq!((db.size(), db.root()), expected);
+            drop(db);
+            let mut db = TestCompactDb::<F>::init(context.child("restart"), cfg.clone(), None)
+                .await
+                .unwrap();
+            assert_eq!((db.size(), db.root()), expected);
+            let batch = db
+                .new_batch()
+                .append(U64::new(999))
+                .merkleize(&db, None, Location::new(0))
+                .await;
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.sync().await.unwrap();
+            let appended = (db.size(), db.root());
+            drop(db);
+            let db = TestCompactDb::<F>::init(context.child("appended"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!((db.size(), db.root()), appended);
+        }
+    }
+
+    #[test_traced]
+    fn test_compact_bounded_initialization_mmr() {
+        deterministic::Runner::default().start(bounded_compact::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_bounded_initialization_mmb() {
+        deterministic::Runner::default().start(bounded_compact::<mmb::Family>);
     }
 
     fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {
