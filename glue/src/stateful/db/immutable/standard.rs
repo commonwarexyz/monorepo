@@ -2,12 +2,13 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture a [`Shared`] database handle
-//! so the batch API can read through to applied state.
+//! deletions. Keyed batch reads access the database through the batch's
+//! [`Reader`] because the immutable proof snapshot carries no keyed
+//! index.
 
 use crate::stateful::db::{
-    BatchContext, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
+    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -35,8 +36,8 @@ use commonware_storage::{
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
 use std::{ops::Deref, sync::Arc};
 
-/// Shared handle to an immutable database.
-type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Shared<Immutable<F, E, K, V, C, H, T, S>>;
+/// Reader over the immutable database a wrapper batch reads through.
+type ImmutableDbHandle<F, E, K, V, C, H, T, S> = Reader<Immutable<F, E, K, V, C, H, T, S>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -310,13 +311,16 @@ where
         )
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
+        };
         ImmutableUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
+            batch,
+            db,
             metadata: None,
-            inactivity_floor: database.inactivity_floor_loc(),
+            inactivity_floor,
         }
     }
 
@@ -417,13 +421,16 @@ where
         )
     }
 
-    fn new_batch(database: BatchContext<'_, Self>) -> Self::Unmerkleized {
-        let (database, shared) = database.into_parts();
+    async fn new_batch(db: Reader<Self>) -> Self::Unmerkleized {
+        let (batch, inactivity_floor) = {
+            let guard = db.read().await;
+            (guard.new_batch(), guard.inactivity_floor_loc())
+        };
         ImmutableUnmerkleized {
-            batch: database.new_batch(),
-            db: shared,
+            batch,
+            db,
             metadata: None,
-            inactivity_floor: database.inactivity_floor_loc(),
+            inactivity_floor,
         }
     }
 
