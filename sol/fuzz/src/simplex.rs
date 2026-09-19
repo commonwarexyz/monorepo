@@ -79,7 +79,7 @@ impl GenerateArgs {
                 if self.parent.is_some() || self.payload.is_some() {
                     return Err("--parent and --payload are invalid for nullify".to_string());
                 }
-                let subject = Subject::<keccak256::Digest>::Nullify { round };
+                let subject: Subject<'_, keccak256::Digest> = Subject::Nullify { round };
                 Ok((
                     subject.namespace(&namespace).to_vec(),
                     subject.message().to_vec(),
