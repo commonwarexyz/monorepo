@@ -538,8 +538,9 @@ mod tests {
 
         // Test Activity codec - Certified variant
         // Collect enough acks for a certificate
-        let expected = schemes[0].participants().quorum::<N3f1>();
-        let expected_count = usize::try_from(expected).expect("quorum exceeds usize::MAX");
+        let expected_count = schemes[0].participants().quorum_count::<N3f1>();
+        let expected = u64::from(expected_count);
+        let expected_count = usize::try_from(expected_count).expect("quorum exceeds usize::MAX");
         let acks: Vec<_> = schemes
             .iter()
             .take(expected_count)
@@ -548,7 +549,7 @@ mod tests {
 
         // A non-empty sub-quorum still reports the exact shortfall.
         let insufficient = &acks[..acks.len() - 1];
-        let found = u32::try_from(insufficient.len()).expect("ack count exceeds u32::MAX");
+        let found = u64::try_from(insufficient.len()).expect("ack count exceeds u64::MAX");
         assert!(matches!(
             Certificate::from_acks(
                 &schemes[0],

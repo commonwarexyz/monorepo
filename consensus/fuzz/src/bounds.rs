@@ -83,15 +83,17 @@ mod tests {
         for n in 1..=21u32 {
             let expected_f = max_faults(n);
             let expected_q = quorum(n);
-            let actual_f = N3f1::max_faults(n);
-            let actual_q = N3f1::quorum(n);
+            let actual_f = N3f1::max_faults(u64::from(n));
+            let actual_q = N3f1::quorum(u64::from(n));
 
             assert_eq!(
-                actual_f, expected_f,
+                actual_f,
+                u64::from(expected_f),
                 "N3f1::max_faults({n}) = {actual_f}, expected {expected_f}"
             );
             assert_eq!(
-                actual_q, expected_q,
+                actual_q,
+                u64::from(expected_q),
                 "N3f1::quorum({n}) = {actual_q}, expected {expected_q}"
             );
 

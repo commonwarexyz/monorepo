@@ -647,7 +647,8 @@ pub mod mocks;
 pub(crate) fn quorum(n: u32) -> u32 {
     use commonware_utils::{Faults, N3f1};
 
-    N3f1::quorum(n)
+    u32::try_from(N3f1::quorum(u64::from(n)))
+        .expect("quorum for a u32 participant count must fit in u32")
 }
 
 #[cfg(test)]
@@ -7990,7 +7991,8 @@ mod tests {
         L: elector::Config<S>,
     {
         let n = campaign.n;
-        let faults = N3f1::max_faults(n) as usize;
+        let faults = usize::try_from(N3f1::max_faults(u64::from(n)))
+            .expect("maximum faults exceeds usize::MAX");
         let cases = twins::cases(
             rng,
             twins::Framework {
