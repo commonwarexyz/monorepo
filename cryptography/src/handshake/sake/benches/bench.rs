@@ -2,7 +2,8 @@ use commonware_cryptography::{
     Signer,
     ed25519::PrivateKey,
     handshake::sake::{
-        Context, Error, RecvCipher, SendCipher, dial_end, dial_start, listen_end, listen_start,
+        Context, Error, RecvCipher, SendCipher, Version, dial_end, dial_start, listen_end,
+        listen_start,
     },
 };
 use commonware_math::algebra::Random;
@@ -22,6 +23,7 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
         &mut rng,
         Context::new(
             b"bench_namespace",
+            Version::V1,
             0,
             0..1,
             dialer_crypto.clone(),
@@ -32,6 +34,7 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
         &mut rng,
         Context::new(
             b"bench_namespace",
+            Version::V1,
             0,
             0..1,
             listener_crypto,

@@ -26,7 +26,7 @@ use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
 use commonware_stream::{
-    cups::{Config as StreamConfig, Handshake},
+    cups::{Config as StreamConfig, Handshake, Version},
     utils::Timeout,
 };
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
@@ -168,6 +168,7 @@ fn main() {
         Timeout::new(
             Handshake {
                 signer: signer.clone(),
+                version: Version::V1,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(60),
             },
@@ -179,7 +180,7 @@ fn main() {
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        Handshake::new(signer),
+        Handshake::new(signer, Version::V1),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),

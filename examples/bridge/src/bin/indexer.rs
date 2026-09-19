@@ -26,7 +26,7 @@ use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
 use commonware_stream::{
-    cups::{Config as StreamConfig, Handshake},
+    cups::{Config as StreamConfig, Handshake, Version},
     utils::Timeout,
 };
 use commonware_utils::{
@@ -244,6 +244,7 @@ fn main() {
             Timeout::new(
                 Handshake {
                     signer,
+                    version: Version::V1,
                     synchrony_bound: Duration::from_secs(1),
                     max_handshake_age: Duration::from_secs(60),
                 },
