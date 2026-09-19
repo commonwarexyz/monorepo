@@ -13,6 +13,16 @@
 //! warning, until then. A `Context`, `Storage`, or `Blob` kept past `start`
 //! keeps the hold.
 //!
+//! Before user code starts, Linux flushes the storage filesystem. macOS flushes
+//! the storage directory, then each existing partition before its first scan or
+//! open. These directory flushes make inherited partition and blob removals
+//! durable before recovery observes their absence. Creation and removal
+//! synchronize subsequent directory changes.
+//!
+//! On macOS, existing blobs are also flushed individually on their first open.
+//! Directory synchronization covers names. This separate flush covers file data.
+//! Both use `F_FULLFSYNC` through [`std::fs::File::sync_all`].
+//!
 //! # Example
 //!
 //! ```rust

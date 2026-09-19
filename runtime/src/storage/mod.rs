@@ -48,6 +48,12 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 }
                 Ok(())
             }
+        } else if #[cfg(target_os = "macos")] {
+            /// Make inherited partition entries durable before user code starts. Partition
+            /// directories and existing blob contents are synchronized on their first access.
+            pub(crate) fn sync(dir: &Path) -> io::Result<()> {
+                File::open(dir)?.sync_all()
+            }
         } else {
             /// Flush nothing at startup. No filesystem-wide flush on this platform makes what a
             /// prior process wrote crash-durable, so the first open of each existing blob flushes
@@ -89,7 +95,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         entries: Mutex<HashMap<(String, Vec<u8>), Entry>>,
         /// Names whose first open through this instance has been accounted for: created here, or
         /// an existing blob whose first-open flush was issued, with its outcome retained in
-        /// `entries`. Nothing flushes the filesystem at startup here, so the first open of any
+        /// `entries`. There is no filesystem-wide startup flush here, so the first open of any
         /// other existing name owes a flush before trusting the file. Removing a name drops it: a
         /// later open of that name creates the blob and owes nothing.
         #[cfg(not(target_os = "linux"))]
@@ -321,7 +327,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 }
             } else {
                 /// Whether the first open of `generation`'s name through this instance owes a
-                /// flush. Nothing flushes the filesystem at startup here, so an existing blob owes
+                /// flush. There is no filesystem-wide startup flush here, so an existing blob owes
                 /// one the first time this instance opens it. Creations are durable on return and
                 /// owe nothing.
                 pub(crate) fn first_open(&self, generation: &Generation, existing: bool) -> bool {
