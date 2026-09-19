@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
+import { LibMerkle } from "../merkle/LibMerkle.sol";
 import { LibQMDBCommon } from "./LibQMDBCommon.sol";
 import { LibQMDBCurrent } from "./LibQMDBCurrent.sol";
 
@@ -25,7 +26,7 @@ library LibQMDBCurrentMMR {
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return LibQMDBCurrent.verify(root, operation, proof, false, chunkBytes, hasher);
+        return LibQMDBCurrent.verify(root, operation, proof, LibMerkle.Family.MMR, chunkBytes, hasher);
     }
 
     /// @notice Verify operation bytes and activity status for a current MMR range.
@@ -44,7 +45,7 @@ library LibQMDBCurrentMMR {
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return LibQMDBCurrent.verifyRange(root, operations, proof, false, chunkBytes, hasher);
+        return LibQMDBCurrent.verifyRange(root, operations, proof, LibMerkle.Family.MMR, chunkBytes, hasher);
     }
 
     /// @notice Verify historical operation inclusion under a canonical current MMR root.
@@ -65,7 +66,7 @@ library LibQMDBCurrentMMR {
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return LibQMDBCurrent.verifyOpsMulti(root, operations, proof, witness, false, chunkBytes, hasher);
+        return LibQMDBCurrent.verifyOpsMulti(root, operations, proof, witness, LibMerkle.Family.MMR, chunkBytes, hasher);
     }
 
     /// @notice Verify key exclusion against a trusted ordered current MMR root.
@@ -87,7 +88,7 @@ library LibQMDBCurrentMMR {
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return LibQMDBCurrent.verifyExclusion(root, key, operation, proof, false, chunkBytes, hasher);
+        return LibQMDBCurrent.verifyExclusion(root, key, operation, proof, LibMerkle.Family.MMR, chunkBytes, hasher);
     }
 
     /// @notice Verify ordered key exclusion under a current MMR root with variable operation encoding.
@@ -110,6 +111,8 @@ library LibQMDBCurrentMMR {
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return LibQMDBCurrent.verifyExclusionVariable(root, key, operation, proof, encoding, false, chunkBytes, hasher);
+        return LibQMDBCurrent.verifyExclusionVariable(
+            root, key, operation, proof, encoding, LibMerkle.Family.MMR, chunkBytes, hasher
+        );
     }
 }

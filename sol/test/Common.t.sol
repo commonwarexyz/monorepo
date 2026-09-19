@@ -7,9 +7,36 @@ import { LibBMT } from "../src/merkle/LibBMT.sol";
 import { LibMMR } from "../src/merkle/LibMMR.sol";
 import { LibMMB } from "../src/merkle/LibMMB.sol";
 
-enum MerkleFamily {
-    MMR,
-    MMB
+enum ProofKind {
+    Range,
+    Single,
+    Multi
+}
+
+enum InputLocation {
+    Memory,
+    Calldata
+}
+
+enum GenerationMode {
+    Materialized,
+    Synthetic
+}
+
+enum Encoding {
+    Fixed,
+    Variable
+}
+
+enum BLSVariant {
+    MinSig,
+    MinPk
+}
+
+/// @dev QMDB roots commit to operations alone or to both operations and activity.
+enum RootKind {
+    Operations,
+    Current
 }
 
 /// @dev Virtual constants specialize verifier callers without a runtime hasher parameter.
@@ -17,6 +44,7 @@ abstract contract HashSelection {
     function _hasher() internal pure virtual returns (address);
 
     /// @dev Build reference digests independently of the verifier's hashing implementation.
+    /// Test targets use native Keccak256 or SHA256 through the precompile and raw adapters.
     function _hash(bytes memory input) internal pure returns (bytes32) {
         return _hasher() == address(0) ? keccak256(input) : sha256(input);
     }
@@ -30,7 +58,7 @@ abstract contract HashTest is Test, HashSelection {
             selected[i < 2 ? i : i + 2] = args[i];
         }
         selected[2] = "--hash";
-        selected[3] = _hasher() == address(0) ? "keccak" : "sha256";
+        selected[3] = _hasher() == address(0) ? "keccak256" : "sha256";
         return vm.ffi(selected);
     }
 
@@ -42,7 +70,7 @@ abstract contract HashTest is Test, HashSelection {
 
 /// @dev A concrete suite selects one append family for its fixtures and verifier.
 abstract contract QMDBTest is HashTest {
-    function _family() internal pure virtual returns (MerkleFamily);
+    function _family() internal pure virtual returns (LibMerkle.Family);
 }
 
 /// @dev Shared FFI arguments select production unordered codecs and proof families.
@@ -55,13 +83,16 @@ abstract contract UnorderedOracle is QMDBTest {
         string memory encoding,
         string memory operation,
         string memory history,
-        bool current,
+        RootKind rootKind,
         uint256 valueLength,
         uint256 chunkBytes
     ) internal returns (bytes memory) {
-        bool historical = bytes(history).length != 0;
+        bool update = keccak256(bytes(operation)) == keccak256("update");
+        assertEq(bytes(history).length != 0, update, "history is required only for updates");
         bool variableLength = keccak256(bytes(encoding)) == keccak256("variable");
-        string[] memory args = new string[](19 + (historical ? 2 : 0) + (current ? 1 : 0) + (variableLength ? 2 : 0));
+        if (!variableLength) assertEq(valueLength, 0, "fixed encoding has no variable value length");
+        string[] memory args =
+            new string[](19 + (rootKind == RootKind.Current ? 2 : 0) + (update ? 2 : 0) + (variableLength ? 2 : 0));
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "unordered";
@@ -74,20 +105,23 @@ abstract contract UnorderedOracle is QMDBTest {
         args[9] = "--inactivity-floor";
         args[10] = vm.toString(floor);
         args[11] = "--family";
-        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
+        args[12] = _family() == LibMerkle.Family.MMB ? "mmb" : "mmr";
         args[13] = "--encoding";
         args[14] = encoding;
         args[15] = "--operation";
         args[16] = operation;
-        args[17] = "--chunk-bytes";
-        args[18] = vm.toString(chunkBytes);
+        args[17] = "--root";
+        args[18] = rootKind == RootKind.Operations ? "operations" : "current";
         uint256 offset = 19;
-        if (historical) {
+        if (rootKind == RootKind.Current) {
+            args[offset++] = "--chunk-bytes";
+            args[offset++] = vm.toString(chunkBytes);
+        } else {
+            assertEq(chunkBytes, 0, "operations roots have no activity chunks");
+        }
+        if (update) {
             args[offset++] = "--history";
             args[offset++] = history;
-        }
-        if (current) {
-            args[offset++] = "--current";
         }
         if (variableLength) {
             args[offset++] = "--value-length";
@@ -97,14 +131,14 @@ abstract contract UnorderedOracle is QMDBTest {
     }
 }
 
-struct CompatibilityCase {
+struct RootPolicyCase {
     bytes32 root;
     uint256 leaves;
     uint256 start;
     uint256 inactive;
-    MerkleFamily family;
-    bool backward;
-    uint8 mode;
+    LibMerkle.Family family;
+    LibMerkle.Bagging bagging;
+    ProofKind proofKind;
     uint256[] indices;
     uint256[] positions;
     bytes32[] elements;
@@ -112,164 +146,60 @@ struct CompatibilityCase {
 }
 
 /// @dev Exercises policy-aware memory and calldata entrypoints with caller-owned inputs and reusable scratch.
-abstract contract CompatibilityHarness is HashTest {
+abstract contract RootPolicyHarness is HashTest {
     function memoryVerify(
-        CompatibilityCase calldata c,
+        RootPolicyCase calldata c,
         uint256[] memory indices,
         uint256[] memory positions,
         bytes32[] memory elements,
         bytes32[] memory proof
     ) internal view returns (bool) {
-        if (c.mode == 2) {
-            return c.family == MerkleFamily.MMB
+        if (c.proofKind == ProofKind.Multi) {
+            return c.family == LibMerkle.Family.MMB
                 ? LibMMB.verifyMulti(
-                    c.root,
-                    c.leaves,
-                    indices,
-                    elements,
-                    positions,
-                    proof,
-                    c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive,
-                    _hasher()
+                    c.root, c.leaves, indices, elements, positions, proof, c.bagging, c.inactive, _hasher()
                 )
                 : LibMMR.verifyMulti(
-                    c.root,
-                    c.leaves,
-                    indices,
-                    elements,
-                    positions,
-                    proof,
-                    c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive,
-                    _hasher()
+                    c.root, c.leaves, indices, elements, positions, proof, c.bagging, c.inactive, _hasher()
                 );
         }
-        if (c.mode == 1) {
-            return c.family == MerkleFamily.MMB
-                ? LibMMB.verify(
-                    c.root,
-                    c.leaves,
-                    c.start,
-                    elements[0],
-                    proof,
-                    c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive,
-                    _hasher()
-                )
-                : LibMMR.verify(
-                    c.root,
-                    c.leaves,
-                    c.start,
-                    elements[0],
-                    proof,
-                    c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive,
-                    _hasher()
-                );
+        if (c.proofKind == ProofKind.Single) {
+            return c.family == LibMerkle.Family.MMB
+                ? LibMMB.verify(c.root, c.leaves, c.start, elements[0], proof, c.bagging, c.inactive, _hasher())
+                : LibMMR.verify(c.root, c.leaves, c.start, elements[0], proof, c.bagging, c.inactive, _hasher());
         }
-        return c.family == MerkleFamily.MMB
-            ? LibMMB.verifyRange(
-                c.root,
-                c.leaves,
-                c.start,
-                elements,
-                proof,
-                c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                c.inactive,
-                _hasher()
-            )
-            : LibMMR.verifyRange(
-                c.root,
-                c.leaves,
-                c.start,
-                elements,
-                proof,
-                c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                c.inactive,
-                _hasher()
-            );
+        return c.family == LibMerkle.Family.MMB
+            ? LibMMB.verifyRange(c.root, c.leaves, c.start, elements, proof, c.bagging, c.inactive, _hasher())
+            : LibMMR.verifyRange(c.root, c.leaves, c.start, elements, proof, c.bagging, c.inactive, _hasher());
     }
 
     function calldataVerify(
-        CompatibilityCase calldata c,
+        RootPolicyCase calldata c,
         uint256[] calldata indices,
         uint256[] calldata positions,
         bytes32[] calldata elements,
         bytes32[] calldata proof
     ) internal view returns (bool) {
-        if (c.mode == 2) {
-            return c.family == MerkleFamily.MMB
+        if (c.proofKind == ProofKind.Multi) {
+            return c.family == LibMerkle.Family.MMB
                 ? LibMMB.verifyMultiCalldata(
-                    c.root,
-                    c.leaves,
-                    indices,
-                    elements,
-                    positions,
-                    proof,
-                    c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive,
-                    _hasher()
+                    c.root, c.leaves, indices, elements, positions, proof, c.bagging, c.inactive, _hasher()
                 )
                 : LibMMR.verifyMultiCalldata(
-                    c.root,
-                    c.leaves,
-                    indices,
-                    elements,
-                    positions,
-                    proof,
-                    c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive,
-                    _hasher()
+                    c.root, c.leaves, indices, elements, positions, proof, c.bagging, c.inactive, _hasher()
                 );
         }
-        if (c.mode == 1) {
-            return c.family == MerkleFamily.MMB
-                ? LibMMB.verifyCalldata(
-                    c.root,
-                    c.leaves,
-                    c.start,
-                    elements[0],
-                    proof,
-                    c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive,
-                    _hasher()
-                )
-                : LibMMR.verifyCalldata(
-                    c.root,
-                    c.leaves,
-                    c.start,
-                    elements[0],
-                    proof,
-                    c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                    c.inactive,
-                    _hasher()
-                );
+        if (c.proofKind == ProofKind.Single) {
+            return c.family == LibMerkle.Family.MMB
+                ? LibMMB.verifyCalldata(c.root, c.leaves, c.start, elements[0], proof, c.bagging, c.inactive, _hasher())
+                : LibMMR.verifyCalldata(c.root, c.leaves, c.start, elements[0], proof, c.bagging, c.inactive, _hasher());
         }
-        return c.family == MerkleFamily.MMB
-            ? LibMMB.verifyRangeCalldata(
-                c.root,
-                c.leaves,
-                c.start,
-                elements,
-                proof,
-                c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                c.inactive,
-                _hasher()
-            )
-            : LibMMR.verifyRangeCalldata(
-                c.root,
-                c.leaves,
-                c.start,
-                elements,
-                proof,
-                c.backward ? LibMerkle.Bagging.BackwardFold : LibMerkle.Bagging.ForwardFold,
-                c.inactive,
-                _hasher()
-            );
+        return c.family == LibMerkle.Family.MMB
+            ? LibMMB.verifyRangeCalldata(c.root, c.leaves, c.start, elements, proof, c.bagging, c.inactive, _hasher())
+            : LibMMR.verifyRangeCalldata(c.root, c.leaves, c.start, elements, proof, c.bagging, c.inactive, _hasher());
     }
 
-    function verify(CompatibilityCase calldata c, bool direct, bool sliced) external view returns (bool) {
+    function verify(RootPolicyCase calldata c, InputLocation inputLocation, bool sliced) external view returns (bool) {
         uint256[] calldata indices = c.indices;
         uint256[] calldata positions = c.positions;
         bytes32[] calldata elements = c.elements;
@@ -280,13 +210,13 @@ abstract contract CompatibilityHarness is HashTest {
             elements = elements[1:elements.length - 1];
             proof = proof[1:proof.length - 1];
         }
-        return direct
+        return inputLocation == InputLocation.Calldata
             ? calldataVerify(c, indices, positions, elements, proof)
             : memoryVerify(c, indices, positions, elements, proof);
     }
 
-    function checked(CompatibilityCase calldata c, bool direct) external view returns (bool valid) {
-        CompatibilityCase memory inputs = c;
+    function checked(RootPolicyCase calldata c, InputLocation inputLocation) external view returns (bool valid) {
+        RootPolicyCase memory inputs = c;
         bytes memory allocated = new bytes(97);
         for (uint256 i; i < allocated.length; ++i) {
             allocated[i] = bytes1(uint8(i + 1));
@@ -309,7 +239,7 @@ abstract contract CompatibilityHarness is HashTest {
         // No allocation occurs between calls so every invocation reuses the same scratch region.
         // The first result checks independence from dirty scratch. Later calls also check cleanup.
         for (uint256 repeat; repeat < 3; ++repeat) {
-            bool result = direct
+            bool result = inputLocation == InputLocation.Calldata
                 ? calldataVerify(c, c.indices, c.positions, c.elements, c.proof)
                 : memoryVerify(c, inputs.indices, inputs.positions, inputs.elements, inputs.proof);
             assembly ("memory-safe") {
@@ -341,7 +271,7 @@ abstract contract CompatibilityHarness is HashTest {
             "allocated input changed"
         );
         bytes32 freshHash = keccak256(fresh);
-        bool later = direct
+        bool later = inputLocation == InputLocation.Calldata
             ? calldataVerify(c, c.indices, c.positions, c.elements, c.proof)
             : memoryVerify(c, inputs.indices, inputs.positions, inputs.elements, inputs.proof);
         assertEq(later, valid, "verification after allocation changed result");
@@ -356,7 +286,7 @@ abstract contract CompatibilityHarness is HashTest {
 
 /// @dev The reference builder simulates append/merge operations without using verifier geometry.
 abstract contract VerifierHarness is HashTest {
-    function referenceRoot(bytes32[] memory elements, MerkleFamily family) internal pure returns (bytes32) {
+    function referenceRoot(bytes32[] memory elements, LibMerkle.Family family) internal pure returns (bytes32) {
         bytes32[] memory peaks = new bytes32[](elements.length + 1);
         uint256[] memory heights = new uint256[](elements.length + 1);
         uint256 count;
@@ -374,7 +304,7 @@ abstract contract VerifierHarness is HashTest {
                     heights[k] = heights[k + 1];
                 }
                 --count;
-                if (family == MerkleFamily.MMB) break;
+                if (family == LibMerkle.Family.MMB) break;
                 j = count;
             }
         }
@@ -387,28 +317,28 @@ abstract contract VerifierHarness is HashTest {
     }
 
     function verifyRange(
-        MerkleFamily family,
+        LibMerkle.Family family,
         bytes32 root,
         uint256 leaves,
         uint256 start,
         bytes32[] memory elements,
         bytes32[] memory proof
     ) public view returns (bool valid) {
-        valid = family == MerkleFamily.MMB
+        valid = family == LibMerkle.Family.MMB
             ? LibMMB.verifyRange(root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher())
             : LibMMR.verifyRange(root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
         assertEq(valid, this.calldataRange(family, root, leaves, start, elements, proof), "range calldata disagreement");
     }
 
     function verifySingle(
-        MerkleFamily family,
+        LibMerkle.Family family,
         bytes32 root,
         uint256 leaves,
         uint256 index,
         bytes32 element,
         bytes32[] memory proof
     ) public view returns (bool valid) {
-        valid = family == MerkleFamily.MMB
+        valid = family == LibMerkle.Family.MMB
             ? LibMMB.verify(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher())
             : LibMMR.verify(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
         assertEq(
@@ -417,14 +347,14 @@ abstract contract VerifierHarness is HashTest {
     }
 
     function calldataRange(
-        MerkleFamily family,
+        LibMerkle.Family family,
         bytes32 root,
         uint256 leaves,
         uint256 start,
         bytes32[] calldata elements,
         bytes32[] calldata proof
     ) external view returns (bool) {
-        return family == MerkleFamily.MMB
+        return family == LibMerkle.Family.MMB
             ? LibMMB.verifyRangeCalldata(
                 root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
             )
@@ -434,31 +364,32 @@ abstract contract VerifierHarness is HashTest {
     }
 
     function calldataSingle(
-        MerkleFamily family,
+        LibMerkle.Family family,
         bytes32 root,
         uint256 leaves,
         uint256 index,
         bytes32 element,
         bytes32[] calldata proof
     ) external view returns (bool) {
-        return family == MerkleFamily.MMB
+        return family == LibMerkle.Family.MMB
             ? LibMMB.verifyCalldata(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher())
             : LibMMR.verifyCalldata(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
     }
 
     function slicedCalldata(
-        MerkleFamily family,
+        LibMerkle.Family family,
         bytes32 root,
         uint256 leaves,
         uint256 start,
         bytes32[] calldata elements,
         bytes32[] calldata proof,
-        bool single
+        ProofKind proofKind
     ) external view returns (bool) {
+        assertTrue(proofKind != ProofKind.Multi, "single or range proof required");
         elements = elements[1:elements.length - 1];
         proof = proof[1:proof.length - 1];
-        if (single) {
-            return family == MerkleFamily.MMB
+        if (proofKind == ProofKind.Single) {
+            return family == LibMerkle.Family.MMB
                 ? LibMMB.verifyCalldata(
                     root, leaves, start, elements[0], proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                 )
@@ -466,7 +397,7 @@ abstract contract VerifierHarness is HashTest {
                     root, leaves, start, elements[0], proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                 );
         }
-        return family == MerkleFamily.MMB
+        return family == LibMerkle.Family.MMB
             ? LibMMB.verifyRangeCalldata(
                 root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
             )
@@ -476,29 +407,37 @@ abstract contract VerifierHarness is HashTest {
     }
 
     function checkedVerification(
-        MerkleFamily family,
+        LibMerkle.Family family,
         bytes32 root,
         uint256 leaves,
         uint256 start,
         bytes32[] memory elements,
         bytes32[] memory proof,
-        bool single
+        ProofKind proofKind
     ) public returns (bool valid) {
-        valid = this.checkedMemoryVerification(family, root, leaves, start, elements, proof, single, false);
-        assertEq(valid, this.checkedMemoryVerification(family, root, leaves, start, elements, proof, single, true));
+        valid = this.checkedMemoryVerification(
+            family, root, leaves, start, elements, proof, proofKind, InputLocation.Memory
+        );
+        assertEq(
+            valid,
+            this.checkedMemoryVerification(
+                family, root, leaves, start, elements, proof, proofKind, InputLocation.Calldata
+            )
+        );
     }
 
     /// @dev Caller-owned arrays precede fresh DFS scratch. Inspect scratch before any subsequent allocation.
     function checkedMemoryVerification(
-        MerkleFamily family,
+        LibMerkle.Family family,
         bytes32 root,
         uint256 leaves,
         uint256 start,
         bytes32[] calldata elements,
         bytes32[] calldata proof,
-        bool single,
-        bool calldataMode
+        ProofKind proofKind,
+        InputLocation inputLocation
     ) external returns (bool valid) {
+        assertTrue(proofKind != ProofKind.Multi, "single or range proof required");
         bytes32[] memory memoryElements = elements;
         bytes32[] memory memoryProof = proof;
         bytes32 beforeInputs = keccak256(abi.encode(memoryElements, memoryProof));
@@ -518,9 +457,9 @@ abstract contract VerifierHarness is HashTest {
                 mstore(p, 0)
             }
         }
-        if (calldataMode) {
-            if (single) {
-                valid = family == MerkleFamily.MMB
+        if (inputLocation == InputLocation.Calldata) {
+            if (proofKind == ProofKind.Single) {
+                valid = family == LibMerkle.Family.MMB
                     ? LibMMB.verifyCalldata(
                         root, leaves, start, elements[0], proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                     )
@@ -528,7 +467,7 @@ abstract contract VerifierHarness is HashTest {
                         root, leaves, start, elements[0], proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                     );
             } else {
-                valid = family == MerkleFamily.MMB
+                valid = family == LibMerkle.Family.MMB
                     ? LibMMB.verifyRangeCalldata(
                         root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                     )
@@ -536,8 +475,8 @@ abstract contract VerifierHarness is HashTest {
                         root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                     );
             }
-        } else if (single) {
-            valid = family == MerkleFamily.MMB
+        } else if (proofKind == ProofKind.Single) {
+            valid = family == LibMerkle.Family.MMB
                 ? LibMMB.verify(
                     root, leaves, start, memoryElements[0], memoryProof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                 )
@@ -545,7 +484,7 @@ abstract contract VerifierHarness is HashTest {
                     root, leaves, start, memoryElements[0], memoryProof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                 );
         } else {
-            valid = family == MerkleFamily.MMB
+            valid = family == LibMerkle.Family.MMB
                 ? LibMMB.verifyRange(
                     root, leaves, start, memoryElements, memoryProof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
                 )
@@ -577,7 +516,7 @@ abstract contract VerifierHarness is HashTest {
         }
         assertEq(
             valid,
-            single
+            proofKind == ProofKind.Single
                 ? verifySingle(family, root, leaves, start, elements[0], memoryProof)
                 : verifyRange(family, root, leaves, start, memoryElements, memoryProof),
             "subsequent verification"
@@ -625,9 +564,9 @@ abstract contract MerkleTestCommon is VerifierHarness {
         uint256 leaves;
     }
 
-    CompatibilityHarness internal harness;
+    RootPolicyHarness internal harness;
 
-    function checkCalldataSlices(MerkleFamily family, bytes32 a, bytes32 b) internal view {
+    function checkCalldataSlices(LibMerkle.Family family, bytes32 a, bytes32 b) internal view {
         bytes32[] memory leaves = new bytes32[](2);
         leaves[0] = a;
         leaves[1] = b;
@@ -638,13 +577,14 @@ abstract contract MerkleTestCommon is VerifierHarness {
         elements[2] = proof[2] = bytes32(type(uint256).max - 1);
         elements[1] = a;
         proof[1] = _hash(abi.encodePacked(uint64(1), b));
-        for (uint256 mode; mode < 2; ++mode) {
-            assertTrue(this.slicedCalldata(family, root, 2, 0, elements, proof, mode != 0));
-            assertFalse(this.slicedCalldata(family, root ^ bytes32(uint256(1)), 2, 0, elements, proof, mode != 0));
+        for (uint256 mode; mode <= uint256(ProofKind.Single); ++mode) {
+            ProofKind proofKind = ProofKind(mode);
+            assertTrue(this.slicedCalldata(family, root, 2, 0, elements, proof, proofKind));
+            assertFalse(this.slicedCalldata(family, root ^ bytes32(uint256(1)), 2, 0, elements, proof, proofKind));
         }
     }
 
-    function checkFullRange(MerkleFamily family, uint8 size, bytes32 seed) internal view {
+    function checkFullRange(LibMerkle.Family family, uint8 size, bytes32 seed) internal view {
         bytes32[] memory elements = new bytes32[](uint256(size) + 1);
         for (uint256 i; i < elements.length; ++i) {
             elements[i] = keccak256(abi.encode(seed, i));
@@ -656,7 +596,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertFalse(verifyRange(family, root, elements.length, 0, elements, proof));
     }
 
-    function checkSingleLeaf(MerkleFamily family, bytes32 element) internal view {
+    function checkSingleLeaf(LibMerkle.Family family, bytes32 element) internal view {
         bytes32 root = _hash(abi.encodePacked(uint64(1), _hash(abi.encodePacked(uint64(0), element))));
         bytes32[] memory proof = new bytes32[](0);
         assertTrue(verifySingle(family, root, 1, 0, element, proof));
@@ -665,7 +605,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertFalse(verifySingle(family, root, 1, type(uint256).max, element, proof));
     }
 
-    function checkTwoLeaves(MerkleFamily family, bytes32 a, bytes32 b) internal view {
+    function checkTwoLeaves(LibMerkle.Family family, bytes32 a, bytes32 b) internal view {
         bytes32[] memory elements = new bytes32[](2);
         elements[0] = a;
         elements[1] = b;
@@ -679,62 +619,68 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertFalse(verifySingle(family, root, 2, 1, b, proof));
     }
 
-    function checkInvalidBounds(MerkleFamily family, uint256 leaves, uint256 start) internal view {
+    function checkInvalidBounds(LibMerkle.Family family, uint256 leaves, uint256 start) internal view {
         bytes32[] memory elements = new bytes32[](1);
         bytes32[] memory proof = new bytes32[](0);
-        uint256 maxLeaves = family == MerkleFamily.MMB ? 0x400000000000001e : 0x4000000000000000;
+        uint256 maxLeaves = family == LibMerkle.Family.MMB ? 0x400000000000001e : 0x4000000000000000;
         if (leaves > maxLeaves || start >= leaves) {
             assertFalse(verifyRange(family, bytes32(0), leaves, start, elements, proof));
         }
         assertFalse(verifyRange(family, bytes32(0), 1, type(uint256).max, elements, proof));
     }
 
-    function checkEmptyTree(MerkleFamily family) internal view {
+    function checkEmptyTree(LibMerkle.Family family) internal view {
         bytes32[] memory empty = new bytes32[](0);
         bytes32 root = _hash(abi.encodePacked(uint64(0)));
         assertTrue(verifyRange(family, root, 0, 0, empty, empty));
         assertFalse(verifyRange(family, root, 1, 0, empty, empty));
     }
 
-    function checkMemoryExitPaths(MerkleFamily family) internal {
+    function checkMemoryExitPaths(LibMerkle.Family family) internal {
         bytes32[] memory elements = new bytes32[](1);
         elements[0] = bytes32(uint256(42));
         bytes32[] memory empty = new bytes32[](0);
         bytes32 root = referenceRoot(elements, family);
-        for (uint256 mode; mode < 2; ++mode) {
-            bool single = mode != 0;
-            assertTrue(checkedVerification(family, root, 1, 0, elements, empty, single));
-            assertFalse(checkedVerification(family, root ^ bytes32(uint256(1)), 1, 0, elements, empty, single));
+        for (uint256 mode; mode <= uint256(ProofKind.Single); ++mode) {
+            ProofKind proofKind = ProofKind(mode);
+            assertTrue(checkedVerification(family, root, 1, 0, elements, empty, proofKind));
+            assertFalse(checkedVerification(family, root ^ bytes32(uint256(1)), 1, 0, elements, empty, proofKind));
             // A leftmost leaf is hashed before its missing right sibling is requested.
-            assertFalse(checkedVerification(family, bytes32(0), 2, 0, elements, empty, single));
-            assertFalse(checkedVerification(family, root, 1, 1, elements, empty, single));
-            assertFalse(checkedVerification(family, root, type(uint256).max, 0, elements, empty, single));
-            assertFalse(checkedVerification(family, root, 1, type(uint256).max, elements, empty, single));
+            assertFalse(checkedVerification(family, bytes32(0), 2, 0, elements, empty, proofKind));
+            assertFalse(checkedVerification(family, root, 1, 1, elements, empty, proofKind));
+            assertFalse(checkedVerification(family, root, type(uint256).max, 0, elements, empty, proofKind));
+            assertFalse(checkedVerification(family, root, 1, type(uint256).max, elements, empty, proofKind));
         }
-        assertTrue(checkedVerification(family, _hash(abi.encodePacked(uint64(0))), 0, 0, empty, empty, false));
-        assertFalse(checkedVerification(family, root, 1, 0, empty, empty, false));
+        assertTrue(checkedVerification(family, _hash(abi.encodePacked(uint64(0))), 0, 0, empty, empty, ProofKind.Range));
+        assertFalse(checkedVerification(family, root, 1, 0, empty, empty, ProofKind.Range));
     }
 
-    function checkMemorySafety(MerkleFamily family, uint8 n, bytes32 seed, bool malformed) internal {
+    function checkMemorySafety(LibMerkle.Family family, uint8 n, bytes32 seed, bool malformed) internal {
         bytes32[] memory elements = new bytes32[](uint256(n) + 1);
         for (uint256 i; i < elements.length; ++i) {
             elements[i] = keccak256(abi.encode(seed, i));
         }
         bytes32 root = referenceRoot(elements, family);
         bytes32[] memory proof = new bytes32[](malformed ? 1 : 0);
-        assertEq(this.checkedVerification(family, root, elements.length, 0, elements, proof, false), !malformed);
+        assertEq(
+            this.checkedVerification(family, root, elements.length, 0, elements, proof, ProofKind.Range), !malformed
+        );
     }
 
-    function generate(MerkleFamily family, uint256 leaves, uint256 start, uint256 length, uint64 seed, bool synthetic)
-        internal
-        returns (Case memory c)
-    {
+    function generate(
+        LibMerkle.Family family,
+        uint256 leaves,
+        uint256 start,
+        uint256 length,
+        uint64 seed,
+        GenerationMode generation
+    ) internal returns (Case memory c) {
         string[] memory args = new string[](17);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
-        args[2] = synthetic ? "synthetic" : "generate";
-        args[3] = "--kind";
-        args[4] = family == MerkleFamily.MMB ? "mmb" : "mmr";
+        args[2] = generation == GenerationMode.Synthetic ? "synthetic" : "generate";
+        args[3] = "--family";
+        args[4] = family == LibMerkle.Family.MMB ? "mmb" : "mmr";
         args[5] = "--leaf-count";
         args[6] = vm.toString(leaves);
         args[7] = "--start";
@@ -751,13 +697,13 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertEq(c.leaves, leaves);
     }
 
-    function rustCheck(MerkleFamily family, Case memory c, uint256 start) internal returns (bool) {
+    function rustCheck(LibMerkle.Family family, Case memory c, uint256 start) internal returns (bool) {
         string[] memory args = new string[](11);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
         args[2] = "check";
-        args[3] = "--kind";
-        args[4] = family == MerkleFamily.MMB ? "mmb" : "mmr";
+        args[3] = "--family";
+        args[4] = family == LibMerkle.Family.MMB ? "mmb" : "mmr";
         args[5] = "--abi-hex";
         args[6] = vm.toString(abi.encode(c.root, c.leaves, start, c.elements, c.proof));
         args[7] = "--bagging";
@@ -767,7 +713,7 @@ abstract contract MerkleTestCommon is VerifierHarness {
         return abi.decode(_ffi(args), (bool));
     }
 
-    function compare(MerkleFamily family, Case memory c, uint256 start) internal returns (bool accepted) {
+    function compare(LibMerkle.Family family, Case memory c, uint256 start) internal returns (bool accepted) {
         accepted = verifyRange(family, c.root, c.leaves, start, c.elements, c.proof);
         assertEq(accepted, rustCheck(family, c, start), "Solidity / Commonware disagreement");
         if (c.elements.length == 1) {
@@ -775,11 +721,11 @@ abstract contract MerkleTestCommon is VerifierHarness {
         }
     }
 
-    function exercise(MerkleFamily family, Case memory c, uint256 start, uint256 mutation) internal {
+    function exercise(LibMerkle.Family family, Case memory c, uint256 start, uint256 mutation) internal {
         assertTrue(compare(family, c, start));
-        assertTrue(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, false));
+        assertTrue(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, ProofKind.Range));
         if (c.elements.length == 1) {
-            assertTrue(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, true));
+            assertTrue(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, ProofKind.Single));
         }
         assertFalse(compare(family, c, start + 1));
         uint256 leaves = c.leaves;
@@ -789,9 +735,11 @@ abstract contract MerkleTestCommon is VerifierHarness {
         bytes32 root = c.root;
         c.root ^= bytes32(uint256(1));
         assertFalse(compare(family, c, start));
-        assertFalse(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, false));
+        assertFalse(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, ProofKind.Range));
         if (c.elements.length == 1) {
-            assertFalse(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, true));
+            assertFalse(
+                this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, ProofKind.Single)
+            );
         }
         c.root = root;
         if (c.elements.length != 0) {
@@ -811,9 +759,11 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.proof[j] = proof[j];
             }
             assertFalse(compare(family, c, start));
-            assertFalse(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, false));
+            assertFalse(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, ProofKind.Range));
             if (c.elements.length == 1) {
-                assertFalse(this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, true));
+                assertFalse(
+                    this.checkedVerification(family, c.root, c.leaves, start, c.elements, c.proof, ProofKind.Single)
+                );
             }
             c.proof = proof;
         }
@@ -825,44 +775,44 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertFalse(compare(family, c, start));
     }
 
-    function checkDifferentialRange(MerkleFamily family, uint16 n, uint16 s, uint16 len, uint64 seed) internal {
+    function checkDifferentialRange(LibMerkle.Family family, uint16 n, uint16 s, uint16 len, uint64 seed) internal {
         uint256 leaves = uint256(n) % 512 + 1;
         uint256 start = uint256(s) % leaves;
         uint256 length = uint256(len) % (leaves - start) + 1;
-        exercise(family, generate(family, leaves, start, length, seed, false), start, seed);
+        exercise(family, generate(family, leaves, start, length, seed, GenerationMode.Materialized), start, seed);
     }
 
-    function checkDifferentialIndividual(MerkleFamily family, uint16 n, uint16 s, uint64 seed) internal {
+    function checkDifferentialIndividual(LibMerkle.Family family, uint16 n, uint16 s, uint64 seed) internal {
         uint256 leaves = uint256(n) % 1024 + 1;
         uint256 start = uint256(s) % leaves;
-        exercise(family, generate(family, leaves, start, 1, seed, false), start, seed);
+        exercise(family, generate(family, leaves, start, 1, seed, GenerationMode.Materialized), start, seed);
     }
 
-    function checkDifferentialDeep(MerkleFamily family, uint8 exponent, uint64 offset, uint64 seed) internal {
+    function checkDifferentialDeep(LibMerkle.Family family, uint8 exponent, uint64 offset, uint64 seed) internal {
         uint256 leaves = uint256(1) << (uint256(exponent) % 62 + 1);
         if (seed & 1 != 0) --leaves;
         uint256 start = uint256(offset) % leaves;
         uint256 length = leaves - start < 4 ? leaves - start : 4;
-        exercise(family, generate(family, leaves, start, length, seed, true), start, seed);
+        exercise(family, generate(family, leaves, start, length, seed, GenerationMode.Synthetic), start, seed);
     }
 
-    function checkDifferentialPositionBitBoundaries(MerkleFamily family) internal {
+    function checkDifferentialPositionBitBoundaries(LibMerkle.Family family) internal {
         for (uint256 bit = 1; bit < 62; ++bit) {
             uint256 boundary = uint256(1) << bit;
-            Case memory c = generate(family, boundary + 1, boundary - 2, 3, 7, true);
+            Case memory c = generate(family, boundary + 1, boundary - 2, 3, 7, GenerationMode.Synthetic);
             assertTrue(compare(family, c, boundary - 2));
         }
     }
 
-    function checkDifferentialMaximumSize(MerkleFamily family) internal {
-        uint256 leaves = family == MerkleFamily.MMB ? 0x400000000000001e : 0x4000000000000000;
-        exercise(family, generate(family, leaves, 0, 1, 1, true), 0, 0);
-        exercise(family, generate(family, leaves, leaves / 2 - 1, 4, 2, true), leaves / 2 - 1, 1);
-        exercise(family, generate(family, leaves, leaves - 1, 1, 3, true), leaves - 1, 0);
+    function checkDifferentialMaximumSize(LibMerkle.Family family) internal {
+        uint256 leaves = family == LibMerkle.Family.MMB ? 0x400000000000001e : 0x4000000000000000;
+        exercise(family, generate(family, leaves, 0, 1, 1, GenerationMode.Synthetic), 0, 0);
+        exercise(family, generate(family, leaves, leaves / 2 - 1, 4, 2, GenerationMode.Synthetic), leaves / 2 - 1, 1);
+        exercise(family, generate(family, leaves, leaves - 1, 1, 3, GenerationMode.Synthetic), leaves - 1, 0);
     }
 
     function checkDifferentialMalformed(
-        MerkleFamily family,
+        LibMerkle.Family family,
         uint64 leaves,
         uint64 start,
         bytes32 root,
@@ -878,18 +828,18 @@ abstract contract MerkleTestCommon is VerifierHarness {
         compare(family, Case(root, elements, proof, leaves), start);
     }
 
-    function checkDifferentialSmallRanges(MerkleFamily family) internal {
+    function checkDifferentialSmallRanges(LibMerkle.Family family) internal {
         for (uint256 leaves = 1; leaves <= 12; ++leaves) {
             for (uint256 start; start < leaves; ++start) {
                 for (uint256 length = 1; length <= leaves - start; ++length) {
-                    Case memory c = generate(family, leaves, start, length, 7, false);
+                    Case memory c = generate(family, leaves, start, length, 7, GenerationMode.Materialized);
                     assertTrue(compare(family, c, start));
                 }
             }
         }
     }
 
-    function checkDifferentialEmpty(MerkleFamily family) internal {
+    function checkDifferentialEmpty(LibMerkle.Family family) internal {
         bytes32[] memory empty = new bytes32[](0);
         Case memory c = Case(_hash(abi.encodePacked(uint64(0))), empty, empty, 0);
         assertTrue(compare(family, c, 0));
@@ -901,33 +851,33 @@ abstract contract MerkleTestCommon is VerifierHarness {
         assertFalse(compare(family, c, 0));
     }
 
-    function checkDifferentialGas(MerkleFamily family, IMerkleGasHarness gasHarness) internal {
-        Case memory c = generate(family, 1024, 1023, 1, 7, false);
+    function checkDifferentialGas(LibMerkle.Family family, IMerkleGasHarness gasHarness) internal {
+        Case memory c = generate(family, 1024, 1023, 1, 7, GenerationMode.Materialized);
         bool valid = gasHarness.verify(c.root, c.leaves, 1023, c.elements[0], c.proof);
-        vm.snapshotGasLastFrame(_group(family == MerkleFamily.MMB ? "MMB" : "MMR"), "individual-1024-last");
+        vm.snapshotGasLastFrame(_group(family == LibMerkle.Family.MMB ? "MMB" : "MMR"), "single-1024-last-memory");
         assertTrue(valid);
         valid = gasHarness.verifyCalldata(c.root, c.leaves, 1023, c.elements[0], c.proof);
-        vm.snapshotGasLastFrame(_group(family == MerkleFamily.MMB ? "MMB" : "MMR"), "individual-1024-last-calldata");
+        vm.snapshotGasLastFrame(_group(family == LibMerkle.Family.MMB ? "MMB" : "MMR"), "single-1024-last-calldata");
         assertTrue(valid);
-        c = generate(family, 1024, 480, 64, 7, false);
+        c = generate(family, 1024, 480, 64, 7, GenerationMode.Materialized);
         valid = gasHarness.verifyRange(c.root, c.leaves, 480, c.elements, c.proof);
-        vm.snapshotGasLastFrame(_group(family == MerkleFamily.MMB ? "MMB" : "MMR"), "range-1024-middle-64");
+        vm.snapshotGasLastFrame(_group(family == LibMerkle.Family.MMB ? "MMB" : "MMR"), "range-1024-middle-64-memory");
         assertTrue(valid);
         valid = gasHarness.verifyRangeCalldata(c.root, c.leaves, 480, c.elements, c.proof);
-        vm.snapshotGasLastFrame(_group(family == MerkleFamily.MMB ? "MMB" : "MMR"), "range-1024-middle-64-calldata");
+        vm.snapshotGasLastFrame(_group(family == LibMerkle.Family.MMB ? "MMB" : "MMR"), "range-1024-middle-64-calldata");
         assertTrue(valid);
     }
 
-    function generateCompatibility(CompatibilityCase memory c, uint256 length, uint64 seed, bool synthetic)
+    function generateRootPolicy(RootPolicyCase memory c, uint256 length, uint64 seed, GenerationMode generation)
         internal
-        returns (CompatibilityCase memory)
+        returns (RootPolicyCase memory)
     {
         string[] memory args = new string[](17);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
-        args[2] = synthetic ? "synthetic" : "generate";
-        args[3] = "--kind";
-        args[4] = c.family == MerkleFamily.MMB ? "mmb" : "mmr";
+        args[2] = generation == GenerationMode.Synthetic ? "synthetic" : "generate";
+        args[3] = "--family";
+        args[4] = c.family == LibMerkle.Family.MMB ? "mmb" : "mmr";
         args[5] = "--leaf-count";
         args[6] = vm.toString(c.leaves);
         args[7] = "--start";
@@ -937,16 +887,16 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[11] = "--seed";
         args[12] = vm.toString(uint256(seed));
         args[13] = "--bagging";
-        args[14] = c.backward ? "backward" : "forward";
+        args[14] = c.bagging == LibMerkle.Bagging.BackwardFold ? "backward" : "forward";
         args[15] = "--inactive-peaks";
         args[16] = vm.toString(c.inactive);
         (c.root, c.elements, c.proof, c.leaves) = abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256));
         return c;
     }
 
-    function generateMulti(CompatibilityCase memory c, uint64 seed, bool synthetic)
+    function generateMulti(RootPolicyCase memory c, uint64 seed, GenerationMode generation)
         internal
-        returns (CompatibilityCase memory)
+        returns (RootPolicyCase memory)
     {
         string memory locations = vm.toString(c.indices[0]);
         for (uint256 i = 1; i < c.indices.length; ++i) {
@@ -955,9 +905,9 @@ abstract contract MerkleTestCommon is VerifierHarness {
         string[] memory args = new string[](15);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
-        args[2] = synthetic ? "synthetic-multi" : "generate-multi";
-        args[3] = "--kind";
-        args[4] = c.family == MerkleFamily.MMB ? "mmb" : "mmr";
+        args[2] = generation == GenerationMode.Synthetic ? "synthetic-multi" : "generate-multi";
+        args[3] = "--family";
+        args[4] = c.family == LibMerkle.Family.MMB ? "mmb" : "mmr";
         args[5] = "--leaf-count";
         args[6] = vm.toString(c.leaves);
         args[7] = "--locations";
@@ -965,40 +915,40 @@ abstract contract MerkleTestCommon is VerifierHarness {
         args[9] = "--seed";
         args[10] = vm.toString(uint256(seed));
         args[11] = "--bagging";
-        args[12] = c.backward ? "backward" : "forward";
+        args[12] = c.bagging == LibMerkle.Bagging.BackwardFold ? "backward" : "forward";
         args[13] = "--inactive-peaks";
         args[14] = vm.toString(c.inactive);
         (c.root, c.elements, c.proof, c.leaves, c.positions) =
             abi.decode(_ffi(args), (bytes32, bytes32[], bytes32[], uint256, uint256[]));
-        c.mode = 2;
+        c.proofKind = ProofKind.Multi;
         return c;
     }
 
-    function rustCheckCompatibility(CompatibilityCase memory c) internal returns (bool) {
+    function rustCheckRootPolicy(RootPolicyCase memory c) internal returns (bool) {
         string[] memory args = new string[](11);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "merkle";
-        args[2] = c.mode == 2 ? "check-multi" : "check";
-        args[3] = "--kind";
-        args[4] = c.family == MerkleFamily.MMB ? "mmb" : "mmr";
+        args[2] = c.proofKind == ProofKind.Multi ? "check-multi" : "check";
+        args[3] = "--family";
+        args[4] = c.family == LibMerkle.Family.MMB ? "mmb" : "mmr";
         args[5] = "--abi-hex";
-        args[6] = c.mode == 2
+        args[6] = c.proofKind == ProofKind.Multi
             ? vm.toString(abi.encode(c.root, c.leaves, c.indices, c.elements, c.proof, c.positions))
             : vm.toString(abi.encode(c.root, c.leaves, c.start, c.elements, c.proof));
         args[7] = "--bagging";
-        args[8] = c.backward ? "backward" : "forward";
+        args[8] = c.bagging == LibMerkle.Bagging.BackwardFold ? "backward" : "forward";
         args[9] = "--inactive-peaks";
         args[10] = vm.toString(c.inactive);
         return abi.decode(_ffi(args), (bool));
     }
 
-    function compareCompatibility(CompatibilityCase memory c, bool expected) internal {
-        assertEq(rustCheckCompatibility(c), expected, "Commonware expected result");
-        assertEq(harness.checked(c, false), expected, "memory disagreement");
-        assertEq(harness.checked(c, true), expected, "calldata disagreement");
+    function compareRootPolicy(RootPolicyCase memory c, bool expected) internal {
+        assertEq(rustCheckRootPolicy(c), expected, "Commonware expected result");
+        assertEq(harness.checked(c, InputLocation.Memory), expected, "memory disagreement");
+        assertEq(harness.checked(c, InputLocation.Calldata), expected, "calldata disagreement");
     }
 
-    function slices(CompatibilityCase memory c, bool expected) internal view {
+    function slices(RootPolicyCase memory c, bool expected) internal view {
         uint256[] memory indices = c.indices;
         uint256[] memory positions = c.positions;
         bytes32[] memory elements = c.elements;
@@ -1023,66 +973,66 @@ abstract contract MerkleTestCommon is VerifierHarness {
         for (uint256 i; i < proof.length; ++i) {
             c.proof[i + 1] = proof[i];
         }
-        assertEq(harness.verify(c, true, true), expected, "sliced calldata disagreement");
+        assertEq(harness.verify(c, InputLocation.Calldata, true), expected, "sliced calldata disagreement");
         c.indices = indices;
         c.positions = positions;
         c.elements = elements;
         c.proof = proof;
     }
 
-    function exerciseCompatibility(CompatibilityCase memory c) internal {
-        compareCompatibility(c, true);
+    function exerciseRootPolicy(RootPolicyCase memory c) internal {
+        compareRootPolicy(c, true);
         slices(c, true);
         c.root ^= bytes32(uint256(1));
-        compareCompatibility(c, false);
+        compareRootPolicy(c, false);
         slices(c, false);
         c.root ^= bytes32(uint256(1));
         c.inactive += 1;
-        compareCompatibility(c, false);
+        compareRootPolicy(c, false);
         c.inactive -= 1;
         c.leaves += 1;
-        compareCompatibility(c, false);
+        compareRootPolicy(c, false);
         c.leaves -= 1;
         if (c.elements.length != 0) {
             c.elements[0] ^= bytes32(uint256(1));
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             c.elements[0] ^= bytes32(uint256(1));
         }
         bytes32[] memory proof = c.proof;
         uint256[] memory positions = c.positions;
         if (proof.length != 0) {
             proof[proof.length - 1] ^= bytes32(uint256(1));
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             proof[proof.length - 1] ^= bytes32(uint256(1));
             c.proof = new bytes32[](proof.length - 1);
             for (uint256 i; i < c.proof.length; ++i) {
                 c.proof[i] = proof[i];
             }
-            if (c.mode == 2) {
+            if (c.proofKind == ProofKind.Multi) {
                 c.positions = new uint256[](positions.length - 1);
                 for (uint256 i; i < c.positions.length; ++i) {
                     c.positions[i] = positions[i];
                 }
             }
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
         }
         c.proof = new bytes32[](proof.length + 1);
         for (uint256 i; i < proof.length; ++i) {
             c.proof[i] = proof[i];
         }
-        if (c.mode == 2) {
+        if (c.proofKind == ProofKind.Multi) {
             c.positions = new uint256[](positions.length + 1);
             for (uint256 i; i < positions.length; ++i) {
                 c.positions[i] = positions[i];
             }
             c.positions[positions.length] = positions.length == 0 ? 0 : positions[positions.length - 1] + 1;
         }
-        compareCompatibility(c, false);
+        compareRootPolicy(c, false);
         c.proof = proof;
         c.positions = positions;
     }
 
-    function peakWidths(MerkleFamily family, uint256 leaves) internal pure returns (uint256[] memory widths) {
+    function peakWidths(LibMerkle.Family family, uint256 leaves) internal pure returns (uint256[] memory widths) {
         widths = new uint256[](leaves);
         uint256 count;
         for (uint256 leaf; leaf < leaves; ++leaf) {
@@ -1094,35 +1044,36 @@ abstract contract MerkleTestCommon is VerifierHarness {
                     widths[k] = widths[k + 1];
                 }
                 --count;
-                if (family == MerkleFamily.MMB) break;
+                if (family == LibMerkle.Family.MMB) break;
                 j = count;
             }
         }
         assembly ("memory-safe") { mstore(widths, count) }
     }
 
-    function checkCompatibilityInactiveBoundaryMatrix(MerkleFamily family) internal {
+    function checkRootPolicyInactiveBoundaryMatrix(LibMerkle.Family family) internal {
         uint256[] memory widths = peakWidths(family, 31);
-        for (uint256 bagging; bagging < 2; ++bagging) {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
             for (uint256 inactive; inactive <= widths.length; ++inactive) {
-                CompatibilityCase memory c;
+                RootPolicyCase memory c;
+                c.proofKind = ProofKind.Range;
                 c.family = family;
-                c.backward = bagging != 0;
+                c.bagging = LibMerkle.Bagging(baggingIndex);
                 c.leaves = 31;
                 c.inactive = inactive;
                 uint256 boundary;
                 for (uint256 peak; peak < widths.length; ++peak) {
                     c.start = boundary;
-                    c = generateCompatibility(c, 1, 11, false);
-                    c.mode = 1;
-                    compareCompatibility(c, true);
-                    c.mode = 0;
-                    compareCompatibility(c, true);
+                    c = generateRootPolicy(c, 1, 11, GenerationMode.Materialized);
+                    c.proofKind = ProofKind.Single;
+                    compareRootPolicy(c, true);
+                    c.proofKind = ProofKind.Range;
+                    compareRootPolicy(c, true);
                     boundary += widths[peak];
                     if (boundary < c.leaves) {
                         c.start = boundary - 1;
-                        c = generateCompatibility(c, 2, 11, false);
-                        compareCompatibility(c, true);
+                        c = generateRootPolicy(c, 2, 11, GenerationMode.Materialized);
+                        compareRootPolicy(c, true);
                         slices(c, true);
                     }
                 }
@@ -1130,93 +1081,104 @@ abstract contract MerkleTestCommon is VerifierHarness {
         }
     }
 
-    function checkCompatibilityRangeMutations(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
-            CompatibilityCase memory c;
+    function checkRootPolicyRangeMutations(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+            RootPolicyCase memory c;
+            c.proofKind = ProofKind.Range;
             c.family = family;
-            c.backward = bagging != 0;
+            c.bagging = LibMerkle.Bagging(baggingIndex);
             c.leaves = 31;
             c.inactive = 2;
             c.start = 15;
-            exerciseCompatibility(generateCompatibility(c, 12, 7, false));
+            exerciseRootPolicy(generateRootPolicy(c, 12, 7, GenerationMode.Materialized));
             c.start = 30;
-            c.mode = 1;
-            exerciseCompatibility(generateCompatibility(c, 1, 7, false));
+            c.proofKind = ProofKind.Single;
+            exerciseRootPolicy(generateRootPolicy(c, 1, 7, GenerationMode.Materialized));
         }
     }
 
-    function checkCompatibilityRange(
-        MerkleFamily family,
-        bool backward,
+    function checkRootPolicyRange(
+        LibMerkle.Family family,
+        LibMerkle.Bagging bagging,
         uint8 n,
         uint8 s,
         uint8 len,
         uint8 inactive,
         uint64 seed
     ) internal {
-        CompatibilityCase memory c;
+        RootPolicyCase memory c;
+        c.proofKind = ProofKind.Range;
         c.family = family;
-        c.backward = backward;
+        c.bagging = bagging;
         c.leaves = uint256(n) % 64 + 1;
         c.start = uint256(s) % c.leaves;
         c.inactive = uint256(inactive) % (peakWidths(family, c.leaves).length + 1);
         uint256 length = uint256(len) % (c.leaves - c.start) + 1;
-        exerciseCompatibility(generateCompatibility(c, length, seed, false));
+        exerciseRootPolicy(generateRootPolicy(c, length, seed, GenerationMode.Materialized));
     }
 
-    function checkCompatibilityMaximumSize(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
-            CompatibilityCase memory c;
+    function checkRootPolicyMaximumSize(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+            RootPolicyCase memory c;
+            c.proofKind = ProofKind.Range;
             c.family = family;
-            c.backward = bagging != 0;
-            c.leaves = c.family == MerkleFamily.MMB ? 0x400000000000001e : 0x4000000000000000;
+            c.bagging = LibMerkle.Bagging(baggingIndex);
+            c.leaves = c.family == LibMerkle.Family.MMB ? 0x400000000000001e : 0x4000000000000000;
             c.inactive = 1;
             c.start = c.leaves / 2 - 1;
-            exerciseCompatibility(generateCompatibility(c, 4, 23, true));
+            exerciseRootPolicy(generateRootPolicy(c, 4, 23, GenerationMode.Synthetic));
             c.start = c.leaves - 1;
-            c.mode = 1;
-            exerciseCompatibility(generateCompatibility(c, 1, 29, true));
+            c.proofKind = ProofKind.Single;
+            exerciseRootPolicy(generateRootPolicy(c, 1, 29, GenerationMode.Synthetic));
         }
     }
 
-    function checkCompatibilityDeep(MerkleFamily family, bool backward, uint8 exponent, uint64 offset, uint64 seed)
-        internal
-    {
-        CompatibilityCase memory c;
+    function checkRootPolicyDeep(
+        LibMerkle.Family family,
+        LibMerkle.Bagging bagging,
+        uint8 exponent,
+        uint64 offset,
+        uint64 seed
+    ) internal {
+        RootPolicyCase memory c;
+        c.proofKind = ProofKind.Range;
         c.family = family;
-        c.backward = backward;
+        c.bagging = bagging;
         c.leaves = (uint256(1) << (uint256(exponent) % 61 + 2)) - 1;
         c.start = uint256(offset) % c.leaves;
         c.inactive = seed % 2;
-        exerciseCompatibility(generateCompatibility(c, c.leaves - c.start < 3 ? c.leaves - c.start : 3, seed, true));
+        exerciseRootPolicy(
+            generateRootPolicy(c, c.leaves - c.start < 3 ? c.leaves - c.start : 3, seed, GenerationMode.Synthetic)
+        );
     }
 
-    function checkCompatibilityEmpty(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
-            for (uint8 mode; mode < 3; mode += 2) {
-                CompatibilityCase memory c;
+    function checkRootPolicyEmpty(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+            for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); proofIndex += 2) {
+                ProofKind proofKind = ProofKind(proofIndex);
+                RootPolicyCase memory c;
                 c.family = family;
-                c.backward = bagging != 0;
-                c.mode = mode;
+                c.bagging = LibMerkle.Bagging(baggingIndex);
+                c.proofKind = proofKind;
                 c.root = _hash(abi.encodePacked(uint64(0)));
-                compareCompatibility(c, true);
+                compareRootPolicy(c, true);
                 slices(c, true);
                 c.inactive = 1;
-                compareCompatibility(c, false);
+                compareRootPolicy(c, false);
                 c.inactive = 0;
                 c.leaves = 1;
-                compareCompatibility(c, false);
+                compareRootPolicy(c, false);
             }
         }
     }
 
-    function checkCompatibilitySparseMatrix(MerkleFamily family) internal {
+    function checkRootPolicySparseMatrix(LibMerkle.Family family) internal {
         uint256 count = peakWidths(family, 31).length;
-        for (uint256 bagging; bagging < 2; ++bagging) {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
             for (uint256 inactive; inactive <= count; ++inactive) {
-                CompatibilityCase memory c;
+                RootPolicyCase memory c;
                 c.family = family;
-                c.backward = bagging != 0;
+                c.bagging = LibMerkle.Bagging(baggingIndex);
                 c.leaves = 31;
                 c.inactive = inactive;
                 c.indices = new uint256[](5);
@@ -1225,118 +1187,119 @@ abstract contract MerkleTestCommon is VerifierHarness {
                 c.indices[2] = 16;
                 c.indices[3] = 15;
                 c.indices[4] = 16;
-                exerciseCompatibility(generateMulti(c, 17, false));
+                exerciseRootPolicy(generateMulti(c, 17, GenerationMode.Materialized));
             }
         }
     }
 
-    function checkCompatibilitySparseWitnessOrdering(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
-            CompatibilityCase memory c;
+    function checkRootPolicySparseWitnessOrdering(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+            RootPolicyCase memory c;
             c.family = family;
-            c.backward = bagging != 0;
+            c.bagging = LibMerkle.Bagging(baggingIndex);
             c.leaves = 31;
             c.inactive = 2;
             c.indices = new uint256[](3);
             c.indices[0] = 30;
             c.indices[1] = 3;
             c.indices[2] = 3;
-            c = generateMulti(c, 9, false);
-            compareCompatibility(c, true);
+            c = generateMulti(c, 9, GenerationMode.Materialized);
+            compareRootPolicy(c, true);
             c.elements[2] ^= bytes32(uint256(1));
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             c.elements[2] ^= bytes32(uint256(1));
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
             (c.positions[0], c.positions[1]) = (c.positions[1], c.positions[0]);
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             (c.positions[0], c.positions[1]) = (c.positions[1], c.positions[0]);
             (c.positions[0], c.positions[1]) = (c.positions[1], c.positions[0]);
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             (c.positions[0], c.positions[1]) = (c.positions[1], c.positions[0]);
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
             uint256 position = c.positions[1];
             c.positions[1] = c.positions[0];
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             c.positions[1] = position;
             c.positions[c.positions.length - 1] = type(uint256).max;
-            compareCompatibility(c, false);
-            c = generateMulti(c, 9, false);
+            compareRootPolicy(c, false);
+            c = generateMulti(c, 9, GenerationMode.Materialized);
             uint256[] memory indices = c.indices;
             c.indices = new uint256[](2);
             c.indices[0] = indices[0];
             c.indices[1] = indices[1];
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             c.indices = indices;
             c.positions = new uint256[](0);
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
         }
     }
 
-    function checkCompatibilitySparse(MerkleFamily family, bool backward, uint8 n, uint64 seed) internal {
-        CompatibilityCase memory c;
+    function checkRootPolicySparse(LibMerkle.Family family, LibMerkle.Bagging bagging, uint8 n, uint64 seed) internal {
+        RootPolicyCase memory c;
         c.family = family;
-        c.backward = backward;
+        c.bagging = bagging;
         c.leaves = uint256(n) % 64 + 1;
         c.inactive = uint256(seed) % (peakWidths(family, c.leaves).length + 1);
         c.indices = new uint256[]((uint256(seed) >> 32) % 32 + 1);
         for (uint256 i; i < c.indices.length; ++i) {
             c.indices[i] = uint256(keccak256(abi.encode(seed, i))) % c.leaves;
         }
-        exerciseCompatibility(generateMulti(c, seed, false));
+        exerciseRootPolicy(generateMulti(c, seed, GenerationMode.Materialized));
     }
 
-    function checkCompatibilitySparseMaximumSize(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
-            CompatibilityCase memory c;
+    function checkRootPolicySparseMaximumSize(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+            RootPolicyCase memory c;
             c.family = family;
-            c.backward = bagging != 0;
-            c.leaves = c.family == MerkleFamily.MMB ? 0x400000000000001e : 0x4000000000000000;
+            c.bagging = LibMerkle.Bagging(baggingIndex);
+            c.leaves = c.family == LibMerkle.Family.MMB ? 0x400000000000001e : 0x4000000000000000;
             c.inactive = 1;
             c.indices = new uint256[](4);
             c.indices[0] = c.leaves - 1;
             c.indices[1] = 0;
             c.indices[2] = c.leaves / 2 - 1;
             c.indices[3] = c.leaves / 2;
-            exerciseCompatibility(generateMulti(c, 31, true));
+            exerciseRootPolicy(generateMulti(c, 31, GenerationMode.Synthetic));
         }
     }
 
-    function checkRootPolicyGas(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
-            CompatibilityCase memory c;
+    function checkRootPolicyGas(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+            RootPolicyCase memory c;
+            c.proofKind = ProofKind.Range;
             c.family = family;
-            c.backward = bagging != 0;
+            c.bagging = LibMerkle.Bagging(baggingIndex);
             c.leaves = 1023;
             c.start = 480;
             c.inactive = 2;
-            c = generateCompatibility(c, 64, 7, false);
-            string memory group = string.concat(c.family == MerkleFamily.MMB ? "MMB" : "MMR", "RootPolicy");
-            string memory fold = c.backward ? "backward" : "forward";
-            assertTrue(harness.verify(c, false, false));
+            c = generateRootPolicy(c, 64, 7, GenerationMode.Materialized);
+            string memory group = string.concat(c.family == LibMerkle.Family.MMB ? "MMB" : "MMR", "RootPolicy");
+            string memory fold = c.bagging == LibMerkle.Bagging.BackwardFold ? "backward" : "forward";
+            assertTrue(harness.verify(c, InputLocation.Memory, false));
             vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-range-memory"));
-            assertTrue(harness.verify(c, true, false));
+            assertTrue(harness.verify(c, InputLocation.Calldata, false));
             vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-range-calldata"));
             c.indices = new uint256[](3);
             c.indices[0] = 0;
             c.indices[1] = 511;
             c.indices[2] = 1022;
-            c = generateMulti(c, 7, false);
-            assertTrue(harness.verify(c, false, false));
+            c = generateMulti(c, 7, GenerationMode.Materialized);
+            assertTrue(harness.verify(c, InputLocation.Memory, false));
             vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-sparse-memory"));
-            assertTrue(harness.verify(c, true, false));
+            assertTrue(harness.verify(c, InputLocation.Calldata, false));
             vm.snapshotGasLastFrame(_group(group), string.concat(fold, "-inactive-sparse-calldata"));
         }
     }
 
-    function checkCompatibilitySparseExactUnion(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
+    function checkRootPolicySparseExactUnion(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
             for (uint256 shape; shape < 5; ++shape) {
-                CompatibilityCase memory c;
+                RootPolicyCase memory c;
                 c.family = family;
-                c.backward = bagging != 0;
+                c.bagging = LibMerkle.Bagging(baggingIndex);
                 c.leaves = 7;
                 c.inactive = 1;
                 c.indices = new uint256[](shape == 0 ? 7 : shape == 4 ? 4 : 2);
@@ -1348,61 +1311,67 @@ abstract contract MerkleTestCommon is VerifierHarness {
                     c.indices[0] = 0;
                     c.indices[1] = shape == 1 ? 1 : shape == 2 ? 3 : 6;
                 }
-                c = generateMulti(c, 43, false);
+                c = generateMulti(c, 43, GenerationMode.Materialized);
                 assertGt(c.proof.length, 0, "Rust union includes witnesses for supplied leaves");
                 if (shape == 0) {
                     for (uint256 witness; witness < c.proof.length; ++witness) {
                         c.proof[witness] ^= bytes32(uint256(1));
-                        compareCompatibility(c, false);
+                        compareRootPolicy(c, false);
                         c.proof[witness] ^= bytes32(uint256(1));
                     }
                 }
-                exerciseCompatibility(c);
+                exerciseRootPolicy(c);
                 c.inactive = 0;
-                compareCompatibility(c, false);
+                compareRootPolicy(c, false);
             }
         }
     }
 
-    function checkCompatibilityInvalidBounds(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
-            for (uint8 mode; mode < 3; ++mode) {
-                CompatibilityCase memory c;
+    function checkRootPolicyInvalidBounds(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+            for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+                ProofKind proofKind = ProofKind(proofIndex);
+                RootPolicyCase memory c;
                 c.family = family;
-                c.backward = bagging != 0;
-                c.mode = mode;
+                c.bagging = LibMerkle.Bagging(baggingIndex);
+                c.proofKind = proofKind;
                 c.leaves = 1;
                 c.elements = new bytes32[](1);
                 c.indices = new uint256[](1);
-                c = mode == 2 ? generateMulti(c, 19, false) : generateCompatibility(c, 1, 19, false);
-                c.leaves = (c.family == MerkleFamily.MMB ? 0x400000000000001e : 0x4000000000000000) + 1;
-                compareCompatibility(c, false);
+                c = proofKind == ProofKind.Multi
+                    ? generateMulti(c, 19, GenerationMode.Materialized)
+                    : generateRootPolicy(c, 1, 19, GenerationMode.Materialized);
+                c.leaves = (c.family == LibMerkle.Family.MMB ? 0x400000000000001e : 0x4000000000000000) + 1;
+                compareRootPolicy(c, false);
                 c.leaves = 1;
                 c.start = type(uint256).max;
                 c.indices[0] = type(uint256).max;
-                compareCompatibility(c, false);
+                compareRootPolicy(c, false);
             }
         }
     }
 
-    function checkCompatibilityRootPolicyBinding(MerkleFamily family) internal {
-        for (uint256 bagging; bagging < 2; ++bagging) {
-            CompatibilityCase memory c;
+    function checkRootPolicyBinding(LibMerkle.Family family) internal {
+        for (uint256 baggingIndex; baggingIndex <= uint256(LibMerkle.Bagging.BackwardFold); ++baggingIndex) {
+            RootPolicyCase memory c;
+            c.proofKind = ProofKind.Range;
             c.family = family;
-            c.backward = bagging != 0;
+            c.bagging = LibMerkle.Bagging(baggingIndex);
             c.leaves = 31;
             c.start = 3;
-            c = generateCompatibility(c, 2, 41, false);
+            c = generateRootPolicy(c, 2, 41, GenerationMode.Materialized);
             bytes32 zeroBoundaryRoot = c.root;
             c.inactive = 1;
-            c = generateCompatibility(c, 2, 41, false);
+            c = generateRootPolicy(c, 2, 41, GenerationMode.Materialized);
             assertNotEq(c.root, zeroBoundaryRoot, "inactive boundary is root bound");
-            compareCompatibility(c, true);
+            compareRootPolicy(c, true);
             c.inactive = 0;
-            compareCompatibility(c, false);
+            compareRootPolicy(c, false);
             c.inactive = 1;
-            c.backward = !c.backward;
-            compareCompatibility(c, false);
+            c.bagging = c.bagging == LibMerkle.Bagging.ForwardFold
+                ? LibMerkle.Bagging.BackwardFold
+                : LibMerkle.Bagging.ForwardFold;
+            compareRootPolicy(c, false);
         }
     }
 }
@@ -1444,7 +1413,7 @@ contract WritingHasher {
     }
 }
 
-contract RawCompatibilityHarness is CompatibilityHarness {
+contract RawRootPolicyHarness is RootPolicyHarness {
     /// @dev Select the raw adapter installed by the test at a fixed non-precompile address.
     function _hasher() internal pure override returns (address) {
         return address(0x123400);
@@ -1453,6 +1422,12 @@ contract RawCompatibilityHarness is CompatibilityHarness {
 
 /// @dev Test raw external hash targets through the same proof and memory contracts as precompiles.
 contract HashAddressTest is MerkleTestCommon {
+    enum HashTarget {
+        Keccak256,
+        Sha256Precompile,
+        Sha256Raw
+    }
+
     enum VerifierKind {
         MMR,
         MMB,
@@ -1467,13 +1442,13 @@ contract HashAddressTest is MerkleTestCommon {
     /// @dev Install a selector-free SHA-256 adapter and its compatibility harness.
     function setUp() public {
         vm.etch(_hasher(), address(new RawSha256Hasher()).code);
-        harness = new RawCompatibilityHarness();
+        harness = new RawRootPolicyHarness();
     }
 
     /// @dev Cover positioned leaf, parent, root and peak preimages with caller memory checks.
     function test_RawAdapterMemorySafety() public {
-        for (uint256 i; i <= uint256(MerkleFamily.MMB); ++i) {
-            MerkleFamily family = MerkleFamily(i);
+        for (uint256 i; i <= uint256(LibMerkle.Family.MMB); ++i) {
+            LibMerkle.Family family = LibMerkle.Family(i);
             checkMemoryExitPaths(family);
             checkMemorySafety(family, 30, bytes32(uint256(79)), false);
             checkMemorySafety(family, 30, bytes32(uint256(79)), true);
@@ -1482,18 +1457,20 @@ contract HashAddressTest is MerkleTestCommon {
 
     /// @dev Compare external hashing with Rust across both bagging policies and inactive peaks.
     function test_DifferentialRawAdapterPolicies() public {
-        for (uint256 i; i <= uint256(MerkleFamily.MMB); ++i) {
-            MerkleFamily family = MerkleFamily(i);
-            checkCompatibilityRange(family, false, 30, 3, 9, 2, 71);
-            checkCompatibilityRange(family, true, 30, 3, 9, 2, 71);
-            checkCompatibilitySparse(family, false, 30, 71);
-            checkCompatibilitySparse(family, true, 30, 71);
+        for (uint256 i; i <= uint256(LibMerkle.Family.MMB); ++i) {
+            LibMerkle.Family family = LibMerkle.Family(i);
+            checkRootPolicyRange(family, LibMerkle.Bagging.ForwardFold, 30, 3, 9, 2, 71);
+            checkRootPolicyRange(family, LibMerkle.Bagging.BackwardFold, 30, 3, 9, 2, 71);
+            checkRootPolicySparse(family, LibMerkle.Bagging.ForwardFold, 30, 71);
+            checkRootPolicySparse(family, LibMerkle.Bagging.BackwardFold, 30, 71);
         }
     }
 
     /// @dev Build a one-leaf proof shared by the three verification shapes.
-    function singleCase(VerifierKind family) internal pure returns (CompatibilityCase memory c) {
-        c.family = family == VerifierKind.MMB ? MerkleFamily.MMB : MerkleFamily.MMR;
+    function singleCase(VerifierKind family) internal pure returns (RootPolicyCase memory c) {
+        c.proofKind = ProofKind.Single;
+        c.bagging = LibMerkle.Bagging.ForwardFold;
+        c.family = family == VerifierKind.MMB ? LibMerkle.Family.MMB : LibMerkle.Family.MMR;
         c.leaves = 1;
         c.elements = new bytes32[](1);
         c.elements[0] = bytes32(uint256(42));
@@ -1504,18 +1481,18 @@ contract HashAddressTest is MerkleTestCommon {
     }
 
     /// @dev Exercise each BMT shape and input location against a raw hash address.
-    function bmtVerify(CompatibilityCase calldata c, bool direct) external view returns (bool) {
-        if (c.mode == 1) {
-            return direct
+    function bmtVerify(RootPolicyCase calldata c, InputLocation inputLocation) external view returns (bool) {
+        if (c.proofKind == ProofKind.Single) {
+            return inputLocation == InputLocation.Calldata
                 ? LibBMT.verifyCalldata(c.root, c.leaves, c.start, c.elements[0], c.proof, _hasher())
                 : LibBMT.verify(c.root, c.leaves, c.start, c.elements[0], c.proof, _hasher());
         }
-        if (c.mode == 2) {
-            return direct
+        if (c.proofKind == ProofKind.Multi) {
+            return inputLocation == InputLocation.Calldata
                 ? LibBMT.verifyMultiCalldata(c.root, c.leaves, c.indices, c.elements, c.proof, _hasher())
                 : LibBMT.verifyMulti(c.root, c.leaves, c.indices, c.elements, c.proof, _hasher());
         }
-        return direct
+        return inputLocation == InputLocation.Calldata
             ? LibBMT.verifyRangeCalldata(c.root, c.leaves, c.start, c.elements, c.proof, _hasher())
             : LibBMT.verifyRange(c.root, c.leaves, c.start, c.elements, c.proof, _hasher());
     }
@@ -1524,14 +1501,16 @@ contract HashAddressTest is MerkleTestCommon {
     function test_RawAdapterAndCrossHashRejection() public view {
         for (uint256 i; i <= uint256(VerifierKind.BMT); ++i) {
             VerifierKind family = VerifierKind(i);
-            CompatibilityCase memory c = singleCase(family);
-            for (uint8 mode; mode < 3; ++mode) {
-                c.mode = mode;
-                for (uint256 location; location < 2; ++location) {
+            RootPolicyCase memory c = singleCase(family);
+            for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+                ProofKind proofKind = ProofKind(proofIndex);
+                c.proofKind = proofKind;
+                for (uint256 locationIndex; locationIndex <= uint256(InputLocation.Calldata); ++locationIndex) {
+                    InputLocation inputLocation = InputLocation(locationIndex);
                     assertTrue(
                         family == VerifierKind.BMT
-                            ? this.bmtVerify(c, location != 0)
-                            : harness.checked(c, location != 0)
+                            ? this.bmtVerify(c, inputLocation)
+                            : harness.checked(c, inputLocation)
                     );
                 }
             }
@@ -1550,13 +1529,15 @@ contract HashAddressTest is MerkleTestCommon {
             c.root = family == VerifierKind.BMT
                 ? keccak256(abi.encodePacked(uint32(1), keccak256(abi.encodePacked(uint32(0), c.elements[0]))))
                 : keccak256(abi.encodePacked(uint64(1), keccak256(abi.encodePacked(uint64(0), c.elements[0]))));
-            for (uint8 mode; mode < 3; ++mode) {
-                c.mode = mode;
-                for (uint256 location; location < 2; ++location) {
+            for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+                ProofKind proofKind = ProofKind(proofIndex);
+                c.proofKind = proofKind;
+                for (uint256 locationIndex; locationIndex <= uint256(InputLocation.Calldata); ++locationIndex) {
+                    InputLocation inputLocation = InputLocation(locationIndex);
                     assertFalse(
                         family == VerifierKind.BMT
-                            ? this.bmtVerify(c, location != 0)
-                            : harness.checked(c, location != 0)
+                            ? this.bmtVerify(c, inputLocation)
+                            : harness.checked(c, inputLocation)
                     );
                 }
             }
@@ -1565,7 +1546,7 @@ contract HashAddressTest is MerkleTestCommon {
 
     /// @dev External hashing covers BMT parent preimages, odd duplication, and the empty inner root.
     function test_RawAdapterBmtOddAndEmpty() public view {
-        CompatibilityCase memory c;
+        RootPolicyCase memory c;
         c.leaves = 3;
         c.elements = new bytes32[](1);
         c.elements[0] = bytes32(uint256(42));
@@ -1582,19 +1563,21 @@ contract HashAddressTest is MerkleTestCommon {
         c.root = sha256(
             abi.encodePacked(uint32(3), sha256(abi.encodePacked(c.proof[0], sha256(abi.encodePacked(leaf, leaf)))))
         );
-        for (uint8 mode; mode < 3; ++mode) {
-            c.mode = mode;
-            assertTrue(this.bmtVerify(c, false));
-            assertTrue(this.bmtVerify(c, true));
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+            ProofKind proofKind = ProofKind(proofIndex);
+            c.proofKind = proofKind;
+            assertTrue(this.bmtVerify(c, InputLocation.Memory));
+            assertTrue(this.bmtVerify(c, InputLocation.Calldata));
         }
         c.leaves = c.start = 0;
         c.elements = c.proof = new bytes32[](0);
         c.indices = new uint256[](0);
         c.root = sha256(abi.encodePacked(uint32(0), sha256("")));
-        for (uint8 mode; mode < 3; mode += 2) {
-            c.mode = mode;
-            assertTrue(this.bmtVerify(c, false));
-            assertTrue(this.bmtVerify(c, true));
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); proofIndex += 2) {
+            ProofKind proofKind = ProofKind(proofIndex);
+            c.proofKind = proofKind;
+            assertTrue(this.bmtVerify(c, InputLocation.Memory));
+            assertTrue(this.bmtVerify(c, InputLocation.Calldata));
         }
     }
 
@@ -1607,25 +1590,31 @@ contract HashAddressTest is MerkleTestCommon {
         for (uint256 i; i < length; ++i) {
             input[i] = words[offset + i];
         }
-        for (uint256 algorithm; algorithm < 3; ++algorithm) {
-            address target = algorithm == 0 ? address(0) : algorithm == 1 ? address(2) : _hasher();
-            bytes32 expected = algorithm == 0 ? keccak256(input) : sha256(input);
+        for (uint256 targetIndex; targetIndex <= uint256(HashTarget.Sha256Raw); ++targetIndex) {
+            HashTarget hashTarget = HashTarget(targetIndex);
+            address target = hashTarget == HashTarget.Keccak256
+                ? address(0)
+                : hashTarget == HashTarget.Sha256Precompile ? address(2) : _hasher();
+            bytes32 expected = hashTarget == HashTarget.Keccak256 ? keccak256(input) : sha256(input);
             assertEq(LibMerkle.hashSlice(a, b, offset, length, target), expected);
         }
     }
 
     /// @dev Hash target selection depends only on the address's low 160 bits.
     function test_DirtyHasherAddress() public view {
-        for (uint256 algorithm; algorithm < 3; ++algorithm) {
-            address target = algorithm == 0 ? address(0) : algorithm == 1 ? address(2) : _hasher();
+        for (uint256 targetIndex; targetIndex <= uint256(HashTarget.Sha256Raw); ++targetIndex) {
+            HashTarget hashTarget = HashTarget(targetIndex);
+            address target = hashTarget == HashTarget.Keccak256
+                ? address(0)
+                : hashTarget == HashTarget.Sha256Precompile ? address(2) : _hasher();
             assembly ("memory-safe") { target := or(target, shl(160, not(0))) }
             bytes memory input = hex"00112233445566778899";
-            bytes32 expected = algorithm == 0 ? keccak256(input) : sha256(input);
+            bytes32 expected = hashTarget == HashTarget.Keccak256 ? keccak256(input) : sha256(input);
             assertEq(LibMerkle.hashSlice(hex"00112233445566778899", 0, 0, input.length, target), expected);
             for (uint256 i; i <= uint256(VerifierKind.BMT); ++i) {
                 VerifierKind family = VerifierKind(i);
-                CompatibilityCase memory c = singleCase(family);
-                if (algorithm == 0) {
+                RootPolicyCase memory c = singleCase(family);
+                if (hashTarget == HashTarget.Keccak256) {
                     c.root = family == VerifierKind.BMT
                         ? keccak256(abi.encodePacked(uint32(1), keccak256(abi.encodePacked(uint32(0), c.elements[0]))))
                         : keccak256(abi.encodePacked(uint64(1), keccak256(abi.encodePacked(uint64(0), c.elements[0]))));
@@ -1690,13 +1679,15 @@ contract HashAddressTest is MerkleTestCommon {
             vm.etch(_hasher(), code);
             for (uint256 i; i <= uint256(VerifierKind.BMT); ++i) {
                 VerifierKind family = VerifierKind(i);
-                CompatibilityCase memory c = singleCase(family);
-                for (uint8 mode; mode < 3; ++mode) {
-                    c.mode = mode;
-                    for (uint256 location; location < 2; ++location) {
+                RootPolicyCase memory c = singleCase(family);
+                for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+                    ProofKind proofKind = ProofKind(proofIndex);
+                    c.proofKind = proofKind;
+                    for (uint256 locationIndex; locationIndex <= uint256(InputLocation.Calldata); ++locationIndex) {
+                        InputLocation inputLocation = InputLocation(locationIndex);
                         vm.expectRevert(LibMerkle.HashFailed.selector);
-                        if (family == VerifierKind.BMT) this.bmtVerify(c, location != 0);
-                        else harness.verify(c, location != 0, false);
+                        if (family == VerifierKind.BMT) this.bmtVerify(c, inputLocation);
+                        else harness.verify(c, inputLocation, false);
                     }
                 }
             }
@@ -1708,13 +1699,15 @@ contract HashAddressTest is MerkleTestCommon {
         vm.etch(_hasher(), address(new WritingHasher()).code);
         for (uint256 i; i <= uint256(VerifierKind.BMT); ++i) {
             VerifierKind family = VerifierKind(i);
-            CompatibilityCase memory c = singleCase(family);
-            for (uint8 mode; mode < 3; ++mode) {
-                c.mode = mode;
-                for (uint256 location; location < 2; ++location) {
+            RootPolicyCase memory c = singleCase(family);
+            for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+                ProofKind proofKind = ProofKind(proofIndex);
+                c.proofKind = proofKind;
+                for (uint256 locationIndex; locationIndex <= uint256(InputLocation.Calldata); ++locationIndex) {
+                    InputLocation inputLocation = InputLocation(locationIndex);
                     bytes memory input = family == VerifierKind.BMT
-                        ? abi.encodeCall(this.bmtVerify, (c, location != 0))
-                        : abi.encodeCall(harness.verify, (c, location != 0, false));
+                        ? abi.encodeCall(this.bmtVerify, (c, inputLocation))
+                        : abi.encodeCall(harness.verify, (c, inputLocation, false));
                     (bool success, bytes memory result) =
                         (family == VerifierKind.BMT ? address(this) : address(harness)).staticcall{ gas: 200000 }(input);
                     assertFalse(success);
@@ -1726,13 +1719,13 @@ contract HashAddressTest is MerkleTestCommon {
     }
 }
 
-contract Keccak256CompatibilityHarness is CompatibilityHarness {
+contract Keccak256RootPolicyHarness is RootPolicyHarness {
     function _hasher() internal pure override returns (address) {
         return address(0);
     }
 }
 
-contract Sha256CompatibilityHarness is CompatibilityHarness {
+contract Sha256RootPolicyHarness is RootPolicyHarness {
     function _hasher() internal pure override returns (address) {
         return address(2);
     }

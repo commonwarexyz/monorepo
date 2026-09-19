@@ -67,7 +67,7 @@ library LibQMDBCurrent {
     /// @param key Key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
     /// @param proof Single-operation proof with an activity chunk.
-    /// @param mmb True for MMB and false for MMR.
+    /// @param family Append family of the authenticated database.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
@@ -76,11 +76,11 @@ library LibQMDBCurrent {
         bytes32 key,
         bytes memory operation,
         Proof calldata proof,
-        bool mmb,
+        LibMerkle.Family family,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
-        return _excludes(key, operation, proof.location) && verify(root, operation, proof, mmb, chunkBytes, hasher);
+        return _excludes(key, operation, proof.location) && verify(root, operation, proof, family, chunkBytes, hasher);
     }
 
     /// @notice Verify ordered key exclusion in a current QMDB with variable operation encoding.
@@ -92,7 +92,7 @@ library LibQMDBCurrent {
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
     /// @param proof Active operation membership proof.
     /// @param encoding Trusted key and value encoding configuration bound to `root`.
-    /// @param mmb True for MMB and false for MMR.
+    /// @param family Append family of the authenticated database.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
@@ -102,12 +102,12 @@ library LibQMDBCurrent {
         bytes memory operation,
         Proof calldata proof,
         ExclusionEncoding memory encoding,
-        bool mmb,
+        LibMerkle.Family family,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
         return _excludesVariable(key, operation, proof.location, encoding)
-            && verify(root, operation, proof, mmb, chunkBytes, hasher);
+            && verify(root, operation, proof, family, chunkBytes, hasher);
     }
 
     /// @dev An active update excludes the open cyclic interval between its keys, including
@@ -142,15 +142,16 @@ library LibQMDBCurrent {
     }
 
     /// @dev Authenticate operation bytes and every touched activity chunk. Inactive operations are valid.
-    /// Chunks are validated before reconstructing their grafted range. `mmb` selects MMB when true and MMR otherwise.
+    /// Chunks are validated before reconstructing their grafted range in the selected family.
     function verifyRange(
         bytes32 root,
         bytes[] memory operations,
         RangeProof calldata proof,
-        bool mmb,
+        LibMerkle.Family family,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
+        bool mmb = family == LibMerkle.Family.MMB;
         if (!_validChunkBytes(chunkBytes)) return false;
         uint256 height = LibMerkle.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
@@ -193,7 +194,7 @@ library LibQMDBCurrent {
             proof.digests,
             proof.inactivePeaks,
             LibMerkle.RangeGraft(chunkData, firstChunk, graftable, chunkBytes << 3),
-            mmb,
+            family,
             hasher
         );
         return
@@ -203,16 +204,17 @@ library LibQMDBCurrent {
     }
 
     /// @dev Authenticate an operation root from the same snapshot before verifying its sparse inclusion proof.
-    /// This proves historical inclusion without establishing activity. `mmb` selects MMB when true and MMR otherwise.
+    /// This proves historical inclusion without establishing activity.
     function verifyOpsMulti(
         bytes32 root,
         bytes[] memory operations,
         LibQMDBCommon.MultiProof calldata proof,
         OpsRootWitness calldata witness,
-        bool mmb,
+        LibMerkle.Family family,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
+        bool mmb = family == LibMerkle.Family.MMB;
         if (!_validChunkBytes(chunkBytes)) return false;
         uint256 height = LibMerkle.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
@@ -233,19 +235,20 @@ library LibQMDBCurrent {
                     hasher
                 ) != root
         ) return false;
-        return LibQMDBCommon.verifyMulti(witness.opsRoot, operations, proof, mmb, hasher);
+        return LibQMDBCommon.verifyMulti(witness.opsRoot, operations, proof, family, hasher);
     }
 
     /// @dev Authenticate an encoded operation and its active bit against the supplied current root.
-    /// `mmb` selects MMB when true and MMR otherwise, determining leaf bounds, physical positions, and graftable chunks.
+    /// The family determines leaf bounds, physical positions, and graftable chunks.
     function verify(
         bytes32 root,
         bytes memory operation,
         Proof calldata proof,
-        bool mmb,
+        LibMerkle.Family family,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
+        bool mmb = family == LibMerkle.Family.MMB;
         if (!_validChunkBytes(chunkBytes)) return false;
         uint256 height = LibMerkle.log2(chunkBytes) + 3;
         uint256 n = proof.leaves;
@@ -279,7 +282,7 @@ library LibQMDBCurrent {
             proof.digests,
             proof.inactivePeaks,
             LibMerkle.Graft(chunkData, chunkBytes << 3),
-            mmb,
+            family,
             hasher
         );
         if (!valid) return false;

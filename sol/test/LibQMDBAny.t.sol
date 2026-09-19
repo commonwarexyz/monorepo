@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { UnorderedOracle, MerkleFamily } from "./Common.t.sol";
+import { LibMerkle } from "../src/merkle/LibMerkle.sol";
+import { UnorderedOracle, RootKind } from "./Common.t.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
 import { LibQMDBAnyMMR } from "../src/qmdb/LibQMDBAnyMMR.sol";
@@ -23,7 +24,7 @@ struct AnyNode {
 abstract contract LibQMDBAnyTest is UnorderedOracle {
     /// @dev Expose the selected family through a calldata proof entrypoint.
     function verify(AnyCase calldata c) external view returns (bool) {
-        return _family() == MerkleFamily.MMB
+        return _family() == LibMerkle.Family.MMB
             ? LibQMDBAnyMMB.verify(c.root, c.operation, c.proof, _hasher())
             : LibQMDBAnyMMR.verify(c.root, c.operation, c.proof, _hasher());
     }
@@ -43,7 +44,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
                     mstore(p, not(0))
                 }
             }
-            bool result = _family() == MerkleFamily.MMB
+            bool result = _family() == LibMerkle.Family.MMB
                 ? LibQMDBAnyMMB.verify(c.root, operation, c.proof, _hasher())
                 : LibQMDBAnyMMR.verify(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
@@ -94,7 +95,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
                     peaks[k] = peaks[k + 1];
                 }
                 --count;
-                if (_family() == MerkleFamily.MMB) break;
+                if (_family() == LibMerkle.Family.MMB) break;
                 j = count;
             }
         }
@@ -222,7 +223,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         c.proof.location = 0;
         c.proof.leaves = 0;
         assertFalse(this.checked(c), "empty tree accepted");
-        c.proof.leaves = (uint256(1) << 62) + (_family() == MerkleFamily.MMB ? 31 : 1);
+        c.proof.leaves = (uint256(1) << 62) + (_family() == LibMerkle.Family.MMB ? 31 : 1);
         assertFalse(this.checked(c), "unsupported leaf count accepted");
         c.proof.leaves = type(uint256).max;
         assertFalse(this.checked(c), "oversized leaf count accepted");
@@ -239,7 +240,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
 
     /// @dev A root and proof from a distinct topology fail under the other family.
     function rejectOtherFamily(AnyCase calldata c) external view {
-        bool valid = _family() == MerkleFamily.MMB
+        bool valid = _family() == LibMerkle.Family.MMB
             ? LibQMDBAnyMMR.verify(c.root, c.operation, c.proof, _hasher())
             : LibQMDBAnyMMB.verify(c.root, c.operation, c.proof, _hasher());
         assertFalse(valid, "proof accepted by the other append family");
@@ -260,8 +261,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         internal
         returns (AnyCase memory c)
     {
-        bool historical = bytes(history).length != 0;
-        string[] memory args = new string[](historical ? 17 : 15);
+        string[] memory args = new string[](15);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "any";
@@ -274,13 +274,9 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         args[9] = "--inactivity-floor";
         args[10] = vm.toString(floor);
         args[11] = "--family";
-        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
-        args[13] = "--chunk-bytes";
-        args[14] = "32";
-        if (historical) {
-            args[15] = "--history";
-            args[16] = history;
-        }
+        args[12] = _family() == LibMerkle.Family.MMB ? "mmb" : "mmr";
+        args[13] = "--history";
+        args[14] = history;
         (c.root, c.proof.leaves, c.proof.location, c.proof.inactivePeaks, c.proof.digests, c.operation) =
             abi.decode(_ffi(args), (bytes32, uint256, uint256, uint256, bytes32[], bytes));
         assertEq(c.proof.leaves, leaves);
@@ -303,10 +299,10 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
                                 768,
                                 encoding == 0 ? "fixed" : "variable",
                                 operations[i],
-                                "",
-                                false,
+                                i == 0 ? "indexed" : "",
+                                RootKind.Operations,
                                 lengths[j],
-                                32
+                                0
                             ),
                             (bytes32, uint256, uint256, uint256, bytes32[], bytes)
                         );
@@ -332,9 +328,9 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
                             encoding == 0 ? "fixed" : "variable",
                             "update",
                             history == 0 ? "updated" : "deleted",
-                            false,
-                            128,
-                            32
+                            RootKind.Operations,
+                            encoding == 0 ? 0 : 128,
+                            0
                         ),
                         (bytes32, uint256, uint256, uint256, bytes32[], bytes)
                     );
@@ -347,8 +343,8 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
     function test_DifferentialBoundaryTrees() public {
         uint256[10] memory sizes = [uint256(1), 2, 7, 8, 255, 256, 257, 383, 512, 1023];
         for (uint256 i; i < sizes.length; ++i) {
-            assertTrue(this.checked(generate(sizes[i], 0, 0, "")));
-            if (sizes[i] > 1) assertTrue(this.checked(generate(sizes[i], sizes[i] - 1, 0, "")));
+            assertTrue(this.checked(generate(sizes[i], 0, 0, "indexed")));
+            if (sizes[i] > 1) assertTrue(this.checked(generate(sizes[i], sizes[i] - 1, 0, "indexed")));
         }
     }
 
@@ -357,7 +353,7 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         uint256 n = uint256(sizeSeed) % 1536 + 1;
         uint256 floor = uint256(floorSeed) % n;
         uint256 location = floor + uint256(locationSeed) % (n - floor);
-        AnyCase memory c = generate(n, location, floor, "");
+        AnyCase memory c = generate(n, location, floor, "indexed");
         assertTrue(this.checked(c));
         c.operation = abi.encodePacked(c.operation, bytes1(0));
         assertFalse(this.checked(c), "modified oracle operation accepted");
@@ -368,11 +364,11 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
         uint256[4] memory floors = [uint256(512), 768, 1024, 1280];
         for (uint256 i; i < floors.length; ++i) {
             uint256 n = i < 2 ? 1023 : 1535;
-            assertTrue(this.checked(generate(n, floors[i], floors[i], "")));
-            AnyCase memory c = generate(n, n - 1, floors[i], "");
+            assertTrue(this.checked(generate(n, floors[i], floors[i], "indexed")));
+            AnyCase memory c = generate(n, n - 1, floors[i], "indexed");
             assertGt(c.proof.inactivePeaks, 0, "fixture has no inactive peaks");
             rejectMutations(c);
-            c = generate(n, n - 1, floors[i], "");
+            c = generate(n, n - 1, floors[i], "indexed");
             c.proof.inactivePeaks = 0;
             assertFalse(this.checked(c), "inactive boundary is not bound");
         }
@@ -393,8 +389,8 @@ abstract contract LibQMDBAnyTest is UnorderedOracle {
 }
 
 abstract contract LibQMDBAnyMMBTest is LibQMDBAnyTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMB;
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMB;
     }
 }
 
@@ -411,8 +407,8 @@ contract LibQMDBAnyMMBSha256Test is LibQMDBAnyMMBTest {
 }
 
 abstract contract LibQMDBAnyMMRTest is LibQMDBAnyTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMR;
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMR;
     }
 }
 

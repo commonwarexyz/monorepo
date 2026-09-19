@@ -1,7 +1,7 @@
 //! Ordered exclusion fixtures with independently fixed or length-prefixed byte fields.
 
 use super::{
-    ExclusionMode, GenerateArgs, Materialized, current_output, materialize, validate_tree,
+    ExclusionMode, ExclusionTreeArgs, Materialized, current_output, materialize, validate_tree,
 };
 use crate::{
     Hash,
@@ -35,9 +35,9 @@ enum FieldSize {
 #[derive(Args)]
 pub(crate) struct ExcludeVariableArgs {
     #[command(flatten)]
-    tree: GenerateArgs,
+    tree: ExclusionTreeArgs,
     #[arg(long)]
-    keyhex: String,
+    key_hex: String,
     /// Length-prefixed vector or fixed key width.
     #[arg(long, value_enum)]
     key_size: FieldSize,
@@ -47,7 +47,8 @@ pub(crate) struct ExcludeVariableArgs {
     /// Raw vector value or metadata length, required for variable values.
     #[arg(long, required_if_eq("value_size", "variable"))]
     value_length: Option<u16>,
-    /// Complete active key set as comma-separated hex, sorted into cyclic order. Use 0x for empty.
+    /// Complete active key set as comma-separated hex, sorted into cyclic order.
+    /// Use 0x for a zero-length key. Empty mode uses --derive-keys.
     #[arg(
         long,
         value_delimiter = ',',
@@ -118,9 +119,9 @@ macro_rules! with_field_type {
 impl ExcludeVariableArgs {
     pub(super) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         match (self.tree.family, hash) {
-            (TreeKind::Mmr, Hash::Keccak) => self.dispatch::<mmr::Family, Keccak256>(),
+            (TreeKind::Mmr, Hash::Keccak256) => self.dispatch::<mmr::Family, Keccak256>(),
             (TreeKind::Mmr, Hash::Sha256) => self.dispatch::<mmr::Family, Sha256>(),
-            (TreeKind::Mmb, Hash::Keccak) => self.dispatch::<mmb::Family, Keccak256>(),
+            (TreeKind::Mmb, Hash::Keccak256) => self.dispatch::<mmb::Family, Keccak256>(),
             (TreeKind::Mmb, Hash::Sha256) => self.dispatch::<mmb::Family, Sha256>(),
         }
     }
@@ -188,10 +189,8 @@ fn keys<K: FixtureBytes>(args: &ExcludeVariableArgs) -> Result<Vec<K>, String> {
 fn generate<F: Graftable, H: Hasher, K: FixtureBytes, V: FixtureBytes>(
     args: &ExcludeVariableArgs,
 ) -> Result<Vec<u8>, String> {
-    validate_tree(&args.tree)?;
-    if args.tree.inactivity_floor != 0 {
-        return Err("exclude-variable derives its inactivity floor from the mode".into());
-    }
+    let tree = args.tree.tree(args.mode);
+    validate_tree(&tree)?;
     if args.metadata && !matches!(args.mode, ExclusionMode::Empty) {
         return Err("metadata requires empty mode".into());
     }
@@ -201,7 +200,7 @@ fn generate<F: Graftable, H: Hasher, K: FixtureBytes, V: FixtureBytes>(
     if args.value_length.is_some() && V::SIZE.is_some() {
         return Err("value-length requires --value-size variable".into());
     }
-    let query = K::from_raw(raw_hex(&args.keyhex)?)?;
+    let query = K::from_raw(raw_hex(&args.key_hex)?)?;
     let keys = keys::<K>(args)?;
     let length = V::SIZE
         .or(args.value_length.map(usize::from))
@@ -213,14 +212,6 @@ fn generate<F: Graftable, H: Hasher, K: FixtureBytes, V: FixtureBytes>(
             .take(length)
             .collect(),
     )?;
-    let tree = GenerateArgs {
-        inactivity_floor: if matches!(args.mode, ExclusionMode::Interval) {
-            0
-        } else {
-            args.tree.location
-        },
-        ..args.tree
-    };
     let op = |index| match args.mode {
         ExclusionMode::Empty => variable::Operation::<F, K, V>::CommitFloor(
             args.metadata.then(|| value.clone()),
@@ -244,7 +235,7 @@ fn generate<F: Graftable, H: Hasher, K: FixtureBytes, V: FixtureBytes>(
         proof,
         root,
         ..
-    } = materialize::<F, H, _>(&tree, op, |index| {
+    } = materialize::<F, H, _>(&tree, args.tree.chunk_bytes, op, |index| {
         matches!(args.mode, ExclusionMode::Interval) || index == tree.location
     })?;
     let exclusion: ExclusionProof<F, K, VariableEncoding<V>, H::Digest, _> = match op(tree.location)
@@ -282,7 +273,7 @@ mod tests {
     #[test]
     fn vector_keys_use_raw_order_and_vary_in_length() {
         for family in ["mmr", "mmb"] {
-            for hash in ["keccak", "sha256"] {
+            for hash in ["keccak256", "sha256"] {
                 for (location, query, expected) in [
                     ("0", "0000", true),
                     ("0", "00", false),
@@ -299,14 +290,12 @@ mod tests {
                             location,
                             "--seed",
                             "42",
-                            "--keyhex",
+                            "--key-hex",
                             query,
                             "--keys",
                             "00,01,010000",
                             "--family",
                             family,
-                            "--inactivity-floor",
-                            "0",
                             "--chunk-bytes",
                             "32",
                             "--key-size",
@@ -333,15 +322,14 @@ mod tests {
             }
         }
         let args = ExcludeVariableArgs {
-            tree: GenerateArgs {
+            tree: ExclusionTreeArgs {
                 leaves: 3,
                 location: 0,
                 seed: 0,
                 family: TreeKind::Mmb,
-                inactivity_floor: 0,
                 chunk_bytes: 32,
             },
-            keyhex: String::new(),
+            key_hex: String::new(),
             key_size: FieldSize::Variable,
             value_size: FieldSize::Variable,
             value_length: Some(0),
@@ -364,7 +352,7 @@ mod tests {
             for value_size in [None, Some(0), Some(1), Some(4), Some(32)] {
                 let raw_key = vec![0; key_size.unwrap_or(33)];
                 let raw_value = vec![0; value_size.unwrap_or(128)];
-                let keyhex = const_hex::encode(&raw_key);
+                let key_hex = const_hex::encode(&raw_key);
                 let key_size_text =
                     key_size.map_or_else(|| "variable".into(), |size| size.to_string());
                 let value_size_text =
@@ -376,18 +364,16 @@ mod tests {
                     "0",
                     "--seed",
                     "42",
-                    "--keyhex",
-                    &keyhex,
+                    "--key-hex",
+                    &key_hex,
                     "--mode",
                     "single",
                     "--family",
                     "mmb",
-                    "--inactivity-floor",
-                    "0",
                     "--chunk-bytes",
                     "32",
                 ];
-                let explicit_key = format!("0x{keyhex}");
+                let explicit_key = format!("0x{key_hex}");
                 arguments.extend(["--keys", &explicit_key]);
                 arguments.extend([
                     "--key-size",
@@ -398,7 +384,7 @@ mod tests {
                 if value_size.is_none() {
                     arguments.extend(["--value-length", "128"]);
                 }
-                let output = run("keccak", &arguments).unwrap();
+                let output = run("keccak256", &arguments).unwrap();
                 assert!(!output.10);
                 let mut expected = vec![0xd2];
                 if key_size.is_none() {
@@ -442,14 +428,12 @@ mod tests {
                         location.as_str(),
                         "--seed",
                         "42",
-                        "--keyhex",
+                        "--key-hex",
                         "0x",
                         "--mode",
                         "empty",
                         "--family",
                         "mmb",
-                        "--inactivity-floor",
-                        "0",
                         "--chunk-bytes",
                         "32",
                     ];
@@ -466,7 +450,7 @@ mod tests {
                     if value_size.is_none() {
                         arguments.extend(["--value-length", "0"]);
                     }
-                    let output = run("keccak", &arguments).unwrap();
+                    let output = run("keccak256", &arguments).unwrap();
                     assert!(output.10);
                     let mut expected = vec![0xd3, u8::from(metadata)];
                     if metadata {
@@ -487,7 +471,7 @@ mod tests {
     fn selected_chunk_width_reaches_the_current_proof() {
         for chunk in ["1", "128"] {
             let output = run(
-                "keccak",
+                "keccak256",
                 &[
                     "--leaves",
                     "3",
@@ -495,7 +479,7 @@ mod tests {
                     "0",
                     "--seed",
                     "42",
-                    "--keyhex",
+                    "--key-hex",
                     "0000",
                     "--keys",
                     "00,01,010000",
@@ -503,8 +487,6 @@ mod tests {
                     chunk,
                     "--family",
                     "mmb",
-                    "--inactivity-floor",
-                    "0",
                     "--key-size",
                     "variable",
                     "--value-size",
@@ -529,7 +511,7 @@ mod tests {
             "fuzz",
             "qmdb",
             "--hash",
-            "keccak",
+            "keccak256",
             "exclude-variable",
             "--leaves",
             "1",
@@ -539,11 +521,9 @@ mod tests {
             "42",
             "--family",
             "mmb",
-            "--inactivity-floor",
-            "0",
             "--chunk-bytes",
             "32",
-            "--keyhex",
+            "--key-hex",
             "0x",
             "--mode",
             "single",
@@ -569,6 +549,17 @@ mod tests {
         conflicting.push("--derive-keys");
         let error = Cli::try_parse_from(conflicting).err().unwrap();
         assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+        let mut irrelevant = args.clone();
+        irrelevant.extend(["--inactivity-floor", "0"]);
+        let error = Cli::try_parse_from(irrelevant).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+        assert!(error.to_string().contains("--inactivity-floor"), "{error}");
+        let mut legacy = args.clone();
+        let key_hex_index = legacy.iter().position(|arg| *arg == "--key-hex").unwrap();
+        legacy[key_hex_index] = "--keyhex";
+        let error = Cli::try_parse_from(legacy).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument);
+        assert!(error.to_string().contains("--keyhex"), "{error}");
         let mut derived = args;
         derived.truncate(derived.len() - 2);
         derived.push("--derive-keys");
@@ -585,14 +576,12 @@ mod tests {
                 "0",
                 "--seed",
                 "42",
-                "--keyhex",
+                "--key-hex",
                 "00",
                 "--key-size",
                 "2",
                 "--family",
                 "mmb",
-                "--inactivity-floor",
-                "0",
                 "--chunk-bytes",
                 "32",
                 "--mode",
@@ -610,14 +599,12 @@ mod tests {
                 "0",
                 "--seed",
                 "42",
-                "--keyhex",
+                "--key-hex",
                 "00",
                 "--key-size",
                 "4",
                 "--family",
                 "mmb",
-                "--inactivity-floor",
-                "0",
                 "--chunk-bytes",
                 "32",
                 "--mode",
@@ -635,7 +622,7 @@ mod tests {
                 "0",
                 "--seed",
                 "42",
-                "--keyhex",
+                "--key-hex",
                 "00",
                 "--value-size",
                 "1",
@@ -643,8 +630,6 @@ mod tests {
                 "1",
                 "--family",
                 "mmb",
-                "--inactivity-floor",
-                "0",
                 "--chunk-bytes",
                 "32",
                 "--mode",
@@ -660,14 +645,12 @@ mod tests {
                 "0",
                 "--seed",
                 "42",
-                "--keyhex",
+                "--key-hex",
                 "00",
                 "--mode",
                 "single",
                 "--family",
                 "mmb",
-                "--inactivity-floor",
-                "0",
                 "--chunk-bytes",
                 "32",
                 "--key-size",
@@ -685,14 +668,12 @@ mod tests {
                 "0",
                 "--seed",
                 "42",
-                "--keyhex",
+                "--key-hex",
                 "00",
                 "--keys",
                 "00,00",
                 "--family",
                 "mmb",
-                "--inactivity-floor",
-                "0",
                 "--chunk-bytes",
                 "32",
                 "--mode",
@@ -711,14 +692,12 @@ mod tests {
                 "0",
                 "--seed",
                 "42",
-                "--keyhex",
+                "--key-hex",
                 "00",
                 "--keys",
                 "00",
                 "--family",
                 "mmb",
-                "--inactivity-floor",
-                "0",
                 "--chunk-bytes",
                 "32",
                 "--mode",
@@ -737,38 +716,11 @@ mod tests {
                 "0",
                 "--seed",
                 "42",
-                "--keyhex",
+                "--key-hex",
                 "00",
                 "--metadata",
                 "--family",
                 "mmb",
-                "--inactivity-floor",
-                "0",
-                "--chunk-bytes",
-                "32",
-                "--mode",
-                "interval",
-                "--key-size",
-                "variable",
-                "--value-size",
-                "variable",
-                "--value-length",
-                "31",
-                "--derive-keys",
-            ],
-            vec![
-                "--leaves",
-                "2",
-                "--location",
-                "1",
-                "--seed",
-                "42",
-                "--keyhex",
-                "00",
-                "--inactivity-floor",
-                "1",
-                "--family",
-                "mmb",
                 "--chunk-bytes",
                 "32",
                 "--mode",
@@ -788,14 +740,12 @@ mod tests {
                 "0",
                 "--seed",
                 "42",
-                "--keyhex",
+                "--key-hex",
                 "0x",
                 "--key-size",
                 "0",
                 "--family",
                 "mmb",
-                "--inactivity-floor",
-                "0",
                 "--chunk-bytes",
                 "32",
                 "--mode",
@@ -807,7 +757,7 @@ mod tests {
                 "--derive-keys",
             ],
         ] {
-            assert!(run("keccak", &args).is_err(), "{args:?}");
+            assert!(run("keccak256", &args).is_err(), "{args:?}");
         }
     }
 }

@@ -52,12 +52,19 @@ pub(crate) struct GenerateArgs {
     epoch: u64,
     #[arg(long)]
     view: u64,
-    /// Ignored for nullification.
-    #[arg(long)]
-    parent: u64,
-    /// A 32-byte digest, ignored for nullification.
-    #[arg(long)]
-    payload_hex: String,
+    #[arg(
+        long,
+        required_if_eq("kind", "notarize"),
+        required_if_eq("kind", "finalize")
+    )]
+    parent: Option<u64>,
+    /// A 32-byte digest.
+    #[arg(
+        long,
+        required_if_eq("kind", "notarize"),
+        required_if_eq("kind", "finalize")
+    )]
+    payload_hex: Option<String>,
     #[arg(long)]
     seed: u64,
 }
@@ -65,23 +72,43 @@ pub(crate) struct GenerateArgs {
 impl GenerateArgs {
     fn subject(&self) -> Result<(Vec<u8>, Vec<u8>), String> {
         let namespace = Namespace::new(&certificate::decode_hex(&self.namespace_hex)?);
-        let payload = certificate::decode_hex(&self.payload_hex)?;
-        let payload: [u8; 32] = payload.try_into().map_err(|_| "payload must be 32 bytes")?;
         let round = Round::new(Epoch::new(self.epoch), View::new(self.view));
-        let proposal = Proposal::new(round, View::new(self.parent), keccak256::Digest(payload));
-        let subject = match self.kind {
-            Kind::Notarize => Subject::Notarize {
-                proposal: &proposal,
-            },
-            Kind::Nullify => Subject::Nullify { round },
-            Kind::Finalize => Subject::Finalize {
-                proposal: &proposal,
-            },
-        };
-        Ok((
-            subject.namespace(&namespace).to_vec(),
-            subject.message().to_vec(),
-        ))
+        match self.kind {
+            Kind::Nullify => {
+                if self.parent.is_some() || self.payload_hex.is_some() {
+                    return Err("--parent and --payload-hex are invalid for nullify".to_string());
+                }
+                let subject = Subject::<keccak256::Digest>::Nullify { round };
+                Ok((
+                    subject.namespace(&namespace).to_vec(),
+                    subject.message().to_vec(),
+                ))
+            }
+            kind @ (Kind::Notarize | Kind::Finalize) => {
+                let parent = self.parent.ok_or("--parent is required for proposals")?;
+                let payload = self
+                    .payload_hex
+                    .as_deref()
+                    .ok_or("--payload-hex is required for proposals")?;
+                let payload = certificate::decode_hex(payload)?;
+                let payload: [u8; 32] =
+                    payload.try_into().map_err(|_| "payload must be 32 bytes")?;
+                let proposal = Proposal::new(round, View::new(parent), keccak256::Digest(payload));
+                let subject = if matches!(kind, Kind::Notarize) {
+                    Subject::Notarize {
+                        proposal: &proposal,
+                    }
+                } else {
+                    Subject::Finalize {
+                        proposal: &proposal,
+                    }
+                };
+                Ok((
+                    subject.namespace(&namespace).to_vec(),
+                    subject.message().to_vec(),
+                ))
+            }
+        }
     }
 }
 
@@ -134,14 +161,15 @@ mod tests {
     use clap::Parser;
 
     fn args(kind: Kind) -> GenerateArgs {
+        let proposal = !matches!(kind, Kind::Nullify);
         GenerateArgs {
             variant: BlsVariant::Minsig,
             kind,
             namespace_hex: const_hex::encode(b"test"),
             epoch: 127,
             view: 128,
-            parent: u64::MAX,
-            payload_hex: const_hex::encode([0xa5; 32]),
+            parent: proposal.then_some(u64::MAX),
+            payload_hex: proposal.then(|| const_hex::encode([0xa5; 32])),
             seed: 7,
         }
     }
@@ -152,7 +180,7 @@ mod tests {
     }
 
     fn subject_args<'a>(scheme: &'a str, variant: &'a str, kind: &'a str) -> Vec<&'a str> {
-        vec![
+        let mut args = vec![
             "commonware-sol-fuzz",
             "simplex",
             "generate",
@@ -167,11 +195,16 @@ mod tests {
             "127",
             "--view",
             "128",
-            "--parent",
-            "0",
-            "--payload-hex",
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        ]
+        ];
+        if kind != "nullify" {
+            args.extend([
+                "--parent",
+                "0",
+                "--payload-hex",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ]);
+        }
+        args
     }
 
     #[test]
@@ -197,10 +230,6 @@ mod tests {
         }
 
         let mut input = args(Kind::Nullify);
-        let before = threshold_output(&input);
-        input.parent = 0;
-        input.payload_hex = const_hex::encode([0; 32]);
-        assert_eq!(before.signature, threshold_output(&input).signature);
         input.namespace_hex = const_hex::encode([0; 120]);
         assert_eq!(&threshold_output(&input).message[..2], &[0x80, 0x01]);
     }
@@ -275,8 +304,10 @@ mod tests {
                     "finalize" => Kind::Finalize,
                     _ => unreachable!(),
                 });
-                input.parent = 0;
-                input.payload_hex = const_hex::encode([0; 32]);
+                if kind != "nullify" {
+                    input.parent = Some(0);
+                    input.payload_hex = Some(const_hex::encode([0; 32]));
+                }
                 let (namespace, subject_message) = input.subject().unwrap();
                 assert_eq!(
                     message.as_ref(),
@@ -287,51 +318,111 @@ mod tests {
     }
 
     #[test]
-    fn multisig_requires_named_inputs_and_signers() {
-        for (variant, public_size) in [("minsig", 256), ("minpk", 128)] {
-            let base = subject_args("multisig", variant, "nullify");
-            let complete: Vec<_> = base
-                .iter()
-                .copied()
-                .chain(["--participants", "4", "--signers", "0x01", "--seed", "7"])
-                .collect();
-            for option in [
-                "--variant",
-                "--kind",
-                "--namespace-hex",
-                "--epoch",
-                "--view",
-                "--parent",
-                "--payload-hex",
-                "--participants",
-                "--signers",
-                "--seed",
-            ] {
-                let mut missing = complete.clone();
-                let index = missing
-                    .iter()
-                    .position(|argument| *argument == option)
+    fn schemes_require_named_inputs() {
+        for scheme in ["threshold", "multisig"] {
+            for (variant, public_size) in [("minsig", 256), ("minpk", 128)] {
+                let mut complete = subject_args(scheme, variant, "nullify");
+                let mut required = vec![
+                    "--variant",
+                    "--kind",
+                    "--namespace-hex",
+                    "--epoch",
+                    "--view",
+                    "--seed",
+                ];
+                if scheme == "multisig" {
+                    complete.extend(["--participants", "4", "--signers", "0x01"]);
+                    required.extend(["--participants", "--signers"]);
+                }
+                complete.extend(["--seed", "7"]);
+
+                for option in required {
+                    let mut missing = complete.clone();
+                    let index = missing
+                        .iter()
+                        .position(|argument| *argument == option)
+                        .unwrap();
+                    missing.drain(index..=index + 1);
+                    assert!(
+                        Cli::try_parse_from(missing).is_err(),
+                        "accepted {scheme} missing {option}"
+                    );
+                }
+
+                let encoded = Cli::try_parse_from(complete.clone())
+                    .unwrap()
+                    .command
+                    .execute()
                     .unwrap();
-                missing.drain(index..=index + 1);
-                assert!(
-                    Cli::try_parse_from(missing).is_err(),
-                    "accepted missing {option}"
-                );
+                if scheme == "multisig" {
+                    let (_, public_keys, signers, _) =
+                        <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded)
+                            .unwrap();
+                    assert_eq!(public_keys.len(), 4 * public_size);
+                    assert_eq!(signers.as_ref(), &[0x01]);
+                    assert!(
+                        Cli::try_parse_from(
+                            complete.iter().copied().chain(["--signers-hex", "0x01"])
+                        )
+                        .is_err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn proposal_fields_match_the_subject_kind_for_both_schemes() {
+        for scheme in ["threshold", "multisig"] {
+            for kind in ["notarize", "finalize"] {
+                let mut complete = subject_args(scheme, "minsig", kind);
+                if scheme == "multisig" {
+                    complete.extend(["--participants", "4", "--signers", "0x01"]);
+                }
+                complete.extend(["--seed", "7"]);
+
+                for option in ["--parent", "--payload-hex"] {
+                    let mut missing = complete.clone();
+                    let index = missing
+                        .iter()
+                        .position(|argument| *argument == option)
+                        .unwrap();
+                    missing.drain(index..=index + 1);
+                    assert!(
+                        Cli::try_parse_from(missing).is_err(),
+                        "accepted {scheme} {kind} without {option}"
+                    );
+                }
             }
 
-            let encoded = Cli::try_parse_from(complete.clone())
+            let mut complete = subject_args(scheme, "minsig", "nullify");
+            if scheme == "multisig" {
+                complete.extend(["--participants", "4", "--signers", "0x01"]);
+            }
+            complete.extend(["--seed", "7"]);
+            Cli::try_parse_from(complete.clone())
                 .unwrap()
                 .command
                 .execute()
                 .unwrap();
-            let (_, public_keys, signers, _) =
-                <sol!((bytes, bytes, bytes, bytes))>::abi_decode_params_validate(&encoded).unwrap();
-            assert_eq!(public_keys.len(), 4 * public_size);
-            assert_eq!(signers.as_ref(), &[0x01]);
-            assert!(
-                Cli::try_parse_from(complete.iter().copied().chain(["--signers-hex", "0x01"]))
-                    .is_err()
-            );
+
+            for fields in [
+                ["--parent", "0"],
+                [
+                    "--payload-hex",
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                ],
+            ] {
+                assert!(
+                    Cli::try_parse_from(complete.iter().copied().chain(fields))
+                        .unwrap()
+                        .command
+                        .execute()
+                        .is_err(),
+                    "accepted {scheme} nullify with {}",
+                    fields[0]
+                );
+            }
         }
     }
 

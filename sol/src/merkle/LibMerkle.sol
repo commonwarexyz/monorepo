@@ -32,6 +32,11 @@ library LibMerkle {
     /// @dev The empty tree commits a zero `uint64` leaf count.
     bytes32 private constant EMPTY_ROOT = keccak256(hex"0000000000000000");
 
+    enum Family {
+        MMR,
+        MMB
+    }
+
     enum Bagging {
         ForwardFold,
         BackwardFold
@@ -90,9 +95,10 @@ library LibMerkle {
         bytes32[] calldata proof,
         uint256 inactive,
         RangeGraft memory graft,
-        bool mmb,
+        Family family,
         address hasher
     ) internal view returns (bytes32 root, bool valid) {
+        bool mmb = family == Family.MMB;
         // forge-lint: disable-next-line(boolean-cst)
         if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0)) return (0, false);
         uint256 count = elements.length;
@@ -139,9 +145,10 @@ library LibMerkle {
         bytes32[] calldata proof,
         uint256 inactive,
         Graft memory graft,
-        bool mmb,
+        Family family,
         address hasher
     ) internal view returns (bytes32 root, bool valid) {
+        bool mmb = family == Family.MMB;
         // forge-lint: disable-next-line(boolean-cst)
         if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0) || index >= leaves) return (0, false);
         uint256 free;
@@ -175,11 +182,12 @@ library LibMerkle {
         uint256 proofCount,
         bool single,
         bool fromCalldata,
-        bool mmb,
+        Family family,
         Bagging bagging,
         uint256 inactivePeaks,
         address hasher
     ) internal view returns (bool valid) {
+        bool mmb = family == Family.MMB;
         if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0)) return false;
         if (start > leaves || count > leaves - start) return false;
         if (count == 0) {
@@ -221,10 +229,10 @@ library LibMerkle {
         uint256 positions,
         uint256 digests,
         uint256 proofCount,
-        bool backward,
+        Bagging bagging,
         uint256 inactive,
         bool cd,
-        bool belt,
+        Family family,
         address hasher
     ) internal view returns (bool valid) {
         return _verifyMulti(
@@ -236,18 +244,19 @@ library LibMerkle {
             positions,
             digests,
             proofCount,
-            backward,
+            bagging == Bagging.BackwardFold,
             inactive,
             cd,
-            belt,
+            family == Family.MMB,
             false,
             hasher
         );
     }
 
-    /// @dev Verify positioned leaf digests in memory with indices and witnesses in calldata.
-    /// Duplicate locations must carry equal digests. Every physical witness is authenticated.
-    /// Input arrays remain unchanged. Temporary pairs and peaks are cleared before returning.
+    /// @dev Verify positioned leaf digests in memory against a backward-folded root.
+    /// Indices and witnesses are in calldata. Duplicate locations must carry equal digests.
+    /// Every physical witness is authenticated. Input arrays remain unchanged.
+    /// Temporary pairs and peaks are cleared before returning.
     function verifyMultiPrehashed(
         bytes32 root,
         uint256 leaves,
@@ -256,7 +265,7 @@ library LibMerkle {
         uint256[] calldata positions,
         bytes32[] calldata digests,
         uint256 inactive,
-        bool belt,
+        Family family,
         address hasher
     ) internal view returns (bool) {
         if (indices.length != elements.length || positions.length != digests.length) return false;
@@ -282,7 +291,7 @@ library LibMerkle {
             true,
             inactive,
             true,
-            belt,
+            family == Family.MMB,
             true,
             hasher
         );

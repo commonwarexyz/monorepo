@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { QMDBTest, MerkleFamily } from "./Common.t.sol";
+import { LibMerkle } from "../src/merkle/LibMerkle.sol";
+import { QMDBTest, ProofKind, RootKind } from "./Common.t.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
@@ -18,8 +19,8 @@ struct BatchCase {
     bytes[] operations;
     LibQMDBCommon.RangeProof range;
     LibQMDBCommon.MultiProof multi;
-    bool sparse;
-    bool current;
+    ProofKind proofKind;
+    RootKind rootKind;
     uint256 chunkBytes;
     LibQMDBCurrent.RangeProof currentRange;
     LibQMDBCurrent.OpsRootWitness witness;
@@ -35,55 +36,68 @@ struct BatchNode {
     uint256 selected;
 }
 
+enum PlainFacade {
+    Any,
+    Keyless,
+    Immutable
+}
+
 abstract contract LibQMDBBatchTest is QMDBTest {
     /// @dev Exercise every plain facade against the same operation bytes and proof.
-    function callPlain(BatchCase calldata c, bytes[] memory operations, uint256 facade) internal view returns (bool) {
-        if (c.current) {
-            if (c.sparse) {
-                return _family() == MerkleFamily.MMB
-                    ? LibQMDBCurrentMMB.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher())
-                    : LibQMDBCurrentMMR.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher());
-            }
-            return _family() == MerkleFamily.MMB
-                ? LibQMDBCurrentMMB.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher())
-                : LibQMDBCurrentMMR.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher());
-        }
-        if (c.sparse) {
-            if (facade == 0) {
-                return _family() == MerkleFamily.MMB
+    function callOperations(BatchCase calldata c, bytes[] memory operations, PlainFacade facade)
+        internal
+        view
+        returns (bool)
+    {
+        if (c.proofKind == ProofKind.Multi) {
+            if (facade == PlainFacade.Any) {
+                return _family() == LibMerkle.Family.MMB
                     ? LibQMDBAnyMMB.verifyMulti(c.root, operations, c.multi, _hasher())
                     : LibQMDBAnyMMR.verifyMulti(c.root, operations, c.multi, _hasher());
             }
-            if (facade == 1) {
-                return _family() == MerkleFamily.MMB
+            if (facade == PlainFacade.Keyless) {
+                return _family() == LibMerkle.Family.MMB
                     ? LibQMDBKeylessMMB.verifyMulti(c.root, operations, c.multi, _hasher())
                     : LibQMDBKeylessMMR.verifyMulti(c.root, operations, c.multi, _hasher());
             }
-            return _family() == MerkleFamily.MMB
+            return _family() == LibMerkle.Family.MMB
                 ? LibQMDBImmutableMMB.verifyMulti(c.root, operations, c.multi, _hasher())
                 : LibQMDBImmutableMMR.verifyMulti(c.root, operations, c.multi, _hasher());
         }
-        if (facade == 0) {
-            return _family() == MerkleFamily.MMB
+        if (facade == PlainFacade.Any) {
+            return _family() == LibMerkle.Family.MMB
                 ? LibQMDBAnyMMB.verifyRange(c.root, operations, c.range, _hasher())
                 : LibQMDBAnyMMR.verifyRange(c.root, operations, c.range, _hasher());
         }
-        if (facade == 1) {
-            return _family() == MerkleFamily.MMB
+        if (facade == PlainFacade.Keyless) {
+            return _family() == LibMerkle.Family.MMB
                 ? LibQMDBKeylessMMB.verifyRange(c.root, operations, c.range, _hasher())
                 : LibQMDBKeylessMMR.verifyRange(c.root, operations, c.range, _hasher());
         }
-        return _family() == MerkleFamily.MMB
+        return _family() == LibMerkle.Family.MMB
             ? LibQMDBImmutableMMB.verifyRange(c.root, operations, c.range, _hasher())
             : LibQMDBImmutableMMR.verifyRange(c.root, operations, c.range, _hasher());
     }
 
+    /// @dev Authenticate Current range activity or sparse historical inclusion.
+    function callCurrent(BatchCase calldata c, bytes[] memory operations) internal view returns (bool) {
+        if (c.proofKind == ProofKind.Multi) {
+            return _family() == LibMerkle.Family.MMB
+                ? LibQMDBCurrentMMB.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher())
+                : LibQMDBCurrentMMR.verifyOpsMulti(c.root, operations, c.multi, c.witness, c.chunkBytes, _hasher());
+        }
+        return _family() == LibMerkle.Family.MMB
+            ? LibQMDBCurrentMMB.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher())
+            : LibQMDBCurrentMMR.verifyRange(c.root, operations, c.currentRange, c.chunkBytes, _hasher());
+    }
+
     /// @dev Reused caller arrays, the zero slot, and subsequent allocations survive every facade.
     function checked(BatchCase calldata c) external view returns (bool valid) {
+        assertTrue(c.proofKind != ProofKind.Single, "range or multi proof required");
         bytes[] memory operations = c.operations;
         bytes memory guard = abi.encode(c);
         bytes32 beforeInputs = keccak256(abi.encode(operations, guard));
-        for (uint256 repeat; repeat < (c.current ? 2 : 6); ++repeat) {
+        for (uint256 repeat; repeat < (c.rootKind == RootKind.Current ? 2 : 6); ++repeat) {
             uint256 beforePointer;
             uint256 afterPointer;
             uint256 zero;
@@ -93,7 +107,9 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                     mstore(p, not(0))
                 }
             }
-            bool result = callPlain(c, operations, repeat % 3);
+            bool result = c.rootKind == RootKind.Current
+                ? callCurrent(c, operations)
+                : callOperations(c, operations, PlainFacade(repeat % 3));
             assembly ("memory-safe") {
                 afterPointer := mload(0x40)
                 zero := mload(0x60)
@@ -113,19 +129,26 @@ abstract contract LibQMDBBatchTest is QMDBTest {
     }
 
     /// @dev Materialize append history without using verifier geometry or hashing helpers.
-    function build(uint256 n, uint256[] memory locations, bool sparse) public pure returns (BatchCase memory c) {
-        return buildTree(n, locations, sparse, new bytes32[](0));
-    }
-
-    /// @dev Build plain and grafted commitments from the same append history.
-    function buildTree(uint256 n, uint256[] memory locations, bool sparse, bytes32[] memory chunks)
-        internal
+    function operationsCase(uint256 n, uint256[] memory locations, ProofKind proofKind)
+        public
         pure
         returns (BatchCase memory c)
     {
-        c.current = chunks.length != 0;
-        c.chunkBytes = c.current ? 32 : 0;
-        c.sparse = sparse;
+        return buildTree(n, locations, proofKind, RootKind.Operations, new bytes32[](0));
+    }
+
+    /// @dev Build the selected commitment using 32-byte chunks for Current activity.
+    function buildTree(
+        uint256 n,
+        uint256[] memory locations,
+        ProofKind proofKind,
+        RootKind rootKind,
+        bytes32[] memory chunks
+    ) internal pure returns (BatchCase memory c) {
+        require(chunks.length == (rootKind == RootKind.Current ? (n + 255) / 256 : 0), "root chunk count");
+        c.rootKind = rootKind;
+        c.chunkBytes = c.rootKind == RootKind.Current ? 32 : 0;
+        c.proofKind = proofKind;
         c.operations = new bytes[](locations.length);
         c.range.leaves = n;
         c.range.start = locations[0];
@@ -160,7 +183,10 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                     right,
                     nodes[left].selected + nodes[right].selected
                 );
-                if (c.current && nodes[position].width == 256 && chunks[nodes[position].start / 256] != 0) {
+                if (
+                    c.rootKind == RootKind.Current && nodes[position].width == 256
+                        && chunks[nodes[position].start / 256] != 0
+                ) {
                     nodes[position].digest =
                         _hash(abi.encodePacked(chunks[nodes[position].start / 256], nodes[position].digest));
                 }
@@ -169,7 +195,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                     peaks[k] = peaks[k + 1];
                 }
                 --count;
-                if (_family() == MerkleFamily.MMB) break;
+                if (_family() == LibMerkle.Family.MMB) break;
                 j = count;
             }
         }
@@ -178,7 +204,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
             folded = _hash(abi.encodePacked(nodes[peaks[i - 1]].digest, folded));
         }
         c.root = _hash(abi.encodePacked(uint64(n), folded));
-        if (c.current) {
+        if (c.rootKind == RootKind.Current) {
             c.witness.graftedRoot = c.root;
             bytes32 plain = nodes[peaks[count - 1]].plain;
             for (uint256 i = count - 1; i > 0; --i) {
@@ -199,13 +225,13 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                 input = abi.encodePacked(input, uint64(n % 256), c.witness.partialDigest);
             }
             c.root = _hash(input);
-            if (sparse) {
+            if (proofKind == ProofKind.Multi) {
                 for (uint256 i; i < position; ++i) {
                     nodes[i].digest = nodes[i].plain;
                 }
             }
         }
-        if (sparse) {
+        if (proofKind == ProofKind.Multi) {
             bool[] memory required = new bool[](position);
             uint256 selectedPeaks;
             for (uint256 i; i < count; ++i) {
@@ -248,7 +274,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
             }
             assembly ("memory-safe") { mstore(digests, length) }
             c.range.digests = digests;
-            if (c.current) {
+            if (c.rootKind == RootKind.Current) {
                 c.currentRange.leaves = n;
                 c.currentRange.start = locations[0];
                 c.currentRange.opsRoot = c.witness.opsRoot;
@@ -309,8 +335,8 @@ abstract contract LibQMDBBatchTest is QMDBTest {
             for (uint256 start; start < n; ++start) {
                 for (uint256 count = 1; count <= n - start; ++count) {
                     uint256[] memory selected = sequence(start, count);
-                    assertTrue(this.checked(build(n, selected, false)), "independent range");
-                    assertTrue(this.checked(build(n, selected, true)), "independent multi");
+                    assertTrue(this.checked(operationsCase(n, selected, ProofKind.Range)), "independent range");
+                    assertTrue(this.checked(operationsCase(n, selected, ProofKind.Multi)), "independent multi");
                 }
             }
         }
@@ -323,7 +349,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         selected[1] = 0;
         selected[2] = 3;
         selected[3] = 7;
-        BatchCase memory c = build(9, selected, true);
+        BatchCase memory c = operationsCase(9, selected, ProofKind.Multi);
         assertTrue(this.checked(c), "equal duplicate rejected");
         c.operations[3] = hex"bad0";
         assertFalse(this.checked(c), "conflicting duplicate accepted");
@@ -339,7 +365,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         c.operations[0] = abi.encodePacked(original, bytes1(0));
         assertFalse(this.checked(c), "wrong operation length");
         c.operations[0] = original;
-        bytes32[] memory witnesses = c.sparse ? c.multi.digests : c.range.digests;
+        bytes32[] memory witnesses = c.proofKind == ProofKind.Multi ? c.multi.digests : c.range.digests;
         for (uint256 i; i < witnesses.length; ++i) {
             witnesses[i] ^= bytes32(uint256(1));
             assertFalse(this.checked(c), "wrong witness digest");
@@ -351,11 +377,11 @@ abstract contract LibQMDBBatchTest is QMDBTest {
             for (uint256 i; i < changed.length && i < witnesses.length; ++i) {
                 changed[i] = witnesses[i];
             }
-            if (c.sparse) c.multi.digests = changed;
+            if (c.proofKind == ProofKind.Multi) c.multi.digests = changed;
             else c.range.digests = changed;
             assertFalse(this.checked(c), "missing or extra digest");
         }
-        if (c.sparse) {
+        if (c.proofKind == ProofKind.Multi) {
             c.multi.digests = witnesses;
             uint256[] memory positions = c.multi.positions;
             for (uint256 mode; mode < 2; ++mode) {
@@ -406,10 +432,11 @@ abstract contract LibQMDBBatchTest is QMDBTest {
 
     /// @dev Mutation checks include witnesses on both sides of a range and selected sparse subtrees.
     function test_BoundsAndWitnessMutations() public view {
-        rejectMutations(build(9, sequence(2, 4), false));
-        rejectMutations(build(9, sequence(2, 4), true));
+        rejectMutations(operationsCase(9, sequence(2, 4), ProofKind.Range));
+        rejectMutations(operationsCase(9, sequence(2, 4), ProofKind.Multi));
         for (uint256 mode; mode < 2; ++mode) {
-            BatchCase memory c = build(1, sequence(0, 1), mode != 0);
+            ProofKind proofKind = mode == 0 ? ProofKind.Range : ProofKind.Multi;
+            BatchCase memory c = operationsCase(1, sequence(0, 1), proofKind);
             c.range.leaves = 0;
             c.multi.leaves = 0;
             assertFalse(this.checked(c), "empty tree");
@@ -420,7 +447,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
     }
 
     /// @dev Construct mixed activity or all-inactive state without requiring selected operations to be active.
-    function currentCase(uint256 n, uint256 start, uint256 count, bool sparse, bool zeroChunks)
+    function currentCase32(uint256 n, uint256 start, uint256 count, ProofKind proofKind, bool zeroChunks)
         internal
         pure
         returns (BatchCase memory)
@@ -431,7 +458,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                 if (i % 3 != 0) chunks[i / 256] |= bytes32(uint256(1) << (248 - ((i % 256) / 8) * 8 + i % 8));
             }
         }
-        return buildTree(n, sequence(start, count), sparse, chunks);
+        return buildTree(n, sequence(start, count), proofKind, RootKind.Current, chunks);
     }
 
     /// @dev Current ranges authenticate inactive bits and zero chunks at graft, pending, and partial boundaries.
@@ -449,7 +476,8 @@ abstract contract LibQMDBBatchTest is QMDBTest {
 
     /// @dev Isolate each materialized tree so boundary sweeps reuse EVM memory between cases.
     function currentBoundary(uint256 n, uint256 start, uint256 count, uint256 mode) external view {
-        BatchCase memory c = currentCase(n, start, count, mode % 2 != 0, mode < 2);
+        ProofKind proofKind = mode % 2 == 0 ? ProofKind.Range : ProofKind.Multi;
+        BatchCase memory c = currentCase32(n, start, count, proofKind, mode < 2);
         assertTrue(this.checked(c), "current activity state");
         if (mode < 2) assertEq(c.witness.graftedRoot, c.witness.opsRoot, "zero graft is not identity");
         rejectCurrentMutations(c);
@@ -486,7 +514,9 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                 c.witness.partialDigest ^= bytes32(uint256(1));
                 c.currentRange.partialDigest ^= bytes32(uint256(1));
             }
-            if (field != 1 || c.sparse) assertFalse(this.checked(c), "current commitment witness");
+            if (field != 1 || c.proofKind == ProofKind.Multi) {
+                assertFalse(this.checked(c), "current commitment witness");
+            }
             if (field == 0) {
                 c.witness.opsRoot ^= bytes32(uint256(1));
                 c.currentRange.opsRoot ^= bytes32(uint256(1));
@@ -501,7 +531,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                 c.currentRange.partialDigest ^= bytes32(uint256(1));
             }
         }
-        if (c.sparse) {
+        if (c.proofKind == ProofKind.Multi) {
             rejectMutations(c);
         } else {
             uint256 originalStart = c.currentRange.start;
@@ -556,32 +586,34 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         }
     }
 
-    /// @dev Decode a Rust batch fixture with a caller-selected Current chunk size.
+    /// @dev Decode operations or Current batch proofs from the Rust oracle.
     function generate(
         uint256 n,
         uint256[] memory selected,
         uint256 floor,
-        bool sparse,
-        bool current,
+        ProofKind proofKind,
+        RootKind rootKind,
         string memory variant,
         string memory activity,
         uint256 chunkBytes,
         string memory encoding
     ) internal returns (BatchCase memory c) {
-        string[] memory args = new string[]((sparse ? 21 : 23) + (current ? 1 : 0));
+        string[] memory args = new string[](
+            (proofKind == ProofKind.Multi ? 19 : 21) + (rootKind == RootKind.Current ? 4 : 0)
+        );
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
-        args[2] = sparse ? "multi" : "range";
+        args[2] = proofKind == ProofKind.Multi ? "multi" : "range";
         args[3] = "--leaves";
         args[4] = vm.toString(n);
         uint256 offset = 5;
-        if (sparse) {
-            string memory query = vm.toString(selected[0]);
-            for (uint256 i = 1; i < selected.length; ++i) {
-                query = string.concat(query, ",", vm.toString(selected[i]));
-            }
+        if (proofKind == ProofKind.Multi) {
             args[offset++] = "--locations";
-            args[offset++] = query;
+            args[offset] = vm.toString(selected[0]);
+            for (uint256 i = 1; i < selected.length; ++i) {
+                args[offset] = string.concat(args[offset], ",", vm.toString(selected[i]));
+            }
+            ++offset;
         } else {
             args[offset++] = "--start";
             args[offset++] = vm.toString(selected[0]);
@@ -591,25 +623,29 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         args[offset++] = "--seed";
         args[offset++] = "71";
         args[offset++] = "--family";
-        args[offset++] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
+        args[offset++] = _family() == LibMerkle.Family.MMB ? "mmb" : "mmr";
         args[offset++] = "--variant";
         args[offset++] = variant;
         args[offset++] = "--encoding";
         args[offset++] = encoding;
         args[offset++] = "--inactivity-floor";
         args[offset++] = vm.toString(floor);
-        args[offset++] = "--activity";
-        args[offset++] = current ? activity : "all";
-        args[offset++] = "--chunk-bytes";
-        args[offset++] = vm.toString(current ? chunkBytes : 32);
-        if (current) {
-            args[offset] = "--current";
+        if (rootKind == RootKind.Current) {
+            args[offset++] = "--activity";
+            args[offset++] = activity;
+            args[offset++] = "--chunk-bytes";
+            args[offset++] = vm.toString(chunkBytes);
+        } else {
+            assertEq(bytes(activity).length, 0, "operations roots have no activity policy");
+            assertEq(chunkBytes, 0, "operations roots have no activity chunks");
         }
-        c.sparse = sparse;
-        c.current = current;
-        c.chunkBytes = current ? chunkBytes : 0;
+        args[offset++] = "--root";
+        args[offset] = rootKind == RootKind.Operations ? "operations" : "current";
+        c.proofKind = proofKind;
+        c.rootKind = rootKind;
+        c.chunkBytes = chunkBytes;
         bytes memory output = _ffi(args);
-        if (current && sparse) {
+        if (rootKind == RootKind.Current && proofKind == ProofKind.Multi) {
             (
                 c.root,
                 c.multi.leaves,
@@ -639,7 +675,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                         bytes32
                     )
                 );
-        } else if (current) {
+        } else if (rootKind == RootKind.Current) {
             (
                 c.root,
                 c.currentRange.leaves,
@@ -655,7 +691,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                 abi.decode(
                     output, (bytes32, uint256, uint256, uint256, bytes32[], bytes[], bytes, bytes32, bytes32, bytes32)
                 );
-        } else if (sparse) {
+        } else if (proofKind == ProofKind.Multi) {
             (
                 c.root,
                 c.multi.leaves,
@@ -676,8 +712,10 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         string[4] memory variants = [string("ordered"), "unordered", "keyless", "immutable"];
         for (uint256 i; i < variants.length; ++i) {
             for (uint256 mode; mode < 2; ++mode) {
-                BatchCase memory c =
-                    generate(1023, sequence(768, 3), 768, mode != 0, false, variants[i], "all", 32, "fixed");
+                ProofKind proofKind = mode == 0 ? ProofKind.Range : ProofKind.Multi;
+                BatchCase memory c = generate(
+                    1023, sequence(768, 3), 768, proofKind, RootKind.Operations, variants[i], "", 0, "fixed"
+                );
                 assertGt(mode == 0 ? c.range.inactivePeaks : c.multi.inactivePeaks, 0, "inactive fixture");
                 rejectMutations(c);
             }
@@ -694,11 +732,11 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                     17,
                     sequence(0, 8),
                     0,
-                    mode % 2 != 0,
-                    mode >= 2,
+                    mode % 2 == 0 ? ProofKind.Range : ProofKind.Multi,
+                    mode >= 2 ? RootKind.Current : RootKind.Operations,
                     variants[i],
-                    mode >= 2 ? "mixed" : "all",
-                    1,
+                    mode >= 2 ? "mixed" : "",
+                    mode >= 2 ? 1 : 0,
                     "variable"
                 );
                 uint256 overhead = i == 0 ? 65 : i == 2 ? 1 : 33;
@@ -706,7 +744,7 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                     assertEq(c.operations[j].length, overhead + lengths[j] + (lengths[j] < 128 ? 1 : 2));
                 }
                 assertTrue(this.checked(c), "variable codec batch");
-                if (c.current) rejectCurrentMutations(c);
+                if (c.rootKind == RootKind.Current) rejectCurrentMutations(c);
                 else rejectMutations(c);
             }
         }
@@ -724,8 +762,8 @@ abstract contract LibQMDBBatchTest is QMDBTest {
                     n,
                     sequence(start, count),
                     0,
-                    mode % 2 != 0,
-                    true,
+                    mode % 2 == 0 ? ProofKind.Range : ProofKind.Multi,
+                    RootKind.Current,
                     "unordered",
                     mode < 2 ? "zero" : "mixed",
                     32,
@@ -744,17 +782,44 @@ abstract contract LibQMDBBatchTest is QMDBTest {
             uint256 chunkBytes = sizes[i];
             uint256 chunkBits = chunkBytes * 8;
             uint256 n = 2 * chunkBits + 1;
-            BatchCase memory range =
-                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "zero", chunkBytes, "fixed");
+            BatchCase memory range = generate(
+                n,
+                sequence(chunkBits - 1, 3),
+                0,
+                ProofKind.Range,
+                RootKind.Current,
+                "unordered",
+                "zero",
+                chunkBytes,
+                "fixed"
+            );
             assertEq(range.currentRange.chunks.length, 2 * chunkBytes, "packed touched chunks");
             assertTrue(this.checked(range), "variable Current range");
             rejectCurrentMutations(range);
 
-            BatchCase memory mixed =
-                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "mixed", chunkBytes, "fixed");
+            BatchCase memory mixed = generate(
+                n,
+                sequence(chunkBits - 1, 3),
+                0,
+                ProofKind.Range,
+                RootKind.Current,
+                "unordered",
+                "mixed",
+                chunkBytes,
+                "fixed"
+            );
             assertTrue(this.checked(mixed), "variable mixed Current range");
-            BatchCase memory active =
-                generate(n, sequence(chunkBits - 1, 3), 0, false, true, "unordered", "all", chunkBytes, "fixed");
+            BatchCase memory active = generate(
+                n,
+                sequence(chunkBits - 1, 3),
+                0,
+                ProofKind.Range,
+                RootKind.Current,
+                "unordered",
+                "all",
+                chunkBytes,
+                "fixed"
+            );
             assertTrue(this.checked(active), "variable active Current range");
             if (chunkBytes > 32) {
                 uint256 last = active.currentRange.chunks.length - 1;
@@ -766,7 +831,8 @@ abstract contract LibQMDBBatchTest is QMDBTest {
             selected[0] = n - 1;
             selected[1] = 0;
             selected[2] = chunkBits;
-            BatchCase memory historical = generate(n, selected, 0, true, true, "unordered", "zero", chunkBytes, "fixed");
+            BatchCase memory historical =
+                generate(n, selected, 0, ProofKind.Multi, RootKind.Current, "unordered", "zero", chunkBytes, "fixed");
             assertTrue(this.checked(historical), "variable historical operation witness");
             rejectCurrentMutations(historical);
         }
@@ -775,8 +841,10 @@ abstract contract LibQMDBBatchTest is QMDBTest {
     /// @dev Operation and grafted trees authenticate their own inactive peak boundaries.
     function test_DifferentialSeparateInactiveCounts() public {
         uint256[] memory selected = sequence(896, 1);
-        BatchCase memory range = generate(1023, selected, 896, false, true, "unordered", "all", 32, "fixed");
-        BatchCase memory multi = generate(1023, selected, 896, true, true, "unordered", "all", 32, "fixed");
+        BatchCase memory range =
+            generate(1023, selected, 896, ProofKind.Range, RootKind.Current, "unordered", "all", 32, "fixed");
+        BatchCase memory multi =
+            generate(1023, selected, 896, ProofKind.Multi, RootKind.Current, "unordered", "all", 32, "fixed");
         assertEq(range.root, multi.root);
         assertTrue(range.currentRange.inactivePeaks != multi.multi.inactivePeaks);
         assertTrue(this.checked(range));
@@ -794,33 +862,46 @@ abstract contract LibQMDBBatchTest is QMDBTest {
         uint256 floor = uint256(floorSeed) % n;
         uint256 start = floor + uint256(querySeed) % (n - floor);
         uint256 count = n - start > 5 ? 5 : n - start;
-        bool sparse = mode % 2 != 0;
-        bool current = mode % 4 >= 2;
+        ProofKind proofKind = mode % 2 == 0 ? ProofKind.Range : ProofKind.Multi;
+        RootKind rootKind = mode % 4 >= 2 ? RootKind.Current : RootKind.Operations;
         uint256[] memory selected = sequence(start, count);
-        if (sparse) {
+        if (proofKind == ProofKind.Multi) {
             for (uint256 i; i < count; ++i) {
                 selected[i] = floor + uint256(keccak256(abi.encode(querySeed, i))) % (n - floor);
             }
         }
-        BatchCase memory c =
-            generate(n, selected, floor, sparse, current, "ordered", mode % 8 < 4 ? "mixed" : "zero", 32, "fixed");
+        BatchCase memory c = generate(
+            n,
+            selected,
+            floor,
+            proofKind,
+            rootKind,
+            "ordered",
+            rootKind == RootKind.Operations ? "" : mode % 8 < 4 ? "mixed" : "zero",
+            rootKind == RootKind.Current ? 32 : 0,
+            "fixed"
+        );
         assertTrue(this.checked(c), "Rust batch disagreement");
         c.operations[0] = abi.encodePacked(c.operations[0], bytes1(0));
         assertFalse(this.checked(c), "modified Rust operation");
     }
 
     /// @dev Random contiguous and scattered selections compare reconstruction with an independent tree.
-    function testFuzz_IndependentBatches(uint16 sizeSeed, uint16 startSeed, uint16 countSeed, bool sparse) public view {
+    function testFuzz_IndependentBatches(uint16 sizeSeed, uint16 startSeed, uint16 countSeed, uint8 proofSeed)
+        public
+        view
+    {
         uint256 n = uint256(sizeSeed) % 96 + 1;
         uint256 start = uint256(startSeed) % n;
         uint256 count = uint256(countSeed) % (n - start) + 1;
+        ProofKind proofKind = proofSeed % 2 == 0 ? ProofKind.Range : ProofKind.Multi;
         uint256[] memory selected = sequence(start, count);
-        if (sparse) {
+        if (proofKind == ProofKind.Multi) {
             for (uint256 i; i < count; ++i) {
                 selected[i] = uint256(keccak256(abi.encode(startSeed, i))) % n;
             }
         }
-        BatchCase memory c = build(n, selected, sparse);
+        BatchCase memory c = operationsCase(n, selected, proofKind);
         assertTrue(this.checked(c));
         c.operations[0] = abi.encodePacked(c.operations[0], bytes1(0));
         assertFalse(this.checked(c), "mutated batch accepted");
@@ -828,8 +909,8 @@ abstract contract LibQMDBBatchTest is QMDBTest {
 }
 
 abstract contract LibQMDBBatchMMBTest is LibQMDBBatchTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMB;
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMB;
     }
 }
 
@@ -846,8 +927,8 @@ contract LibQMDBBatchMMBSha256Test is LibQMDBBatchMMBTest {
 }
 
 abstract contract LibQMDBBatchMMRTest is LibQMDBBatchTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMR;
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMR;
     }
 }
 

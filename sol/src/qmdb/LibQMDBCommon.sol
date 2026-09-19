@@ -31,11 +31,13 @@ library LibQMDBCommon {
     }
 
     /// @dev Authenticate exact encoded operations at consecutive locations.
-    function verifyRange(bytes32 root, bytes[] memory operations, RangeProof calldata proof, bool mmb, address hasher)
-        internal
-        view
-        returns (bool)
-    {
+    function verifyRange(
+        bytes32 root,
+        bytes[] memory operations,
+        RangeProof calldata proof,
+        LibMerkle.Family family,
+        address hasher
+    ) internal view returns (bool) {
         (bytes32 reconstructed, bool valid) = reconstructRange(
             operations,
             proof.leaves,
@@ -43,7 +45,7 @@ library LibQMDBCommon {
             proof.digests,
             proof.inactivePeaks,
             LibMerkle.RangeGraft(0, 0, 0, 0),
-            mmb,
+            family,
             hasher
         );
         return valid && reconstructed == root;
@@ -58,9 +60,10 @@ library LibQMDBCommon {
         bytes32[] calldata digests,
         uint256 inactivePeaks,
         LibMerkle.RangeGraft memory graft,
-        bool mmb,
+        LibMerkle.Family family,
         address hasher
     ) internal view returns (bytes32 root, bool valid) {
+        bool mmb = family == LibMerkle.Family.MMB;
         // forge-lint: disable-next-line(boolean-cst)
         if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0)) return (0, false);
         // forge-lint: disable-next-line(boolean-cst)
@@ -78,16 +81,19 @@ library LibQMDBCommon {
                 position += mmb ? (((next + 1) & next) == 0 ? 1 : 2) : 1 + LibMerkle.log2(next & (~next + 1));
             }
         }
-        return LibMerkle.reconstructPrehashed(leaves, start, elements, digests, inactivePeaks, graft, mmb, hasher);
+        return LibMerkle.reconstructPrehashed(leaves, start, elements, digests, inactivePeaks, graft, family, hasher);
     }
 
     /// @dev Authenticate exact encoded operations at the supplied locations.
     /// Every location is checked before hashing and duplicate locations require equal operations.
-    function verifyMulti(bytes32 root, bytes[] memory operations, MultiProof calldata proof, bool mmb, address hasher)
-        internal
-        view
-        returns (bool)
-    {
+    function verifyMulti(
+        bytes32 root,
+        bytes[] memory operations,
+        MultiProof calldata proof,
+        LibMerkle.Family family,
+        address hasher
+    ) internal view returns (bool) {
+        bool mmb = family == LibMerkle.Family.MMB;
         uint256 leaves = proof.leaves;
         if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0)) return false;
         if (operations.length != proof.locations.length || proof.positions.length != proof.digests.length) {
@@ -103,7 +109,7 @@ library LibQMDBCommon {
             elements[i] = LibMerkle.hash(abi.encodePacked(uint64(position), operations[i]), hasher);
         }
         return LibMerkle.verifyMultiPrehashed(
-            root, leaves, proof.locations, elements, proof.positions, proof.digests, proof.inactivePeaks, mmb, hasher
+            root, leaves, proof.locations, elements, proof.positions, proof.digests, proof.inactivePeaks, family, hasher
         );
     }
 
@@ -115,14 +121,15 @@ library LibQMDBCommon {
         uint256 location,
         bytes32[] calldata digests,
         uint256 inactivePeaks,
-        bool mmb,
+        LibMerkle.Family family,
         address hasher
     ) internal view returns (bool) {
+        bool mmb = family == LibMerkle.Family.MMB;
         if (leaves > (uint256(1) << 62) + (mmb ? 30 : 0) || location >= leaves) {
             return false;
         }
         (bytes32 reconstructed, bool valid) =
-            reconstruct(leaves, location, operation, digests, inactivePeaks, LibMerkle.Graft(0, 0), mmb, hasher);
+            reconstruct(leaves, location, operation, digests, inactivePeaks, LibMerkle.Graft(0, 0), family, hasher);
         return valid && reconstructed == root;
     }
 
@@ -137,13 +144,14 @@ library LibQMDBCommon {
         bytes32[] calldata digests,
         uint256 inactivePeaks,
         LibMerkle.Graft memory graft,
-        bool mmb,
+        LibMerkle.Family family,
         address hasher
     ) internal view returns (bytes32 root, bool valid) {
+        bool mmb = family == LibMerkle.Family.MMB;
         uint256 position = LibMerkle.position(LibMerkle.peak(location, 1, mmb), 1, mmb);
         // The leaf bound keeps every physical position below `2^64`.
         // forge-lint: disable-next-line(unsafe-typecast)
         bytes32 leaf = LibMerkle.hash(abi.encodePacked(uint64(position), operation), hasher);
-        return LibMerkle.reconstructGrafted(leaves, location, leaf, digests, inactivePeaks, graft, mmb, hasher);
+        return LibMerkle.reconstructGrafted(leaves, location, leaf, digests, inactivePeaks, graft, family, hasher);
     }
 }

@@ -51,9 +51,9 @@ pub(crate) struct LifecycleArgs {
 impl LifecycleArgs {
     pub(super) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         match (self.family, hash) {
-            (TreeKind::Mmr, Hash::Keccak) => generate::<mmr::Family, Keccak256>(self.seed),
+            (TreeKind::Mmr, Hash::Keccak256) => generate::<mmr::Family, Keccak256>(self.seed),
             (TreeKind::Mmr, Hash::Sha256) => generate::<mmr::Family, Sha256>(self.seed),
-            (TreeKind::Mmb, Hash::Keccak) => generate::<mmb::Family, Keccak256>(self.seed),
+            (TreeKind::Mmb, Hash::Keccak256) => generate::<mmb::Family, Keccak256>(self.seed),
             (TreeKind::Mmb, Hash::Sha256) => generate::<mmb::Family, Sha256>(self.seed),
         }
     }
@@ -247,7 +247,7 @@ mod tests {
     #[test]
     fn persistent_lifecycle_is_deterministic() {
         for family in [TreeKind::Mmr, TreeKind::Mmb] {
-            for hash in [Hash::Keccak, Hash::Sha256] {
+            for hash in [Hash::Keccak256, Hash::Sha256] {
                 let run = || LifecycleArgs { seed: 71, family }.execute(hash).unwrap();
                 let encoded = run();
                 assert_eq!(encoded, run());

@@ -1,14 +1,14 @@
 {
-  "minpk_participants=16_signers=1": "178446",
-  "minpk_participants=16_signers=11": "191159",
-  "minpk_participants=4_signers=1": "171757",
-  "minpk_participants=4_signers=3": "174278",
-  "minpk_participants=64_signers=1": "207078",
-  "minpk_participants=64_signers=43": "262248",
-  "minsig_participants=16_signers=1": "142049",
-  "minsig_participants=16_signers=11": "160323",
-  "minsig_participants=4_signers=1": "133206",
-  "minsig_participants=4_signers=3": "136783",
-  "minsig_participants=64_signers=1": "181862",
-  "minsig_participants=64_signers=43": "265176"
+  "minpk_participants=16_signers=1": "178499",
+  "minpk_participants=16_signers=11": "191212",
+  "minpk_participants=4_signers=1": "171810",
+  "minpk_participants=4_signers=3": "174331",
+  "minpk_participants=64_signers=1": "207131",
+  "minpk_participants=64_signers=43": "262301",
+  "minsig_participants=16_signers=1": "142102",
+  "minsig_participants=16_signers=11": "160376",
+  "minsig_participants=4_signers=1": "133259",
+  "minsig_participants=4_signers=3": "136836",
+  "minsig_participants=64_signers=1": "181915",
+  "minsig_participants=64_signers=43": "265229"
 }

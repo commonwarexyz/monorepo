@@ -48,21 +48,24 @@ pub(crate) enum Command {
     /// Build a complete tree and return a range proof.
     Generate {
         #[arg(long, value_enum)]
-        kind: TreeKind,
+        family: TreeKind,
+        /// Check rejection of mutated roots, elements, and proof digests.
+        #[arg(long)]
+        check_mutated: bool,
         #[command(flatten)]
         range: RangeArgs,
     },
     /// Reconstruct a root from deterministic siblings without building the tree.
     Synthetic {
         #[arg(long, value_enum)]
-        kind: TreeKind,
+        family: TreeKind,
         #[command(flatten)]
         range: RangeArgs,
     },
     /// Verify an ABI-encoded (root, leaves, start, elements, proof) tuple.
     Check {
         #[arg(long, value_enum)]
-        kind: TreeKind,
+        family: TreeKind,
         #[arg(long)]
         abi_hex: String,
         #[command(flatten)]
@@ -71,36 +74,41 @@ pub(crate) enum Command {
     /// Build a complete tree and return a sparse multiproof.
     GenerateMulti {
         #[arg(long, value_enum)]
-        kind: TreeKind,
+        family: TreeKind,
+        /// Check rejection of mutated roots, elements, and proof digests.
+        #[arg(long)]
+        check_mutated: bool,
         #[command(flatten)]
         args: multi::MultiArgs,
     },
     /// Build only the selected paths and return a deep sparse multiproof.
     SyntheticMulti {
         #[arg(long, value_enum)]
-        kind: TreeKind,
+        family: TreeKind,
         #[command(flatten)]
         args: multi::MultiArgs,
     },
     /// Verify an ABI-encoded sparse multiproof tuple.
     CheckMulti {
         #[arg(long, value_enum)]
-        kind: TreeKind,
+        family: TreeKind,
         #[arg(long)]
         abi_hex: String,
         #[command(flatten)]
         policy: Policy,
     },
-    /// Shorthand for `generate --kind mmr`.
-    Mmr(RangeArgs),
-    /// Shorthand for `generate --kind mmb`.
-    Mmb(RangeArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
 pub(crate) enum TreeKind {
     Mmr,
     Mmb,
+}
+
+#[derive(Clone, Copy)]
+enum GenerationMode {
+    Materialized { check_mutated: bool },
+    Synthetic,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -136,10 +144,6 @@ pub(crate) struct RangeArgs {
     length: u64,
     #[arg(long)]
     seed: u64,
-    /// Check rejection of mutated roots, elements, and proof digests.
-    /// Synthetic generation always performs these checks.
-    #[arg(long)]
-    check_mutated: bool,
     #[command(flatten)]
     policy: Policy,
 }
@@ -383,24 +387,23 @@ fn abi_encode(output: &Output) -> Vec<u8> {
 }
 
 impl RangeArgs {
-    fn generate<F: Family, H: Hasher>(&self, synthetic_mode: bool) -> Result<Output, String> {
-        if synthetic_mode {
-            synthetic::<F, H>(
+    fn generate<F: Family, H: Hasher>(&self, mode: GenerationMode) -> Result<Output, String> {
+        match mode {
+            GenerationMode::Synthetic => synthetic::<F, H>(
                 self.leaf_count,
                 self.start,
                 self.length,
                 self.seed,
                 self.policy,
-            )
-        } else {
-            generate::<F, H>(
+            ),
+            GenerationMode::Materialized { check_mutated } => generate::<F, H>(
                 self.leaf_count,
                 self.start,
                 self.length,
                 self.seed,
-                self.check_mutated,
+                check_mutated,
                 self.policy,
-            )
+            ),
         }
     }
 }
@@ -408,54 +411,63 @@ impl RangeArgs {
 impl Command {
     pub(crate) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         match hash {
-            Hash::Keccak => self.execute_with::<Keccak256>(),
+            Hash::Keccak256 => self.execute_with::<Keccak256>(),
             Hash::Sha256 => self.execute_with::<Sha256>(),
         }
     }
 
     fn execute_with<H: Hasher>(self) -> Result<Vec<u8>, String> {
-        let multi_check = matches!(&self, Self::CheckMulti { .. });
-        let (kind, range, synthetic_mode) = match self {
+        let (family, range, mode) = match self {
             Self::Check {
-                kind,
-                abi_hex,
-                policy,
-            }
-            | Self::CheckMulti {
-                kind,
+                family,
                 abi_hex,
                 policy,
             } => {
                 let encoded = const_hex::decode(abi_hex.strip_prefix("0x").unwrap_or(&abi_hex))
                     .map_err(|error| format!("invalid ABI hex: {error}"))?;
-                let accepted = match kind {
-                    TreeKind::Mmr => {
-                        if multi_check {
-                            multi::check::<mmr::Family, H>(&encoded, policy)
-                        } else {
-                            check::<mmr::Family, H>(&encoded, policy)
-                        }
-                    }
-                    TreeKind::Mmb => {
-                        if multi_check {
-                            multi::check::<mmb::Family, H>(&encoded, policy)
-                        } else {
-                            check::<mmb::Family, H>(&encoded, policy)
-                        }
-                    }
+                let accepted = match family {
+                    TreeKind::Mmr => check::<mmr::Family, H>(&encoded, policy),
+                    TreeKind::Mmb => check::<mmb::Family, H>(&encoded, policy),
                 };
                 return Ok(accepted.abi_encode());
             }
-            Self::GenerateMulti { kind, args } => return args.execute::<H>(kind, false),
-            Self::SyntheticMulti { kind, args } => return args.execute::<H>(kind, true),
-            Self::Generate { kind, range } => (kind, range, false),
-            Self::Synthetic { kind, range } => (kind, range, true),
-            Self::Mmr(range) => (TreeKind::Mmr, range, false),
-            Self::Mmb(range) => (TreeKind::Mmb, range, false),
+            Self::CheckMulti {
+                family,
+                abi_hex,
+                policy,
+            } => {
+                let encoded = const_hex::decode(abi_hex.strip_prefix("0x").unwrap_or(&abi_hex))
+                    .map_err(|error| format!("invalid ABI hex: {error}"))?;
+                let accepted = match family {
+                    TreeKind::Mmr => multi::check::<mmr::Family, H>(&encoded, policy),
+                    TreeKind::Mmb => multi::check::<mmb::Family, H>(&encoded, policy),
+                };
+                return Ok(accepted.abi_encode());
+            }
+            Self::GenerateMulti {
+                family,
+                check_mutated,
+                args,
+            } => {
+                return args.execute::<H>(family, GenerationMode::Materialized { check_mutated });
+            }
+            Self::SyntheticMulti { family, args } => {
+                return args.execute::<H>(family, GenerationMode::Synthetic);
+            }
+            Self::Generate {
+                family,
+                check_mutated,
+                range,
+            } => (
+                family,
+                range,
+                GenerationMode::Materialized { check_mutated },
+            ),
+            Self::Synthetic { family, range } => (family, range, GenerationMode::Synthetic),
         };
-        let output = match kind {
-            TreeKind::Mmr => range.generate::<mmr::Family, H>(synthetic_mode)?,
-            TreeKind::Mmb => range.generate::<mmb::Family, H>(synthetic_mode)?,
+        let output = match family {
+            TreeKind::Mmr => range.generate::<mmr::Family, H>(mode)?,
+            TreeKind::Mmb => range.generate::<mmb::Family, H>(mode)?,
         };
         Ok(abi_encode(&output))
     }
@@ -473,20 +485,20 @@ mod tests {
     };
 
     #[test]
-    fn cli_preserves_generation_forms_and_check_encoding() {
+    fn cli_generation_forms_and_check_encoding() {
         use clap::CommandFactory;
 
         Cli::command().debug_assert();
-        for kind in ["mmr", "mmb"] {
+        for family in ["mmr", "mmb"] {
             for mode in ["generate", "synthetic"] {
-                let explicit = Cli::try_parse_from([
+                let mut args = vec![
                     "commonware-sol-fuzz",
                     "merkle",
                     "--hash",
-                    "keccak",
+                    "keccak256",
                     mode,
-                    "--kind",
-                    kind,
+                    "--family",
+                    family,
                     "--leaf-count",
                     "11",
                     "--start",
@@ -499,13 +511,16 @@ mod tests {
                     "forward",
                     "--inactive-peaks",
                     "0",
-                    "--check-mutated",
-                ])
-                .unwrap()
-                .command
-                .execute()
-                .unwrap();
-                let expected = match (kind, mode) {
+                ];
+                if mode == "generate" {
+                    args.push("--check-mutated");
+                }
+                let explicit = Cli::try_parse_from(args)
+                    .unwrap()
+                    .command
+                    .execute()
+                    .unwrap();
+                let expected = match (family, mode) {
                     ("mmr", "generate") => {
                         generate::<mmr::Family, Keccak256>(11, 2, 6, 42, true, FORWARD_ACTIVE)
                     }
@@ -518,43 +533,16 @@ mod tests {
                 }
                 .unwrap();
                 assert_eq!(explicit, abi_encode(&expected));
-                if mode == "generate" {
-                    let shorthand = Cli::try_parse_from([
-                        "commonware-sol-fuzz",
-                        "merkle",
-                        "--hash",
-                        "keccak",
-                        kind,
-                        "--leaf-count",
-                        "11",
-                        "--start",
-                        "2",
-                        "--length",
-                        "6",
-                        "--seed",
-                        "42",
-                        "--bagging",
-                        "forward",
-                        "--inactive-peaks",
-                        "0",
-                        "--check-mutated",
-                    ])
-                    .unwrap()
-                    .command
-                    .execute()
-                    .unwrap();
-                    assert_eq!(shorthand, explicit);
-                }
                 let input = const_hex::encode(check_input(&expected, 2));
                 for hex in [input.clone(), format!("0x{input}")] {
                     let accepted = Cli::try_parse_from([
                         "commonware-sol-fuzz",
                         "merkle",
                         "--hash",
-                        "keccak",
+                        "keccak256",
                         "check",
-                        "--kind",
-                        kind,
+                        "--family",
+                        family,
                         "--abi-hex",
                         &hex,
                         "--bagging",
@@ -577,7 +565,7 @@ mod tests {
         for args in [
             vec![
                 "generate",
-                "--kind",
+                "--family",
                 "mmr",
                 "--leaf-count",
                 "11",
@@ -594,7 +582,7 @@ mod tests {
             ],
             vec![
                 "synthetic",
-                "--kind",
+                "--family",
                 "mmb",
                 "--leaf-count",
                 "11",
@@ -611,7 +599,7 @@ mod tests {
             ],
             vec![
                 "check",
-                "--kind",
+                "--family",
                 "mmr",
                 "--abi-hex",
                 "00",
@@ -622,7 +610,7 @@ mod tests {
             ],
             vec![
                 "generate-multi",
-                "--kind",
+                "--family",
                 "mmb",
                 "--leaf-count",
                 "11",
@@ -637,7 +625,7 @@ mod tests {
             ],
             vec![
                 "synthetic-multi",
-                "--kind",
+                "--family",
                 "mmr",
                 "--leaf-count",
                 "11",
@@ -652,40 +640,10 @@ mod tests {
             ],
             vec![
                 "check-multi",
-                "--kind",
+                "--family",
                 "mmb",
                 "--abi-hex",
                 "00",
-                "--bagging",
-                "forward",
-                "--inactive-peaks",
-                "0",
-            ],
-            vec![
-                "mmr",
-                "--leaf-count",
-                "11",
-                "--start",
-                "2",
-                "--length",
-                "6",
-                "--seed",
-                "42",
-                "--bagging",
-                "forward",
-                "--inactive-peaks",
-                "0",
-            ],
-            vec![
-                "mmb",
-                "--leaf-count",
-                "11",
-                "--start",
-                "2",
-                "--length",
-                "6",
-                "--seed",
-                "42",
                 "--bagging",
                 "forward",
                 "--inactive-peaks",
@@ -701,7 +659,7 @@ mod tests {
                 "--hash",
                 "blake3",
                 "generate",
-                "--kind",
+                "--family",
                 "mmr",
                 "--leaf-count",
                 "11",
@@ -917,16 +875,13 @@ mod tests {
     }
     #[test]
     fn cli_hash_selection() {
-        for kind in ["mmr", "mmb"] {
-            for mode in ["generate", "synthetic", "shorthand"] {
+        for family in ["mmr", "mmb"] {
+            for mode in ["generate", "synthetic"] {
                 let mut outputs = Vec::new();
-                for hash in ["keccak", "sha256"] {
-                    let mut args = vec!["fuzz", "merkle", "--hash", hash];
-                    if mode != "shorthand" {
-                        args.extend([mode, "--kind"]);
-                    }
+                for hash in ["keccak256", "sha256"] {
+                    let mut args = vec!["fuzz", "merkle", "--hash", hash, mode, "--family"];
                     args.extend([
-                        kind,
+                        family,
                         "--leaf-count",
                         "11",
                         "--start",
@@ -956,15 +911,15 @@ mod tests {
                     }
                     .abi_encode_params();
                     let hex = const_hex::encode(input);
-                    for check_hash in ["keccak", "sha256"] {
+                    for check_hash in ["keccak256", "sha256"] {
                         let accepted = Cli::try_parse_from([
                             "fuzz",
                             "merkle",
                             "--hash",
                             check_hash,
                             "check",
-                            "--kind",
-                            kind,
+                            "--family",
+                            family,
                             "--abi-hex",
                             &hex,
                             "--bagging",
@@ -992,7 +947,7 @@ mod tests {
         for command in [
             vec![
                 "generate",
-                "--kind",
+                "--family",
                 "mmr",
                 "--leaf-count",
                 "3",
@@ -1005,29 +960,7 @@ mod tests {
             ],
             vec![
                 "synthetic",
-                "--kind",
-                "mmb",
-                "--leaf-count",
-                "3",
-                "--start",
-                "1",
-                "--length",
-                "1",
-                "--seed",
-                "42",
-            ],
-            vec![
-                "mmr",
-                "--leaf-count",
-                "3",
-                "--start",
-                "1",
-                "--length",
-                "1",
-                "--seed",
-                "42",
-            ],
-            vec![
+                "--family",
                 "mmb",
                 "--leaf-count",
                 "3",
@@ -1040,7 +973,7 @@ mod tests {
             ],
             vec![
                 "generate-multi",
-                "--kind",
+                "--family",
                 "mmr",
                 "--leaf-count",
                 "3",
@@ -1051,7 +984,7 @@ mod tests {
             ],
             vec![
                 "synthetic-multi",
-                "--kind",
+                "--family",
                 "mmb",
                 "--leaf-count",
                 "3",
@@ -1060,12 +993,12 @@ mod tests {
                 "--seed",
                 "42",
             ],
-            vec!["check", "--kind", "mmr", "--abi-hex", "00"],
-            vec!["check-multi", "--kind", "mmb", "--abi-hex", "00"],
+            vec!["check", "--family", "mmr", "--abi-hex", "00"],
+            vec!["check-multi", "--family", "mmb", "--abi-hex", "00"],
         ] {
             for bagging in ["forward", "backward"] {
                 for inactive in ["0", "1"] {
-                    let mut args = vec!["fuzz", "merkle", "--hash", "keccak"];
+                    let mut args = vec!["fuzz", "merkle", "--hash", "keccak256"];
                     args.extend_from_slice(&command);
                     args.extend(["--bagging", bagging, "--inactive-peaks", inactive]);
                     assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
@@ -1083,10 +1016,112 @@ mod tests {
     }
 
     #[test]
+    fn cli_requires_family_and_rejects_removed_forms() {
+        let rejects = |args: Vec<&str>| {
+            assert!(
+                Cli::try_parse_from(
+                    ["fuzz", "merkle", "--hash", "keccak256"]
+                        .into_iter()
+                        .chain(args.iter().copied())
+                )
+                .is_err(),
+                "accepted {args:?}"
+            );
+        };
+        let range = [
+            "--leaf-count",
+            "3",
+            "--start",
+            "1",
+            "--length",
+            "1",
+            "--seed",
+            "42",
+            "--bagging",
+            "forward",
+            "--inactive-peaks",
+            "0",
+        ];
+        let multi = [
+            "--leaf-count",
+            "3",
+            "--locations",
+            "1",
+            "--seed",
+            "42",
+            "--bagging",
+            "forward",
+            "--inactive-peaks",
+            "0",
+        ];
+        let check = [
+            "--abi-hex",
+            "00",
+            "--bagging",
+            "forward",
+            "--inactive-peaks",
+            "0",
+        ];
+
+        for command in ["generate", "synthetic"] {
+            rejects(
+                std::iter::once(command)
+                    .chain(range.iter().copied())
+                    .collect(),
+            );
+        }
+        for command in ["generate-multi", "synthetic-multi"] {
+            rejects(
+                std::iter::once(command)
+                    .chain(multi.iter().copied())
+                    .collect(),
+            );
+        }
+        for command in ["check", "check-multi"] {
+            rejects(
+                std::iter::once(command)
+                    .chain(check.iter().copied())
+                    .collect(),
+            );
+        }
+
+        rejects(
+            ["generate", "--kind", "mmr"]
+                .into_iter()
+                .chain(range)
+                .collect(),
+        );
+        for alias in ["mmr", "mmb"] {
+            rejects(std::iter::once(alias).chain(range).collect());
+        }
+        rejects(
+            ["synthetic", "--family", "mmr", "--check-mutated"]
+                .into_iter()
+                .chain(range)
+                .collect(),
+        );
+        rejects(
+            ["synthetic-multi", "--family", "mmb", "--check-mutated"]
+                .into_iter()
+                .chain(multi)
+                .collect(),
+        );
+    }
+
+    #[test]
     fn cli_requires_named_fields() {
         assert!(
             Cli::try_parse_from([
-                "fuzz", "merkle", "--hash", "keccak", "generate", "mmr", "11", "2", "6", "42"
+                "fuzz",
+                "merkle",
+                "--hash",
+                "keccak256",
+                "generate",
+                "mmr",
+                "11",
+                "2",
+                "6",
+                "42"
             ])
             .is_err()
         );
@@ -1095,9 +1130,9 @@ mod tests {
                 "fuzz",
                 "merkle",
                 "--hash",
-                "keccak",
+                "keccak256",
                 "generate",
-                "--kind",
+                "--family",
                 "mmr",
                 "--leaf-count",
                 "11",
@@ -1110,7 +1145,14 @@ mod tests {
         );
         assert!(
             Cli::try_parse_from([
-                "fuzz", "merkle", "--hash", "keccak", "check", "--kind", "mmr", "00"
+                "fuzz",
+                "merkle",
+                "--hash",
+                "keccak256",
+                "check",
+                "--family",
+                "mmr",
+                "00"
             ])
             .is_err()
         );

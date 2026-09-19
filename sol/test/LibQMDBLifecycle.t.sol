@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { QMDBTest, MerkleFamily } from "./Common.t.sol";
+import { LibMerkle } from "../src/merkle/LibMerkle.sol";
+import { QMDBTest } from "./Common.t.sol";
 import { LibQMDBCurrent } from "../src/qmdb/LibQMDBCurrent.sol";
 import { LibQMDBCurrentMMB } from "../src/qmdb/LibQMDBCurrentMMB.sol";
 import { LibQMDBCurrentMMR } from "../src/qmdb/LibQMDBCurrentMMR.sol";
@@ -31,40 +32,38 @@ abstract contract LibQMDBLifecycleTest is QMDBTest {
     }
 
     /// @dev Expose the calldata proof entrypoints with the fixture's 32-byte bitmap chunks.
-    function verify(
-        bytes32 root,
-        bytes memory operation,
-        LibQMDBCurrent.Proof calldata proof,
-        bool exclusion,
-        bytes32 key
-    ) external view returns (bool) {
-        if (exclusion) {
-            return _family() == MerkleFamily.MMB
-                ? LibQMDBCurrentMMB.verifyExclusion(root, key, operation, proof, 32, _hasher())
-                : LibQMDBCurrentMMR.verifyExclusion(root, key, operation, proof, 32, _hasher());
-        }
-        return _family() == MerkleFamily.MMB
+    function verifyMembership(bytes32 root, bytes memory operation, LibQMDBCurrent.Proof calldata proof)
+        external
+        view
+        returns (bool)
+    {
+        return _family() == LibMerkle.Family.MMB
             ? LibQMDBCurrentMMB.verify(root, operation, proof, 32, _hasher())
             : LibQMDBCurrentMMR.verify(root, operation, proof, 32, _hasher());
     }
 
+    /// @dev Expose fixed-width exclusion with the fixture's 32-byte bitmap chunks.
+    function verifyExclusion(bytes32 root, bytes32 key, bytes memory operation, LibQMDBCurrent.Proof calldata proof)
+        external
+        view
+        returns (bool)
+    {
+        return _family() == LibMerkle.Family.MMB
+            ? LibQMDBCurrentMMB.verifyExclusion(root, key, operation, proof, 32, _hasher())
+            : LibQMDBCurrentMMR.verifyExclusion(root, key, operation, proof, 32, _hasher());
+    }
+
     /// @dev Map the Rust ABI tuple into the verifier's calldata proof structure.
-    function _verify(Operation memory operation, bool exclusion, bytes32 key) internal view returns (bool) {
-        return this.verify(
-            operation.root,
-            operation.operation,
-            LibQMDBCurrent.Proof(
-                operation.leaves,
-                operation.location,
-                operation.inactivePeaks,
-                operation.chunk,
-                operation.opsRoot,
-                operation.pending,
-                operation.partialDigest,
-                operation.digests
-            ),
-            exclusion,
-            key
+    function _proof(Operation memory operation) internal pure returns (LibQMDBCurrent.Proof memory) {
+        return LibQMDBCurrent.Proof(
+            operation.leaves,
+            operation.location,
+            operation.inactivePeaks,
+            operation.chunk,
+            operation.opsRoot,
+            operation.pending,
+            operation.partialDigest,
+            operation.digests
         );
     }
 
@@ -79,7 +78,7 @@ abstract contract LibQMDBLifecycleTest is QMDBTest {
             args[3] = "--seed";
             args[4] = vm.toString(seeds[i]);
             args[5] = "--family";
-            args[6] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
+            args[6] = _family() == LibMerkle.Family.MMB ? "mmb" : "mmr";
             Lifecycle memory c = abi.decode(_ffi(args), (Lifecycle));
             assertGt(c.retainedStart, 0, "pruning must remove stored operations");
             assertLt(c.empty.leaves, 2048, "bounded lifecycle");
@@ -88,23 +87,44 @@ abstract contract LibQMDBLifecycleTest is QMDBTest {
             assertNotEq(c.afterOverwrite.root, c.empty.root);
             assertEq(c.before.operation[0], bytes1(0xd2));
             assertEq(c.empty.operation[0], bytes1(0xd3));
-            assertTrue(_verify(c.before, false, 0), "initial membership");
-            assertTrue(_verify(c.afterOverwrite, false, 0), "recovered membership");
-            assertTrue(_verify(c.excluded, true, c.excludedKey), "deleted key exclusion");
-            assertTrue(_verify(c.empty, true, c.emptyKey), "empty database exclusion");
-            assertTrue(_verify(c.empty, true, c.excludedKey), "empty database excludes every key");
-            assertFalse(_verify(c.excluded, true, c.emptyKey), "live key cannot be excluded");
+            assertTrue(this.verifyMembership(c.before.root, c.before.operation, _proof(c.before)), "initial membership");
+            assertTrue(
+                this.verifyMembership(c.afterOverwrite.root, c.afterOverwrite.operation, _proof(c.afterOverwrite)),
+                "recovered membership"
+            );
+            assertTrue(
+                this.verifyExclusion(c.excluded.root, c.excludedKey, c.excluded.operation, _proof(c.excluded)),
+                "deleted key exclusion"
+            );
+            assertTrue(
+                this.verifyExclusion(c.empty.root, c.emptyKey, c.empty.operation, _proof(c.empty)),
+                "empty database exclusion"
+            );
+            assertTrue(
+                this.verifyExclusion(c.empty.root, c.excludedKey, c.empty.operation, _proof(c.empty)),
+                "empty database excludes every key"
+            );
+            assertFalse(
+                this.verifyExclusion(c.excluded.root, c.emptyKey, c.excluded.operation, _proof(c.excluded)),
+                "live key cannot be excluded"
+            );
             c.before.root = c.afterOverwrite.root;
-            assertFalse(_verify(c.before, false, 0), "stale proof under recovered root");
+            assertFalse(
+                this.verifyMembership(c.before.root, c.before.operation, _proof(c.before)),
+                "stale proof under recovered root"
+            );
             c.afterOverwrite.operation[33] ^= bytes1(uint8(1));
-            assertFalse(_verify(c.afterOverwrite, false, 0), "wrong current value");
+            assertFalse(
+                this.verifyMembership(c.afterOverwrite.root, c.afterOverwrite.operation, _proof(c.afterOverwrite)),
+                "wrong current value"
+            );
         }
     }
 }
 
 abstract contract LibQMDBLifecycleMMBTest is LibQMDBLifecycleTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMB;
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMB;
     }
 }
 
@@ -121,8 +141,8 @@ contract LibQMDBLifecycleMMBSha256Test is LibQMDBLifecycleMMBTest {
 }
 
 abstract contract LibQMDBLifecycleMMRTest is LibQMDBLifecycleTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMR;
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMR;
     }
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
+import { LibMerkle } from "../merkle/LibMerkle.sol";
 import { LibQMDBCommon } from "./LibQMDBCommon.sol";
 
 /// @notice Verify inclusion of encoded operations in a keyless QMDB.
@@ -23,7 +24,14 @@ library LibQMDBKeylessMMR {
         returns (bool)
     {
         return LibQMDBCommon.verify(
-            root, operation, proof.leaves, proof.location, proof.digests, proof.inactivePeaks, false, hasher
+            root,
+            operation,
+            proof.leaves,
+            proof.location,
+            proof.digests,
+            proof.inactivePeaks,
+            LibMerkle.Family.MMR,
+            hasher
         );
     }
 
@@ -39,7 +47,7 @@ library LibQMDBKeylessMMR {
         LibQMDBCommon.RangeProof calldata proof,
         address hasher
     ) internal view returns (bool) {
-        return LibQMDBCommon.verifyRange(root, operations, proof, false, hasher);
+        return LibQMDBCommon.verifyRange(root, operations, proof, LibMerkle.Family.MMR, hasher);
     }
 
     /// @notice Verify a sparse selection of encoded operations against a trusted keyless MMR root.
@@ -54,6 +62,6 @@ library LibQMDBKeylessMMR {
         LibQMDBCommon.MultiProof calldata proof,
         address hasher
     ) internal view returns (bool) {
-        return LibQMDBCommon.verifyMulti(root, operations, proof, false, hasher);
+        return LibQMDBCommon.verifyMulti(root, operations, proof, LibMerkle.Family.MMR, hasher);
     }
 }

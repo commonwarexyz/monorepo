@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { QMDBTest, MerkleFamily } from "./Common.t.sol";
+import { LibMerkle } from "../src/merkle/LibMerkle.sol";
+import { QMDBTest, Encoding } from "./Common.t.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
 import { LibQMDBKeylessMMB } from "../src/qmdb/LibQMDBKeylessMMB.sol";
 import { LibQMDBKeylessMMR } from "../src/qmdb/LibQMDBKeylessMMR.sol";
@@ -13,6 +14,12 @@ struct KeylessCase {
 }
 
 abstract contract LibQMDBKeylessTest is QMDBTest {
+    enum KeylessOperation {
+        Append,
+        Commit,
+        CommitMetadata
+    }
+
     /// @dev Caller allocations and reusable scratch survive successful and rejected proofs.
     function checked(KeylessCase calldata c) external view returns (bool valid) {
         bytes memory operation = c.operation;
@@ -28,7 +35,7 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
                     mstore(p, not(0))
                 }
             }
-            bool result = _family() == MerkleFamily.MMB
+            bool result = _family() == LibMerkle.Family.MMB
                 ? LibQMDBKeylessMMB.verify(c.root, operation, c.proof, _hasher())
                 : LibQMDBKeylessMMR.verify(c.root, operation, c.proof, _hasher());
             assembly ("memory-safe") {
@@ -196,7 +203,7 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
         c.proof.location = 0;
         c.proof.leaves = 0;
         assertFalse(this.checked(c), "empty tree accepted");
-        c.proof.leaves = (uint256(1) << 62) + (_family() == MerkleFamily.MMB ? 31 : 1);
+        c.proof.leaves = (uint256(1) << 62) + (_family() == LibMerkle.Family.MMB ? 31 : 1);
         assertFalse(this.checked(c), "unsupported leaf count accepted");
         c.proof.leaves = type(uint256).max;
         assertFalse(this.checked(c), "oversized leaf count accepted");
@@ -210,10 +217,10 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
         uint256 location,
         uint256 floor,
         uint256 seed,
-        bool variableEncoding,
-        uint256 operation
+        Encoding encoding,
+        KeylessOperation operation
     ) internal returns (KeylessCase memory c) {
-        string[] memory args = new string[](variableEncoding ? 21 : 19);
+        string[] memory args = new string[](encoding == Encoding.Variable ? 19 : 17);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "qmdb";
         args[2] = "keyless";
@@ -226,17 +233,17 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
         args[9] = "--inactivity-floor";
         args[10] = vm.toString(floor);
         args[11] = "--family";
-        args[12] = _family() == MerkleFamily.MMB ? "mmb" : "mmr";
+        args[12] = _family() == LibMerkle.Family.MMB ? "mmb" : "mmr";
         args[13] = "--encoding";
-        args[14] = variableEncoding ? "variable" : "fixed";
+        args[14] = encoding == Encoding.Variable ? "variable" : "fixed";
         args[15] = "--operation";
-        args[16] = location == 0 || operation == 1 ? "commit" : operation == 0 ? "append" : "commit-metadata";
-        args[17] = "--chunk-bytes";
-        args[18] = "32";
-        if (variableEncoding) {
+        args[16] = operation == KeylessOperation.Append
+            ? "append"
+            : operation == KeylessOperation.Commit ? "commit" : "commit-metadata";
+        if (encoding == Encoding.Variable) {
             uint256[8] memory lengths = [uint256(0), 1, 31, 32, 33, 127, 128, 129];
-            args[19] = "--value-length";
-            args[20] = vm.toString(lengths[seed % lengths.length]);
+            args[17] = "--value-length";
+            args[18] = vm.toString(lengths[seed % lengths.length]);
         }
         (c.root, c.proof.leaves, c.proof.location, c.proof.inactivePeaks, c.proof.digests, c.operation) =
             abi.decode(_ffi(args), (bytes32, uint256, uint256, uint256, bytes32[], bytes));
@@ -246,10 +253,11 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
 
     /// @dev Production codecs and roots agree with independently encoded bootstrap commits.
     function test_DifferentialBootstrapCommit() public {
-        for (uint256 encoding; encoding < 2; ++encoding) {
-            KeylessCase memory c = generate(1, 0, 0, 71, encoding != 0, 1);
+        for (uint256 encodingIndex; encodingIndex <= uint256(Encoding.Variable); ++encodingIndex) {
+            Encoding encoding = Encoding(encodingIndex);
+            KeylessCase memory c = generate(1, 0, 0, 71, encoding, KeylessOperation.Commit);
             bytes memory expected =
-                encoding == 0 ? abi.encodePacked(hex"0000", bytes32(0), uint64(0)) : bytes(hex"000000");
+                encoding == Encoding.Fixed ? abi.encodePacked(hex"0000", bytes32(0), uint64(0)) : bytes(hex"000000");
             assertEq(c.operation, expected);
             assertEq(c.root, smallCase(expected, false).root);
             rejectMutations(c);
@@ -259,11 +267,12 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
     /// @dev Rust proofs exercise both operation encodings at merge and peak boundaries.
     function test_DifferentialBoundaryTrees() public {
         uint256[10] memory sizes = [uint256(1), 2, 7, 8, 255, 256, 257, 383, 512, 1023];
-        for (uint256 encoding; encoding < 2; ++encoding) {
+        for (uint256 encodingIndex; encodingIndex <= uint256(Encoding.Variable); ++encodingIndex) {
+            Encoding encoding = Encoding(encodingIndex);
             for (uint256 i; i < sizes.length; ++i) {
-                assertTrue(this.checked(generate(sizes[i], 0, 0, 71, encoding != 0, 0)));
+                assertTrue(this.checked(generate(sizes[i], 0, 0, 71, encoding, KeylessOperation.Commit)));
                 if (sizes[i] > 1) {
-                    assertTrue(this.checked(generate(sizes[i], sizes[i] - 1, 0, 71, encoding != 0, 0)));
+                    assertTrue(this.checked(generate(sizes[i], sizes[i] - 1, 0, 71, encoding, KeylessOperation.Append)));
                 }
             }
         }
@@ -273,9 +282,14 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
     function test_DifferentialVariablePayloadBoundaries() public {
         uint256[8] memory lengths = [uint256(0), 1, 31, 32, 33, 127, 128, 129];
         for (uint256 seed; seed < lengths.length; ++seed) {
-            for (uint256 kind; kind < 3; kind += 2) {
-                KeylessCase memory c = generate(2, 1, 0, seed, true, kind);
-                uint256 framing = kind == 0 ? 1 : 3;
+            for (
+                uint256 operationIndex;
+                operationIndex <= uint256(KeylessOperation.CommitMetadata);
+                operationIndex += 2
+            ) {
+                KeylessOperation operation = KeylessOperation(operationIndex);
+                KeylessCase memory c = generate(2, 1, 0, seed, Encoding.Variable, operation);
+                uint256 framing = operation == KeylessOperation.Append ? 1 : 3;
                 assertEq(c.operation.length, framing + varint(lengths[seed]).length + lengths[seed]);
                 rejectMutations(c);
             }
@@ -284,7 +298,7 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
 
     /// @dev A distinct merge history must not authenticate under the other tree family.
     function rejectOtherFamily(KeylessCase calldata c) external view {
-        bool valid = _family() == MerkleFamily.MMB
+        bool valid = _family() == LibMerkle.Family.MMB
             ? LibQMDBKeylessMMR.verify(c.root, c.operation, c.proof, _hasher())
             : LibQMDBKeylessMMB.verify(c.root, c.operation, c.proof, _hasher());
         assertFalse(valid, "proof accepted by the other append family");
@@ -293,11 +307,17 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
     /// @dev Nonzero floors and optional commit metadata authenticate inactive peak boundaries.
     function test_DifferentialInactiveCommits() public {
         uint256[3] memory floors = [uint256(512), 768, 1280];
-        for (uint256 encoding; encoding < 2; ++encoding) {
-            for (uint256 kind = 1; kind < 3; ++kind) {
+        for (uint256 encodingIndex; encodingIndex <= uint256(Encoding.Variable); ++encodingIndex) {
+            Encoding encoding = Encoding(encodingIndex);
+            for (
+                uint256 operationIndex = uint256(KeylessOperation.Commit);
+                operationIndex <= uint256(KeylessOperation.CommitMetadata);
+                ++operationIndex
+            ) {
+                KeylessOperation operation = KeylessOperation(operationIndex);
                 for (uint256 i; i < floors.length; ++i) {
                     uint256 n = i == 2 ? 1535 : 1023;
-                    KeylessCase memory c = generate(n, n - 1, floors[i], 71, encoding != 0, kind);
+                    KeylessCase memory c = generate(n, n - 1, floors[i], 71, encoding, operation);
                     assertGt(c.proof.inactivePeaks, 0, "fixture has no inactive peaks");
                     rejectMutations(c);
                     uint256 inactive = c.proof.inactivePeaks;
@@ -312,8 +332,9 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
 
     /// @dev Deep valid proofs bind their witnesses and tree family for append operations.
     function test_DifferentialProofMutations() public {
-        for (uint256 encoding; encoding < 2; ++encoding) {
-            KeylessCase memory c = generate(256, 255, 0, 71, encoding != 0, 0);
+        for (uint256 encodingIndex; encodingIndex <= uint256(Encoding.Variable); ++encodingIndex) {
+            Encoding encoding = Encoding(encodingIndex);
+            KeylessCase memory c = generate(256, 255, 0, 71, encoding, KeylessOperation.Append);
             rejectMutations(c);
             this.rejectOtherFamily(c);
         }
@@ -325,13 +346,14 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
         uint16 locationSeed,
         uint16 floorSeed,
         uint64 seed,
-        bool variableEncoding,
+        Encoding encoding,
         uint8 kindSeed
     ) public {
         uint256 n = uint256(sizeSeed) % 1536 + 1;
         uint256 floor = uint256(floorSeed) % n;
         uint256 location = floor + uint256(locationSeed) % (n - floor);
-        KeylessCase memory c = generate(n, location, floor, seed, variableEncoding, uint256(kindSeed) % 3);
+        KeylessOperation operation = location == 0 ? KeylessOperation.Commit : KeylessOperation(uint256(kindSeed) % 3);
+        KeylessCase memory c = generate(n, location, floor, seed, encoding, operation);
         assertTrue(this.checked(c));
         c.operation = abi.encodePacked(c.operation, bytes1(0));
         assertFalse(this.checked(c), "modified oracle operation accepted");
@@ -339,8 +361,8 @@ abstract contract LibQMDBKeylessTest is QMDBTest {
 }
 
 abstract contract LibQMDBKeylessMMBTest is LibQMDBKeylessTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMB;
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMB;
     }
 }
 
@@ -357,8 +379,8 @@ contract LibQMDBKeylessMMBSha256Test is LibQMDBKeylessMMBTest {
 }
 
 abstract contract LibQMDBKeylessMMRTest is LibQMDBKeylessTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMR;
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMR;
     }
 }
 

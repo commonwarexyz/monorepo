@@ -64,7 +64,7 @@ library LibMMR {
             proof.length,
             true,
             false,
-            false,
+            LibMerkle.Family.MMR,
             bagging,
             inactivePeaks,
             hasher
@@ -110,7 +110,7 @@ library LibMMR {
             proof.length,
             false,
             false,
-            false,
+            LibMerkle.Family.MMR,
             bagging,
             inactivePeaks,
             hasher
@@ -152,7 +152,7 @@ library LibMMR {
             proof.length,
             true,
             true,
-            false,
+            LibMerkle.Family.MMR,
             bagging,
             inactivePeaks,
             hasher
@@ -199,7 +199,7 @@ library LibMMR {
             proof.length,
             false,
             true,
-            false,
+            LibMerkle.Family.MMR,
             bagging,
             inactivePeaks,
             hasher
@@ -255,10 +255,10 @@ library LibMMR {
             positionData,
             proofData,
             proof.length,
-            bagging == LibMerkle.Bagging.BackwardFold,
+            bagging,
             inactivePeaks,
             false,
-            false,
+            LibMerkle.Family.MMR,
             hasher
         );
     }
@@ -313,10 +313,10 @@ library LibMMR {
             positionData,
             proofData,
             proof.length,
-            bagging == LibMerkle.Bagging.BackwardFold,
+            bagging,
             inactivePeaks,
             true,
-            false,
+            LibMerkle.Family.MMR,
             hasher
         );
     }

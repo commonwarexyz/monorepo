@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { RawSha256Hasher, MerkleFamily } from "./Common.t.sol";
+import { RawSha256Hasher, ProofKind } from "./Common.t.sol";
 import { LibMerkle } from "../src/merkle/LibMerkle.sol";
 import { LibQMDBCommon } from "../src/qmdb/LibQMDBCommon.sol";
-import { LibQMDBBatchTest, BatchCase } from "./LibQMDBBatch.t.sol";
+import { LibQMDBBatchTest, BatchCase, PlainFacade } from "./LibQMDBBatch.t.sol";
 import { LibQMDBCurrentTest, QMDBCase } from "./LibQMDBCurrent.t.sol";
 import { LibQMDBAnyMMB } from "../src/qmdb/LibQMDBAnyMMB.sol";
 import { LibQMDBAnyMMR } from "../src/qmdb/LibQMDBAnyMMR.sol";
@@ -53,14 +53,14 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         vm.etch(_hasher(), address(new RawSha256Hasher()).code);
         precompile = LibQMDBBatchTest(
             deployCode(
-                _family() == MerkleFamily.MMB
+                _family() == LibMerkle.Family.MMB
                     ? "LibQMDBBatch.t.sol:LibQMDBBatchMMBSha256Test"
                     : "LibQMDBBatch.t.sol:LibQMDBBatchMMRSha256Test"
             )
         );
         currentBuilder = LibQMDBCurrentTest(
             deployCode(
-                _family() == MerkleFamily.MMB
+                _family() == LibMerkle.Family.MMB
                     ? "LibQMDBCurrent.t.sol:LibQMDBCurrentMMBSha256Test"
                     : "LibQMDBCurrent.t.sol:LibQMDBCurrentMMRSha256Test"
             )
@@ -73,7 +73,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         view
         returns (bool)
     {
-        return _family() == MerkleFamily.MMB
+        return _family() == LibMerkle.Family.MMB
             ? LibQMDBAnyMMB.verify(root, operation, proof, hasher)
             : LibQMDBAnyMMR.verify(root, operation, proof, hasher);
     }
@@ -84,7 +84,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         view
         returns (bool)
     {
-        return _family() == MerkleFamily.MMB
+        return _family() == LibMerkle.Family.MMB
             ? LibQMDBKeylessMMB.verify(root, operation, proof, hasher)
             : LibQMDBKeylessMMR.verify(root, operation, proof, hasher);
     }
@@ -95,33 +95,38 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
         view
         returns (bool)
     {
-        return _family() == MerkleFamily.MMB
+        return _family() == LibMerkle.Family.MMB
             ? LibQMDBImmutableMMB.verify(root, operation, proof, hasher)
             : LibQMDBImmutableMMR.verify(root, operation, proof, hasher);
     }
 
-    /// @dev Select membership or a proper interior query in a fixed-width exclusion interval.
-    function singleCurrent(QMDBCase calldata c, address hasher, bool exclusion) external view returns (bool) {
-        if (exclusion) {
-            return _family() == MerkleFamily.MMB
-                ? LibQMDBCurrentMMB.verifyExclusion(
-                    c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
-                )
-                : LibQMDBCurrentMMR.verifyExclusion(
-                    c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
-                );
-        }
-        return _family() == MerkleFamily.MMB
+    function singleCurrentMembership(QMDBCase calldata c, address hasher) external view returns (bool) {
+        return _family() == LibMerkle.Family.MMB
             ? LibQMDBCurrentMMB.verify(c.root, c.operation, c.proof, c.chunkBytes, hasher)
             : LibQMDBCurrentMMR.verify(c.root, c.operation, c.proof, c.chunkBytes, hasher);
     }
 
+    /// @dev Query an interior key in the fixed-width exclusion fixtures.
+    function singleCurrentExclusion(QMDBCase calldata c, address hasher) external view returns (bool) {
+        return _family() == LibMerkle.Family.MMB
+            ? LibQMDBCurrentMMB.verifyExclusion(
+                c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
+            )
+            : LibQMDBCurrentMMR.verifyExclusion(
+                    c.root, bytes32(uint256(15)), c.operation, c.proof, c.chunkBytes, hasher
+                );
+    }
+
     /// @dev Singleton facades use identical ABI tuple fields, allowing one shared fixture.
-    function singletonCall(BatchCase memory c, uint256 facade, address hasher) internal pure returns (bytes memory) {
+    function singletonCall(BatchCase memory c, PlainFacade facade, address hasher)
+        internal
+        pure
+        returns (bytes memory)
+    {
         bytes4[3] memory selectors =
             [this.singleAny.selector, this.singleKeyless.selector, this.singleImmutable.selector];
         LibQMDBCommon.Proof memory proof = LibQMDBCommon.Proof(c.range.leaves, c.range.start, 0, c.range.digests);
-        return abi.encodeWithSelector(selectors[facade], c.root, c.operations[0], proof, hasher);
+        return abi.encodeWithSelector(selectors[uint256(facade)], c.root, c.operations[0], proof, hasher);
     }
 
     /// @dev Require the encoded entrypoint to succeed and return true.
@@ -133,8 +138,9 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
 
     /// @dev Every plain singleton facade accepts exactly the same SHA-256 commitment.
     function test_RawSingletonsMatchPrecompile() public view {
-        BatchCase memory c = build(13, sequence(3, 1), false);
-        for (uint256 facade; facade < 3; ++facade) {
+        BatchCase memory c = operationsCase(13, sequence(3, 1), ProofKind.Range);
+        for (uint256 facadeIndex; facadeIndex <= uint256(PlainFacade.Immutable); ++facadeIndex) {
+            PlainFacade facade = PlainFacade(facadeIndex);
             accepted(singletonCall(c, facade, address(2)));
             accepted(singletonCall(c, facade, _hasher()));
         }
@@ -143,20 +149,22 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
     /// @dev Range and genuinely separated sparse queries share the precompile verdict and memory invariants.
     function test_RawBatchesMatchPrecompile() public view {
         uint256[] memory locations = sequence(2, 3);
-        for (uint256 sparse; sparse < 2; ++sparse) {
-            if (sparse != 0) {
+        for (uint256 proofIndex; proofIndex < 2; ++proofIndex) {
+            ProofKind proofKind = proofIndex == 0 ? ProofKind.Range : ProofKind.Multi;
+            if (proofKind == ProofKind.Multi) {
                 locations[1] = 8;
                 locations[2] = 12;
             }
-            BatchCase memory c = build(13, locations, sparse != 0);
+            BatchCase memory c = operationsCase(13, locations, proofKind);
             assertTrue(precompile.checked(c));
             assertTrue(this.checked(c));
             c.operations[0] = bytes.concat(c.operations[0], hex"ff");
             assertFalse(precompile.checked(c));
             assertFalse(this.checked(c));
         }
-        for (uint256 sparse; sparse < 2; ++sparse) {
-            BatchCase memory c = currentCase(513, 254, 5, sparse != 0, false);
+        for (uint256 proofIndex; proofIndex < 2; ++proofIndex) {
+            ProofKind proofKind = proofIndex == 0 ? ProofKind.Range : ProofKind.Multi;
+            BatchCase memory c = currentCase32(513, 254, 5, proofKind, false);
             assertTrue(precompile.checked(c));
             assertTrue(this.checked(c));
             c.root ^= bytes32(uint256(1));
@@ -168,15 +176,16 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
     /// @dev Membership and exclusion both authenticate through a graft and a partial final chunk.
     function test_RawCurrentSingletonAndExclusionMatchPrecompile() public view {
         bytes memory operation = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), bytes32(uint256(20)));
-        QMDBCase memory c = currentBuilder.buildChunk(33, 0, operation, true, 2);
-        for (uint256 mode; mode < 2; ++mode) {
-            assertTrue(this.singleCurrent(c, address(2), mode != 0));
-            assertTrue(this.singleCurrent(c, _hasher(), mode != 0));
-            c.root ^= bytes32(uint256(1));
-            assertFalse(this.singleCurrent(c, address(2), mode != 0));
-            assertFalse(this.singleCurrent(c, _hasher(), mode != 0));
-            c.root ^= bytes32(uint256(1));
-        }
+        QMDBCase memory c = currentBuilder.build(33, 0, operation, true, 2);
+        assertTrue(this.singleCurrentMembership(c, address(2)));
+        assertTrue(this.singleCurrentMembership(c, _hasher()));
+        assertTrue(this.singleCurrentExclusion(c, address(2)));
+        assertTrue(this.singleCurrentExclusion(c, _hasher()));
+        c.root ^= bytes32(uint256(1));
+        assertFalse(this.singleCurrentMembership(c, address(2)));
+        assertFalse(this.singleCurrentMembership(c, _hasher()));
+        assertFalse(this.singleCurrentExclusion(c, address(2)));
+        assertFalse(this.singleCurrentExclusion(c, _hasher()));
     }
 
     /// @dev A reverting call and zero, short, or oversized output must all surface HashFailed.
@@ -194,16 +203,18 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
 
     /// @dev Leaf, positioned parent, peak fold, and leaf-count root calls all enforce raw response framing.
     function test_RawPlainHashFailuresByStage() public {
-        BatchCase memory c = build(13, sequence(0, 1), false);
+        BatchCase memory c = operationsCase(13, sequence(0, 1), ProofKind.Range);
         uint256[4] memory stages = [uint256(12), 72, 64, 40];
-        for (uint256 facade; facade < 3; ++facade) {
+        for (uint256 facadeIndex; facadeIndex <= uint256(PlainFacade.Immutable); ++facadeIndex) {
+            PlainFacade facade = PlainFacade(facadeIndex);
             bytes memory input = singletonCall(c, facade, _hasher());
             for (uint256 stage; stage < stages.length; ++stage) {
                 assertStageFailures(input, stages[stage]);
             }
         }
-        for (uint256 sparse; sparse < 2; ++sparse) {
-            c = build(13, sequence(0, 2), sparse != 0);
+        for (uint256 proofIndex; proofIndex < 2; ++proofIndex) {
+            ProofKind proofKind = proofIndex == 0 ? ProofKind.Range : ProofKind.Multi;
+            c = operationsCase(13, sequence(0, 2), proofKind);
             bytes memory input = abi.encodeCall(this.checked, (c));
             for (uint256 stage; stage < stages.length; ++stage) {
                 assertStageFailures(input, stages[stage]);
@@ -213,17 +224,18 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
 
     /// @dev Distinct preimage sizes isolate leaf, parent, bitmap graft, Merkle root, and Current root failures.
     function test_RawCurrentHashFailuresByStage() public {
-        QMDBCase memory c = currentBuilder.buildChunk(33, 0, hex"010203", true, 2);
-        bytes memory input = abi.encodeCall(this.singleCurrent, (c, _hasher(), false));
+        QMDBCase memory c = currentBuilder.build(33, 0, hex"010203", true, 2);
+        bytes memory input = abi.encodeCall(this.singleCurrentMembership, (c, _hasher()));
         uint256[5] memory stages = [uint256(11), 72, 34, 40, 104 + (c.proof.pending == 0 ? 0 : 32)];
         for (uint256 stage; stage < stages.length; ++stage) {
             assertStageFailures(input, stages[stage]);
         }
         c.operation = abi.encodePacked(bytes1(0xd2), bytes32(uint256(10)), bytes32(uint256(20)));
-        c = currentBuilder.buildChunk(33, 0, c.operation, true, 2);
-        assertStageFailures(abi.encodeCall(this.singleCurrent, (c, _hasher(), true)), 34);
-        for (uint256 sparse; sparse < 2; ++sparse) {
-            BatchCase memory batch = currentCase(513, 0, 2, sparse != 0, false);
+        c = currentBuilder.build(33, 0, c.operation, true, 2);
+        assertStageFailures(abi.encodeCall(this.singleCurrentExclusion, (c, _hasher())), 34);
+        for (uint256 proofIndex; proofIndex < 2; ++proofIndex) {
+            ProofKind proofKind = proofIndex == 0 ? ProofKind.Range : ProofKind.Multi;
+            BatchCase memory batch = currentCase32(513, 0, 2, proofKind, false);
             input = abi.encodeCall(this.checked, (batch));
             assertStageFailures(input, 12);
             assertStageFailures(input, 72);
@@ -233,24 +245,24 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
 
     /// @dev A successful STATICCALL to an address without code has no digest and must fail closed.
     function test_RawEmptyTarget() public {
-        BatchCase memory plain = build(13, sequence(0, 2), false);
-        QMDBCase memory current = currentBuilder.buildChunk(33, 0, hex"010203", true, 2);
+        BatchCase memory plain = operationsCase(13, sequence(0, 2), ProofKind.Range);
+        QMDBCase memory current = currentBuilder.build(33, 0, hex"010203", true, 2);
         vm.etch(_hasher(), hex"");
         vm.expectRevert(LibMerkle.HashFailed.selector);
         this.checked(plain);
         vm.expectRevert(LibMerkle.HashFailed.selector);
-        this.singleCurrent(current, _hasher(), false);
+        this.singleCurrentMembership(current, _hasher());
     }
 }
 
-contract LibQMDBHashMMBTest is LibQMDBHashTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMB;
+contract LibQMDBHashMMBRawSha256Test is LibQMDBHashTest {
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMB;
     }
 }
 
-contract LibQMDBHashMMRTest is LibQMDBHashTest {
-    function _family() internal pure override returns (MerkleFamily) {
-        return MerkleFamily.MMR;
+contract LibQMDBHashMMRRawSha256Test is LibQMDBHashTest {
+    function _family() internal pure override returns (LibMerkle.Family) {
+        return LibMerkle.Family.MMR;
     }
 }

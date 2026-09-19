@@ -37,8 +37,6 @@ pub(crate) struct MultiArgs {
     locations: Vec<u64>,
     #[arg(long)]
     seed: u64,
-    #[arg(long)]
-    check_mutated: bool,
     #[command(flatten)]
     policy: Policy,
 }
@@ -46,12 +44,12 @@ pub(crate) struct MultiArgs {
 impl MultiArgs {
     pub(super) fn execute<H: Hasher>(
         self,
-        kind: TreeKind,
-        synthetic: bool,
+        family: TreeKind,
+        mode: GenerationMode,
     ) -> Result<Vec<u8>, String> {
-        let output = match kind {
-            TreeKind::Mmr => self.generate::<mmr::Family, H>(synthetic)?,
-            TreeKind::Mmb => self.generate::<mmb::Family, H>(synthetic)?,
+        let output = match family {
+            TreeKind::Mmr => self.generate::<mmr::Family, H>(mode)?,
+            TreeKind::Mmb => self.generate::<mmb::Family, H>(mode)?,
         };
         let (output, positions) = output;
         Ok(MultiOutput {
@@ -66,7 +64,7 @@ impl MultiArgs {
 
     fn generate<F: Family, H: Hasher>(
         &self,
-        synthetic: bool,
+        mode: GenerationMode,
     ) -> Result<(Output, Vec<u64>), String> {
         if self.leaf_count > *F::MAX_LEAVES
             || self.locations.is_empty()
@@ -77,12 +75,15 @@ impl MultiArgs {
         }
         let hasher = self.policy.hasher::<H>();
         let locations: Vec<_> = self.locations.iter().copied().map(Location::new).collect();
-        let (root, proof) = if synthetic {
-            let tree = SparseTree::new(self.leaf_count, self.seed, &locations, &hasher);
-            prove::<F, H, _>(&tree, self.policy, &locations)?
-        } else {
-            let tree = materialize::<F, H>(self.leaf_count, self.seed, &hasher)?;
-            prove::<F, H, _>(&tree, self.policy, &locations)?
+        let (root, proof) = match mode {
+            GenerationMode::Synthetic => {
+                let tree = SparseTree::new(self.leaf_count, self.seed, &locations, &hasher);
+                prove::<F, H, _>(&tree, self.policy, &locations)?
+            }
+            GenerationMode::Materialized { .. } => {
+                let tree = materialize::<F, H>(self.leaf_count, self.seed, &hasher)?;
+                prove::<F, H, _>(&tree, self.policy, &locations)?
+            }
         };
         let elements: Vec<_> = self
             .locations
@@ -97,7 +98,13 @@ impl MultiArgs {
         if !proof.verify_multi_inclusion(&hasher, &pairs, &root) {
             return Err("Commonware rejected its generated multiproof".into());
         }
-        if synthetic || self.check_mutated {
+        if matches!(
+            mode,
+            GenerationMode::Synthetic
+                | GenerationMode::Materialized {
+                    check_mutated: true
+                }
+        ) {
             check_rejections::<F, H>(&hasher, &proof, &pairs, root)?;
         }
         let positions = canonical_positions::<F>(self.leaf_count, &locations, self.policy)?;
@@ -382,11 +389,15 @@ mod tests {
                             leaf_count: leaves,
                             locations,
                             seed: 42,
-                            check_mutated: true,
                             policy,
                         };
-                        for synthetic in [false, true] {
-                            let (output, positions) = args.generate::<F, H>(synthetic).unwrap();
+                        for mode in [
+                            GenerationMode::Materialized {
+                                check_mutated: true,
+                            },
+                            GenerationMode::Synthetic,
+                        ] {
+                            let (output, positions) = args.generate::<F, H>(mode).unwrap();
                             let encoded = check_input(&output, &args.locations, &positions);
                             assert!(check::<F, H>(&encoded, policy));
                             let mut bad = encoded.clone();
@@ -447,13 +458,13 @@ mod tests {
                         leaf_count: leaves,
                         locations: vec![leaves - 1, 0, leaves / 2, 1, leaves / 2 - 1],
                         seed: 17,
-                        check_mutated: true,
                         policy: Policy {
                             bagging,
                             inactive_peaks,
                         },
                     };
-                    let (output, positions) = args.generate::<F, H>(true).unwrap();
+                    let (output, positions) =
+                        args.generate::<F, H>(GenerationMode::Synthetic).unwrap();
                     assert!(check::<F, H>(
                         &check_input(&output, &args.locations, &positions),
                         args.policy
@@ -480,14 +491,18 @@ mod tests {
                 leaf_count: leaves,
                 locations: (0..leaves).rev().collect(),
                 seed: 81,
-                check_mutated: true,
                 policy: Policy {
                     bagging: Fold::Backward,
                     inactive_peaks: 1,
                 },
             };
-            let (full, full_positions) = args.generate::<F, H>(false).unwrap();
-            let (sparse, sparse_positions) = args.generate::<F, H>(true).unwrap();
+            let (full, full_positions) = args
+                .generate::<F, H>(GenerationMode::Materialized {
+                    check_mutated: true,
+                })
+                .unwrap();
+            let (sparse, sparse_positions) =
+                args.generate::<F, H>(GenerationMode::Synthetic).unwrap();
             assert_eq!(full.root, sparse.root);
             assert_eq!(full.proof, sparse.proof);
             assert_eq!(full_positions, sparse_positions);
@@ -508,15 +523,15 @@ mod tests {
     #[test]
     fn cli_sparse_forms_and_empty_check() {
         for mode in ["generate-multi", "synthetic-multi"] {
-            for kind in ["mmr", "mmb"] {
-                let encoded = Cli::try_parse_from([
+            for family in ["mmr", "mmb"] {
+                let mut args = vec![
                     "commonware-sol-fuzz",
                     "merkle",
                     "--hash",
-                    "keccak",
+                    "keccak256",
                     mode,
-                    "--kind",
-                    kind,
+                    "--family",
+                    family,
                     "--leaf-count",
                     "31",
                     "--locations",
@@ -527,12 +542,15 @@ mod tests {
                     "backward",
                     "--inactive-peaks",
                     "2",
-                    "--check-mutated",
-                ])
-                .unwrap()
-                .command
-                .execute()
-                .unwrap();
+                ];
+                if mode == "generate-multi" {
+                    args.push("--check-mutated");
+                }
+                let encoded = Cli::try_parse_from(args)
+                    .unwrap()
+                    .command
+                    .execute()
+                    .unwrap();
                 assert!(encoded.len() >= 192);
             }
         }
@@ -568,18 +586,18 @@ mod tests {
     }
     #[test]
     fn cli_hash_selection() {
-        for kind in ["mmr", "mmb"] {
+        for family in ["mmr", "mmb"] {
             for mode in ["generate-multi", "synthetic-multi"] {
                 let mut outputs = Vec::new();
-                for hash in ["keccak", "sha256"] {
+                for hash in ["keccak256", "sha256"] {
                     let encoded = Cli::try_parse_from([
                         "fuzz",
                         "merkle",
                         "--hash",
                         hash,
                         mode,
-                        "--kind",
-                        kind,
+                        "--family",
+                        family,
                         "--leaf-count",
                         "31",
                         "--locations",
@@ -607,15 +625,15 @@ mod tests {
                     }
                     .abi_encode_params();
                     let hex = const_hex::encode(input);
-                    for check_hash in ["keccak", "sha256"] {
+                    for check_hash in ["keccak256", "sha256"] {
                         let accepted = Cli::try_parse_from([
                             "fuzz",
                             "merkle",
                             "--hash",
                             check_hash,
                             "check-multi",
-                            "--kind",
-                            kind,
+                            "--family",
+                            family,
                             "--abi-hex",
                             &hex,
                             "--bagging",
@@ -643,7 +661,7 @@ mod tests {
                 "fuzz",
                 "merkle",
                 "--hash",
-                "keccak",
+                "keccak256",
                 "generate-multi",
                 "mmb",
                 "31",
@@ -657,9 +675,9 @@ mod tests {
                 "fuzz",
                 "merkle",
                 "--hash",
-                "keccak",
+                "keccak256",
                 "generate-multi",
-                "--kind",
+                "--family",
                 "mmb",
                 "--leaf-count",
                 "31",

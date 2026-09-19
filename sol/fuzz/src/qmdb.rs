@@ -115,15 +115,15 @@ pub(crate) enum Command {
     /// Prove membership of an encoded immutable set or commit.
     Immutable(ImmutableArgs),
     /// Build an operations tree and its activity-grafted tree, then prove one active update.
-    Current(GenerateArgs),
+    Current(CurrentArgs),
     /// Prove exclusion using a cyclic key interval or an empty database commit.
     Exclude(ExcludeArgs),
     /// Prove exclusion with independently fixed or vector byte fields.
     ExcludeVariable(exclusion::ExcludeVariableArgs),
 }
 
-#[derive(Args)]
-pub(crate) struct GenerateArgs {
+#[derive(Args, Clone, Copy)]
+pub(crate) struct TreeArgs {
     #[arg(long)]
     leaves: u64,
     #[arg(long)]
@@ -135,30 +135,77 @@ pub(crate) struct GenerateArgs {
     /// Operations below this location are inactive; current proofs fold chunk-aligned peaks.
     #[arg(long)]
     inactivity_floor: u64,
+}
+
+#[derive(Args)]
+pub(crate) struct CurrentArgs {
+    #[command(flatten)]
+    tree: TreeArgs,
     /// Current activity bitmap chunk size in bytes.
     #[arg(long)]
     chunk_bytes: usize,
 }
 
+#[derive(Args, Clone, Copy)]
+struct ExclusionTreeArgs {
+    #[arg(long)]
+    leaves: u64,
+    #[arg(long)]
+    location: u64,
+    #[arg(long)]
+    seed: u64,
+    #[arg(long, value_enum)]
+    family: TreeKind,
+    /// Current activity bitmap chunk size in bytes.
+    #[arg(long)]
+    chunk_bytes: usize,
+}
+
+impl ExclusionTreeArgs {
+    const fn tree(self, mode: ExclusionMode) -> TreeArgs {
+        TreeArgs {
+            leaves: self.leaves,
+            location: self.location,
+            seed: self.seed,
+            family: self.family,
+            inactivity_floor: match mode {
+                ExclusionMode::Interval => 0,
+                ExclusionMode::Single | ExclusionMode::Empty => self.location,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum History {
+    /// Derive keys from operation locations using the command's indexed schedule.
+    Indexed,
+    /// Repeat key zero throughout the operation stream.
     Updated,
+    /// Repeat key zero, then delete it in the final operation.
     Deleted,
 }
 
 #[derive(Args)]
 pub(crate) struct AnyArgs {
     #[command(flatten)]
-    tree: GenerateArgs,
-    /// Authenticate the first update after later updates or deletion of its key.
+    tree: TreeArgs,
+    /// Key schedule; indexed derives keys from operation locations, while updated/deleted repeat
+    /// key zero.
     #[arg(long, value_enum)]
-    history: Option<History>,
+    history: History,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum Encoding {
     Fixed,
     Variable,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum RootKind {
+    Operations,
+    Current,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -172,16 +219,22 @@ enum UnorderedOperation {
 #[derive(Args)]
 pub(crate) struct UnorderedArgs {
     #[command(flatten)]
-    tree: GenerateArgs,
-    /// Return a Current proof and its Rust activity verdict.
-    #[arg(long)]
-    current: bool,
+    tree: TreeArgs,
+    /// Root authenticated by the proof.
+    #[arg(long, value_enum)]
+    root: RootKind,
+    /// Current activity bitmap chunk size in bytes.
+    #[arg(long, required_if_eq("root", "current"))]
+    chunk_bytes: Option<usize>,
     #[arg(long, value_enum)]
     encoding: Encoding,
+    /// Fixture mode: update generates the selected history; other modes place the named
+    /// operation at --location in an indexed update log.
     #[arg(long, value_enum)]
     operation: UnorderedOperation,
-    /// Repeat one key before a final overwrite or delete.
-    #[arg(long, value_enum)]
+    /// Full-log history for update mode; indexed cycles keys over the active window.
+    /// Deleted ends with a delete, returned when --location selects the final record.
+    #[arg(long, value_enum, required_if_eq("operation", "update"))]
     history: Option<History>,
     /// Variable value and metadata length, required for variable encoding.
     #[arg(long, required_if_eq("encoding", "variable"))]
@@ -198,7 +251,7 @@ enum KeylessOperation {
 #[derive(Args)]
 pub(crate) struct KeylessArgs {
     #[command(flatten)]
-    tree: GenerateArgs,
+    tree: TreeArgs,
     #[arg(long, value_enum)]
     encoding: Encoding,
     #[arg(long, value_enum)]
@@ -218,7 +271,7 @@ enum ImmutableOperation {
 #[derive(Args)]
 pub(crate) struct ImmutableArgs {
     #[command(flatten)]
-    tree: GenerateArgs,
+    tree: TreeArgs,
     #[arg(long, value_enum)]
     encoding: Encoding,
     #[arg(long, value_enum)]
@@ -238,9 +291,9 @@ enum ExclusionMode {
 #[derive(Args)]
 pub(crate) struct ExcludeArgs {
     #[command(flatten)]
-    tree: GenerateArgs,
+    tree: ExclusionTreeArgs,
     #[arg(long)]
-    keyhex: String,
+    key_hex: String,
     #[arg(long, value_enum)]
     mode: ExclusionMode,
     #[arg(long)]
@@ -262,7 +315,7 @@ fn operation<F: Family>(seed: u64, index: u64, leaves: u64) -> Operation<F> {
 }
 
 fn materialize_ops<F: Family, H: Hasher>(
-    args: &GenerateArgs,
+    args: &TreeArgs,
     encode: &dyn Fn(u64, &mut Vec<u8>),
 ) -> Result<Mem<F, H::Digest>, String> {
     validate_tree(args)?;
@@ -280,7 +333,7 @@ fn materialize_ops<F: Family, H: Hasher>(
     Ok(ops)
 }
 
-fn validate_tree(args: &GenerateArgs) -> Result<(), String> {
+fn validate_tree(args: &TreeArgs) -> Result<(), String> {
     if args.leaves == 0
         || args.leaves > 1_000_000
         || args.location >= args.leaves
@@ -295,26 +348,26 @@ fn validate_tree(args: &GenerateArgs) -> Result<(), String> {
 
 fn any_operation<F: Family>(args: &AnyArgs, index: u64) -> Operation<F> {
     match args.history {
-        Some(History::Deleted) if index == args.tree.leaves - 1 => Operation::Delete(key(0)),
-        Some(_) => Operation::Update(fixed::Update {
+        History::Indexed => operation(args.tree.seed, index, args.tree.leaves),
+        History::Deleted if index == args.tree.leaves - 1 => Operation::Delete(key(0)),
+        History::Updated | History::Deleted => Operation::Update(fixed::Update {
             key: key(0),
             value: FixedBytes::new(leaf(args.tree.seed, index)),
             next_key: key(0),
         }),
-        None => operation(args.tree.seed, index, args.tree.leaves),
     }
 }
 
 fn any<F: Family, H: Hasher>(args: &AnyArgs) -> Result<AnyOutput, String> {
     let tree = &args.tree;
-    if args.history.is_some() && (tree.leaves < 2 || tree.location != 0) {
-        return Err("history requires leaves >= 2 and location = 0".into());
+    if !matches!(args.history, History::Indexed) && (tree.leaves < 2 || tree.location != 0) {
+        return Err("updated and deleted history require leaves >= 2 and location = 0".into());
     }
     plain_proof::<F, H, _>(tree, |index| any_operation::<F>(args, index))
 }
 
 fn plain_proof<F: Family, H: Hasher, O: Encode>(
-    tree: &GenerateArgs,
+    tree: &TreeArgs,
     operation: impl Fn(u64) -> O,
 ) -> Result<AnyOutput, String> {
     let ops = materialize_ops::<F, H>(tree, &|index, bytes| operation(index).write(bytes))?;
@@ -465,14 +518,29 @@ fn immutable<F: Family, H: Hasher>(args: &ImmutableArgs) -> Result<AnyOutput, St
 
 fn unordered<F: Graftable, H: Hasher>(args: &UnorderedArgs) -> Result<Vec<u8>, String> {
     validate_tree(&args.tree)?;
-    with_chunk_bytes!(args.tree.chunk_bytes, |N| Ok::<_, String>(N))?;
+    match (args.root, args.chunk_bytes) {
+        (RootKind::Operations, Some(_)) => {
+            return Err("--chunk-bytes requires --root current".into());
+        }
+        (RootKind::Current, None) => {
+            return Err("--root current requires --chunk-bytes".into());
+        }
+        _ => {}
+    }
     if args.value_length.is_some() && matches!(args.encoding, Encoding::Fixed) {
         return Err("value-length requires --encoding variable".into());
     }
-    if args.history.is_some()
-        && (args.tree.leaves < 2 || !matches!(args.operation, UnorderedOperation::Update))
-    {
-        return Err("history requires leaves >= 2 and --operation update".into());
+    match (args.operation, args.history) {
+        (UnorderedOperation::Update, None) => {
+            return Err("--operation update requires --history".into());
+        }
+        (UnorderedOperation::Update, Some(History::Updated | History::Deleted))
+            if args.tree.leaves < 2 =>
+        {
+            return Err("updated and deleted history require leaves >= 2".into());
+        }
+        (UnorderedOperation::Update, Some(_)) | (_, None) => {}
+        (_, Some(_)) => return Err("--history requires --operation update".into()),
     }
     match args.encoding {
         Encoding::Fixed => {
@@ -505,12 +573,14 @@ where
 {
     let tree = &args.tree;
     let op = |index| {
-        if let Some(history) = args.history {
-            return if matches!(history, History::Deleted) && index + 1 == tree.leaves {
-                unordered::Operation::Delete(key(0))
-            } else {
-                unordered::Operation::Update(unordered::Update(key(0), value(index)))
-            };
+        match args.history {
+            Some(History::Deleted) if index + 1 == tree.leaves => {
+                return unordered::Operation::Delete(key(0));
+            }
+            Some(History::Updated | History::Deleted) => {
+                return unordered::Operation::Update(unordered::Update(key(0), value(index)));
+            }
+            Some(History::Indexed) | None => {}
         }
         if index == tree.location {
             match args.operation {
@@ -535,7 +605,7 @@ where
             value(index),
         ))
     };
-    if !args.current {
+    if matches!(args.root, RootKind::Operations) {
         return plain_proof::<F, H, _>(tree, op).map(|output| output.abi_encode_params());
     }
     // Replay key ownership: only the latest surviving update and latest commit are active.
@@ -559,7 +629,10 @@ where
         }
         active[index as usize] = true;
     }
-    let fixture = materialize::<F, H, _>(tree, op, |index| active[index as usize])?;
+    let chunk_bytes = args
+        .chunk_bytes
+        .ok_or("--root current requires --chunk-bytes")?;
+    let fixture = materialize::<F, H, _>(tree, chunk_bytes, op, |index| active[index as usize])?;
     let expected = fixture
         .proof
         .verify::<H, _>(op(tree.location), &fixture.root);
@@ -599,12 +672,12 @@ struct CurrentTree<F: Graftable, D: Digest, const N: usize> {
 }
 
 fn materialize_current<F: Graftable, H: Hasher, const N: usize>(
-    args: &GenerateArgs,
+    args: &TreeArgs,
     encode: &dyn Fn(u64, &mut Vec<u8>),
     active: &dyn Fn(u64) -> bool,
 ) -> Result<CurrentTree<F, H::Digest, N>, String> {
     validate_tree(args)?;
-    let GenerateArgs {
+    let TreeArgs {
         leaves,
         inactivity_floor,
         ..
@@ -674,7 +747,7 @@ fn materialize_current<F: Graftable, H: Hasher, const N: usize>(
 }
 
 fn materialize_singleton<F: Graftable, H: Hasher, const N: usize>(
-    args: &GenerateArgs,
+    args: &TreeArgs,
     encode: &dyn Fn(u64, &mut Vec<u8>),
     active: &dyn Fn(u64) -> bool,
 ) -> Result<Materialized<F, H::Digest>, String> {
@@ -732,11 +805,12 @@ fn materialize_singleton<F: Graftable, H: Hasher, const N: usize>(
 }
 
 fn materialize<F: Graftable, H: Hasher, O: Codec + Clone>(
-    args: &GenerateArgs,
+    args: &TreeArgs,
+    chunk_bytes: usize,
     operation: impl Fn(u64) -> O,
     active: impl Fn(u64) -> bool,
 ) -> Result<Materialized<F, H::Digest>, String> {
-    let fixture = with_chunk_bytes!(args.chunk_bytes, |N| {
+    let fixture = with_chunk_bytes!(chunk_bytes, |N| {
         materialize_singleton::<F, H, N>(
             args,
             &|index, bytes| operation(index).write(bytes),
@@ -748,7 +822,7 @@ fn materialize<F: Graftable, H: Hasher, O: Codec + Clone>(
         Location::new(args.location),
         core::slice::from_ref(&op),
         core::slice::from_ref(&fixture.proof.chunk),
-        args.chunk_bytes,
+        chunk_bytes,
         &fixture.root,
     ) || fixture.proof.verify::<H, _>(op, &fixture.root) != active(args.location)
     {
@@ -757,22 +831,20 @@ fn materialize<F: Graftable, H: Hasher, O: Codec + Clone>(
     Ok(fixture)
 }
 
-fn current<F: Graftable, H: Hasher>(args: &GenerateArgs) -> Result<OperationOutput, String> {
+fn current<F: Graftable, H: Hasher>(args: &CurrentArgs) -> Result<OperationOutput, String> {
     materialize::<F, H, _>(
-        args,
-        |index| operation::<F>(args.seed, index, args.leaves),
-        |index| index >= args.inactivity_floor,
+        &args.tree,
+        args.chunk_bytes,
+        |index| operation::<F>(args.tree.seed, index, args.tree.leaves),
+        |index| index >= args.tree.inactivity_floor,
     )
     .map(|fixture| fixture.output)
 }
 
 fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, String> {
-    let query = const_hex::decode(args.keyhex.strip_prefix("0x").unwrap_or(&args.keyhex))
+    let query = const_hex::decode(args.key_hex.strip_prefix("0x").unwrap_or(&args.key_hex))
         .map_err(|e| e.to_string())?;
     let query = FixedBytes::<32>::new(query.try_into().map_err(|_| "key must be 32 bytes")?);
-    if args.tree.inactivity_floor != 0 {
-        return Err("exclude derives its inactivity floor from the mode".into());
-    }
     if args.metadata && !matches!(args.mode, ExclusionMode::Empty) {
         return Err("metadata requires empty mode".into());
     }
@@ -781,13 +853,7 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
     {
         return Err("empty and single modes require location = leaves - 1".into());
     }
-    let tree = GenerateArgs {
-        inactivity_floor: match args.mode {
-            ExclusionMode::Interval => 0,
-            _ => args.tree.location,
-        },
-        ..args.tree
-    };
+    let tree = args.tree.tree(args.mode);
     let op = |index| match args.mode {
         ExclusionMode::Empty => Operation::<F>::CommitFloor(
             args.metadata
@@ -813,7 +879,7 @@ fn exclude<F: Graftable, H: Hasher>(args: &ExcludeArgs) -> Result<Vec<u8>, Strin
         proof,
         root,
         ..
-    } = materialize::<F, H, _>(&tree, op, |index| {
+    } = materialize::<F, H, _>(&tree, args.tree.chunk_bytes, op, |index| {
         matches!(args.mode, ExclusionMode::Interval) || index == tree.location
     })?;
     let exclusion: ExclusionProof<F, FixedBytes<32>, FixedEncoding<FixedBytes<32>>, H::Digest, _> =
@@ -834,51 +900,51 @@ impl Command {
             Self::Range(args) => args.execute(hash),
             Self::Multi(args) => args.execute(hash),
             Self::Unordered(args) => match (args.tree.family, hash) {
-                (TreeKind::Mmr, Hash::Keccak) => unordered::<mmr::Family, Keccak256>(&args),
+                (TreeKind::Mmr, Hash::Keccak256) => unordered::<mmr::Family, Keccak256>(&args),
                 (TreeKind::Mmr, Hash::Sha256) => unordered::<mmr::Family, Sha256>(&args),
-                (TreeKind::Mmb, Hash::Keccak) => unordered::<mmb::Family, Keccak256>(&args),
+                (TreeKind::Mmb, Hash::Keccak256) => unordered::<mmb::Family, Keccak256>(&args),
                 (TreeKind::Mmb, Hash::Sha256) => unordered::<mmb::Family, Sha256>(&args),
             },
             Self::Any(args) => {
                 let output = match (args.tree.family, hash) {
-                    (TreeKind::Mmr, Hash::Keccak) => any::<mmr::Family, Keccak256>(&args),
+                    (TreeKind::Mmr, Hash::Keccak256) => any::<mmr::Family, Keccak256>(&args),
                     (TreeKind::Mmr, Hash::Sha256) => any::<mmr::Family, Sha256>(&args),
-                    (TreeKind::Mmb, Hash::Keccak) => any::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak256) => any::<mmb::Family, Keccak256>(&args),
                     (TreeKind::Mmb, Hash::Sha256) => any::<mmb::Family, Sha256>(&args),
                 }?;
                 Ok(output.abi_encode_params())
             }
             Self::Keyless(args) => {
                 let output = match (args.tree.family, hash) {
-                    (TreeKind::Mmr, Hash::Keccak) => keyless::<mmr::Family, Keccak256>(&args),
+                    (TreeKind::Mmr, Hash::Keccak256) => keyless::<mmr::Family, Keccak256>(&args),
                     (TreeKind::Mmr, Hash::Sha256) => keyless::<mmr::Family, Sha256>(&args),
-                    (TreeKind::Mmb, Hash::Keccak) => keyless::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak256) => keyless::<mmb::Family, Keccak256>(&args),
                     (TreeKind::Mmb, Hash::Sha256) => keyless::<mmb::Family, Sha256>(&args),
                 }?;
                 Ok(output.abi_encode_params())
             }
             Self::Immutable(args) => {
                 let output = match (args.tree.family, hash) {
-                    (TreeKind::Mmr, Hash::Keccak) => immutable::<mmr::Family, Keccak256>(&args),
+                    (TreeKind::Mmr, Hash::Keccak256) => immutable::<mmr::Family, Keccak256>(&args),
                     (TreeKind::Mmr, Hash::Sha256) => immutable::<mmr::Family, Sha256>(&args),
-                    (TreeKind::Mmb, Hash::Keccak) => immutable::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak256) => immutable::<mmb::Family, Keccak256>(&args),
                     (TreeKind::Mmb, Hash::Sha256) => immutable::<mmb::Family, Sha256>(&args),
                 }?;
                 Ok(output.abi_encode_params())
             }
             Self::Current(args) => {
-                let output = match (args.family, hash) {
-                    (TreeKind::Mmr, Hash::Keccak) => current::<mmr::Family, Keccak256>(&args),
+                let output = match (args.tree.family, hash) {
+                    (TreeKind::Mmr, Hash::Keccak256) => current::<mmr::Family, Keccak256>(&args),
                     (TreeKind::Mmr, Hash::Sha256) => current::<mmr::Family, Sha256>(&args),
-                    (TreeKind::Mmb, Hash::Keccak) => current::<mmb::Family, Keccak256>(&args),
+                    (TreeKind::Mmb, Hash::Keccak256) => current::<mmb::Family, Keccak256>(&args),
                     (TreeKind::Mmb, Hash::Sha256) => current::<mmb::Family, Sha256>(&args),
                 }?;
                 Ok(output.abi_encode_params())
             }
             Self::Exclude(args) => match (args.tree.family, hash) {
-                (TreeKind::Mmr, Hash::Keccak) => exclude::<mmr::Family, Keccak256>(&args),
+                (TreeKind::Mmr, Hash::Keccak256) => exclude::<mmr::Family, Keccak256>(&args),
                 (TreeKind::Mmr, Hash::Sha256) => exclude::<mmr::Family, Sha256>(&args),
-                (TreeKind::Mmb, Hash::Keccak) => exclude::<mmb::Family, Keccak256>(&args),
+                (TreeKind::Mmb, Hash::Keccak256) => exclude::<mmb::Family, Keccak256>(&args),
                 (TreeKind::Mmb, Hash::Sha256) => exclude::<mmb::Family, Sha256>(&args),
             },
         }
@@ -906,7 +972,7 @@ mod tests {
                 "fuzz",
                 "qmdb",
                 "--hash",
-                "keccak",
+                "keccak256",
                 command,
                 "--leaves",
                 "3",
@@ -918,13 +984,14 @@ mod tests {
                 "mmb",
                 "--inactivity-floor",
                 "0",
-                "--chunk-bytes",
-                "32",
                 "--operation",
                 operation,
                 "--encoding",
                 "variable",
             ];
+            if command == "unordered" {
+                args.extend(["--root", "operations", "--history", "indexed"]);
+            }
             let error = Cli::try_parse_from(&args).err().unwrap();
             assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
             assert!(error.to_string().contains("--value-length"), "{error}");
@@ -952,7 +1019,10 @@ mod tests {
 
         for (command, selection) in [
             ("lifecycle", vec![]),
-            ("any", vec!["--leaves", "3", "--location", "1"]),
+            (
+                "any",
+                vec!["--leaves", "3", "--location", "1", "--history", "indexed"],
+            ),
             ("current", vec!["--leaves", "3", "--location", "1"]),
             (
                 "unordered",
@@ -965,6 +1035,10 @@ mod tests {
                     "fixed",
                     "--operation",
                     "update",
+                    "--history",
+                    "indexed",
+                    "--root",
+                    "operations",
                 ],
             ),
             (
@@ -1000,7 +1074,7 @@ mod tests {
                     "3",
                     "--location",
                     "1",
-                    "--keyhex",
+                    "--key-hex",
                     "00",
                     "--mode",
                     "interval",
@@ -1013,7 +1087,7 @@ mod tests {
                     "3",
                     "--location",
                     "1",
-                    "--keyhex",
+                    "--key-hex",
                     "00",
                     "--mode",
                     "interval",
@@ -1040,8 +1114,8 @@ mod tests {
                     "ordered",
                     "--encoding",
                     "fixed",
-                    "--activity",
-                    "all",
+                    "--root",
+                    "operations",
                 ],
             ),
             (
@@ -1055,17 +1129,27 @@ mod tests {
                     "ordered",
                     "--encoding",
                     "fixed",
-                    "--activity",
-                    "all",
+                    "--root",
+                    "operations",
                 ],
             ),
         ] {
-            for hash in ["keccak", "sha256"] {
+            for hash in ["keccak256", "sha256"] {
                 let mut args = vec![
                     "fuzz", "qmdb", "--hash", hash, command, "--seed", "42", "--family", "mmb",
                 ];
-                if command != "lifecycle" {
-                    args.extend(["--inactivity-floor", "0", "--chunk-bytes", "32"]);
+                match command {
+                    "any" | "unordered" | "keyless" | "immutable" | "range" | "multi" => {
+                        args.extend(["--inactivity-floor", "0"]);
+                    }
+                    "current" => {
+                        args.extend(["--inactivity-floor", "0", "--chunk-bytes", "32"]);
+                    }
+                    "exclude" | "exclude-variable" => {
+                        args.extend(["--chunk-bytes", "32"]);
+                    }
+                    "lifecycle" => {}
+                    _ => unreachable!(),
                 }
                 args.extend_from_slice(&selection);
                 assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
@@ -1089,7 +1173,7 @@ mod tests {
                             | "--start"
                             | "--count"
                             | "--locations"
-                            | "--keyhex"
+                            | "--key-hex"
                     ) {
                         let mut positional = args.clone();
                         positional.remove(index);
@@ -1116,6 +1200,308 @@ mod tests {
                 let error = Cli::try_parse_from(&args).err().unwrap();
                 assert_eq!(error.kind(), ErrorKind::InvalidValue, "{args:?}: {error}");
             }
+        }
+    }
+
+    #[test]
+    fn cli_requires_applicable_history_modes() {
+        use clap::error::ErrorKind;
+
+        let any = [
+            "fuzz",
+            "qmdb",
+            "--hash",
+            "keccak256",
+            "any",
+            "--leaves",
+            "3",
+            "--location",
+            "1",
+            "--seed",
+            "42",
+            "--family",
+            "mmb",
+            "--inactivity-floor",
+            "0",
+        ];
+        let error = Cli::try_parse_from(any).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+        assert!(error.to_string().contains("--history"), "{error}");
+
+        let update = [
+            "fuzz",
+            "qmdb",
+            "--hash",
+            "keccak256",
+            "unordered",
+            "--leaves",
+            "3",
+            "--location",
+            "1",
+            "--seed",
+            "42",
+            "--family",
+            "mmb",
+            "--inactivity-floor",
+            "0",
+            "--encoding",
+            "fixed",
+            "--operation",
+            "update",
+            "--root",
+            "operations",
+        ];
+        let error = Cli::try_parse_from(update).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+        assert!(error.to_string().contains("--history"), "{error}");
+
+        for history in ["updated", "deleted"] {
+            let mut repeated = update.to_vec();
+            let leaves = repeated.iter().position(|arg| *arg == "--leaves").unwrap() + 1;
+            repeated[leaves] = "1";
+            let location = repeated
+                .iter()
+                .position(|arg| *arg == "--location")
+                .unwrap()
+                + 1;
+            repeated[location] = "0";
+            repeated.extend(["--history", history]);
+            let error = Cli::try_parse_from(repeated)
+                .unwrap()
+                .command
+                .execute()
+                .unwrap_err();
+            assert_eq!(error, "updated and deleted history require leaves >= 2");
+        }
+
+        for operation in ["delete", "commit", "commit-metadata"] {
+            for history in ["indexed", "updated", "deleted"] {
+                let error = Cli::try_parse_from([
+                    "fuzz",
+                    "qmdb",
+                    "--hash",
+                    "keccak256",
+                    "unordered",
+                    "--leaves",
+                    "3",
+                    "--location",
+                    "1",
+                    "--seed",
+                    "42",
+                    "--family",
+                    "mmb",
+                    "--inactivity-floor",
+                    "0",
+                    "--encoding",
+                    "fixed",
+                    "--operation",
+                    operation,
+                    "--history",
+                    history,
+                    "--root",
+                    "operations",
+                ])
+                .unwrap()
+                .command
+                .execute()
+                .unwrap_err();
+                assert_eq!(error, "--history requires --operation update");
+            }
+        }
+    }
+
+    #[test]
+    fn cli_enforces_conditional_configuration() {
+        use clap::error::ErrorKind;
+
+        for (command, operation) in [
+            ("any", None),
+            ("keyless", Some("append")),
+            ("immutable", Some("set")),
+        ] {
+            let mut args = vec![
+                "fuzz",
+                "qmdb",
+                "--hash",
+                "keccak256",
+                command,
+                "--leaves",
+                "3",
+                "--location",
+                "1",
+                "--seed",
+                "42",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--chunk-bytes",
+                "32",
+            ];
+            if let Some(operation) = operation {
+                args.extend(["--encoding", "fixed", "--operation", operation]);
+            } else {
+                args.extend(["--history", "indexed"]);
+            }
+            let error = Cli::try_parse_from(args).err().unwrap();
+            assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{error}");
+            assert!(error.to_string().contains("--chunk-bytes"), "{error}");
+        }
+
+        let current = [
+            "fuzz",
+            "qmdb",
+            "--hash",
+            "keccak256",
+            "unordered",
+            "--leaves",
+            "3",
+            "--location",
+            "1",
+            "--seed",
+            "42",
+            "--family",
+            "mmb",
+            "--inactivity-floor",
+            "0",
+            "--encoding",
+            "fixed",
+            "--operation",
+            "update",
+            "--history",
+            "indexed",
+            "--root",
+            "current",
+        ];
+        let error = Cli::try_parse_from(current).err().unwrap();
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument, "{error}");
+        assert!(error.to_string().contains("--chunk-bytes"), "{error}");
+
+        let operations = current.iter().copied().take(current.len() - 1).chain([
+            "operations",
+            "--chunk-bytes",
+            "32",
+        ]);
+        let error = Cli::try_parse_from(operations)
+            .unwrap()
+            .command
+            .execute()
+            .unwrap_err();
+        assert_eq!(error, "--chunk-bytes requires --root current");
+
+        let error = Cli::try_parse_from([
+            "fuzz",
+            "qmdb",
+            "--hash",
+            "keccak256",
+            "exclude",
+            "--leaves",
+            "1",
+            "--location",
+            "0",
+            "--seed",
+            "42",
+            "--family",
+            "mmb",
+            "--chunk-bytes",
+            "32",
+            "--key-hex",
+            "00",
+            "--mode",
+            "single",
+            "--inactivity-floor",
+            "0",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{error}");
+        assert!(error.to_string().contains("--inactivity-floor"), "{error}");
+    }
+
+    #[test]
+    fn exclude_cli_rejects_legacy_keyhex() {
+        use clap::error::ErrorKind;
+
+        let error = Cli::try_parse_from([
+            "fuzz",
+            "qmdb",
+            "--hash",
+            "keccak256",
+            "exclude",
+            "--leaves",
+            "1",
+            "--location",
+            "0",
+            "--seed",
+            "42",
+            "--family",
+            "mmb",
+            "--chunk-bytes",
+            "32",
+            "--keyhex",
+            "00",
+            "--mode",
+            "single",
+        ])
+        .err()
+        .unwrap();
+        assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{error}");
+        assert!(error.to_string().contains("--keyhex"), "{error}");
+    }
+
+    #[test]
+    fn cli_rejects_legacy_current_flag() {
+        use clap::error::ErrorKind;
+
+        for tail in [
+            vec![
+                "unordered",
+                "--leaves",
+                "3",
+                "--location",
+                "1",
+                "--operation",
+                "update",
+                "--history",
+                "indexed",
+                "--root",
+                "operations",
+            ],
+            vec![
+                "range",
+                "--leaves",
+                "3",
+                "--start",
+                "1",
+                "--count",
+                "2",
+                "--variant",
+                "ordered",
+                "--root",
+                "operations",
+            ],
+        ] {
+            let args = [
+                "fuzz",
+                "qmdb",
+                "--hash",
+                "keccak256",
+                tail[0],
+                "--seed",
+                "42",
+                "--family",
+                "mmb",
+                "--inactivity-floor",
+                "0",
+                "--encoding",
+                "fixed",
+                "--current",
+            ]
+            .into_iter()
+            .chain(tail.into_iter().skip(1));
+            let error = Cli::try_parse_from(args).err().unwrap();
+            assert_eq!(error.kind(), ErrorKind::UnknownArgument, "{error}");
+            assert!(error.to_string().contains("--current"), "{error}");
         }
     }
 
@@ -1296,13 +1682,13 @@ mod tests {
 
     fn check_unordered<F: Graftable, H: Hasher, O: Codec + Clone>(
         encoded: &[u8],
-        current: bool,
+        root_kind: RootKind,
         cfg: &O::Cfg,
         expected: bool,
         inactive: bool,
     ) {
         let digest = |bytes: &[u8]| H::Digest::decode(Copying(bytes)).unwrap();
-        if current {
+        if matches!(root_kind, RootKind::Current) {
             type ResultTuple = <sol!((bytes32, uint256, uint256, uint256, bytes, bytes32, bytes32, bytes32, bytes32[], bytes, bool)) as SolType>::RustType;
             let (
                 root,
@@ -1379,10 +1765,10 @@ mod tests {
 
     fn unordered_matrix<F: Graftable, H: Hasher>(family: &str, hash: &str) {
         for encoding in ["fixed", "variable"] {
-            for current in [false, true] {
+            for root_kind in [RootKind::Operations, RootKind::Current] {
                 for (leaves, location, floor, operation, history, expected) in [
-                    (1u64, 0u64, 0u64, "update", "", true),
-                    (1023, 1022, 768, "update", "", true),
+                    (1u64, 0u64, 0u64, "update", "indexed", true),
+                    (1023, 1022, 768, "update", "indexed", true),
                     (257, 256, 0, "delete", "", false),
                     (383, 382, 0, "commit", "", true),
                     (639, 638, 0, "commit-metadata", "", true),
@@ -1412,11 +1798,14 @@ mod tests {
                             encoding.into(),
                             "--operation".into(),
                             operation.into(),
-                            "--chunk-bytes".into(),
-                            "32".into(),
+                            "--root".into(),
+                            match root_kind {
+                                RootKind::Operations => "operations".into(),
+                                RootKind::Current => "current".into(),
+                            },
                         ];
-                        if current {
-                            args.push("--current".into());
+                        if matches!(root_kind, RootKind::Current) {
+                            args.extend(["--chunk-bytes".into(), "32".into()]);
                         }
                         if !history.is_empty() {
                             args.extend(["--history".into(), history.into()]);
@@ -1435,7 +1824,7 @@ mod tests {
                                 H,
                                 unordered::fixed::Operation<F, FixedBytes<32>, FixedBytes<32>>,
                             >(
-                                &encoded, current, &(), expected, floor != 0
+                                &encoded, root_kind, &(), expected, floor != 0
                             );
                             break;
                         } else {
@@ -1445,7 +1834,7 @@ mod tests {
                                 unordered::variable::Operation<F, FixedBytes<32>, Vec<u8>>,
                             >(
                                 &encoded,
-                                current,
+                                root_kind,
                                 &((), ((0..=129).into(), ())),
                                 expected,
                                 floor != 0,
@@ -1471,12 +1860,14 @@ mod tests {
                 "mmb",
                 "--inactivity-floor",
                 "0",
-                "--chunk-bytes",
-                "32",
+                "--root",
+                "operations",
                 "--encoding",
                 "fixed",
                 "--operation",
                 "update",
+                "--history",
+                "indexed",
             ],
             vec![
                 "--leaves",
@@ -1489,12 +1880,14 @@ mod tests {
                 "mmb",
                 "--inactivity-floor",
                 "0",
-                "--chunk-bytes",
-                "32",
+                "--root",
+                "operations",
                 "--encoding",
                 "fixed",
                 "--operation",
                 "update",
+                "--history",
+                "indexed",
             ],
             vec![
                 "--leaves",
@@ -1507,12 +1900,14 @@ mod tests {
                 "mmb",
                 "--inactivity-floor",
                 "0",
-                "--chunk-bytes",
-                "32",
+                "--root",
+                "operations",
                 "--encoding",
                 "fixed",
                 "--operation",
                 "update",
+                "--history",
+                "indexed",
             ],
             vec![
                 "--leaves",
@@ -1525,12 +1920,14 @@ mod tests {
                 "2",
                 "--family",
                 "mmb",
-                "--chunk-bytes",
-                "32",
+                "--root",
+                "operations",
                 "--encoding",
                 "fixed",
                 "--operation",
                 "update",
+                "--history",
+                "indexed",
             ],
             vec![
                 "--leaves",
@@ -1545,12 +1942,14 @@ mod tests {
                 "mmb",
                 "--inactivity-floor",
                 "0",
-                "--chunk-bytes",
-                "32",
+                "--root",
+                "operations",
                 "--encoding",
                 "fixed",
                 "--operation",
                 "update",
+                "--history",
+                "indexed",
             ],
             vec![
                 "--leaves",
@@ -1565,8 +1964,8 @@ mod tests {
                 "mmb",
                 "--inactivity-floor",
                 "0",
-                "--chunk-bytes",
-                "32",
+                "--root",
+                "operations",
                 "--encoding",
                 "fixed",
                 "--operation",
@@ -1587,8 +1986,8 @@ mod tests {
                 "mmb",
                 "--inactivity-floor",
                 "0",
-                "--chunk-bytes",
-                "32",
+                "--root",
+                "operations",
                 "--encoding",
                 "fixed",
             ],
@@ -1599,7 +1998,8 @@ mod tests {
                 "2",
                 "--seed",
                 "71",
-                "--current",
+                "--root",
+                "current",
                 "--inactivity-floor",
                 "2",
                 "--operation",
@@ -1613,7 +2013,7 @@ mod tests {
             ],
         ] {
             let result = Cli::try_parse_from(
-                ["fuzz", "qmdb", "--hash", "keccak", "unordered"]
+                ["fuzz", "qmdb", "--hash", "keccak256", "unordered"]
                     .into_iter()
                     .chain(tail),
             )
@@ -1626,16 +2026,16 @@ mod tests {
 
     #[test]
     fn unordered_cli_codecs_activity_and_inactive_prefixes() {
-        unordered_matrix::<mmr::Family, Keccak256>("mmr", "keccak");
+        unordered_matrix::<mmr::Family, Keccak256>("mmr", "keccak256");
         unordered_matrix::<mmr::Family, Sha256>("mmr", "sha256");
-        unordered_matrix::<mmb::Family, Keccak256>("mmb", "keccak");
+        unordered_matrix::<mmb::Family, Keccak256>("mmb", "keccak256");
         unordered_matrix::<mmb::Family, Sha256>("mmb", "sha256");
     }
 
     #[test]
     fn immutable_cli_codecs_operations_and_inactive_prefixes() {
         for family in ["mmr", "mmb"] {
-            for hash in ["keccak", "sha256"] {
+            for hash in ["keccak256", "sha256"] {
                 for encoding in ["fixed", "variable"] {
                     for operation in ["set", "commit", "commit-metadata"] {
                         for (leaves, location, floor) in
@@ -1664,8 +2064,6 @@ mod tests {
                                 operation.into(),
                                 "--inactivity-floor".into(),
                                 floor.to_string(),
-                                "--chunk-bytes".into(),
-                                "32".into(),
                             ];
                             if encoding == "variable" {
                                 args.extend(["--value-length".into(), "128".into()]);
@@ -1733,7 +2131,7 @@ mod tests {
                 "fuzz".to_string(),
                 "qmdb".into(),
                 "--hash".into(),
-                "keccak".into(),
+                "keccak256".into(),
                 "immutable".into(),
                 "--leaves".into(),
                 leaves.to_string(),
@@ -1747,8 +2145,6 @@ mod tests {
                 operation.into(),
                 "--family".into(),
                 "mmb".into(),
-                "--chunk-bytes".into(),
-                "32".into(),
                 "--encoding".into(),
                 "fixed".into(),
             ];
@@ -1774,7 +2170,7 @@ mod tests {
                     "fuzz",
                     "qmdb",
                     "--hash",
-                    "keccak",
+                    "keccak256",
                     "keyless",
                     "--leaves",
                     "3",
@@ -1792,8 +2188,6 @@ mod tests {
                     "mmb",
                     "--inactivity-floor",
                     "0",
-                    "--chunk-bytes",
-                    "32",
                 ];
                 let encoded = Cli::try_parse_from(args)
                     .unwrap()
@@ -1818,7 +2212,7 @@ mod tests {
             "fuzz",
             "qmdb",
             "--hash",
-            "keccak",
+            "keccak256",
             "keyless",
             "--leaves",
             "3",
@@ -1832,8 +2226,6 @@ mod tests {
             "mmb",
             "--inactivity-floor",
             "0",
-            "--chunk-bytes",
-            "32",
             "--encoding",
             "fixed",
             "--operation",
@@ -1859,7 +2251,7 @@ mod tests {
                 "fuzz",
                 "qmdb",
                 "--hash",
-                "keccak",
+                "keccak256",
                 "keyless",
                 "--leaves",
                 &leaves.to_string(),
@@ -1873,8 +2265,6 @@ mod tests {
                 operation,
                 "--family",
                 "mmb",
-                "--chunk-bytes",
-                "32",
                 "--encoding",
                 "fixed",
             ])
@@ -1888,7 +2278,7 @@ mod tests {
     #[test]
     fn keyless_cli_covers_codecs_operations_and_inactive_prefixes() {
         for family in ["mmr", "mmb"] {
-            for hash in ["keccak", "sha256"] {
+            for hash in ["keccak256", "sha256"] {
                 for encoding in ["fixed", "variable"] {
                     for operation in ["append", "commit", "commit-metadata"] {
                         for (leaves, location, floor) in [
@@ -1929,8 +2319,6 @@ mod tests {
                                         encoding,
                                         "--operation",
                                         operation,
-                                        "--chunk-bytes",
-                                        "32",
                                     ]
                                     .into_iter()
                                     .chain(length_args),
@@ -1948,7 +2336,7 @@ mod tests {
                                     assert_ne!(output.inactivePeaks, 0);
                                 }
                                 match (family, hash) {
-                                    ("mmr", "keccak") => {
+                                    ("mmr", "keccak256") => {
                                         verify_keyless_output::<mmr::Family, Keccak256>(
                                             &output, encoding, operation, seed, floor,
                                         )
@@ -1956,7 +2344,7 @@ mod tests {
                                     ("mmr", _) => verify_keyless_output::<mmr::Family, Sha256>(
                                         &output, encoding, operation, seed, floor,
                                     ),
-                                    (_, "keccak") => {
+                                    (_, "keccak256") => {
                                         verify_keyless_output::<mmb::Family, Keccak256>(
                                             &output, encoding, operation, seed, floor,
                                         )
@@ -1976,15 +2364,15 @@ mod tests {
     #[test]
     fn any_cli_covers_boundaries_inactive_prefixes_and_history() {
         for family in ["mmr", "mmb"] {
-            for hash in ["keccak", "sha256"] {
+            for hash in ["keccak256", "sha256"] {
                 for leaves in [1u64, 2, 3, 7, 11, 31, 255, 256, 257, 383, 513, 1793] {
                     for location in [0, leaves / 2, leaves - 1] {
                         for floor in [0, location] {
-                            for history in [None, Some("updated"), Some("deleted")] {
-                                if history.is_some() && (leaves < 2 || location != 0) {
+                            for history in ["indexed", "updated", "deleted"] {
+                                if history != "indexed" && (leaves < 2 || location != 0) {
                                     continue;
                                 }
-                                let mut args = vec![
+                                let args = vec![
                                     "fuzz".to_owned(),
                                     "qmdb".into(),
                                     "--hash".into(),
@@ -2000,12 +2388,9 @@ mod tests {
                                     family.into(),
                                     "--inactivity-floor".into(),
                                     floor.to_string(),
-                                    "--chunk-bytes".into(),
-                                    "32".into(),
+                                    "--history".into(),
+                                    history.into(),
                                 ];
-                                if let Some(history) = history {
-                                    args.extend(["--history".into(), history.into()]);
-                                }
                                 let encoded = Cli::try_parse_from(args)
                                     .unwrap()
                                     .command
@@ -2019,11 +2404,11 @@ mod tests {
                                 assert_eq!(output.operation.len(), 97);
                                 assert_eq!(output.operation[0], 0xD2);
                                 match (family, hash) {
-                                    ("mmr", "keccak") => {
+                                    ("mmr", "keccak256") => {
                                         verify_any_output::<mmr::Family, Keccak256>(&output)
                                     }
                                     ("mmr", _) => verify_any_output::<mmr::Family, Sha256>(&output),
-                                    (_, "keccak") => {
+                                    (_, "keccak256") => {
                                         verify_any_output::<mmb::Family, Keccak256>(&output)
                                     }
                                     _ => verify_any_output::<mmb::Family, Sha256>(&output),
@@ -2040,15 +2425,14 @@ mod tests {
     fn any_history_contains_later_mutations_of_the_proven_key() {
         for history in [History::Updated, History::Deleted] {
             let args = AnyArgs {
-                tree: GenerateArgs {
+                tree: TreeArgs {
                     leaves: 3,
                     location: 0,
                     seed: 42,
                     family: TreeKind::Mmb,
                     inactivity_floor: 0,
-                    chunk_bytes: 32,
                 },
-                history: Some(history),
+                history,
             };
             let Operation::Update(first) = any_operation::<mmb::Family>(&args, 0) else {
                 unreachable!()
@@ -2065,11 +2449,11 @@ mod tests {
                 _ => unreachable!(),
             }
             let before = any::<mmb::Family, Keccak256>(&AnyArgs {
-                tree: GenerateArgs {
+                tree: TreeArgs {
                     leaves: 1,
                     ..args.tree
                 },
-                history: None,
+                history: History::Indexed,
             })
             .unwrap();
             let output = any::<mmb::Family, Keccak256>(&args).unwrap();
@@ -2081,13 +2465,33 @@ mod tests {
                 any_operation::<mmb::Family>(&args, 0).encode().as_ref()
             );
             verify_any_output::<mmb::Family, Keccak256>(&output);
+            assert!(
+                any::<mmb::Family, Keccak256>(&AnyArgs {
+                    tree: TreeArgs {
+                        leaves: 1,
+                        ..args.tree
+                    },
+                    history,
+                })
+                .is_err()
+            );
+            assert!(
+                any::<mmb::Family, Keccak256>(&AnyArgs {
+                    tree: TreeArgs {
+                        location: 1,
+                        ..args.tree
+                    },
+                    history,
+                })
+                .is_err()
+            );
         }
     }
 
     #[test]
     fn materialized_current_proofs_cover_chunk_boundaries() {
         for family in ["mmr", "mmb"] {
-            for hash in ["keccak", "sha256"] {
+            for hash in ["keccak256", "sha256"] {
                 for leaves in [
                     1u64, 255, 256, 257, 382, 383, 384, 511, 512, 513, 638, 639, 640, 769, 1024,
                     1793, 4097,
@@ -2121,11 +2525,11 @@ mod tests {
                                 <OperationOutput as SolValue>::abi_decode_params_validate(&encoded)
                                     .unwrap();
                             match (family, hash) {
-                                ("mmr", "keccak") => {
+                                ("mmr", "keccak256") => {
                                     verify_output::<mmr::Family, Keccak256, 32>(&output)
                                 }
                                 ("mmr", _) => verify_output::<mmr::Family, Sha256, 32>(&output),
-                                (_, "keccak") => {
+                                (_, "keccak256") => {
                                     verify_output::<mmb::Family, Keccak256, 32>(&output)
                                 }
                                 _ => verify_output::<mmb::Family, Sha256, 32>(&output),
@@ -2168,7 +2572,7 @@ mod tests {
     fn exclusion_matches_cyclic_intervals_and_empty_commits() {
         type ExclusionOutput = <sol!((bytes32, uint256, uint256, uint256, bytes, bytes32, bytes32, bytes32, bytes32[], bytes, bool)) as SolType>::RustType;
         for family in ["mmr", "mmb"] {
-            for hash in ["keccak", "sha256"] {
+            for hash in ["keccak256", "sha256"] {
                 for leaves in [1u64, 256, 257, 383, 513] {
                     for location in [0, leaves - 1] {
                         for mode in ["interval", "single", "empty"] {
@@ -2179,7 +2583,7 @@ mod tests {
                                 let start = 2 * (location + 1);
                                 let end = 2 * ((location + 1) % leaves + 1);
                                 for query in [0, start - 1, start, start + 1, end, u64::MAX] {
-                                    let queryhex = const_hex::encode(key(query));
+                                    let query_hex = const_hex::encode(key(query));
                                     let mut arguments = vec![
                                         "fuzz".to_owned(),
                                         "qmdb".into(),
@@ -2192,14 +2596,12 @@ mod tests {
                                         location.to_string(),
                                         "--seed".into(),
                                         "42".into(),
-                                        "--keyhex".into(),
-                                        queryhex,
+                                        "--key-hex".into(),
+                                        query_hex,
                                         "--family".into(),
                                         family.into(),
                                         "--mode".into(),
                                         mode.into(),
-                                        "--inactivity-floor".into(),
-                                        "0".into(),
                                         "--chunk-bytes".into(),
                                         "32".into(),
                                     ];
@@ -2250,7 +2652,7 @@ mod tests {
                     "fuzz",
                     "qmdb",
                     "--hash",
-                    "keccak",
+                    "keccak256",
                     "current",
                     "--leaves",
                     &leaves.to_string(),
@@ -2291,7 +2693,7 @@ mod tests {
                 "fuzz",
                 "qmdb",
                 "--hash",
-                "keccak",
+                "keccak256",
                 "current",
                 "--leaves",
                 "3",

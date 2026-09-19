@@ -13,7 +13,7 @@ mod simplex;
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub(crate) enum Hash {
     Sha256,
-    Keccak,
+    Keccak256,
 }
 
 #[derive(Parser)]
