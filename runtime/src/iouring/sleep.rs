@@ -729,7 +729,8 @@ mod tests {
                 (sleep,)
             });
 
-            // An installed forwarding channel must notify its receiver when the worker closes.
+            // Once the owner processes the handoff, closure wakes the receiver.
+            // Before that, the queued sender can independently notify it when dropped.
             if promoted {
                 assert!(callbacks.wakes.load(Ordering::Relaxed) > 0);
             }
@@ -759,7 +760,7 @@ mod tests {
             (sleep,)
         });
 
-        // Shutdown owns cleanup even though the registered future escaped.
+        // Shutdown removes the registration and wakes its surviving local observer.
         assert_eq!(Arc::strong_count(&counter), 1);
         assert_eq!(counter.0.load(Ordering::Relaxed), 1);
 

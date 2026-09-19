@@ -773,7 +773,8 @@ pub mod tests {
                 (operation,)
             });
 
-            // An installed forwarding channel notifies its receiver on completion or closure.
+            // Once the owner processes the handoff, completion or closure wakes the receiver.
+            // Before that, the queued sender can independently notify it when dropped.
             if promoted {
                 assert!(callbacks.wakes.load(Ordering::Relaxed) > 0);
             }

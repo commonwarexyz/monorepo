@@ -639,8 +639,9 @@ impl Shared {
 /// spawned by dedicated and blocking tasks. Task factories run on their caller,
 /// while returned futures run on the selected worker. Resources and pending I/O
 /// and sleep futures can move between workers. Registrations stay on their original
-/// worker, which must remain alive until observation completes. Detached sync
-/// completion handles can be awaited on any thread.
+/// worker. Closing that worker causes unresolved I/O futures to fail and unresolved
+/// sleeps to panic when polled. Detached sync completion handles can be awaited on
+/// any thread.
 pub struct Context {
     /// User-facing task and metric namespace.
     name: String,

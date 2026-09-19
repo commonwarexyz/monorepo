@@ -542,6 +542,7 @@ pub mod tests {
         },
         storage::hold::{Held, Hold},
     };
+    use commonware_utils::channel::oneshot::error::TryRecvError;
     use std::{
         fs::File,
         net::{SocketAddr, TcpListener},
@@ -1053,6 +1054,43 @@ pub mod tests {
         let next = waiters.insert(make_recv_request(), observer());
         assert_eq!(id.0.index, next.0.index);
         assert_ne!(id, next);
+    }
+
+    #[test]
+    fn test_close_defers_local_and_forwarded_notifications() {
+        // Register two pending reads and transfer one observer to a channel.
+        // Distinct notification targets identify each shutdown path independently.
+        let mut waiters = Waiters::new(2);
+        let mut deferred = Deferred::default();
+        let counter = Arc::new(Counter::default());
+        let waker = Waker::from(counter.clone());
+        let local = waiters.insert(make_recv_request(), observer());
+        assert!(waiters.set_waker(local, waker.clone()).is_none());
+        let forwarded = waiters.insert(make_recv_request(), observer());
+        let (sender, mut receiver) = oneshot::channel();
+        waiters.forward(forwarded, sender, &mut deferred);
+        assert!(deferred.is_empty());
+
+        // Closure detaches both observers and requests cancellation. Notifications
+        // must remain deferred so callbacks cannot run under the worker borrow.
+        let cancel = waiters.close(&mut deferred);
+        assert_eq!(cancel.len(), 2);
+        assert!(cancel.contains(&local));
+        assert!(cancel.contains(&forwarded));
+        assert_eq!(deferred.wakes.len(), 1);
+        assert!(deferred.wakes[0].will_wake(&waker));
+        assert!(deferred.drops.is_empty());
+        assert_eq!(deferred.results.len(), 1);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        // Run the deferred actions and verify each observer receives its notification.
+        deferred.wakes.pop().unwrap().wake();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        let (sender, result) = deferred.results.pop().unwrap();
+        assert!(sender.send(result).is_ok());
+        assert!(matches!(receiver.try_recv(), Ok(Err(Error::Closed))));
+        assert!(deferred.is_empty());
     }
 
     #[test]

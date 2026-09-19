@@ -1283,7 +1283,8 @@ fn test_worker_closure_wakes_shared_observers_before_forwarding(#[case] timer: b
             assert_eq!(polls.load(Ordering::Relaxed), 1);
             assert_eq!(counter.0.load(Ordering::Relaxed), 0);
 
-            // Optionally cancel the external observer before letting the source finish.
+            // In the cancellation case, dropping the external clone removes its waker.
+            // Source exit then drops the last Shared clone and must complete worker cleanup.
             let mut observer = (!cancel).then_some(shared);
             release.send(()).unwrap();
             task.await.unwrap();
@@ -1300,8 +1301,7 @@ fn test_worker_closure_wakes_shared_observers_before_forwarding(#[case] timer: b
             })
             .await;
 
-            // Closure must notify a surviving observer and be visible on its next poll.
-            // A canceled observer must receive no notification.
+            // A surviving observer must be notified of closure and observe it on its next poll.
             if let Some(observer) = &mut observer {
                 assert!(
                     counter.0.load(Ordering::Relaxed) > 0,
@@ -1319,6 +1319,7 @@ fn test_worker_closure_wakes_shared_observers_before_forwarding(#[case] timer: b
                     assert!(matches!(result.unwrap(), Poll::Ready(Err(_))));
                 }
             } else {
+                // Shared removed this clone's waker before the source was released.
                 assert_eq!(counter.0.load(Ordering::Relaxed), 0);
             }
         });
