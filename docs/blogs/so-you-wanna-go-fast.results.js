@@ -169,48 +169,59 @@ function marker(parent, index, x, y) {
   return svgNode(parent, 'path', { d, ...attrs });
 }
 
-for (const panel of document.querySelectorAll('[data-mm-results]')) {
-  let scenario = 'healthy';
-  let fsync = false;
-  const scenarios = document.createElement('div');
-  scenarios.className = 'mm-result-scenarios';
-  scenarios.setAttribute('role', 'group');
-  scenarios.setAttribute('aria-label', 'Scenario');
-  for (const [value, text] of [['healthy', 'Healthy'], ['crash1', '1 crash'], ['crash9', '9 crashes'], ['loss_0.001', '0.1% loss']]) {
-    const button = document.createElement('button');
-    button.textContent = text;
-    button.setAttribute('aria-pressed', value === scenario);
-    button.addEventListener('click', () => {
-      for (const sibling of scenarios.children) sibling.setAttribute('aria-pressed', sibling === button);
-      scenario = value;
-      render();
-    });
-    scenarios.append(button);
-  }
-  panel.append(scenarios);
-  const toolbar = document.createElement('div');
-  toolbar.className = 'mm-result-toolbar';
-  panel.append(toolbar);
-  let metric = 'p50_ms';
-  const controls = document.createElement('div');
-  controls.className = 'mm-result-controls';
-  controls.setAttribute('role', 'group');
-  controls.setAttribute('aria-label', 'Latency statistic');
-  for (const [key, name] of [['p50_ms', 'Median + P25–P75'], ['p99_ms', 'P99']]) {
-    const button = document.createElement('button');
-    button.textContent = name;
-    button.dataset.metric = key;
-    button.addEventListener('click', () => { metric = key; render(); });
-    controls.append(button);
-  }
-  toolbar.append(controls);
-  const syncLabel = document.createElement('label');
-  syncLabel.className = 'mm-result-sync';
-  const syncInput = document.createElement('input');
-  syncInput.type = 'checkbox';
-  syncInput.addEventListener('change', () => { fsync = syncInput.checked; render(); });
-  syncLabel.append(syncInput, 'Fsync on');
-  toolbar.append(syncLabel);
+const panels = document.querySelectorAll('[data-mm-results]');
+const renderers = [];
+let scenario = 'healthy';
+let metric = 'p50_ms';
+let fsync = false;
+const controlsHost = document.querySelector('[data-mm-results-controls]');
+const scenarios = document.createElement('div');
+scenarios.className = 'mm-result-scenarios';
+scenarios.setAttribute('role', 'group');
+scenarios.setAttribute('aria-label', 'Scenario');
+for (const [value, text] of [['healthy', 'Healthy'], ['crash1', '1 crash'], ['crash9', '9 crashes'], ['loss_0.001', '0.1% loss']]) {
+  const button = document.createElement('button');
+  button.textContent = text;
+  button.dataset.scenario = value;
+  button.addEventListener('click', () => { scenario = value; renderAll(); });
+  scenarios.append(button);
+}
+controlsHost.append(scenarios);
+const toolbar = document.createElement('div');
+toolbar.className = 'mm-result-toolbar';
+controlsHost.append(toolbar);
+const controls = document.createElement('div');
+controls.className = 'mm-result-controls';
+controls.setAttribute('role', 'group');
+controls.setAttribute('aria-label', 'Latency statistic');
+for (const [key, name] of [['p50_ms', 'Median + P25–P75'], ['p99_ms', 'P99']]) {
+  const button = document.createElement('button');
+  button.textContent = name;
+  button.dataset.metric = key;
+  button.addEventListener('click', () => { metric = key; renderAll(); });
+  controls.append(button);
+}
+toolbar.append(controls);
+const syncLabel = document.createElement('label');
+syncLabel.className = 'mm-result-sync';
+const syncInput = document.createElement('input');
+syncInput.type = 'checkbox';
+syncInput.addEventListener('change', () => { fsync = syncInput.checked; renderAll(); });
+syncLabel.append(syncInput, 'Fsync on');
+toolbar.append(syncLabel);
+
+function updateControls() {
+  for (const button of scenarios.children) button.setAttribute('aria-pressed', button.dataset.scenario === scenario);
+  for (const button of controls.children) button.setAttribute('aria-pressed', button.dataset.metric === metric);
+  syncInput.checked = fsync;
+}
+
+function renderAll() {
+  updateControls();
+  for (const render of renderers) render();
+}
+
+for (const panel of panels) {
   const legend = document.createElement('div');
   legend.className = 'mm-result-legend';
   protocols.forEach((name, index) => {
@@ -241,10 +252,9 @@ for (const panel of document.querySelectorAll('[data-mm-results]')) {
     const conditions = results.filter(row => row.topology === panel.dataset.mmResults && row.scenario === scenario && row.fsync === fsync);
     const rows = conditions.filter(row => row.paper_eligible).sort((a, b) => protocols.indexOf(a.protocol) - protocols.indexOf(b.protocol) || a.offered_tps - b.offered_tps);
     for (const [index, item] of [...legend.children].entries()) item.hidden = fsync && protocols[index] !== 'Multimmit';
-    for (const button of controls.children) button.setAttribute('aria-pressed', button.dataset.metric === metric);
     const width = plot.clientWidth;
     const height = width < 480 ? 260 : 280;
-    const left = 104, right = width - 24, top = 16, bottom = height - 48;
+    const left = 72, right = width - 24, top = 16, bottom = height - 48;
     const minY = 10 ** Math.floor(Math.log10(Math.min(...rows.map(r => metric === 'p50_ms' ? r.p25_ms : r.p99_ms)) / 1.05));
     const upper = Math.max(...rows.map(r => metric === 'p50_ms' ? r.p75_ms : r.p99_ms)) * 1.05;
     const magnitude = 10 ** Math.floor(Math.log10(upper));
@@ -256,7 +266,7 @@ for (const panel of document.querySelectorAll('[data-mm-results]')) {
     svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
     const decoration = svgNode(svg, 'g', { 'aria-hidden': 'true' });
     svgNode(decoration, 'text', {
-      transform: `translate(16 ${(top + bottom) / 2}) rotate(-90)`,
+      transform: `translate(20 ${(top + bottom) / 2}) rotate(-90)`,
       'text-anchor': 'middle', class: 'mm-axis-title',
     }, 'Submission → finality (ms)');
     const ticksY = [];
@@ -339,5 +349,7 @@ for (const panel of document.querySelectorAll('[data-mm-results]')) {
       });
     });
   }
+  renderers.push(render);
   new ResizeObserver(render).observe(plot);
 }
+renderAll();
