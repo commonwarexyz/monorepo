@@ -60,8 +60,9 @@ pub(crate) enum Command {
     Check {
         #[arg(long, value_enum)]
         mode: Mode,
+        /// Hex-encoded ABI input.
         #[arg(long)]
-        abi_hex: String,
+        abi: String,
     },
 }
 
@@ -273,7 +274,7 @@ fn check<H: Hasher>(mode: Mode, encoded: &[u8]) -> bool {
 impl Command {
     pub(crate) fn execute(self, hash: Hash) -> Result<Vec<u8>, String> {
         match hash {
-            Hash::Keccak => self.execute_with::<Keccak256>(),
+            Hash::Keccak256 => self.execute_with::<Keccak256>(),
             Hash::Sha256 => self.execute_with::<Sha256>(),
         }
     }
@@ -310,8 +311,8 @@ impl Command {
                 index,
                 seed,
             } => synthetic::<H>(leaves, index, seed)?,
-            Self::Check { mode, abi_hex } => {
-                let encoded = const_hex::decode(abi_hex.strip_prefix("0x").unwrap_or(&abi_hex))
+            Self::Check { mode, abi } => {
+                let encoded = const_hex::decode(abi.strip_prefix("0x").unwrap_or(&abi))
                     .map_err(|error| format!("invalid ABI hex: {error}"))?;
                 return Ok(check::<H>(mode, &encoded).abi_encode());
             }
@@ -485,22 +486,25 @@ mod tests {
                 "42",
             ],
         ] {
-            let encoded =
-                Cli::try_parse_from(["fuzz", "bmt", "--hash", "keccak"].into_iter().chain(args))
-                    .unwrap()
-                    .command
-                    .execute()
-                    .unwrap();
+            let encoded = Cli::try_parse_from(
+                ["fuzz", "bmt", "--hash", "keccak256"]
+                    .into_iter()
+                    .chain(args),
+            )
+            .unwrap()
+            .command
+            .execute()
+            .unwrap();
             let hex = const_hex::encode(&encoded);
             let accepted = Cli::try_parse_from([
                 "fuzz",
                 "bmt",
                 "--hash",
-                "keccak",
+                "keccak256",
                 "check",
                 "--mode",
                 "multi",
-                "--abi-hex",
+                "--abi",
                 &hex,
             ])
             .unwrap()
@@ -545,7 +549,7 @@ mod tests {
             ],
         ] {
             let mut outputs = Vec::new();
-            for hash in ["keccak", "sha256"] {
+            for hash in ["keccak256", "sha256"] {
                 let encoded = Cli::try_parse_from(
                     ["fuzz", "bmt", "--hash", hash]
                         .into_iter()
@@ -556,16 +560,9 @@ mod tests {
                 .execute()
                 .unwrap();
                 let hex = const_hex::encode(&encoded);
-                for check_hash in ["keccak", "sha256"] {
+                for check_hash in ["keccak256", "sha256"] {
                     let accepted = Cli::try_parse_from([
-                        "fuzz",
-                        "bmt",
-                        "--hash",
-                        check_hash,
-                        "check",
-                        "--mode",
-                        "multi",
-                        "--abi-hex",
+                        "fuzz", "bmt", "--hash", check_hash, "check", "--mode", "multi", "--abi",
                         &hex,
                     ])
                     .unwrap()
@@ -604,7 +601,7 @@ mod tests {
                 "--seed",
                 "42",
             ],
-            vec!["check", "--mode", "single", "--abi-hex", "00"],
+            vec!["check", "--mode", "single", "--abi", "00"],
         ] {
             assert!(Cli::try_parse_from(["fuzz", "bmt"].into_iter().chain(args)).is_err());
         }
@@ -621,20 +618,44 @@ mod tests {
     fn cli_requires_named_fields() {
         assert!(
             Cli::try_parse_from([
-                "fuzz", "bmt", "--hash", "keccak", "generate", "11", "2", "1", "42"
+                "fuzz",
+                "bmt",
+                "--hash",
+                "keccak256",
+                "generate",
+                "11",
+                "2",
+                "1",
+                "42"
             ])
             .is_err()
         );
         assert!(
             Cli::try_parse_from([
-                "fuzz", "bmt", "--hash", "keccak", "generate", "--leaves", "11", "--start", "2",
-                "--count", "1"
+                "fuzz",
+                "bmt",
+                "--hash",
+                "keccak256",
+                "generate",
+                "--leaves",
+                "11",
+                "--start",
+                "2",
+                "--count",
+                "1"
             ])
             .is_err()
         );
         assert!(
             Cli::try_parse_from([
-                "fuzz", "bmt", "--hash", "keccak", "check", "--mode", "single", "00"
+                "fuzz",
+                "bmt",
+                "--hash",
+                "keccak256",
+                "check",
+                "--mode",
+                "single",
+                "00"
             ])
             .is_err()
         );

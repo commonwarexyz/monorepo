@@ -17,6 +17,7 @@ commonware-codec = { workspace = true, features = ["std"] }
 commonware-consensus.workspace = true
 commonware-cryptography = { workspace = true, features = ["std"] }
 commonware-parallel = { workspace = true, features = ["std"] }
+commonware-runtime.workspace = true
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
 const-hex = { workspace = true, features = ["std"] }

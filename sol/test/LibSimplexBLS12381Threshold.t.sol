@@ -2,6 +2,7 @@
 pragma solidity ^0.8.15;
 
 import { Test } from "forge-std/Test.sol";
+import { BLSVariant } from "./Common.t.sol";
 import { LibBLS12381 as BLS } from "../src/certificate/LibBLS12381.sol";
 import { LibSimplex as Simplex } from "../src/simplex/LibSimplex.sol";
 import { LibSimplexBLS12381Threshold as Scheme } from "../src/simplex/LibSimplexBLS12381Threshold.sol";
@@ -9,13 +10,13 @@ import { LibSimplexBLS12381Threshold as Scheme } from "../src/simplex/LibSimplex
 /// @dev External calls exercise the complete Simplex wrapper across the ABI boundary.
 contract SimplexBLS12381ThresholdHarness {
     function verify(
-        bool minSig,
+        BLSVariant variant,
         bytes calldata signature,
         bytes memory key,
         bytes memory namespace,
         Simplex.Subject memory subject
     ) external view returns (bool) {
-        return minSig
+        return variant == BLSVariant.MinSig
             ? Scheme.verifyMinSig(signature, abi.decode(key, (BLS.G2Point)), namespace, subject)
             : Scheme.verifyMinPk(signature, abi.decode(key, (BLS.G1Point)), namespace, subject);
     }
@@ -37,7 +38,7 @@ contract LibSimplexBLS12381ThresholdTest is Test {
 
     /// @dev Verify generated certificates and reject every changed Simplex signing input.
     function testFuzz_DifferentialCertificate(
-        bool minSig,
+        BLSVariant variant,
         uint8 kind,
         bytes memory namespace,
         uint64 epoch,
@@ -49,13 +50,14 @@ contract LibSimplexBLS12381ThresholdTest is Test {
         Simplex.Subject memory subject = Simplex.Subject({
             kind: Simplex.Kind(kind % 3), epoch: epoch, viewNumber: viewNumber, parent: parent, payload: payload
         });
-        Case memory c = _generate(minSig, namespace, subject, seed);
-        _assertCertificateInputs(minSig, c, namespace, subject);
+        Case memory c = _generate(variant, namespace, subject, seed);
+        _assertCertificateInputs(variant, c, namespace, subject);
     }
 
     /// @dev Exercise every vote domain and varint boundary for both signature variants.
     function test_DifferentialDomains() public {
-        for (uint256 family = 0; family != 2; ++family) {
+        for (uint256 variantIndex; variantIndex <= uint256(BLSVariant.MinPk); ++variantIndex) {
+            BLSVariant variant = BLSVariant(variantIndex);
             for (uint256 kind = 0; kind != 3; ++kind) {
                 bytes memory namespace = new bytes(119);
                 Simplex.Subject memory subject = Simplex.Subject({
@@ -65,93 +67,96 @@ contract LibSimplexBLS12381ThresholdTest is Test {
                     parent: 127,
                     payload: bytes32(uint256(7))
                 });
-                Case memory c = _generate(family == 0, namespace, subject, 9);
-                _assertCertificateInputs(family == 0, c, namespace, subject);
+                Case memory c = _generate(variant, namespace, subject, 9);
+                _assertCertificateInputs(variant, c, namespace, subject);
             }
         }
     }
 
     /// @dev Measure each complete wrapper with a finalization subject and trusted epoch key.
     function test_DifferentialGas() public {
-        for (uint256 family = 0; family != 2; ++family) {
-            bool minSig = family == 0;
+        for (uint256 variantIndex; variantIndex <= uint256(BLSVariant.MinPk); ++variantIndex) {
+            BLSVariant variant = BLSVariant(variantIndex);
             bytes memory namespace = bytes("simplex");
             Simplex.Subject memory subject = Simplex.Subject({
                 kind: Simplex.Kind.Finalization, epoch: 1, viewNumber: 300, parent: 128, payload: bytes32(uint256(7))
             });
-            Case memory c = _generate(minSig, namespace, subject, 9);
-            assertTrue(harness.verify(minSig, c.signature, c.key, namespace, subject));
-            vm.snapshotGasLastFrame("SimplexBLS12381Threshold", minSig ? "minsig" : "minpk");
+            Case memory c = _generate(variant, namespace, subject, 9);
+            assertTrue(harness.verify(variant, c.signature, c.key, namespace, subject));
+            vm.snapshotGasLastFrame("SimplexBLS12381Threshold", variant == BLSVariant.MinSig ? "minsig" : "minpk");
         }
     }
 
     /// @dev Check framing plus domain, subject, and namespace mutations.
     function _assertCertificateInputs(
-        bool minSig,
+        BLSVariant variant,
         Case memory c,
         bytes memory namespace,
         Simplex.Subject memory subject
     ) internal view {
         assertEq(Simplex.encodeMessage(namespace, subject), c.message, "signing transcript mismatch");
-        assertTrue(harness.verify(minSig, c.signature, c.key, namespace, subject));
+        assertTrue(harness.verify(variant, c.signature, c.key, namespace, subject));
 
         Simplex.Kind kind = subject.kind;
         subject.kind = Simplex.Kind((uint256(kind) + 1) % 3);
-        assertFalse(harness.verify(minSig, c.signature, c.key, namespace, subject));
+        assertFalse(harness.verify(variant, c.signature, c.key, namespace, subject));
         subject.kind = kind;
 
         subject.epoch ^= 1;
-        assertFalse(harness.verify(minSig, c.signature, c.key, namespace, subject));
+        assertFalse(harness.verify(variant, c.signature, c.key, namespace, subject));
         subject.epoch ^= 1;
 
         subject.viewNumber ^= 1;
-        assertFalse(harness.verify(minSig, c.signature, c.key, namespace, subject));
+        assertFalse(harness.verify(variant, c.signature, c.key, namespace, subject));
         subject.viewNumber ^= 1;
 
         subject.parent ^= 1;
         assertEq(
-            harness.verify(minSig, c.signature, c.key, namespace, subject), subject.kind == Simplex.Kind.Nullification
+            harness.verify(variant, c.signature, c.key, namespace, subject), subject.kind == Simplex.Kind.Nullification
         );
         subject.parent ^= 1;
 
         subject.payload ^= bytes32(uint256(1));
         assertEq(
-            harness.verify(minSig, c.signature, c.key, namespace, subject), subject.kind == Simplex.Kind.Nullification
+            harness.verify(variant, c.signature, c.key, namespace, subject), subject.kind == Simplex.Kind.Nullification
         );
         subject.payload ^= bytes32(uint256(1));
 
-        assertFalse(harness.verify(minSig, c.signature, c.key, bytes.concat(namespace, hex"00"), subject));
-        assertTrue(harness.verify(minSig, c.signature, c.key, namespace, subject));
+        assertFalse(harness.verify(variant, c.signature, c.key, bytes.concat(namespace, hex"00"), subject));
+        assertTrue(harness.verify(variant, c.signature, c.key, namespace, subject));
     }
 
     /// @dev Ask Commonware for a signed subject and its independently encoded transcript.
-    function _generate(bool minSig, bytes memory namespace, Simplex.Subject memory subject, uint64 seed)
+    function _generate(BLSVariant variant, bytes memory namespace, Simplex.Subject memory subject, uint64 seed)
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](20);
+        string[] memory args = new string[](subject.kind == Simplex.Kind.Nullification ? 16 : 20);
         args[0] = _binary();
         args[1] = "simplex";
         args[2] = "generate";
         args[3] = "threshold";
         args[4] = "--variant";
-        args[5] = minSig ? "minsig" : "minpk";
+        args[5] = variant == BLSVariant.MinSig ? "minsig" : "minpk";
         args[6] = "--kind";
         args[7] = subject.kind == Simplex.Kind.Notarization
             ? "notarize"
             : subject.kind == Simplex.Kind.Nullification ? "nullify" : "finalize";
-        args[8] = "--namespace-hex";
+        args[8] = "--namespace";
         args[9] = vm.toString(namespace);
         args[10] = "--epoch";
         args[11] = vm.toString(uint256(subject.epoch));
         args[12] = "--view";
         args[13] = vm.toString(uint256(subject.viewNumber));
-        args[14] = "--parent";
-        args[15] = vm.toString(uint256(subject.parent));
-        args[16] = "--payload-hex";
-        args[17] = vm.toString(subject.payload);
-        args[18] = "--seed";
-        args[19] = vm.toString(uint256(seed));
+        uint256 offset = 14;
+        if (subject.kind != Simplex.Kind.Nullification) {
+            args[offset++] = "--parent";
+            args[offset++] = vm.toString(uint256(subject.parent));
+            args[offset++] = "--payload";
+            args[offset++] = vm.toString(subject.payload);
+        }
+        args[offset++] = "--seed";
+        args[offset++] = vm.toString(uint256(seed));
         (c.signature, c.key, c.message, c.point) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 

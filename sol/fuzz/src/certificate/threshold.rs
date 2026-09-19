@@ -34,14 +34,18 @@ pub(crate) enum Command {
     Check {
         #[arg(long, value_enum)]
         variant: BlsVariant,
+        /// Hex-encoded public key.
         #[arg(long)]
-        public_key_hex: String,
+        public_key: String,
+        /// Hex-encoded namespace bytes.
         #[arg(long)]
-        namespace_hex: String,
+        namespace: String,
+        /// Hex-encoded message bytes.
         #[arg(long)]
-        message_hex: String,
+        message: String,
+        /// Hex-encoded signature.
         #[arg(long)]
-        signature_hex: String,
+        signature: String,
     },
 }
 
@@ -49,10 +53,12 @@ pub(crate) enum Command {
 pub(crate) struct GenerateArgs {
     #[arg(long, value_enum)]
     variant: BlsVariant,
+    /// Hex-encoded namespace bytes.
     #[arg(long)]
-    namespace_hex: String,
+    namespace: String,
+    /// Hex-encoded message bytes.
     #[arg(long)]
-    message_hex: String,
+    message: String,
     #[arg(long)]
     seed: u64,
 }
@@ -151,8 +157,8 @@ impl Command {
     pub(crate) fn execute(self) -> Result<Vec<u8>, String> {
         match self {
             Self::Generate(args) => {
-                let namespace = decode_hex(&args.namespace_hex)?;
-                let message = decode_hex(&args.message_hex)?;
+                let namespace = decode_hex(&args.namespace)?;
+                let message = decode_hex(&args.message)?;
                 Ok(encode_output(generate_variant(
                     args.variant,
                     &namespace,
@@ -162,15 +168,15 @@ impl Command {
             }
             Self::Check {
                 variant,
-                public_key_hex,
-                namespace_hex,
-                message_hex,
-                signature_hex,
+                public_key,
+                namespace,
+                message,
+                signature,
             } => {
-                let public = decode_hex(&public_key_hex)?;
-                let namespace = decode_hex(&namespace_hex)?;
-                let message = decode_hex(&message_hex)?;
-                let signature = decode_hex(&signature_hex)?;
+                let public = decode_hex(&public_key)?;
+                let namespace = decode_hex(&namespace)?;
+                let message = decode_hex(&message)?;
+                let signature = decode_hex(&signature)?;
                 let accepted = match variant {
                     BlsVariant::Minsig => {
                         check::<MinSig>(&public, &namespace, &message, &signature)
@@ -300,9 +306,9 @@ mod tests {
                 "generate",
                 "--variant",
                 variant,
-                "--namespace-hex",
+                "--namespace",
                 "0x74657374",
-                "--message-hex",
+                "--message",
                 "0x6d657373616765",
                 "--seed",
                 "42",
@@ -331,13 +337,13 @@ mod tests {
                 "check",
                 "--variant",
                 variant,
-                "--public-key-hex",
+                "--public-key",
                 &const_hex::encode(&decoded.public_key),
-                "--namespace-hex",
+                "--namespace",
                 "0x74657374",
-                "--message-hex",
+                "--message",
                 "0x6d657373616765",
-                "--signature-hex",
+                "--signature",
                 &const_hex::encode(&decoded.signature),
             ])
             .unwrap()
@@ -352,9 +358,9 @@ mod tests {
                 "hash",
                 "--variant",
                 variant,
-                "--namespace-hex",
+                "--namespace",
                 "0x74657374",
-                "--message-hex",
+                "--message",
                 "0x6d657373616765",
             ])
             .unwrap()
