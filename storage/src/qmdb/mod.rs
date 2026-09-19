@@ -86,6 +86,7 @@ pub(crate) mod bitmap;
 mod cache;
 pub mod chain;
 pub(crate) mod compact;
+pub mod compaction;
 #[cfg(test)]
 mod conformance;
 pub mod current;

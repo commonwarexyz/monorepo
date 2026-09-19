@@ -499,6 +499,8 @@ pub trait BitmapPrunedBits {
 pub mod tests {
     //! Shared test utilities for Current QMDB variants.
 
+    mod compaction;
+
     pub use super::BitmapPrunedBits;
     use super::{
         FConfig, FixedConfig, MerkleConfig, VConfig, VariableConfig, grafting, ordered, unordered,
