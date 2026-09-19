@@ -49,7 +49,7 @@ library LibQMDBCurrent {
     }
 
     /// @dev Operation framing is independent of whether individual fields have fixed widths.
-    enum OperationEncoding {
+    enum Encoding {
         Fixed,
         Variable
     }
@@ -57,13 +57,13 @@ library LibQMDBCurrent {
     /// @dev Fixed operations use 32-byte keys and fixed-size values. Variable operations accept
     /// fixed-width fields or `VARIABLE_SIZE` byte vectors with canonical unsigned 32-bit varint lengths.
     /// Keys use raw byte lexicographic ordering. All fields describe the authenticated database schema.
-    struct Encoding {
-        OperationEncoding operation;
+    struct Schema {
+        Encoding encoding;
         uint256 keySize;
         uint256 valueSize;
     }
 
-    /// @dev Select a length-prefixed byte vector in `Encoding`.
+    /// @dev Select a length-prefixed byte vector in `Schema`.
     uint256 internal constant VARIABLE_SIZE = type(uint256).max;
 
     /// @notice Verify ordered key exclusion in a current QMDB.
@@ -74,7 +74,7 @@ library LibQMDBCurrent {
     /// @param key Raw key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
     /// @param proof Active operation membership proof.
-    /// @param encoding Trusted operation framing and field sizes bound to `root`.
+    /// @param schema Trusted operation framing and field sizes bound to `root`.
     /// @param family Append family of the authenticated database.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
@@ -84,22 +84,22 @@ library LibQMDBCurrent {
         bytes memory key,
         bytes memory operation,
         Proof calldata proof,
-        Encoding memory encoding,
+        Schema memory schema,
         LibMerkle.Family family,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
         bool excluded;
-        if (encoding.operation == OperationEncoding.Fixed) {
+        if (schema.encoding == Encoding.Fixed) {
             // The key length check makes the fixed parser's bytes32 conversion exact.
             if (
-                encoding.keySize != 32 || key.length != 32 || operation.length < 65
-                    || encoding.valueSize != operation.length - 65
+                schema.keySize != 32 || key.length != 32 || operation.length < 65
+                    || schema.valueSize != operation.length - 65
             ) return false;
             // forge-lint: disable-next-line(unsafe-typecast)
             excluded = _excludesFixed(bytes32(key), operation, proof.location);
         } else {
-            excluded = _excludesVariable(key, operation, proof.location, encoding);
+            excluded = _excludesVariable(key, operation, proof.location, schema);
         }
         return excluded && verify(root, operation, proof, family, chunkBytes, hasher);
     }
@@ -318,23 +318,23 @@ library LibQMDBCurrent {
     }
 
     /// @dev Parse variable operation framing before interpreting an authenticated cyclic key interval.
-    function _excludesVariable(bytes memory key, bytes memory operation, uint256 location, Encoding memory encoding)
+    function _excludesVariable(bytes memory key, bytes memory operation, uint256 location, Schema memory schema)
         private
         pure
         returns (bool)
     {
         if (operation.length == 0) return false;
-        if (encoding.keySize == VARIABLE_SIZE) {
+        if (schema.keySize == VARIABLE_SIZE) {
             if (key.length > type(uint32).max) return false;
-        } else if (key.length != encoding.keySize) {
+        } else if (key.length != schema.keySize) {
             return false;
         }
         if (operation[0] == 0xd2) {
-            (uint256 left, uint256 leftEnd, bool valid) = _field(operation, 1, encoding.keySize);
+            (uint256 left, uint256 leftEnd, bool valid) = _field(operation, 1, schema.keySize);
             if (!valid) return false;
-            (, uint256 valueEnd, bool valueValid) = _field(operation, leftEnd, encoding.valueSize);
+            (, uint256 valueEnd, bool valueValid) = _field(operation, leftEnd, schema.valueSize);
             if (!valueValid) return false;
-            (uint256 right, uint256 rightEnd, bool rightValid) = _field(operation, valueEnd, encoding.keySize);
+            (uint256 right, uint256 rightEnd, bool rightValid) = _field(operation, valueEnd, schema.keySize);
             if (!rightValid || rightEnd != operation.length) return false;
             int256 afterLeft = _compare(key, 0, key.length, operation, left, leftEnd);
             int256 beforeRight = _compare(key, 0, key.length, operation, right, rightEnd);
@@ -347,7 +347,7 @@ library LibQMDBCurrent {
         uint256 cursor = 2;
         if (operation[1] == 0x01) {
             bool valid;
-            (, cursor, valid) = _field(operation, cursor, encoding.valueSize);
+            (, cursor, valid) = _field(operation, cursor, schema.valueSize);
             if (!valid) return false;
         }
         (uint256 floor, uint256 end, bool validFloor) = _varint(operation, cursor, 64);

@@ -77,7 +77,7 @@ library LibQMDBCurrentMMB {
     /// @param key Raw key whose absence is being proven.
     /// @param operation Exact encoded adjacent-key update or empty-database commit.
     /// @param proof Single-operation membership proof with an activity chunk.
-    /// @param encoding Trusted operation framing and field sizes bound to `root`.
+    /// @param schema Trusted operation framing and field sizes bound to `root`.
     /// @param chunkBytes Trusted bitmap chunk byte size of the authenticated database.
     /// @param hasher Trusted raw hash target, or `address(0)` for native Keccak256.
     /// @return True when the active operation proves that `key` is absent under `root`.
@@ -86,12 +86,12 @@ library LibQMDBCurrentMMB {
         bytes memory key,
         bytes memory operation,
         LibQMDBCurrent.Proof calldata proof,
-        LibQMDBCurrent.Encoding memory encoding,
+        LibQMDBCurrent.Schema memory schema,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {
         return LibQMDBCurrent.verifyExclusion(
-            root, key, operation, proof, encoding, LibMerkle.Family.MMB, chunkBytes, hasher
+            root, key, operation, proof, schema, LibMerkle.Family.MMB, chunkBytes, hasher
         );
     }
 }
