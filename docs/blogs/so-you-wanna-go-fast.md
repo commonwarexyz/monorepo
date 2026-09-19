@@ -203,12 +203,12 @@ Healthy runs show how much work the system can handle when every validator respo
 <figure class="mm-results" aria-describedby="mm-results-caption">
   <div data-mm-results="global" class="mm-result-panel">
     <h3>Global</h3>
-    <p class="mm-result-meta">13 regions · 50 validators <button type="button" class="mm-region-help" aria-label="Show exact AWS regions" aria-describedby="mm-global-regions">?</button><span id="mm-global-regions" class="mm-region-tooltip" role="tooltip">AWS regions: us-east-1, us-west-2, ca-central-1, eu-west-1, eu-west-2, eu-west-3, eu-central-1, eu-north-1, ap-northeast-1, ap-northeast-2, ap-south-1, ap-southeast-1, ap-southeast-2.</span></p>
+    <p class="mm-result-meta">13 regions · 50 validators <button type="button" class="mm-region-help" aria-label="Show exact AWS regions" aria-describedby="mm-global-regions">?</button><span id="mm-global-regions" class="mm-region-tooltip" role="tooltip">AWS regions: us-east-1, us-west-2, ca-central-1, eu-west-1, eu-west-2, eu-west-3, eu-central-1, eu-north-1, ap-northeast-1, ap-northeast-2, ap-south-1, ap-southeast-1, ap-southeast-2</span></p>
     <p class="mm-result-fallback">At one million offered transactions per second, median submission-to-finality latency is 400 ms and P99 is 635 ms.</p>
   </div>
   <div data-mm-results="na" class="mm-result-panel">
     <h3>North America</h3>
-    <p class="mm-result-meta">3 regions · 50 validators <button type="button" class="mm-region-help" aria-label="Show exact AWS regions" aria-describedby="mm-na-regions">?</button><span id="mm-na-regions" class="mm-region-tooltip" role="tooltip">AWS regions: us-east-1, us-east-2, ca-central-1.</span></p>
+    <p class="mm-result-meta">3 regions · 50 validators <button type="button" class="mm-region-help" aria-label="Show exact AWS regions" aria-describedby="mm-na-regions">?</button><span id="mm-na-regions" class="mm-region-tooltip" role="tooltip">AWS regions: us-east-1, us-east-2, ca-central-1</span></p>
     <p class="mm-result-fallback">At one million offered transactions per second, median submission-to-finality latency is 63 ms and P99 is 100 ms.</p>
   </div>
   <figcaption id="mm-results-caption">Figure 9. Latency from the submission time assigned by the load generator to finality recorded by the producing validator, measured on the same testbeds. Use the controls inside each chart to select its scenario, enable fsync, or switch between median and P99. Median plots include P25–P75 range bars. Fsync off compares all three implementations. Fsync on shows only Multimmit. Each point is one 120-second submission cohort after a 120-second warmup. Throughput counts transactions finalized during the measurement window. Hover, tap, or focus a load point to compare the measurements. Latency uses a logarithmic scale, fitted to each chart. Throughput uses a linear scale.</figcaption>
