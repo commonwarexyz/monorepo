@@ -58,7 +58,9 @@ mod tests {
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
         Handshake as _,
-        cups::{Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender},
+        cups::{
+            Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender, Version,
+        },
         utils::Timeout,
     };
     use commonware_utils::NZUsize;
@@ -74,6 +76,7 @@ mod tests {
         Timeout::new(
             StreamHandshake {
                 signer,
+                version: Version::V1,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },

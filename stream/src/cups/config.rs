@@ -11,11 +11,11 @@ use std::future::Future;
 ///
 /// ```
 /// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::{cups::{Config, Handshake}, utils::Timeout};
+/// use commonware_stream::{cups::{Config, Handshake, Version}, utils::Timeout};
 /// use std::time::Duration;
 ///
 /// let config = Config::new(
-///     Timeout::new(Handshake::new(PrivateKey::from_seed(0)), Duration::from_secs(5)),
+///     Timeout::new(Handshake::new(PrivateKey::from_seed(0), Version::V1), Duration::from_secs(5)),
 ///     b"_COMMONWARE_STREAM_CONFIG_EXAMPLE",
 ///     1024,
 /// );
