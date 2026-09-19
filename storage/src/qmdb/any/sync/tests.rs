@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            source::{self, Request, Response, Source},
+            source::{self, Request, Response, Source, Verifier},
         },
     },
 };
@@ -1806,7 +1806,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-        verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, Self::Error> {
         let Some(mut response) = self.inner.serve(request, Some).await? else {
             return Ok(None);
@@ -1907,7 +1907,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-        verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, Self::Error> {
         if request.size() == self.historical_target_size {
             if matches!(request, Request::Boundary { .. }) {

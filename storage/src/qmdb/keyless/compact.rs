@@ -38,7 +38,7 @@ use crate::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
         },
-        sync::{CompactTarget, Request, Response, Source},
+        sync::{CompactTarget, Request, Source, Verifier},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -684,7 +684,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-        verify: impl Fn(Response<F, Self::Op, H::Digest>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, Self::Error> {
         let response = self
             .witness
@@ -699,7 +699,7 @@ mod tests {
     use crate::{
         merkle::{mmb, mmr},
         qmdb::{
-            any::value::FixedEncoding, compact::witness, verify_proof,
+            any::value::FixedEncoding, compact::witness, sync::Response, verify_proof,
             verify_proof_and_pinned_nodes,
         },
     };

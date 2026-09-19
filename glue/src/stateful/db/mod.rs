@@ -83,7 +83,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{self, Request, Response, Source};
+use commonware_storage::qmdb::sync::{self, Request, Source, Verifier};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -282,7 +282,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: Request<Self::Family>,
-        verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, Self::Error> {
         self.0.serve(request, verify).await
     }

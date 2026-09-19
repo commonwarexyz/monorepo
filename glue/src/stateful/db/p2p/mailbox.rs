@@ -6,7 +6,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{Request, Response, Source},
+    qmdb::sync::{Request, Response, Source, Verifier},
 };
 use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, future::Future};
@@ -193,7 +193,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-        verify: impl Fn(Response<F, Op, D>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, Self::Error> {
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {

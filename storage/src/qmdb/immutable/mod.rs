@@ -81,6 +81,7 @@ use crate::{
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
         Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
+        sync::Verifier,
     },
     translator::Translator,
 };
@@ -857,9 +858,7 @@ where
     async fn serve<TOutput: Send + 'static>(
         &self,
         request: crate::qmdb::sync::Request<F>,
-        verify: impl Fn(crate::qmdb::sync::Response<F, Self::Op, Self::Digest>) -> Option<TOutput>
-        + Send
-        + 'static,
+        verify: impl Verifier<Self, TOutput>,
     ) -> Result<Option<TOutput>, Self::Error> {
         self.journal.serve(request, verify).await
     }

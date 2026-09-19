@@ -43,7 +43,7 @@ use crate::{
         bitmap::Shared,
         current::{db, grafting},
         metrics::Metrics as AnyMetrics,
-        sync::{Database, DatabaseConfig as Config, Request, Response},
+        sync::{Database, DatabaseConfig as Config, Request, Verifier},
     },
     translator::Translator,
 };
@@ -317,7 +317,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-        verify: impl Fn(Response<F, Self::Op, H::Digest>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, qmdb::Error<F>> {
         self.any.serve(request, verify).await
     }

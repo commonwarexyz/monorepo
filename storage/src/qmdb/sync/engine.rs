@@ -801,7 +801,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::{Family as MmrFamily, Proof};
+    use crate::{
+        merkle::mmr::{Family as MmrFamily, Proof},
+        qmdb::sync::Verifier,
+    };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU64, non_empty_range};
@@ -917,9 +920,7 @@ mod tests {
         async fn serve<T: Send + 'static>(
             &self,
             _request: Request<MmrFamily>,
-            verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<T>
-            + Send
-            + 'static,
+            verify: impl Verifier<Self, T>,
         ) -> Result<Option<T>, Self::Error> {
             Ok(verify(Response::Operations {
                 proof: Proof {

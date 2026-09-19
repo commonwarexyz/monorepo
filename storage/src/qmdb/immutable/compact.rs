@@ -39,7 +39,7 @@ use crate::{
             witness::{self, VerifiedWitness},
         },
         operation::Key,
-        sync::{CompactTarget, Request, Response, Source},
+        sync::{CompactTarget, Request, Source, Verifier},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -710,7 +710,7 @@ where
     async fn serve<TOutput: Send + 'static>(
         &self,
         request: Request<F>,
-        verify: impl Fn(Response<F, Self::Op, H::Digest>) -> Option<TOutput> + Send + 'static,
+        verify: impl Verifier<Self, TOutput>,
     ) -> Result<Option<TOutput>, Self::Error> {
         let response = self
             .witness

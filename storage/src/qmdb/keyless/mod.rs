@@ -50,7 +50,10 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
-    qmdb::{Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root},
+    qmdb::{
+        Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root,
+        sync::Verifier,
+    },
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
@@ -596,9 +599,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: crate::qmdb::sync::Request<F>,
-        verify: impl Fn(crate::qmdb::sync::Response<F, Self::Op, Self::Digest>) -> Option<T>
-        + Send
-        + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, Self::Error> {
         self.journal.serve(request, verify).await
     }

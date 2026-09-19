@@ -382,6 +382,21 @@ where
     }
 }
 
+/// A callback that accepts a source response by producing a value.
+///
+/// Returning `None` rejects the response as described by [`Source::serve`].
+pub trait Verifier<S: Source + ?Sized, T>:
+    Fn(Response<S::Family, S::Op, S::Digest>) -> Option<T> + Send + 'static
+{
+}
+
+impl<S, T, V> Verifier<S, T> for V
+where
+    S: Source + ?Sized,
+    V: Fn(Response<S::Family, S::Op, S::Digest>) -> Option<T> + Send + 'static,
+{
+}
+
 /// A source for proofs and operations.
 pub trait Source: Send + Sync {
     /// The merkle family backing this source's proofs.
@@ -404,11 +419,10 @@ pub trait Source: Send + Sync {
     ///
     /// `serve` returns `Ok(None)` when it stops without an accepted response.
     /// Dropping the returned future cancels the request.
-    #[allow(clippy::type_complexity)]
     fn serve<'a, T: Send + 'static>(
         &'a self,
         request: Request<Self::Family>,
-        verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> impl Future<Output = Result<Option<T>, Self::Error>> + Send + 'a;
 }
 
@@ -424,7 +438,7 @@ where
     fn serve<'a, U: Send + 'static>(
         &'a self,
         request: Request<Self::Family>,
-        verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<U> + Send + 'static,
+        verify: impl Verifier<Self, U>,
     ) -> impl Future<Output = Result<Option<U>, Self::Error>> + Send + 'a {
         T::serve(self, request, verify)
     }
@@ -443,7 +457,7 @@ where
     async fn serve<U: Send + 'static>(
         &self,
         request: Request<Self::Family>,
-        verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<U> + Send + 'static,
+        verify: impl Verifier<Self, U>,
     ) -> Result<Option<U>, Self::Error> {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
         Ok(source.serve(request, verify).await?)
@@ -464,9 +478,7 @@ macro_rules! impl_locked_source {
             async fn serve<U: Send + 'static>(
                 &self,
                 request: Request<Self::Family>,
-                verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<U>
-                + Send
-                + 'static,
+                verify: impl Verifier<Self, U>,
             ) -> Result<Option<U>, Self::Error> {
                 self.read().await.serve(request, verify).await
             }
@@ -490,7 +502,6 @@ where
     type Op = C::Item;
     type Error = qmdb::Error<F>;
 
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.sync.serve",
         level = "info",
@@ -504,7 +515,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-        verify: impl Fn(Response<F, C::Item, H::Digest>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, qmdb::Error<F>> {
         // Reject before the floor lookup so the error carries the requested size and the
         // floor read never touches out-of-range locations.
@@ -562,7 +573,7 @@ where
     async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-        verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<T> + Send + 'static,
+        verify: impl Verifier<Self, T>,
     ) -> Result<Option<T>, Self::Error> {
         self.log.serve(request, verify).await
     }
@@ -634,7 +645,7 @@ pub(crate) mod tests {
         async fn serve<T: Send + 'static>(
             &self,
             _request: Request<F>,
-            verify: impl Fn(Response<F, Op, D>) -> Option<T> + Send + 'static,
+            verify: impl Verifier<Self, T>,
         ) -> Result<Option<T>, qmdb::Error<F>> {
             loop {
                 let Some(response) = self.responses.lock().pop_front() else {
@@ -688,7 +699,7 @@ pub(crate) mod tests {
         async fn serve<T: Send + 'static>(
             &self,
             _request: Request<F>,
-            _verify: impl Fn(Response<F, Op, D>) -> Option<T> + Send + 'static,
+            _verify: impl Verifier<Self, T>,
         ) -> Result<Option<T>, qmdb::Error<F>> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }

@@ -542,9 +542,7 @@ mod tests {
         async fn serve<T: Send + 'static>(
             &self,
             request: sync::Request<Self::Family>,
-            verify: impl Fn(sync::Response<Self::Family, Self::Op, Self::Digest>) -> Option<T>
-            + Send
-            + 'static,
+            verify: impl sync::Verifier<Self, T>,
         ) -> Result<Option<T>, Self::Error> {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
