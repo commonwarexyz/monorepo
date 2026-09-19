@@ -96,8 +96,11 @@ impl<F, E, C, I, H, U, const N: usize, S> sync::Database for Db<F, E, C, I, H, U
 where
     F: merkle::Family,
     E: Context + Spawner,
-    C: Mutable<Item = Operation<F, U>>
-        + sync::Journal<F, Context = E, Op = Operation<F, U>>
+    C: crate::journal::authenticated::Backing<
+            E,
+            Item = Operation<F, U>,
+            Config = <C as sync::Journal<F>>::Config,
+        > + sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
     <C as sync::Journal<F>>::Config: Clone + Send,
     I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,
@@ -118,6 +121,10 @@ where
         <I as SnapshotBuild<F>>::Concurrency,
     >;
     type Digest = H::Digest;
+
+    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
+        crate::qmdb::any::init_with_bitmap::<F, E, U, H, I, C, S, N>(context, config, None).await
+    }
 
     async fn from_sync_result(
         context: Self::Context,
@@ -168,7 +175,10 @@ where
         .await
     }
 
-    fn root(&self) -> Self::Digest {
-        Self::root(self)
+    fn target(&self) -> qmdb::sync::Target<F, H::Digest> {
+        qmdb::sync::Target {
+            root: Self::root(self),
+            range: commonware_utils::non_empty_range!(self.sync_boundary(), self.bounds().end),
+        }
     }
 }
