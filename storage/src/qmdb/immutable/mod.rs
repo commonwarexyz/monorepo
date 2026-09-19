@@ -844,7 +844,7 @@ where
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
-    C::Item: EncodeShared,
+    Operation<F, K, V>: EncodeShared,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -854,17 +854,14 @@ where
     type Op = Operation<F, K, V>;
     type Error = Error<F>;
 
-    async fn serve(
+    async fn serve<TOutput: Send + 'static>(
         &self,
         request: crate::qmdb::sync::Request<F>,
-    ) -> Result<
-        (
-            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
-            crate::qmdb::sync::FeedbackTx,
-        ),
-        Self::Error,
-    > {
-        self.journal.serve(request).await
+        verify: impl Fn(crate::qmdb::sync::Response<F, Self::Op, Self::Digest>) -> Option<TOutput>
+        + Send
+        + 'static,
+    ) -> Result<Option<TOutput>, Self::Error> {
+        self.journal.serve(request, verify).await
     }
 }
 

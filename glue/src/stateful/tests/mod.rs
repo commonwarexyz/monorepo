@@ -54,7 +54,7 @@ use commonware_storage::{
     qmdb::{
         any::unordered::fixed,
         immutable::fixed as immutable_fixed,
-        sync::{FeedbackTx, Request, Response, Source as QmdbSource},
+        sync::{Request, Response, Source as QmdbSource},
     },
 };
 use commonware_utils::{
@@ -851,13 +851,11 @@ impl QmdbSource for NoopQmdbResolver {
     type Op = fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
     type Error = Infallible;
 
-    fn serve<'a>(
+    fn serve<'a, T: Send + 'static>(
         &'a self,
         _request: Request<Self::Family>,
-    ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
-    > + Send
-    + 'a {
+        _verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<T> + Send + 'static,
+    ) -> impl Future<Output = Result<Option<T>, Self::Error>> + Send + 'a {
         std::future::pending()
     }
 }
@@ -879,13 +877,11 @@ impl QmdbSource for NoopCompactQmdbResolver {
     type Op = immutable_fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
     type Error = Infallible;
 
-    fn serve<'a>(
+    fn serve<'a, T: Send + 'static>(
         &'a self,
         _request: Request<Self::Family>,
-    ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
-    > + Send
-    + 'a {
+        _verify: impl Fn(Response<Self::Family, Self::Op, Self::Digest>) -> Option<T> + Send + 'static,
+    ) -> impl Future<Output = Result<Option<T>, Self::Error>> + Send + 'a {
         std::future::pending()
     }
 }

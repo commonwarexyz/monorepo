@@ -539,22 +539,19 @@ mod tests {
         type Op = fixed::Operation<mmr::Family, Digest, Digest>;
         type Error = <Arc<FullFixedDb> as sync::Source>::Error;
 
-        async fn serve(
+        async fn serve<T: Send + 'static>(
             &self,
             request: sync::Request<Self::Family>,
-        ) -> Result<
-            (
-                sync::Response<Self::Family, Self::Op, Self::Digest>,
-                sync::FeedbackTx,
-            ),
-            Self::Error,
-        > {
+            verify: impl Fn(sync::Response<Self::Family, Self::Op, Self::Digest>) -> Option<T>
+            + Send
+            + 'static,
+        ) -> Result<Option<T>, Self::Error> {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
 
-            self.source.serve(request).await
+            self.source.serve(request, verify).await
         }
     }
 

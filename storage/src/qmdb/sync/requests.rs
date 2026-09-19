@@ -93,13 +93,21 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
         }
     }
 
-    /// Remove all requests at locations before `loc`, aborting their futures.
-    pub fn remove_before(&mut self, loc: Location<F>) {
-        let keep = self.by_location.split_off(&loc);
-        for id in self.by_location.values() {
-            self.tracked.remove(id);
-        }
-        self.by_location = keep;
+    /// Retain requests matching `keep`, aborting all others.
+    pub fn retain(&mut self, mut keep: impl FnMut(Request<F>) -> bool) {
+        let tracked = &mut self.tracked;
+        self.by_location.retain(|_, id| {
+            let request = tracked
+                .get(id)
+                .expect("location index must reference a tracked request")
+                .request;
+            if keep(request) {
+                true
+            } else {
+                tracked.remove(id);
+                false
+            }
+        });
     }
 
     /// Iterate over the maximum operation ranges covered by outstanding requests, in ascending

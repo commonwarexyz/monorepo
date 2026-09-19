@@ -593,17 +593,14 @@ where
     type Op = Operation<F, V>;
     type Error = Error<F>;
 
-    async fn serve(
+    async fn serve<T: Send + 'static>(
         &self,
         request: crate::qmdb::sync::Request<F>,
-    ) -> Result<
-        (
-            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
-            crate::qmdb::sync::FeedbackTx,
-        ),
-        Self::Error,
-    > {
-        self.journal.serve(request).await
+        verify: impl Fn(crate::qmdb::sync::Response<F, Self::Op, Self::Digest>) -> Option<T>
+        + Send
+        + 'static,
+    ) -> Result<Option<T>, Self::Error> {
+        self.journal.serve(request, verify).await
     }
 }
 

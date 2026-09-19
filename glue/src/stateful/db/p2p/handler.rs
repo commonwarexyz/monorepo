@@ -13,16 +13,18 @@ use std::collections::VecDeque;
 /// callbacks, re-routed so the actor processes them on its own task.
 pub(super) enum EngineMessage<F: Family> {
     /// A peer delivered a response for a previously fetched key.
-    /// The actor decodes the value, hands it to the local callers behind the
-    /// delivered subscribers, and reports a verification result through `response`.
+    /// The actor checks decoded data with the callers named by the delivery.
+    /// Explicit verification verdicts are sent through `response`. Dropping it
+    /// leaves the delivery unjudged.
     Deliver {
         delivery: Delivery<Request<F>, u64>,
         value: Bytes,
         response: oneshot::Sender<bool>,
     },
     /// A peer requested data for `key`.
-    /// The actor queries the local database and sends the encoded
-    /// [`Response`](commonware_storage::qmdb::sync::Response) back through `response`.
+    /// The actor sends an encoded [`Response`](commonware_storage::qmdb::sync::Response)
+    /// through `response` when it can serve the request. Otherwise it closes `response`
+    /// without sending data.
     Produce {
         key: Request<F>,
         response: oneshot::Sender<Bytes>,
