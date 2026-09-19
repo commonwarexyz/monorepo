@@ -203,7 +203,10 @@ where
             completion = self.approvals.next_completed() => {
                 self.handle_approval(&mut resolver_mailbox, completion);
             },
-            _ = self.serves.next_completed() => {},
+            _ = self.serves.next_completed() => {
+                // Polling drives the serve future and removes it on completion, freeing the slot.
+                // The future sends the response and records metrics, leaving no result to handle.
+            },
             Some(message) = mailbox_message else continue => {
                 self.handle_mailbox_message(&mut resolver_mailbox, message);
             },
@@ -231,18 +234,22 @@ where
     {
         match message {
             mailbox::Message::AttachDatabase(db) => {
+                // Future serves use this handle; an active serve keeps its captured database.
                 let replacing_existing = matches!(self.state, State::HasDb(_));
                 info!(replacing_existing, "attached resolver database");
                 self.state = State::HasDb(db);
                 let _ = self.metrics.has_database.try_set(1i64);
             }
             mailbox::Message::GetOperations { request, response } => {
+                // Callers joining before delivery share the waiting group's subscription.
                 if let Some(pending) = self.pending.get_mut(&request) {
                     pending.responses.retain(|response| !response.is_closed());
                     pending.responses.push(response);
                     return;
                 }
 
+                // Use an increasing ID so deliveries and retirement for earlier groups
+                // cannot consume this group's demand.
                 let subscriber = self.next_subscriber;
                 self.next_subscriber = self
                     .next_subscriber

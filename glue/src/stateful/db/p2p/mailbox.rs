@@ -29,7 +29,8 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
         request: Request<F>,
         response: ResponseTx<F, Op, D>,
     },
-    /// Cancel a previously requested operation fetch.
+    /// Notify the actor that a caller stopped waiting for a response.
+    /// The waiting group's subscription is retired only after all its callers leave.
     CancelOperations { request: Request<F> },
 }
 
