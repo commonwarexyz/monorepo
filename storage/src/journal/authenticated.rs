@@ -1179,6 +1179,9 @@ pub trait Backing<E: Context>: Mutable {
     /// Initialization-owned storage used to select and validate the retained prefix.
     type Recovery: BackingRecovery<Journal = Self>;
 
+    /// The configuration needed to initialize this journal.
+    type Config: Clone + Send + Sync;
+
     /// Open recovery storage for an optional exclusive item end. Implementations may inspect
     /// later storage to validate recovery boundaries. Returns [JournalError::ItemPruned] when
     /// `max_size` lies below the retained start.
@@ -1206,9 +1209,6 @@ pub trait Backing<E: Context>: Mutable {
         cfg: &Self::Config,
         position: u64,
     ) -> impl Future<Output = Result<bool, JournalError>> + Send;
-
-    /// The configuration needed to initialize this journal.
-    type Config: Clone + Send + Sync;
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.

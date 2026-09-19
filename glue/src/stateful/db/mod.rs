@@ -100,7 +100,7 @@ use std::{
     ops::Deref,
     sync::Arc,
 };
-use tracing::debug;
+use tracing::{debug, error};
 
 const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
 
@@ -763,7 +763,7 @@ where
     };
     let recovered = db.sync_target();
     if recovered != expected {
-        tracing::error!(
+        error!(
             ?expected,
             ?recovered,
             "database does not match initialization target"

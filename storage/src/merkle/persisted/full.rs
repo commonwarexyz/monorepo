@@ -168,8 +168,10 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     pub(crate) journal: Journal<E, D>,
 
     /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
-    /// boundary used to generate them. The metadata remains empty until pruning is invoked, and its
-    /// contents change only when the pruning boundary moves.
+    /// boundary used to generate them. [`Merkle::prune`] writes both when the boundary moves.
+    /// [`Merkle::init_sync`] writes the range start as the boundary and that boundary's pins on
+    /// every sync, including a genesis sync, and removes the pins of any other boundary. The
+    /// metadata stays empty until one of them runs.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// True while flushed nodes or a started sync still require a full journal sync.
@@ -289,8 +291,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
     /// Validate reconstruction anchors before authorizing deliberate history deletion.
     ///
-    /// A persisted pruning boundary beyond the available journal is corruption, including
-    /// when the journal is empty.
+    /// A persisted pruning boundary beyond the recovered journal, including an empty one, fails
+    /// with [Error::MissingNode]. An interrupted [Self::init_sync] leaves that state until its
+    /// retry completes the reset.
     pub(crate) async fn prepare(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,

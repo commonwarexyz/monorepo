@@ -533,8 +533,13 @@ where
     ///
     /// # Panics
     ///
-    /// Panics if the last operation is not a commit floor operation. Empty logs are handled
-    /// upstream by [`crate::qmdb::any::init_with_bitmap`].
+    /// Panics if `shared_bitmap` is pruned past the inactivity floor declared by the last commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::HistoricalFloorPruned`] when `log` is empty or its last operation is not
+    /// a commit floor operation. [`crate::qmdb::any::init_with_bitmap`] appends an initial commit
+    /// floor to an empty log before calling this.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn init_from_log(
         context: E,

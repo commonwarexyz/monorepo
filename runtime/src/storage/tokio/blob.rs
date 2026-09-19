@@ -990,6 +990,92 @@ mod tests {
         .unwrap();
     }
 
+    /// An open canceled while its predecessor is still settling neither replaces that
+    /// settlement nor keeps the name, and the predecessor's debt survives for the next open.
+    #[tokio::test]
+    async fn test_reopen_canceled_during_wait_keeps_debt() {
+        timeout(Duration::from_secs(10), async {
+            let (storage, directory) = storage_for_reopen_test("canceled_wait", Layout::ALL);
+            let key = ("partition".to_string(), b"blob".to_vec());
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+
+            // Gate a plain write inside the blocking pool so the open settles only on release.
+            let (entered, entering) = ::tokio::sync::oneshot::channel();
+            let (release, gate) = mpsc::channel();
+            *blob.open.shared.test.before_mutation.lock() = Some((entered, gate));
+            let mut mutation = Box::pin(blob.write_at(0, b"orphaned", WriteOptions::default()));
+            assert!((&mut mutation).now_or_never().is_none());
+            entering.await.unwrap();
+            drop(mutation);
+            drop(blob);
+            let wait = storage
+                .pending
+                .entries
+                .lock()
+                .get(&key)
+                .unwrap()
+                .settle
+                .clone();
+            assert!(wait.is_some());
+            assert_eq!(storage.pending.outstanding(), 1);
+
+            // The reopen attaches behind the settling predecessor and waits for it. The scan
+            // proves its namespace dispatch, and with it the attachment, completed.
+            let mut opening = Box::pin(storage.open("partition", b"blob"));
+            assert!((&mut opening).now_or_never().is_none());
+            storage.scan("partition").await.unwrap();
+            assert!((&mut opening).now_or_never().is_none());
+            {
+                let entries = storage.pending.entries.lock();
+                let entry = entries.get(&key).unwrap();
+                assert_eq!(entry.identity.strong_count(), 1);
+                assert!(entry.settle.is_some());
+                assert!(!entry.dirty);
+            }
+
+            // Canceling the waiting reopen releases the name without settling anything, so the
+            // entry keeps the predecessor's settlement.
+            drop(opening);
+            {
+                let entries = storage.pending.entries.lock();
+                let entry = entries.get(&key).unwrap();
+                assert_eq!(entry.identity.strong_count(), 0);
+                assert!(entry.settle.is_some());
+                assert!(!entry.dirty);
+                assert!(entry.failed.is_none());
+            }
+            assert_eq!(storage.pending.outstanding(), 1);
+            assert_eq!(storage.pending.completions(), 0);
+
+            // The write lands and its settlement records the debt on the retained entry.
+            release.send(()).unwrap();
+            Pending::wait(wait).await.unwrap();
+            assert_eq!(storage.pending.outstanding(), 0);
+            assert!(storage.pending.owes("partition", b"blob"));
+
+            // The next open establishes the debt before returning.
+            let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+            assert_eq!(size, 8);
+            assert_eq!(storage.pending.completions(), 1);
+            assert!(!storage.pending.owes("partition", b"blob"));
+            assert_eq!(
+                blob.read_at(0, 8, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                b"orphaned"
+            );
+            drop(blob);
+            assert!(storage.pending.entries.lock().is_empty());
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn test_header_read_after_payload_shrink() {
         let (storage, directory) =

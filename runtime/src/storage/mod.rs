@@ -49,10 +49,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 Ok(())
             }
         } else {
-            /// Make what a prior process wrote crash-durable before any storage structure reads.
-            ///
-            /// No filesystem-wide flush with that guarantee exists here, so this does nothing and
-            /// the first open of each existing blob flushes it instead (see [Pending::first_open]).
+            /// Flush nothing at startup. No filesystem-wide flush on this platform makes what a
+            /// prior process wrote crash-durable, so the first open of each existing blob flushes
+            /// it instead (see [Pending::first_open]).
             pub(crate) const fn sync(_: &Path) -> io::Result<()> {
                 Ok(())
             }

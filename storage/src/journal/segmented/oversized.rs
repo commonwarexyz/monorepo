@@ -654,8 +654,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
 
     /// Truncate only the given section to a specific index size.
     ///
-    /// Other sections are unaffected.
-    /// The value size is derived from the last entry after truncating the index.
+    /// Other sections are unaffected. The value size is derived from the last entry after
+    /// truncating the index.
     ///
     /// Both truncations are made durable before returning (see the module docs on crash recovery).
     async fn truncate_pending_section(
@@ -792,10 +792,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Required markers and the selected paired boundary are validated before lowering markers
     /// and releasing suffix storage. Index and value sections above `section` are never opened
     /// and are removed before publication. Unlike [Self::init_at_most], the bound section is
-    /// opened before it is shortened: a
-    /// commit marker may still advertise its entries, and the marker must be lowered and synced
-    /// before the index bytes it covers are discarded. Drain the returned replay before
-    /// publication.
+    /// opened before it is shortened: a commit marker may still advertise its entries, and the
+    /// marker must be lowered and synced before the index bytes it covers are discarded. Drain
+    /// the returned replay before publication.
     pub async fn init_with_metadata_at_most(
         context: &E,
         cfg: Config<V::Cfg>,

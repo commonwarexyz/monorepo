@@ -697,11 +697,10 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let pos = self.bounds.end;
         let end = pos.checked_add(1).ok_or(Error::SizeOverflow)?;
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
-        if !self.pending.contains_key(&blob) {
-            self.pending
-                .insert(blob, self.partition.open_recovery(blob).await?);
-        }
-        let writer = self.pending.get_mut(&blob).expect("opened recovery blob");
+        let writer = match self.pending.entry(blob) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(self.partition.open_recovery(blob).await?),
+        };
         let mut bytes = Vec::with_capacity(A::SIZE);
         item.write(&mut bytes);
         writer.append(&bytes).await?;

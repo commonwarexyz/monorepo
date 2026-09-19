@@ -1161,14 +1161,15 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                      of size {size}"
                 )));
             }
-            warn!(blob, valid, size, "truncating to last well-formed page");
 
             // A cap can place the hole below the on-disk watermark, so this data is still
             // acknowledged. Truncate it in `publish` after the offsets watermark is lowered.
             if max_size.is_some() {
+                warn!(blob, valid, size, "deferring truncation to publish");
                 valid_lengths.insert(blob, valid);
                 continue;
             }
+            warn!(blob, valid, size, "truncating to last well-formed page");
             writer.truncate(valid).await?;
         }
 
@@ -2201,7 +2202,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// the new end of the journal (and the underlying blob is truncated to the last valid item).
 /// Data at or below that prefix is never repaired: a blob that no longer backs its acknowledged
 /// items fails init, and other damage there surfaces as a read error. Repair is performed
-/// during init. Incomplete trailing frames are repaired as torn writes; complete frames whose
+/// during init. Incomplete trailing frames are repaired as torn writes. Complete frames whose
 /// payloads fail to decode are treated as corruption.
 ///
 /// # Invariants

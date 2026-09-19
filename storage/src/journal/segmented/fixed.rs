@@ -653,8 +653,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 
     /// Initialize a new `Journal` instance.
     ///
-    /// Backing blobs are opened without scanning their full page prefixes. Use `replay` to validate
-    /// and iterate over all items before appending to a retained section.
+    /// Opening a backing blob trims any invalid tail so it ends at a checksum-validated page.
+    /// Earlier pages are not read. Use `replay` to validate and iterate over all items before
+    /// appending to a nonempty retained section.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         Ok(Self(Box::new(
             Inner::init(context, cfg, None, u64::MAX).await?,
@@ -909,9 +910,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
 /// Owned replay reader over a [Journal]'s items.
 ///
 /// Yields `(section, position, item)` in order and repairs a torn page or an incomplete trailing
-/// item only in sections opened at initialization with an unvalidated suffix. Dropping the reader before it
-/// is exhausted destroys the journal: recovery is re-initialization. Call [Replay::finish] on
-/// an exhausted reader to get the journal back.
+/// item only in sections opened at initialization with an unvalidated suffix. Dropping the reader
+/// before it is exhausted destroys the journal: recovery is re-initialization. Call
+/// [Replay::finish] on an exhausted reader to get the journal back.
 pub struct Replay<E: Storage + Metrics, A: CodecFixed> {
     journal: Journal<E, A>,
     sections: VecDeque<SectionReplay<E::Blob>>,

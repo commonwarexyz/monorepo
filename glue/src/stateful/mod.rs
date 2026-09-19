@@ -327,8 +327,10 @@ where
     ///
     /// The wrapper calls this immediately before applying each block's winning
     /// batches. It does not call this for blocks already reflected in the
-    /// database set: the genesis block on a fresh boot, blocks reconciled at
-    /// startup, and blocks covered by state sync.
+    /// database set: the genesis block on a fresh boot, finalized blocks at or
+    /// below the height a restarted node opened the database set at (the later
+    /// of marshal's processed anchor and the stored state sync height), and
+    /// blocks covered by state sync.
     ///
     /// Only reads completed through `readers` during this call are guaranteed
     /// to observe database state before `batches`. Retain owned values instead
@@ -366,8 +368,10 @@ where
     ///
     /// Blocks already reflected in the database set invoke neither this hook
     /// nor [`capture`](Self::capture): the genesis block on a fresh boot,
-    /// blocks reconciled at startup, and blocks covered by state sync.
-    /// Consecutive hook calls may therefore skip heights after state sync.
+    /// finalized blocks at or below the height a restarted node opened the
+    /// database set at (the later of marshal's processed anchor and the stored
+    /// state sync height), and blocks covered by state sync. Consecutive hook
+    /// calls may therefore skip heights after state sync.
     ///
     /// This hook receives read-only database handles and may overlap verification
     /// of blocks built on the newly finalized block or one of its retained
