@@ -798,7 +798,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::any::unordered::fixed,
+        qmdb::{self, any::unordered::fixed},
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -837,9 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn unmerkleized_batch_falls_through_to_applied_state() {
+    fn unmerkleized_batch_refuses_after_competing_finalization() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("unordered-fixed-live-fallback", &context);
+            let config = fixed_config("unordered-fixed-stale-refusal", &context);
             let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -863,8 +863,12 @@ mod tests {
             slot.put(database);
             sync.await.expect("database sync failed");
 
-            // The batch commitment does not provide a historical database view.
-            assert_eq!(pre_finalization.get(&key).await.unwrap(), Some(value));
+            // The winner is not an ancestor of the earlier fork, so reading through it
+            // refuses instead of consulting state the fork never accounted for.
+            assert!(matches!(
+                pre_finalization.get(&key).await,
+                Err(qmdb::Error::StaleRead)
+            ));
         });
     }
 
