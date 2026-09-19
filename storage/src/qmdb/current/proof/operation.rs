@@ -34,7 +34,7 @@ impl<F: Graftable, D: Digest, const N: usize> Proof<F, D, [u8; N]> {
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `loc` falls in a pruned bitmap chunk.
-    pub async fn new<H: Hasher<Digest = D>, S: Storage<F, Digest = D>>(
+    pub async fn new<H: Hasher<Digest = D>, S: Storage<Family = F, Digest = D>>(
         status: &impl BitmapReadable<N>,
         storage: &S,
         inactivity_floor: Location<F>,

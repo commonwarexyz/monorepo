@@ -83,14 +83,14 @@ where
                 return Ok(None);
             }
 
-            // If the translated key is in the snapshot, search its conflicts for the span.
-            if let Some(span) = self.find_span(self.snapshot.get(key).copied(), key).await? {
+            // If the translated key is in the index, search its conflicts for the span.
+            if let Some(span) = self.find_span(self.index.get(key).copied(), key).await? {
                 return Ok(Some(span));
             }
 
             // The remaining span owner is in the previous translated key. Allow wrapping because
             // spans connect the last active key back to the first.
-            let Some((iter, _)) = self.snapshot.prev_translated_key(key) else {
+            let Some((iter, _)) = self.index.prev_translated_key(key) else {
                 // DB is empty.
                 return Ok(None);
             };
@@ -125,7 +125,7 @@ where
         async move {
             // The strict predecessor can share the query's translated key.
             if let Some(prev) = self
-                .find_strict_prev_key(self.snapshot.get(key).copied(), key)
+                .find_strict_prev_key(self.index.get(key).copied(), key)
                 .await?
             {
                 return Ok(Some(prev));
@@ -133,7 +133,7 @@ where
 
             // The previous translated key is the only remaining candidate. Reject wrapping so
             // queries at or below the first active key have no predecessor.
-            let Some((iter, false)) = self.snapshot.prev_translated_key(key) else {
+            let Some((iter, false)) = self.index.prev_translated_key(key) else {
                 return Ok(None);
             };
 
@@ -141,7 +141,7 @@ where
         }
     }
 
-    /// Returns the database's strict predecessor of `key` if it is among these snapshot entries.
+    /// Returns the database's strict predecessor of `key` if it is among these index entries.
     async fn find_strict_prev_key(
         &self,
         locs: impl Iterator<Item = Location<F>> + Send,
@@ -177,7 +177,7 @@ where
     {
         async move {
             // Resolve translated-key collisions before returning an update and its location.
-            for loc in self.snapshot.get(key).copied() {
+            for loc in self.index.get(key).copied() {
                 let op = self.log.read(*loc).await?;
                 assert!(
                     op.is_update(),
@@ -214,7 +214,7 @@ where
         async move {
             // The starting collision bucket can also contain keys below the requested bound.
             let mut init_pending = self
-                .fetch_all_updates(self.snapshot.get(&start).copied())
+                .fetch_all_updates(self.index.get(&start).copied())
                 .await?;
             init_pending.retain(|x| x.key >= start);
 
@@ -228,8 +228,7 @@ where
                     }
 
                     // Wrapping to the first translated key marks the end of the range.
-                    let Some((iter, wrapped)) = self.snapshot.next_translated_key(&driver_key)
-                    else {
+                    let Some((iter, wrapped)) = self.index.next_translated_key(&driver_key) else {
                         return None; // DB is empty
                     };
                     if wrapped {
