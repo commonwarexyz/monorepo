@@ -3031,6 +3031,7 @@ mod tests {
                 .await
                 .expect("Failed to write legacy blob");
 
+            drop(legacy_blob);
             let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -3335,6 +3336,7 @@ mod tests {
                 .expect("Failed to write bad bytes");
 
             // Re-initialize the journal to simulate a restart
+            drop(blob);
             let journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
@@ -3475,6 +3477,7 @@ mod tests {
                 .await
                 .unwrap();
 
+            drop(blob);
             let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -3686,6 +3689,7 @@ mod tests {
             blob.resize(size - 1).await.unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -3897,6 +3901,7 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to corrupt blob");
             blob.sync().await.expect("failed to sync blob");
 
+            drop(blob);
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to recover journal");
@@ -4306,6 +4311,7 @@ mod tests {
             .expect("Failed to extend blob");
 
             // Re-initialize the journal to simulate a restart
+            drop(blob);
             let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
@@ -5248,10 +5254,10 @@ mod tests {
                 PAGE_SIZE.get() as u64,
             )
             .await;
-            let (_, size_before) = context
-                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_before = context
+                .durable(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
@@ -5259,10 +5265,10 @@ mod tests {
 
             // Adoption must not mutate the torn blob. Items on the torn page fail lazily at
             // read while every item beyond the damaged blob remains readable.
-            let (_, size_after) = context
-                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_after = context
+                .durable(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size_after, size_before,
                 "adoption must preserve the evidence"
@@ -5284,10 +5290,10 @@ mod tests {
             let _ = Journal::<_, Digest>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
-            let (_, size_retry) = context
-                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_retry = context
+                .durable(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(size_retry, size_before);
         });
     }
@@ -5463,9 +5469,8 @@ mod tests {
                 (journal, _) = journal.append(&test_digest(i)).await.unwrap();
             }
 
-            // Explicitly sync blobs 0 and 1 (redundant under the rollover pipeline, but keeps
-            // the durable set independent of it) and drop without flushing blob 2, losing its
-            // buffered items.
+            // Wait for blobs 0 and 1 to become durable, then drop without flushing
+            // blob 2's buffered items.
             {
                 journal.test_sync_blob(0).await.unwrap();
                 journal.test_sync_blob(1).await.unwrap();
@@ -5477,7 +5482,7 @@ mod tests {
             let names = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(names.len(), 3);
             for (blob, name) in names.iter().enumerate() {
-                let (_blob, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
+                let (_, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
                 if blob < 2 {
                     assert!(size > 0, "blob {blob} should be durable");
                 } else {
@@ -5546,13 +5551,14 @@ mod tests {
                 .unwrap();
             blob.resize(0).await.unwrap();
             blob.sync().await.unwrap();
+            drop(blob);
 
             // Durable state: blob 0 (10 items), blob 1 (empty gap), blob 2 (8 items).
             let names = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(names.len(), 3);
             let mut sizes = Vec::new();
             for name in &names {
-                let (_blob, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
+                let (_, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
                 sizes.push(size);
             }
             assert!(sizes[0] > 0, "blob 0 should be durable");
@@ -5659,6 +5665,7 @@ mod tests {
             blob0.resize(0).await.unwrap();
             blob0.sync().await.unwrap();
 
+            drop(blob0);
             let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -6759,13 +6766,13 @@ mod tests {
             }
             journal = journal.sync().await.unwrap();
 
+            drop(journal);
             let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
                 .await
                 .unwrap();
             checkpoint.set_clear_target(100);
             let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
-            drop(journal);
 
             let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
@@ -6825,13 +6832,13 @@ mod tests {
             }
             journal = journal.sync().await.unwrap();
 
+            drop(journal);
             let mut checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition)
                 .await
                 .unwrap();
             checkpoint.set_clear_target(15);
             let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
-            drop(journal);
 
             let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
@@ -6875,6 +6882,7 @@ mod tests {
             let (blob, _) = context.open(&blob_part, &1u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let result = Journal::<_, Digest>::init(context.child("crash"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
@@ -6903,6 +6911,7 @@ mod tests {
             let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let result = Journal::<_, Digest>::init(context.child("crash"), cfg.clone()).await;
             assert!(matches!(result, Err(Error::Corruption(_))));
         });
