@@ -1173,6 +1173,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::{DatabaseSet, Unmerkleized};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::boxed;
@@ -1842,6 +1843,69 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), first);
+        });
+    }
+
+    /// Pruning to the oldest retained target keeps every retained target initializable, so a
+    /// restart whose marshal anchor lags the databases opens at that older target. The pruned
+    /// target's range starts a whole chunk above zero, so the prune moves the bitmap.
+    #[test]
+    fn database_set_current_prune_keeps_recovery_targets_initializable() {
+        deterministic::Runner::default().start(|context| async move {
+            type DbSet = Shared<FixedDb>;
+            let config = fixed_config("current-prune-recovery-window", &context);
+            let databases =
+                <DbSet as DatabaseSet<_>>::init(context.child("db"), config.clone(), None).await;
+
+            // Four generations rewrite the same keys. H1 through H3 are durable, and H4 is
+            // applied without a barrier of its own when the prune to H2 runs.
+            let mut targets = Vec::new();
+            for generation in 0..4u64 {
+                let mut batch = databases.new_batch_for_test::<_>().await;
+                for i in 0..384u64 {
+                    batch = batch.write(
+                        Sha256::hash(&[&i.to_be_bytes()]),
+                        Some(Sha256::hash(&[&(generation * 1_000 + i).to_le_bytes()])),
+                    );
+                }
+                let batch = Unmerkleized::merkleize(batch).await.unwrap();
+                <DbSet as DatabaseSet<_>>::apply(&databases, batch).await;
+                if generation < 3 {
+                    assert!(
+                        <DbSet as DatabaseSet<_>>::finalize(&databases)
+                            .await
+                            .durable()
+                            .await
+                    );
+                }
+                targets.push(<DbSet as DatabaseSet<_>>::committed_targets(&databases).await);
+            }
+            assert!(*targets[1].range.start() > Location::<mmr::Family>::new(0));
+            <DbSet as DatabaseSet<_>>::prune(&databases, &targets[1]).await;
+            drop(databases);
+
+            // An unbounded reopen recovers H4, which the prune committed.
+            let reopened =
+                <DbSet as DatabaseSet<_>>::init(context.child("reopen"), config.clone(), None)
+                    .await;
+            assert_eq!(
+                <DbSet as DatabaseSet<_>>::committed_targets(&reopened).await,
+                targets[3]
+            );
+            drop(reopened);
+
+            // H3 and H2 stay inside the retained window, so bounded initialization at either
+            // succeeds and reports it.
+            for (name, target) in [("h3", &targets[2]), ("h2", &targets[1])] {
+                let db = <FixedDb as ManagedDb<_>>::init(
+                    context.child(name),
+                    config.clone(),
+                    Some(target.clone()),
+                )
+                .await
+                .unwrap();
+                assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), *target);
+            }
         });
     }
 }
