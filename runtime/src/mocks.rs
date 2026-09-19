@@ -700,7 +700,7 @@ pub struct MigratingReadBlob<B> {
     /// Wrapped blob.
     inner: B,
     /// Whether each read must remain pending after its first backend poll.
-    require_pending_first_poll: bool,
+    require_pending: bool,
     /// Reads started across all clones.
     reads: Arc<AtomicUsize>,
 }
@@ -708,11 +708,11 @@ pub struct MigratingReadBlob<B> {
 #[cfg(any(test, feature = "test-utils"))]
 impl<B> MigratingReadBlob<B> {
     /// Wrap `inner`, optionally requiring the first backend poll of each read to return pending.
-    /// Set `require_pending_first_poll` when a test must exercise registered backend I/O.
-    pub fn new(inner: B, require_pending_first_poll: bool) -> Self {
+    /// Set `require_pending` when a test must exercise registered backend I/O.
+    pub fn new(inner: B, require_pending: bool) -> Self {
         Self {
             inner,
-            require_pending_first_poll,
+            require_pending,
             reads: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -748,7 +748,7 @@ impl<B: Blob> Blob for MigratingReadBlob<B> {
         // Capture exactly one backend poll, then yield before exposing its result. Requiring a
         // pending result lets a test establish that a task handoff carries unresolved backend I/O.
         let first_poll = poll!(&mut read);
-        if self.require_pending_first_poll {
+        if self.require_pending {
             assert!(
                 first_poll.is_pending(),
                 "blob read completed before registering pending I/O"

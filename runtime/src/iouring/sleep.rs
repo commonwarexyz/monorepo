@@ -155,6 +155,7 @@ enum Observer {
 }
 
 impl Observer {
+    /// Defer the local wake or forwarded result until the worker borrow ends.
     fn complete(self, result: Result<(), Error>, deferred: &mut Deferred) {
         match self {
             Self::Local(waker) => deferred.wakes.push(waker),
@@ -162,6 +163,7 @@ impl Observer {
         }
     }
 
+    /// Defer cancellation cleanup by dropping local wakers or closing forwarded observers.
     fn release(self, deferred: &mut Deferred) {
         match self {
             Self::Local(waker) => deferred.drops.push(waker),

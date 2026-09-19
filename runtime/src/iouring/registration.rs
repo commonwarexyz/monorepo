@@ -65,6 +65,7 @@ enum State<K: Key> {
 
 /// A movable observer of one registration on its original worker.
 pub struct Registration<K: Key> {
+    /// Retains the cancellation identity until observation completes or is released.
     state: State<K>,
 }
 
@@ -87,6 +88,7 @@ impl<K: Key> Registration<K> {
         }
     }
 
+    /// Return the identity of a waiting registration.
     #[cfg(test)]
     pub fn key(&self) -> K {
         let State::Waiting { key, .. } = self.state else {

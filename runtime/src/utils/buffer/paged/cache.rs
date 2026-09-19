@@ -916,7 +916,7 @@ mod tests {
     )]
     fn test_page_fetch_migrates_between_dedicated_workers<R: crate::Runner>(
         #[case] runner: R,
-        #[case] require_pending_first_poll: bool,
+        #[case] require_pending: bool,
     ) where
         R::Context: crate::BufferPooler + crate::Clock + crate::Spawner + crate::Storage,
     {
@@ -935,7 +935,7 @@ mod tests {
                 .unwrap();
 
             // Count reads beneath an empty cache so duplicate physical misses remain observable.
-            let blob = MigratingReadBlob::new(blob, require_pending_first_poll);
+            let blob = MigratingReadBlob::new(blob, require_pending);
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
             let blob_id = cache_ref.next_id();
 
