@@ -165,9 +165,9 @@ harness = false
 path = "src/reed_solomon/benches/bench.rs"
 
 [[bench]]
-name = "handshake"
+name = "sake"
 harness = false
-path = "src/handshake/benches/bench.rs"
+path = "src/handshake/sake/benches/bench.rs"
 
 [[bench]]
 name = "bloomfilter"

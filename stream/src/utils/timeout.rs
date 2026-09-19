@@ -24,7 +24,7 @@ pub enum TimeoutError<E> {
 ///
 /// ```
 /// use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-/// use commonware_stream::{encrypted::Handshake, utils::Timeout};
+/// use commonware_stream::{cups::Handshake, utils::Timeout};
 /// use std::time::Duration;
 ///
 /// let handshake = Timeout::new(Handshake::new(PrivateKey::from_seed(0)), Duration::from_secs(5));

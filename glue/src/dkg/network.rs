@@ -266,7 +266,7 @@ mod tests {
     use commonware_runtime::{
         Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
-    use commonware_stream::encrypted::Handshake;
+    use commonware_stream::cups::Handshake;
     use commonware_utils::{NZU32, NZUsize, channel::mpsc, sync::Mutex};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},

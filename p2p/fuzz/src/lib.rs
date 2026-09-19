@@ -12,7 +12,7 @@ use commonware_runtime::{
     Clock, Handle, IoBuf, Quota, Runner, Supervisor as _,
     deterministic::{self, Context},
 };
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::cups::Handshake;
 use commonware_utils::{
     NZU32, NZUsize, TryCollect,
     ordered::{Map, Set},

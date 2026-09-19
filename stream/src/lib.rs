@@ -14,9 +14,7 @@ commonware_macros::stability_scope!(BETA {
     use rand_core::CryptoRng;
     use std::{error::Error, future::Future};
 
-    mod config;
-    pub use config::Config;
-    pub mod encrypted;
+    pub mod cups;
     pub mod utils;
 
     /// Authenticates a raw connection and upgrades it to an ordered message stream.
@@ -156,7 +154,10 @@ commonware_macros::stability_scope!(BETA {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::utils::{Timeout, TimeoutError};
+        use crate::{
+            cups::Config,
+            utils::{Timeout, TimeoutError},
+        };
         use commonware_runtime::{Runner as _, Supervisor as _, deterministic, mocks};
         use commonware_utils::sync::Mutex;
         use futures::{FutureExt as _, future::Either};
@@ -258,7 +259,7 @@ commonware_macros::stability_scope!(BETA {
         }
 
         impl Handshake for OpaqueHandshake {
-            const MAX_SIZE: u32 = encrypted::MAX_SIZE;
+            const MAX_SIZE: u32 = cups::MAX_SIZE;
 
             type PublicKey = OpaqueIdentity;
             type Error = Rejected;

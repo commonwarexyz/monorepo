@@ -16,7 +16,7 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::cups::Handshake;
 use commonware_utils::{TryCollect, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{

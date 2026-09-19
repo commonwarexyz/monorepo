@@ -62,7 +62,7 @@ use commonware_p2p::{
     authenticated::{self, discovery},
 };
 use commonware_runtime::{Quota, Runner as _, Supervisor as _, tokio};
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::cups::Handshake;
 use commonware_utils::{NZU32, TryCollect, ordered::Set, sync::Mutex};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

@@ -123,7 +123,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::encrypted::Handshake;
+//! use commonware_stream::cups::Handshake;
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -233,7 +233,7 @@ mod tests {
     };
     use commonware_stream::{
         Handshake, Receiver as StreamReceiver, Sender as StreamSender,
-        encrypted::{self, Handshake as StreamHandshake},
+        cups::{self, Handshake as StreamHandshake},
     };
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
@@ -2267,11 +2267,11 @@ mod tests {
     }
 
     struct TestSender<O: Sink> {
-        inner: encrypted::Sender<O>,
+        inner: cups::Sender<O>,
     }
 
     impl<O: Sink> StreamSender for TestSender<O> {
-        type Error = encrypted::Error;
+        type Error = cups::Error;
 
         fn send(
             &mut self,
@@ -2291,11 +2291,11 @@ mod tests {
     }
 
     struct TestReceiver<I: Stream> {
-        inner: encrypted::Receiver<I>,
+        inner: cups::Receiver<I>,
     }
 
     impl<I: Stream> StreamReceiver for TestReceiver<I> {
-        type Error = encrypted::Error;
+        type Error = cups::Error;
 
         fn recv(&mut self) -> impl Future<Output = Result<IoBufs, Self::Error>> + Send {
             self.inner.recv()
@@ -2313,7 +2313,7 @@ mod tests {
     #[derive(Debug, Error)]
     enum TestHandshakeError {
         #[error("encrypted handshake failed: {0}")]
-        Encrypted(#[from] encrypted::Error),
+        Encrypted(#[from] cups::Error),
         #[error("unknown application identity")]
         UnknownApplicationIdentity,
         #[error("authentication failed")]
