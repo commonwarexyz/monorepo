@@ -14,7 +14,7 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            source::{self, FeedbackTx, Request, Response, Source, tests::dropped_feedback},
+            source::{self, Request, Response, Source, Verifier},
         },
     },
 };
@@ -1784,8 +1784,8 @@ where
     });
 }
 
-/// A source wrapper that corrupts pinned nodes on the first request, then returns correct
-/// data on subsequent requests.
+/// A source wrapper that corrupts the first pinned-node candidate, then offers correct data
+/// within the same request.
 #[derive(Clone)]
 struct CorruptFirstPinnedNodesSource<R> {
     inner: R,
@@ -1796,17 +1796,21 @@ impl<R, F> Source for CorruptFirstPinnedNodesSource<R>
 where
     F: merkle::Family,
     R: Source<Family = F, Digest = Digest>,
+    R::Op: Send + 'static,
 {
     type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn serve(
+    async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
-        let (mut response, feedback_tx) = self.inner.serve(request).await?;
+        verify: impl Verifier<Self, T>,
+    ) -> Result<Option<T>, Self::Error> {
+        let Some(mut response) = self.inner.serve(request, Some).await? else {
+            return Ok(None);
+        };
         // Corrupt pinned nodes only on the first boundary response.
         if let Response::Boundary { pinned_nodes, .. } = &mut response
             && !self
@@ -1815,14 +1819,17 @@ where
             && !pinned_nodes.is_empty()
         {
             pinned_nodes[0] = Digest::from([0xFFu8; 32]);
-            return Ok((response, dropped_feedback()));
+            if let Some(verified) = verify(response) {
+                return Ok(Some(verified));
+            }
+            return self.inner.serve(request, verify).await;
         }
-        Ok((response, feedback_tx))
+        Ok(verify(response))
     }
 }
 
-/// Test that corrupted pinned nodes on the first attempt are rejected and the sync
-/// succeeds on retry when the source returns correct data.
+/// Test that corrupted pinned nodes are rejected and the sync succeeds when the source retries
+/// with correct data in the same request.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
@@ -1866,16 +1873,16 @@ where
             max_retained_roots: 8,
         };
 
-        // Sync should succeed on the second attempt after the first corrupted pinned nodes
-        // are rejected.
+        // Sync should succeed on the second candidate after the corrupted pinned nodes are
+        // rejected.
         let synced_db: H::Db = sync::sync(config).await.unwrap();
         assert_eq!(synced_db.root(), sync_root);
         synced_db.destroy().await.unwrap();
     });
 }
 
-/// A source wrapper that replays the first fresh boundary request against the retained
-/// historical root, then blocks the retry until the test releases it.
+/// A source wrapper that answers the first fresh boundary candidate against the retained
+/// historical root, then blocks the next candidate in the same request until released.
 #[derive(Clone)]
 struct ReplayFreshBoundarySource<R, F: merkle::Family> {
     inner: R,
@@ -1890,16 +1897,18 @@ impl<R, F> Source for ReplayFreshBoundarySource<R, F>
 where
     F: merkle::Family,
     R: Source<Family = F, Digest = Digest>,
+    R::Op: Send + 'static,
 {
     type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn serve(
+    async fn serve<T: Send + 'static>(
         &self,
         request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
+        verify: impl Verifier<Self, T>,
+    ) -> Result<Option<T>, Self::Error> {
         if request.size() == self.historical_target_size {
             if matches!(request, Request::Boundary { .. }) {
                 // Simulate a source that has not answered the old target's pinned-nodes
@@ -1917,15 +1926,19 @@ where
         if matches!(request, Request::Boundary { .. }) && request.start() == self.boundary_start {
             let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
-                // Answer the boundary request with an operations response against the
-                // historical size, so the engine has to retry it.
+                // Offer an operations response against the historical size, so the verifier
+                // rejects it before the source proceeds to the fresh boundary candidate.
                 let historical = Request::Operations {
                     size: self.historical_target_size,
                     start: request.start(),
                     max_ops: request.max_ops(),
                 };
-                let (response, _) = self.inner.serve(historical).await?;
-                return Ok((response, dropped_feedback()));
+                let Some(response) = self.inner.serve(historical, Some).await? else {
+                    return Ok(None);
+                };
+                if let Some(verified) = verify(response) {
+                    return Ok(Some(verified));
+                }
             }
 
             let release = self.release_boundary_retry.lock().take();
@@ -1934,7 +1947,7 @@ where
             }
         }
 
-        self.inner.serve(request).await
+        self.inner.serve(request, verify).await
     }
 }
 

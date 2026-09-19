@@ -462,22 +462,17 @@ mod tests {
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
         type Error = <Arc<FixedDb> as sync::Source>::Error;
 
-        async fn serve(
+        async fn serve<T: Send + 'static>(
             &self,
             request: sync::Request<Self::Family>,
-        ) -> Result<
-            (
-                sync::Response<Self::Family, Self::Op, Self::Digest>,
-                sync::FeedbackTx,
-            ),
-            Self::Error,
-        > {
+            verify: impl sync::Verifier<Self, T>,
+        ) -> Result<Option<T>, Self::Error> {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
 
-            self.source.serve(request).await
+            self.source.serve(request, verify).await
         }
     }
 

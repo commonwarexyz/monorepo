@@ -83,7 +83,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
+use commonware_storage::qmdb::sync::{self, Request, Source, Verifier};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -279,11 +279,12 @@ where
     type Op = <Inner<DB> as Source>::Op;
     type Error = <Inner<DB> as Source>::Error;
 
-    async fn serve(
+    async fn serve<T: Send + 'static>(
         &self,
         request: Request<Self::Family>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
-        self.0.serve(request).await
+        verify: impl Verifier<Self, T>,
+    ) -> Result<Option<T>, Self::Error> {
+        self.0.serve(request, verify).await
     }
 }
 
@@ -1702,7 +1703,7 @@ pub(crate) async fn sync_standard_db<E, DB, S>(
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: sync::Database<Context = E>,
-    DB::Op: Encode,
+    DB::Op: Encode + 'static,
     S: sync::SourceFor<DB>,
 {
     sync::sync(sync::engine::Config {
@@ -1745,7 +1746,7 @@ pub(crate) async fn sync_compact_db<E, DB, S>(
 where
     E: Metrics + Spawner,
     DB: sync::Database<Context = E>,
-    DB::Op: Encode,
+    DB::Op: Encode + 'static,
     S: sync::SourceFor<DB>,
 {
     let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;

@@ -12,17 +12,17 @@ use std::collections::VecDeque;
 /// Each variant corresponds to one of the `resolver::Consumer` or `p2p::Producer`
 /// callbacks, re-routed so the actor processes them on its own task.
 pub(super) enum EngineMessage<F: Family> {
-    /// A peer delivered a response for a previously fetched key.
-    /// The actor decodes the value, fans it out to waiting subscribers,
-    /// and reports acceptance back through `response`.
+    /// A peer delivered a response for a previously fetched key. The actor checks decoded data with
+    /// the callers named by the delivery. Explicit verification verdicts are sent through
+    /// `response`. Dropping it leaves the delivery unjudged.
     Deliver {
-        key: Request<F>,
+        delivery: Delivery<Request<F>, u64>,
         value: Bytes,
         response: oneshot::Sender<bool>,
     },
-    /// A peer requested data for `key`.
-    /// The actor queries the local database and sends the encoded
-    /// [`Response`](commonware_storage::qmdb::sync::Response) back through `response`.
+    /// A peer requested data for `key`. The actor sends an encoded
+    /// [`Response`](commonware_storage::qmdb::sync::Response) through `response` when it can serve
+    /// the request. Otherwise it closes `response` without sending data.
     Produce {
         key: Request<F>,
         response: oneshot::Sender<Bytes>,
@@ -109,7 +109,7 @@ impl<F: Family> Handler<F> {
 impl<F: Family> resolver::Consumer for Handler<F> {
     type Key = Request<F>;
     type Value = Bytes;
-    type Subscriber = ();
+    type Subscriber = u64;
     type Outcome = bool;
 
     fn deliver(
@@ -119,7 +119,7 @@ impl<F: Family> resolver::Consumer for Handler<F> {
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(EngineMessage::Deliver {
-            key: delivery.key,
+            delivery,
             value,
             response,
         });
@@ -143,7 +143,7 @@ impl<F: Family> Producer for Handler<F> {
 mod tests {
     use super::*;
     use commonware_storage::mmr::{self, Location};
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZU64, non_empty_vec};
 
     #[test]
     fn handle_retains_open_deliveries_only() {
@@ -168,7 +168,10 @@ mod tests {
         EngineMessage::handle(
             &mut overflow,
             EngineMessage::Deliver {
-                key,
+                delivery: Delivery {
+                    key,
+                    subscribers: non_empty_vec![(0, tracing::Span::none())],
+                },
                 value: Bytes::new(),
                 response,
             },
@@ -177,7 +180,10 @@ mod tests {
         EngineMessage::handle(
             &mut overflow,
             EngineMessage::Deliver {
-                key,
+                delivery: Delivery {
+                    key,
+                    subscribers: non_empty_vec![(0, tracing::Span::none())],
+                },
                 value: Bytes::from_static(b"open"),
                 response,
             },
