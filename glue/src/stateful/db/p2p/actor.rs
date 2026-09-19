@@ -252,6 +252,8 @@ where
                     return;
                 }
 
+                // Retire canceled subscriptions from the resolver while preserving callers
+                // still waiting for a response or verifying one.
                 self.metrics.cancel_requests.inc_by(canceled.len() as u64);
                 resolver.retain(move |key, id| key != &request || !canceled.contains(id));
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
