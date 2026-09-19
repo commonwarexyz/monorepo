@@ -3051,14 +3051,23 @@ mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
     //! `apply_batch`, `prune_bitmap`, and initialization is independent of the snapshot index
     //! variant, so one variant (`unordered::variable`) suffices as the test bed.
-    use crate::qmdb::any::unordered::variable::test::{AnyTest, create_test_config};
+    use crate::{
+        merkle::Location,
+        qmdb::any::{
+            BITMAP_CHUNK_BYTES,
+            unordered::variable::test::{AnyTest, create_test_config},
+        },
+    };
     use commonware_cryptography::{Hasher as _, Sha256};
     use commonware_macros::{boxed, test_traced};
     use commonware_runtime::{
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::bitmap::Readable as _;
+    use commonware_utils::bitmap::{Prunable, Readable as _};
+
+    /// Bits per chunk of the test database's activity bitmap.
+    const CHUNK_BITS: u64 = Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
 
     /// Open a fresh test DB.
     async fn open_db(context: Context) -> AnyTest {
@@ -3074,7 +3083,9 @@ mod bitmap_tests {
             .collect()
     }
 
-    /// Commit, drop, reopen, and assert the rebuilt bitmap matches the in-memory bitmap.
+    /// Commit, drop, reopen, and assert the rebuilt bitmap matches the in-memory bitmap. The
+    /// rebuilt pruned prefix derives from the retained log start, so it may lie below the live
+    /// prefix after a prune whose chunk floor is above the journal's section floor.
     #[boxed]
     async fn assert_oracle_round_trip(db: AnyTest, context: Context, label: &str) -> AnyTest {
         let pre_active = bitmap_active_locs(&db);
@@ -3087,8 +3098,12 @@ mod bitmap_tests {
 
         assert_eq!(
             db.bitmap.pruned_bits(),
-            pre_pruned,
-            "pruned_bits diverged on reopen",
+            *db.bounds().start / CHUNK_BITS * CHUNK_BITS,
+            "rebuilt pruned prefix must derive from the retained log start",
+        );
+        assert!(
+            db.bitmap.pruned_bits() <= pre_pruned,
+            "rebuilt pruned prefix exceeds the live prefix",
         );
         assert_eq!(db.bitmap.len(), pre_len, "bitmap len diverged on reopen");
         assert_eq!(
@@ -3269,6 +3284,35 @@ mod bitmap_tests {
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![3]));
 
             let db = assert_oracle_round_trip(db, context, "tail").await;
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// After a prune whose chunk floor lies above the journal's section floor, the live bitmap
+    /// is pruned to the chunk floor while a reopen derives the prefix from the retained start.
+    #[test_traced]
+    fn pruned_prefix_derives_from_retained_start_on_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = open_db(context.child("db")).await;
+            for round in 0..3u64 {
+                let mut batch = db.new_batch();
+                for i in 0..700u64 {
+                    let key = Sha256::hash(&[&i.to_be_bytes()]);
+                    batch = batch.write(key, Some(vec![(round + 1) as u8, i as u8]));
+                }
+                let batch = batch.merkleize(&db, None).await.unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.commit().await.unwrap();
+            }
+            let prune_loc = Location::new(CHUNK_BITS);
+            assert!(db.inactivity_floor_loc() >= prune_loc);
+            let db = db.prune(prune_loc).await.unwrap();
+            assert!(
+                *db.bounds().start < CHUNK_BITS,
+                "section floor must lie below the chunk floor"
+            );
+            assert_eq!(db.bitmap.pruned_bits(), CHUNK_BITS);
+            let db = assert_oracle_round_trip(db, context, "coarse_prune").await;
             db.destroy().await.unwrap();
         });
     }

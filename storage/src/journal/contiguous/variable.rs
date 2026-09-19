@@ -1161,14 +1161,15 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                      of size {size}"
                 )));
             }
-            warn!(blob, valid, size, "truncating to last well-formed page");
 
             // A cap can place the hole below the on-disk watermark, so this data is still
             // acknowledged. Truncate it in `publish` after the offsets watermark is lowered.
             if max_size.is_some() {
+                warn!(blob, valid, size, "deferring truncation to publish");
                 valid_lengths.insert(blob, valid);
                 continue;
             }
+            warn!(blob, valid, size, "truncating to last well-formed page");
             writer.truncate(valid).await?;
         }
 
@@ -1195,7 +1196,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// bound on the recovered end, since inspection rebuilds the offsets from data. An empty
     /// range means the journal is empty exactly at its start: no data blobs, or a staged clear
     /// at its target. Acknowledged offsets without any data blob are corruption, as they are for
-    /// inspection.
+    /// bounded inspection (unbounded initialization reconciles them to an empty journal).
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn span(context: &E, cfg: &Config<V::Cfg>) -> Result<Range<u64>, Error> {
         let items_per_blob = cfg.items_per_section.get();
@@ -1862,6 +1863,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// After clearing, the journal will behave as if initialized with `init_at_size(new_size)`.
     /// The offsets reset intent is staged before the data blobs are cleared so recovery can
     /// complete the requested reset if a crash interrupts the operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end. A live handle never
+    /// moves the end backward. Use bounded initialization for that. Returns [Error::SizeOverflow]
+    /// if `new_size` is `u64::MAX`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(
         mut self: Box<Self>,
@@ -2010,8 +2017,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 }
                 std::cmp::Ordering::Equal => {}
                 std::cmp::Ordering::Greater => {
-                    // Prune always removes data before offsets, so offsets should never be
-                    // ahead by a blob.
+                    // The live prune removes data before offsets, and recovery prunes offsets
+                    // only to a start inside the oldest retained data blob, so offsets are
+                    // never ahead by a blob.
                     return Err(Error::Corruption(format!(
                         "offsets start blob {offsets_start_blob} ahead of \
                          oldest data blob {oldest_blob}"
@@ -2190,10 +2198,12 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the underlying
-/// blob will be truncated to the last valid item). Repair is performed during init.
-/// Incomplete trailing frames are repaired as torn writes; complete frames whose payloads fail to
-/// decode are treated as corruption.
+/// the first invalid data read above the recovery watermark's acknowledged prefix is considered
+/// the new end of the journal (and the underlying blob is truncated to the last valid item).
+/// Data at or below that prefix is never repaired: a blob that no longer backs its acknowledged
+/// items fails init, and other damage there surfaces as a read error. Repair is performed
+/// during init. Incomplete trailing frames are repaired as torn writes. Complete frames whose
+/// payloads fail to decode are treated as corruption.
 ///
 /// # Invariants
 ///
@@ -2210,15 +2220,17 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 ///   happen if we crash after pruning the data blobs but before pruning the offsets journal).
 ///
 /// Offsets may start after the data's blob-aligned start when both are in the same blob, as in a
-/// mid-blob `init_at_size`. Offsets starting in a later blob imply corruption because we
-/// always prune the data blobs before the offsets journal.
+/// mid-blob `init_at_size`. Offsets starting in a later blob imply corruption: the live prune
+/// removes data before offsets, and recovery prunes offsets only to a start inside the oldest
+/// retained data blob.
 ///
 /// ## 2. Offsets Recovery Watermark
 ///
 /// The offsets journal's recovery watermark records a durable lower bound on the journal size and
-/// a preferred point for replaying data to rebuild offset entries after a crash. Fixed-journal
-/// recovery rejects watermarks beyond the recovered offsets size as corruption. A watermark below
-/// the recovered offsets start is stale after a prune, so init falls back to the offsets start. If
+/// a preferred point for replaying data to rebuild offset entries after a crash. In an unbounded
+/// open, fixed-journal recovery rejects watermarks beyond the recovered offsets size as
+/// corruption. A bounded open clamps the watermark to its cap first. A watermark below the
+/// recovered offsets start is stale after a prune, so init falls back to the offsets start. If
 /// retained data exists but ends before the watermark, init returns corruption because acknowledged
 /// data is missing. If no retained data exists, init reconciles both sides to an empty journal.
 /// Replay after a valid anchor stops at the first short data blob and truncates newer blobs so the
@@ -2269,6 +2281,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Returns a journal with journal.bounds() == Range{start: size, end: size}
     /// and next append at position `size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::SizeOverflow] if `size` is `u64::MAX`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
         Ok(Self(Box::new(
@@ -2277,6 +2293,11 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Discard all items and reposition the journal at `new_size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end and
+    /// [Error::SizeOverflow] if it is `u64::MAX`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
@@ -2330,7 +2351,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
-    /// Close storage-backed snapshots before reopening these partitions for bounded initialization.
+    /// Close storage-backed snapshots before reopening these partitions.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, V>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
@@ -2376,9 +2397,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
     /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
     /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune or rewind that
-    /// changes the journal. A failed offsets or recovery-watermark sync is not observed by
-    /// commit and resurfaces on the next sync.
+    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
+    /// journal. A failed offsets or recovery-watermark sync is not observed by commit and
+    /// resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -2489,10 +2510,13 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
         }
         let per_blob = self.cfg.items_per_section.get();
         let blob = position_to_blob(pos, per_blob);
+
+        // `bounds.end` is derived by walking `pending`, and every mutation keeps `pending`
+        // contiguous over `bounds`, so a position inside `bounds` always has a blob.
         let writer = self
             .pending
             .get(&blob)
-            .ok_or_else(|| Error::Corruption(format!("missing recovery data blob {blob}")))?;
+            .expect("positions inside bounds map to a pending recovery blob");
         let offset = self.offsets.item(pos).await?;
         read_frame_at::<V>(
             writer,
@@ -2733,7 +2757,7 @@ mod tests {
         buffer::paged::{CacheRef, Recovery as PagedRecovery, Writer, corrupt_page},
         deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, StorageEvent, drive_pending_syncs,
             fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
@@ -2782,13 +2806,23 @@ mod tests {
             let (journal, handle) = journal.start_sync().await.unwrap();
             handle.await.unwrap();
             drop(journal);
+
+            // An empty trailing data blob, as a crash during rollover leaves, forces recovery to
+            // remove it.
+            let (blob, _) = context
+                .open(&config.data_partition(), &2u64.to_be_bytes())
+                .await
+                .unwrap();
+            drop(blob);
             *context.storage_fault_config().write() = deterministic::FaultConfig {
                 remove_rate: Some(probability!(1.0)),
                 ..Default::default()
             };
 
-            // Removing derived offsets may fail, but must never authorize clearing the data.
-            drop(Journal::<_, u64>::init(context.child("interrupted"), config.clone()).await);
+            // The failed removal must never authorize clearing the data.
+            let result =
+                Journal::<_, u64>::init(context.child("interrupted"), config.clone()).await;
+            assert!(matches!(result, Err(Error::Runtime(_))), "{result:?}");
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let journal = Journal::<_, u64>::init(context.child("retry"), config)
                 .await
@@ -3422,11 +3456,30 @@ mod tests {
             blob.resize(1).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
+            let (context, recordings) = RecordingContext::new(context);
             let journal = Journal::<_, u64>::init_at_most(context.child("storage"), cfg.clone(), 7)
                 .await
                 .unwrap();
             assert_eq!(journal.bounds(), 0..7);
             drop(journal);
+
+            // No discarded data or offsets blob above the cap is opened.
+            let partitions = [
+                cfg.data_partition(),
+                format!("{}-blobs", cfg.offsets_partition()),
+            ];
+            for partition in &partitions {
+                for blob in 2..5u64 {
+                    assert!(
+                        !recordings.storage_events().iter().any(|event| matches!(
+                            event,
+                            StorageEvent::Opened { partition: opened, name, .. }
+                                if opened == partition && name.as_slice() == blob.to_be_bytes()
+                        )),
+                        "discarded blob {blob} was opened in {partition}"
+                    );
+                }
+            }
             let journal = Journal::<_, u64>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -5442,8 +5495,8 @@ mod tests {
             }
             let mut journal = journal.sync().await.unwrap();
 
-            // Prune data to blob 1 (position 10) but rewind offsets to 5, so the retained start is
-            // 10 while the offsets end at 5.
+            // Prune data to blob 1 (position 10) but truncate offsets to 5, so the retained start
+            // is 10 while the offsets end at 5.
             journal.test_prune_data(1).await.unwrap();
             let journal = journal.test_truncate_offsets(5).await.unwrap();
             drop(journal);

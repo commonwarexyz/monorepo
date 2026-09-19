@@ -48,11 +48,16 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 }
                 Ok(())
             }
+        } else if #[cfg(target_os = "macos")] {
+            /// Make inherited partition entries durable before user code starts. Partition
+            /// directories and existing blob contents are synchronized on their first access.
+            pub(crate) fn sync(dir: &Path) -> io::Result<()> {
+                File::open(dir)?.sync_all()
+            }
         } else {
-            /// Make what a prior process wrote crash-durable before any storage structure reads.
-            ///
-            /// No filesystem-wide flush with that guarantee exists here, so this does nothing and
-            /// the first open of each existing blob flushes it instead (see [Pending::first_open]).
+            /// Flush nothing at startup. No filesystem-wide flush on this platform makes what a
+            /// prior process wrote crash-durable, so the first open of each existing blob flushes
+            /// it instead (see [Pending::first_open]).
             pub(crate) const fn sync(_: &Path) -> io::Result<()> {
                 Ok(())
             }
@@ -88,10 +93,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     #[derive(Default)]
     pub(crate) struct Pending {
         entries: Mutex<HashMap<(String, Vec<u8>), Entry>>,
-        /// Names this instance has created or flushed. Nothing flushes the filesystem at startup
-        /// here, so the first open of any other existing name owes a flush before trusting the
-        /// file. Removing a name drops it: a later open of that name creates the blob and owes
-        /// nothing.
+        /// Names whose first open through this instance has been accounted for: created here, or
+        /// an existing blob whose first-open flush was issued, with its outcome retained in
+        /// `entries`. There is no filesystem-wide startup flush here, so the first open of any
+        /// other existing name owes a flush before trusting the file. Removing a name drops it: a
+        /// later open of that name creates the blob and owes nothing.
         #[cfg(not(target_os = "linux"))]
         flushed: Mutex<HashSet<(String, Vec<u8>)>>,
         #[cfg(test)]
@@ -180,11 +186,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Attach a fresh open to a name while the backend holds its namespace lock.
         ///
         /// Returns [Error::BlobAlreadyOpen] while a handle from an earlier open is alive. Returns
-        /// the name's retained failure until the name is removed. Otherwise returns the open's generation,
-        /// the receiver that fires once a still-settling predecessor has finished its operations,
-        /// and whether the name carries debt or outstanding work the open must observe through
-        /// [Self::debt] before trusting the file. Descriptor metadata must be observed after
-        /// attachment, or after awaiting the returned receiver.
+        /// the name's retained failure until the name is removed or recreated. Otherwise returns
+        /// the open's generation, the receiver that fires once a still-settling predecessor has
+        /// finished its operations, and whether the name carries debt or outstanding work the
+        /// open must observe through [Self::debt] before trusting the file. Descriptor metadata
+        /// must be observed after attachment, or after awaiting the returned receiver.
         pub(crate) fn attach(
             self: &Arc<Self>,
             partition: &str,
@@ -321,7 +327,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 }
             } else {
                 /// Whether the first open of `generation`'s name through this instance owes a
-                /// flush. Nothing flushes the filesystem at startup here, so an existing blob owes
+                /// flush. There is no filesystem-wide startup flush here, so an existing blob owes
                 /// one the first time this instance opens it. Creations are durable on return and
                 /// owe nothing.
                 pub(crate) fn first_open(&self, generation: &Generation, existing: bool) -> bool {

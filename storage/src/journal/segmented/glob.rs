@@ -68,8 +68,9 @@ struct Inner<E: Context, V: Codec> {
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
-    /// See [Glob::init].
-    async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+    /// See [Glob::init]. Sections above `ceiling` are left unopened for the truncation that
+    /// removes them.
+    async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: WriteFactory {
@@ -77,7 +78,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 pool: context.storage_buffer_pool().clone(),
             },
         };
-        let manager = Manager::init(context, manager_cfg).await?;
+        let manager = Manager::init_bounded(context, manager_cfg, ceiling).await?;
 
         Ok(Self {
             manager,
@@ -390,7 +391,17 @@ impl<E: Context, V: CodecShared> From<Recovery<E, V>> for Glob<E, V> {
 impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// Open the uncached sections under paired initialization ownership.
     pub(crate) async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Ok(Self(Box::new(Inner::init(context, cfg).await?)))
+        Self::init_bounded(context, cfg, u64::MAX).await
+    }
+
+    /// Open sections up to `ceiling` for paired initialization. Later sections are never read
+    /// and must be removed with [Self::truncate] before publication.
+    pub(crate) async fn init_bounded(
+        context: E,
+        cfg: Config<V::Cfg>,
+        ceiling: u64,
+    ) -> Result<Self, Error> {
+        Ok(Self(Box::new(Inner::init(context, cfg, ceiling).await?)))
     }
 
     /// Check whether the entry at `(offset, size)` in `section` has a valid trailing checksum.

@@ -40,7 +40,8 @@
 //! Initialization fails if pruning removed history needed by the selected commit.
 //!
 //! Initialization durably removes the later history. The bound does not limit future appends.
-//! Close all existing users of the storage before reopening. If initialization fails, retry it.
+//! Close all existing users of the storage before reopening. A failed or interrupted
+//! initialization leaves storage recoverable, so it can be retried once the cause is addressed.
 //! To require an exact checkpoint, also check the recovered root and range.
 //!
 //! # Ownership
