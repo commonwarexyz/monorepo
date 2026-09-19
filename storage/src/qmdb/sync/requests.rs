@@ -81,12 +81,7 @@ impl<F: Family, Op: Send, D: Digest, E: Send> Requests<F, Op, D, E> {
             _aborter: _,
         }) = self.tracked.remove(&id)
         {
-            // Only remove from by_location if it still points to this ID.
-            // A newer request may have superseded this location.
-            let start = request.start();
-            if self.by_location.get(&start) == Some(&id) {
-                self.by_location.remove(&start);
-            }
+            self.by_location.remove(&request.start());
             Some(request)
         } else {
             None

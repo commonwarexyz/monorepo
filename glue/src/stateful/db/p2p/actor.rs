@@ -249,7 +249,7 @@ where
                 // Retire canceled subscriptions from the resolver while preserving callers
                 // still waiting for a verified response.
                 self.metrics.cancel_requests.inc_by(canceled.len() as u64);
-                resolver.retain(move |key, id| key != &request || !canceled.contains(id));
+                resolver.retain(move |_, id| !canceled.contains(id));
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
             }
         }

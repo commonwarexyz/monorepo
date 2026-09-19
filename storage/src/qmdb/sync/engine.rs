@@ -367,7 +367,7 @@ where
             reached_current_target_reported: false,
             metrics,
         };
-        engine.schedule_requests()?;
+        engine.schedule_requests();
         engine.record_progress();
         Ok(engine)
     }
@@ -391,7 +391,7 @@ where
     }
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
-    fn schedule_requests(&mut self) -> Result<(), Error<DB, S>> {
+    fn schedule_requests(&mut self) {
         let target_size = self.target.range.end();
 
         // Schedule a boundary request at the lower sync bound if pinned nodes are still
@@ -441,8 +441,6 @@ where
             };
             self.spawn_fetch(request);
         }
-
-        Ok(())
     }
 
     /// Reset sync state for a target update.
@@ -461,16 +459,14 @@ where
         // sizes remain eligible so eviction cancels requests that can no longer be reused.
         if self.max_retained_roots > 0 {
             self.retained_sizes.insert(self.target.range.end());
-            while self.retained_sizes.len() > self.max_retained_roots {
+            if self.retained_sizes.len() > self.max_retained_roots {
                 self.retained_sizes.pop_first();
             }
         }
 
         let new_start = new_target.range.start();
-        let new_size = new_target.range.end();
         self.outstanding_requests.retain(|request| {
-            request.start() > new_start
-                && (request.size() == new_size || self.retained_sizes.contains(&request.size()))
+            request.start() > new_start && self.retained_sizes.contains(&request.size())
         });
 
         self.target = new_target;
@@ -673,7 +669,7 @@ where
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
                 updated_self.record_progress();
-                updated_self.schedule_requests()?;
+                updated_self.schedule_requests();
                 Ok(NextStep::Continue(updated_self))
             }
             Event::UpdateChannelClosed => {
@@ -691,7 +687,7 @@ where
                 if let Ok(fetch_result) = fetch_result {
                     self.handle_fetch_result(fetch_result)?;
                 }
-                self.schedule_requests()?;
+                self.schedule_requests();
                 let mut engine = self.apply_operations().await?;
                 engine.record_progress();
                 Ok(NextStep::Continue(engine))
