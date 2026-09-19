@@ -30,7 +30,7 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
         response: ResponseTx<F, Op, D>,
     },
     /// Notify the actor that a caller stopped waiting for a response.
-    /// The waiting group's subscription is retired only after all its callers leave.
+    /// Only subscriptions whose response channels have closed are canceled.
     CancelOperations { request: Request<F> },
 }
 

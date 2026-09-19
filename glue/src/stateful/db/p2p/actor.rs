@@ -23,7 +23,7 @@ use commonware_utils::{
 use futures::future;
 use rand_core::Rng;
 use std::{
-    collections::{BTreeMap, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet},
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
@@ -34,15 +34,8 @@ type DatabaseRoot<DB> = <Shared<DB> as Source>::Digest;
 type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
 type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>;
 type PendingSubs<F, DB> =
-    BTreeMap<Request<F>, Pending<mailbox::ResponseTx<F, Op<DB>, DatabaseRoot<DB>>>>;
-
-/// Local callers sharing one resolver subscription while waiting for a response.
-struct Pending<T> {
-    /// Identity included in deliveries for this group.
-    subscriber: u64,
-    /// Callers awaiting the response and an individual approval channel.
-    responses: Vec<T>,
-}
+    BTreeMap<(Request<F>, u64), mailbox::ResponseTx<F, Op<DB>, DatabaseRoot<DB>>>;
+type Approval<F> = (Delivery<Request<F>, u64>, Option<bool>);
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -82,14 +75,6 @@ where
     pub priority_responses: bool,
 }
 
-/// Runtime serving state for the resolver actor.
-enum State<DB> {
-    /// Database is not attached yet.
-    NoDb,
-    /// Database is attached and can serve incoming requests.
-    HasDb(Shared<DB>),
-}
-
 /// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
 pub struct Actor<E, P, D, B, F, DB>
 where
@@ -105,14 +90,13 @@ where
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
     mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB>>,
-    state: State<DB>,
     metrics: ResolverMetrics,
-    /// Groups waiting for bytes from this actor's resolver engine.
+    /// Callers awaiting bytes, indexed by request and resolver subscriber.
     pending: PendingSubs<F, DB>,
-    /// Next identity to allocate when opening a request group.
+    /// Next identity to allocate for a caller.
     next_subscriber: u64,
-    /// Verification results for groups that have received their responses.
-    approvals: FuturesPool<'static, (Request<F>, u64, Option<bool>)>,
+    /// Verification results for the resolver's delivered subscriber snapshots.
+    approvals: FuturesPool<'static, Approval<F>>,
     serves: FuturesPool<'static, ()>,
 }
 
@@ -128,12 +112,11 @@ where
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
-    pub fn new(context: E, mut cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
+    pub fn new(context: E, cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
         let metrics = ResolverMetrics::new(&context);
-        let state = cfg.database.take().map_or(State::NoDb, |db| {
-            let _ = metrics.has_database.try_set(1i64);
-            State::HasDb(db)
-        });
+        let _ = metrics
+            .has_database
+            .try_set(i64::from(cfg.database.is_some()));
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mailbox = Mailbox::new(mailbox_tx);
@@ -141,7 +124,6 @@ where
             context: ContextCell::new(context),
             config: cfg,
             mailbox_rx,
-            state,
             metrics,
             pending: BTreeMap::new(),
             next_subscriber: 0,
@@ -235,33 +217,19 @@ where
         match message {
             mailbox::Message::AttachDatabase(db) => {
                 // Future serves use this handle; an active serve keeps its captured database.
-                let replacing_existing = matches!(self.state, State::HasDb(_));
+                let replacing_existing = self.config.database.replace(db).is_some();
                 info!(replacing_existing, "attached resolver database");
-                self.state = State::HasDb(db);
                 let _ = self.metrics.has_database.try_set(1i64);
             }
             mailbox::Message::GetOperations { request, response } => {
-                // Callers joining before delivery share the waiting group's subscription.
-                if let Some(pending) = self.pending.get_mut(&request) {
-                    pending.responses.retain(|response| !response.is_closed());
-                    pending.responses.push(response);
-                    return;
-                }
-
-                // Use an increasing ID so deliveries and retirement for earlier groups
-                // cannot consume this group's demand.
+                // Each caller owns a subscription. The resolver coalesces same-key fetches
+                // and redelivers cached responses to callers that join during verification.
                 let subscriber = self.next_subscriber;
                 self.next_subscriber = self
                     .next_subscriber
                     .checked_add(1)
                     .expect("request ID overflow");
-                self.pending.insert(
-                    request,
-                    Pending {
-                        subscriber,
-                        responses: vec![response],
-                    },
-                );
+                self.pending.insert((request, subscriber), response);
                 resolver.fetch(Fetch {
                     key: request,
                     subscriber,
@@ -271,22 +239,21 @@ where
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
             }
             mailbox::Message::CancelOperations { request } => {
-                // A cancellation notice may arrive after new callers have joined.
-                // Keep the request while any caller still awaits a response.
-                let Some(pending) = self.pending.get_mut(&request) else {
-                    return;
-                };
-                pending.responses.retain(|response| !response.is_closed());
-                if !pending.responses.is_empty() {
+                // Notices can lag behind new callers. Closed response channels identify
+                // exactly which subscriptions no longer have a waiting caller.
+                let canceled: BTreeSet<_> = self
+                    .pending
+                    .extract_if((request, 0)..=(request, u64::MAX), |_, response| {
+                        response.is_closed()
+                    })
+                    .map(|((_, subscriber), _)| subscriber)
+                    .collect();
+                if canceled.is_empty() {
                     return;
                 }
 
-                // Remove only this group's ID: an earlier group may still be
-                // validating a response for the same key.
-                let subscriber = pending.subscriber;
-                self.pending.remove(&request);
-                resolver.retain(move |key, id| key != &request || *id != subscriber);
-                self.metrics.cancel_requests.inc();
+                self.metrics.cancel_requests.inc_by(canceled.len() as u64);
+                resolver.retain(move |key, id| key != &request || !canceled.contains(id));
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
             }
         }
@@ -299,25 +266,20 @@ where
         value: bytes::Bytes,
         feedback_tx: oneshot::Sender<bool>,
     ) {
-        // A queued delivery can outlive its callers. Consume a waiting group only
-        // when its subscription is included in the delivery.
+        // Queued deliveries can outlive their callers. Only IDs in this snapshot
+        // may consume a response; later subscribers remain with the resolver.
         let key = delivery.key;
-        let entry = match self.pending.entry(key) {
-            Entry::Occupied(entry)
-                if delivery
-                    .subscribers
-                    .iter()
-                    .any(|(subscriber, _)| *subscriber == entry.get().subscriber) =>
-            {
-                entry
-            }
-            _ => {
-                self.metrics.deliveries.inc(status::Status::Dropped);
-                return;
-            }
-        };
+        if !delivery
+            .subscribers
+            .iter()
+            .any(|(subscriber, _)| self.pending.contains_key(&(key, *subscriber)))
+        {
+            self.metrics.deliveries.inc(status::Status::Dropped);
+            return;
+        }
 
-        // Keep the waiting group intact until decoding and response shape checks succeed.
+        // Retain waiting callers until decoding and response shape checks succeed,
+        // so invalid bytes leave their subscriptions available for resolver retry.
         let cfg = (key.max_ops().get() as usize, ());
         let response = match Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &cfg) {
             Ok(response)
@@ -336,16 +298,18 @@ where
             }
         };
 
-        let pending = entry.remove();
-        let _ = self.metrics.pending_requests.try_set(self.pending.len());
-        let subscriber = pending.subscriber;
-        let mut approvals = Vec::with_capacity(pending.responses.len());
-        for caller in pending.responses {
+        // Give every matching caller its response before processing any verdict.
+        let mut approvals = Vec::with_capacity(delivery.subscribers.len().get());
+        for (subscriber, _) in delivery.subscribers.iter() {
+            let Some(caller) = self.pending.remove(&(key, *subscriber)) else {
+                continue;
+            };
             let (approval, receiver) = oneshot::channel();
             if caller.send((response.clone(), approval)).is_ok() {
                 approvals.push(receiver);
             }
         }
+        let _ = self.metrics.pending_requests.try_set(self.pending.len());
         if approvals.is_empty() {
             self.metrics.deliveries.inc(status::Status::Dropped);
             return;
@@ -357,27 +321,30 @@ where
             for approval in approvals {
                 if let Ok(verdict) = approval.await {
                     feedback_tx.send_lossy(verdict);
-                    return (key, subscriber, Some(verdict));
+                    return (delivery, Some(verdict));
                 }
             }
-            (key, subscriber, None)
+            (delivery, None)
         });
     }
 
-    /// Retire completed request groups and record their verification results.
-    fn handle_approval<R>(
-        &mut self,
-        resolver: &mut R,
-        (key, subscriber, verdict): (Request<F>, u64, Option<bool>),
-    ) where
+    /// Retire rejected deliveries' subscriptions and record verification results.
+    fn handle_approval<R>(&mut self, resolver: &mut R, (delivery, verdict): Approval<F>)
+    where
         R: Resolver<Key = Request<F>, Subscriber = u64>,
     {
         match verdict {
             Some(true) => self.metrics.deliveries.inc(status::Status::Success),
             Some(false) => {
-                // Validation is serialized per key, so this group and all older
-                // groups have finished. Only newer subscriptions can still own callers.
-                resolver.retain(move |candidate, id| candidate != &key || *id > subscriber);
+                // These callers have received their responses or departed. Retire the
+                // entire snapshot so resolver retry serves only remaining subscribers.
+                let key = delivery.key;
+                let delivered: BTreeSet<_> = delivery
+                    .subscribers
+                    .into_iter()
+                    .map(|(subscriber, _)| subscriber)
+                    .collect();
+                resolver.retain(move |candidate, id| candidate != &key || !delivered.contains(id));
                 self.metrics.deliveries.inc(status::Status::Failure);
                 debug!(?key, "downstream marked response as peer-invalid");
             }
@@ -393,7 +360,7 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
-        let State::HasDb(database) = &self.state else {
+        let Some(database) = &self.config.database else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         };
@@ -442,9 +409,7 @@ mod tests {
         qmdb::any::{FixedConfig, unordered::fixed},
         translator::TwoCap,
     };
-    use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize, channel::oneshot, non_empty_vec, probability,
-    };
+    use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, channel::oneshot, probability};
     use futures::FutureExt as _;
     use std::time::Duration;
 
@@ -554,11 +519,16 @@ mod tests {
 
     fn test_delivery(
         key: Request<mmr::Family>,
-        subscriber: u64,
+        subscribers: impl IntoIterator<Item = u64>,
     ) -> Delivery<Request<mmr::Family>, u64> {
         Delivery {
             key,
-            subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
+            subscribers: subscribers
+                .into_iter()
+                .map(|subscriber| (subscriber, tracing::Span::none()))
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
         }
     }
 
@@ -748,7 +718,7 @@ mod tests {
         }
     }
 
-    /// Wait for the actor to retire a waiting group after its last caller leaves.
+    /// Wait for the actor to retire canceled caller subscriptions.
     async fn wait_for_cancels(
         context: &deterministic::Context,
         metrics: &ResolverMetrics,
@@ -888,13 +858,13 @@ mod tests {
     }
 
     #[test]
-    fn get_operations_reuses_live_group_and_cancels_exact_id() {
+    fn get_operations_registers_each_caller_and_cancels_exact_ids() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
             let request = test_request_at(Location::new(1));
 
-            // Fresh demand replaces a closed local caller without allocating a new ID.
+            // A delayed cancellation notice must preserve a fresh caller for the same key.
             let (old, old_rx) = oneshot::channel();
             actor.handle_mailbox_message(
                 &mut resolver,
@@ -903,7 +873,7 @@ mod tests {
                     response: old,
                 },
             );
-            let subscriber = resolver.fetches[0].1;
+            let old_id = resolver.fetches[0].1;
             drop(old_rx);
             let (fresh, fresh_rx) = oneshot::channel();
             actor.handle_mailbox_message(
@@ -913,17 +883,19 @@ mod tests {
                     response: fresh,
                 },
             );
+            let fresh_id = resolver.fetches[1].1;
+            assert_ne!(fresh_id, old_id);
             actor.handle_mailbox_message(
                 &mut resolver,
                 mailbox::Message::CancelOperations { request },
             );
-            assert_eq!(resolver.fetches.len(), 1);
-            assert_eq!(resolver.retains, 0);
-            let pending = actor.pending.get(&request).unwrap();
-            assert_eq!(pending.subscriber, subscriber);
-            assert_eq!(pending.responses.len(), 1);
+            assert_eq!(resolver.fetches.len(), 2);
+            assert_eq!(resolver.retains, 1);
+            assert_eq!(resolver.subscriptions[&request], [fresh_id]);
+            assert_eq!(actor.pending.len(), 1);
+            assert!(actor.pending.contains_key(&(request, fresh_id)));
 
-            // The last closed caller authorizes one exact cancellation; later notices are no-ops.
+            // Each closed caller is retired once; repeated notices are harmless.
             drop(fresh_rx);
             actor.handle_mailbox_message(
                 &mut resolver,
@@ -933,14 +905,14 @@ mod tests {
                 &mut resolver,
                 mailbox::Message::CancelOperations { request },
             );
-            assert_eq!(resolver.retains, 1);
+            assert_eq!(resolver.retains, 2);
             assert!(!resolver.subscriptions.contains_key(&request));
-            assert!(!actor.pending.contains_key(&request));
+            assert!(actor.pending.is_empty());
         });
     }
 
     #[test]
-    fn partial_caller_cancellation_preserves_live_group() {
+    fn partial_caller_cancellation_preserves_live_subscriber() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
@@ -953,23 +925,25 @@ mod tests {
                     mailbox::Message::GetOperations { request, response },
                 );
             }
-            assert_eq!(resolver.fetches.len(), 1);
-            let subscriber = resolver.fetches[0].1;
+            assert_eq!(resolver.fetches.len(), 2);
+            let subscriber = resolver.fetches[1].1;
 
             drop(canceled_rx);
             actor.handle_mailbox_message(
                 &mut resolver,
                 mailbox::Message::CancelOperations { request },
             );
-            assert_eq!(resolver.retains, 0);
-            let pending = actor.pending.get(&request).unwrap();
-            assert_eq!(pending.subscriber, subscriber);
-            assert_eq!(pending.responses.len(), 1);
+            assert_eq!(resolver.retains, 1);
+            assert_eq!(resolver.subscriptions[&request], [subscriber]);
+            assert_eq!(actor.pending.len(), 1);
+            assert!(actor.pending.contains_key(&(request, subscriber)));
+            assert_eq!(actor.metrics.pending_requests.get(), 1);
+            assert_eq!(actor.metrics.cancel_requests.get(), 1);
 
             let payload = encoded_fetch_payload();
             let (feedback, verdict) = oneshot::channel();
             actor.handle_deliver(
-                test_delivery(request, subscriber),
+                test_delivery(request, [subscriber]),
                 payload.clone(),
                 feedback,
             );
@@ -989,6 +963,15 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
             let request = test_request_at(Location::new(1));
+            let (existing, _existing_rx) = oneshot::channel();
+            actor.handle_mailbox_message(
+                &mut resolver,
+                mailbox::Message::GetOperations {
+                    request,
+                    response: existing,
+                },
+            );
+            let existing_id = resolver.fetches[0].1;
             actor.next_subscriber = u64::MAX;
             let (response, receiver) = oneshot::channel();
 
@@ -1001,13 +984,14 @@ mod tests {
             }));
             assert!(result.is_err());
             assert!(receiver.await.is_err());
-            assert!(actor.pending.is_empty());
-            assert!(resolver.fetches.is_empty());
+            assert_eq!(actor.pending.len(), 1);
+            assert!(actor.pending.contains_key(&(request, existing_id)));
+            assert_eq!(resolver.fetches, [(request, existing_id)]);
         });
     }
 
     #[test]
-    fn malformed_or_mismatched_delivery_preserves_same_cohort() {
+    fn malformed_or_mismatched_delivery_preserves_waiting_caller() {
         deterministic::Runner::default().start(|context| async move {
             // Keep a boundary requester waiting across responses it cannot consume.
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
@@ -1022,7 +1006,7 @@ mod tests {
                 mailbox::Message::GetOperations { request, response },
             );
             let subscriber = resolver.fetches[0].1;
-            let delivery = test_delivery(request, subscriber);
+            let delivery = test_delivery(request, [subscriber]);
 
             // Both failures must judge the original subscription and leave its caller waiting.
             for payload in [
@@ -1033,9 +1017,8 @@ mod tests {
                 actor.handle_deliver(delivery.clone(), payload, feedback);
 
                 assert!(!validity.await.unwrap());
-                let pending = actor.pending.get(&request).unwrap();
-                assert_eq!(pending.subscriber, subscriber);
-                assert_eq!(pending.responses.len(), 1);
+                assert_eq!(actor.pending.len(), 1);
+                assert!(actor.pending.contains_key(&(request, subscriber)));
                 assert!(matches!(
                     receiver.try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
@@ -1051,7 +1034,7 @@ mod tests {
             let mut resolver = RecordingResolver::default();
             let request = test_request_at(Location::new(1));
 
-            // Cancel the first group after its only caller closes, then reopen the key.
+            // Cancel the first caller, then admit two new callers for the same key.
             let (old, old_rx) = oneshot::channel();
             actor.handle_mailbox_message(
                 &mut resolver,
@@ -1076,35 +1059,62 @@ mod tests {
             );
             let fresh_id = resolver.fetches[1].1;
             assert!(fresh_id > old_id);
+            let (later, mut later_rx) = oneshot::channel();
+            actor.handle_mailbox_message(
+                &mut resolver,
+                mailbox::Message::GetOperations {
+                    request,
+                    response: later,
+                },
+            );
+            let later_id = resolver.fetches[2].1;
 
-            // The stale delivery is unjudged and cannot consume the reopened waiting group.
+            // The stale delivery is unjudged and cannot consume either new caller.
             let (stale_feedback, stale_verdict) = oneshot::channel();
             actor.handle_deliver(
-                test_delivery(request, old_id),
+                test_delivery(request, [old_id]),
                 encoded_fetch_payload(),
                 stale_feedback,
             );
             assert!(stale_verdict.await.is_err());
-            let pending = actor.pending.get(&request).unwrap();
-            assert_eq!(pending.subscriber, fresh_id);
+            assert_eq!(actor.pending.len(), 2);
             assert!(matches!(
                 fresh_rx.try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             ));
 
-            // A matching delivery reaches the fresh caller and completes normally.
+            // A queued snapshot reaches only its named caller, even after later admission.
             let (feedback, verdict) = oneshot::channel();
             actor.handle_deliver(
-                test_delivery(request, fresh_id),
+                test_delivery(request, [fresh_id]),
                 encoded_fetch_payload(),
                 feedback,
             );
             let (_response, approval) = fresh_rx.await.unwrap();
             approval.send(true).unwrap();
             let completion = actor.approvals.next_completed().await;
-            assert_eq!(completion, (request, fresh_id, Some(true)));
+            assert_eq!(completion, (test_delivery(request, [fresh_id]), Some(true)));
             actor.handle_approval(&mut resolver, completion);
             assert!(verdict.await.unwrap());
+            assert!(matches!(
+                later_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            assert_eq!(actor.pending.len(), 1);
+            assert!(actor.pending.contains_key(&(request, later_id)));
+
+            // The remaining subscriber receives its own delivery and finishes independently.
+            let (feedback, verdict) = oneshot::channel();
+            actor.handle_deliver(
+                test_delivery(request, [later_id]),
+                encoded_fetch_payload(),
+                feedback,
+            );
+            later_rx.await.unwrap().1.send(true).unwrap();
+            let completion = actor.approvals.next_completed().await;
+            actor.handle_approval(&mut resolver, completion);
+            assert!(verdict.await.unwrap());
+            assert!(actor.pending.is_empty());
         });
     }
 
@@ -1125,7 +1135,7 @@ mod tests {
             // Successful decoding with no recipient drops the verdict and queues no approval.
             let (feedback, verdict) = oneshot::channel();
             actor.handle_deliver(
-                test_delivery(request, subscriber),
+                test_delivery(request, [subscriber]),
                 encoded_fetch_payload(),
                 feedback,
             );
@@ -1150,15 +1160,11 @@ mod tests {
                         mailbox::Message::GetOperations { request, response },
                     );
                 }
-                let subscriber = resolver.fetches[0].1;
+                let delivery = test_delivery(request, resolver.fetches.iter().map(|(_, id)| *id));
 
                 // One caller abstains; the other either accepts or also leaves the data unjudged.
                 let (feedback, verdict) = oneshot::channel();
-                actor.handle_deliver(
-                    test_delivery(request, subscriber),
-                    encoded_fetch_payload(),
-                    feedback,
-                );
+                actor.handle_deliver(delivery.clone(), encoded_fetch_payload(), feedback);
                 drop(first_rx.await.unwrap().1);
                 let approval = second_rx.await.unwrap().1;
                 if let Some(verdict) = expected {
@@ -1169,7 +1175,7 @@ mod tests {
 
                 // An abstention neither overrides an explicit acceptance nor creates one.
                 let completion = actor.approvals.next_completed().await;
-                assert_eq!(completion, (request, subscriber, expected));
+                assert_eq!(completion, (delivery, expected));
                 actor.handle_approval(&mut resolver, completion);
                 assert_eq!(verdict.await.ok(), expected);
                 assert_eq!(resolver.retains, 0);
@@ -1178,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn false_approval_retires_rejector_but_preserves_newer_demand() {
+    fn false_approval_retires_snapshot_but_preserves_newer_demand() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
@@ -1189,33 +1195,24 @@ mod tests {
                 max_ops: NZU64!(2),
             };
 
-            // Deliver one group, then admit newer same-key and unrelated demand before its verdict.
+            // A delivery can include a caller whose cancellation notice has not arrived yet.
             let (rejecting, rejecting_rx) = oneshot::channel();
             let (later, later_rx) = oneshot::channel();
-            actor.handle_mailbox_message(
-                &mut resolver,
-                mailbox::Message::GetOperations {
-                    request,
-                    response: rejecting,
-                },
-            );
-            actor.handle_mailbox_message(
-                &mut resolver,
-                mailbox::Message::GetOperations {
-                    request,
-                    response: later,
-                },
-            );
-            let rejecting_id = resolver.fetches[0].1;
+            let (departed, departed_rx) = oneshot::channel();
+            for response in [rejecting, later, departed] {
+                actor.handle_mailbox_message(
+                    &mut resolver,
+                    mailbox::Message::GetOperations { request, response },
+                );
+            }
+            let delivery = test_delivery(request, resolver.fetches.iter().map(|(_, id)| *id));
+            drop(departed_rx);
             let (feedback, verdict) = oneshot::channel();
-            actor.handle_deliver(
-                test_delivery(request, rejecting_id),
-                encoded_fetch_payload(),
-                feedback,
-            );
+            actor.handle_deliver(delivery.clone(), encoded_fetch_payload(), feedback);
             let (_response, rejection) = rejecting_rx.await.unwrap();
             let (_response, later_approval) = later_rx.await.unwrap();
 
+            // New same-key and unrelated callers must survive retirement of this snapshot.
             let (fresh, _fresh_rx) = oneshot::channel();
             actor.handle_mailbox_message(
                 &mut resolver,
@@ -1224,7 +1221,7 @@ mod tests {
                     response: fresh,
                 },
             );
-            let fresh_id = resolver.fetches[1].1;
+            let fresh_id = resolver.fetches[3].1;
             let (other, _other_rx) = oneshot::channel();
             actor.handle_mailbox_message(
                 &mut resolver,
@@ -1233,12 +1230,12 @@ mod tests {
                     response: other,
                 },
             );
-            let unrelated_id = resolver.fetches[2].1;
+            let unrelated_id = resolver.fetches[4].1;
 
-            // The production approval transition removes completed and older IDs only.
+            // Rejection retires every delivered ID, including the failed handoff.
             rejection.send(false).unwrap();
             let completion = actor.approvals.next_completed().await;
-            assert_eq!(completion, (request, rejecting_id, Some(false)));
+            assert_eq!(completion, (delivery, Some(false)));
             actor.handle_approval(&mut resolver, completion);
             assert!(!verdict.await.unwrap());
             assert!(later_approval.is_closed());
@@ -1251,6 +1248,12 @@ mod tests {
                 &[unrelated_id]
             );
             assert_eq!(resolver.retains, 1);
+            actor.handle_mailbox_message(
+                &mut resolver,
+                mailbox::Message::CancelOperations { request },
+            );
+            assert_eq!(resolver.retains, 1);
+            assert_eq!(actor.pending.len(), 2);
         });
     }
 
@@ -1375,7 +1378,7 @@ mod tests {
             };
             let barrier_expected = expected_payload(&pair.databases[1], barrier_request).await;
 
-            // Hold the first delivery's verdict while a new waiting group forms for its key.
+            // Hold the first delivery's verdict while later subscribers join the same key.
             let (first, delayed) = futures::future::join(
                 pair.mailboxes[0].serve(request),
                 pair.mailboxes[0].serve(request),
@@ -1384,12 +1387,12 @@ mod tests {
             let (first, first_feedback) = first.unwrap();
             let (delayed_response, delayed_feedback) = delayed.unwrap();
             assert_operations_response(&first, request, &expected);
-            assert_eq!(pair.metrics[0].fetch_requests.get(), 1);
+            assert_eq!(pair.metrics[0].fetch_requests.get(), 2);
 
             let second = pair.mailboxes[0].serve(request);
             futures::pin_mut!(second);
             assert!(futures::poll!(second.as_mut()).is_pending());
-            wait_for_fetches(&context, &pair.metrics[0], 2).await;
+            wait_for_fetches(&context, &pair.metrics[0], 3).await;
             let third = pair.mailboxes[0].serve(request);
             futures::pin_mut!(third);
             assert!(futures::poll!(third.as_mut()).is_pending());
@@ -1435,10 +1438,10 @@ mod tests {
     }
 
     #[test]
-    fn cancel_late_cohort_preserves_prior_feedback_and_fresh_demand() {
+    fn cancel_late_subscriber_preserves_prior_feedback_and_fresh_demand() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Separate barrier keys establish resolver consumption before and after cancellation.
-            const PREFIX: &str = "cancel_late_cohort_live";
+            const PREFIX: &str = "cancel_late_subscriber_live";
             let pair_context = context.child(PREFIX);
             let pair = spawn_live_pair(&pair_context, PREFIX).await;
             let size = pair.databases[1].read().await.bounds().end;
@@ -1458,11 +1461,11 @@ mod tests {
             let post_cancel_expected =
                 expected_payload(&pair.databases[1], post_cancel_barrier).await;
 
-            // Keep the first group's approval open throughout cancellation of a later group.
+            // Keep the first caller's approval open throughout cancellation of a later subscriber.
             let (first, first_feedback) = pair.mailboxes[0].serve(request).await.unwrap();
             assert_operations_response(&first, request, &expected);
 
-            // Admit the late group into the resolver, then drop its last caller.
+            // Admit the late subscriber into the resolver, then drop its caller.
             {
                 let late = pair.mailboxes[0].serve(request);
                 futures::pin_mut!(late);
@@ -1472,7 +1475,7 @@ mod tests {
                 let (barrier, barrier_feedback) = select! {
                     result = pair.mailboxes[0].serve(barrier_request) => result.unwrap(),
                     _ = context.sleep(Duration::from_secs(1)) => {
-                        panic!("resolver did not process the late cohort before cancellation");
+                        panic!("resolver did not process the late subscriber before cancellation");
                     },
                 };
                 assert_operations_response(&barrier, barrier_request, &barrier_expected);
@@ -1495,11 +1498,11 @@ mod tests {
             barrier_feedback.unwrap().send(true).unwrap();
             first_feedback.unwrap().send(true).unwrap();
 
-            // Cancelling the intermediate group must preserve cached data for the fresh caller.
+            // Canceling the intermediate subscriber must preserve cached data for the fresh caller.
             let (fresh, fresh_feedback) = select! {
                 result = fresh => result.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("fresh cohort did not receive the retained response");
+                    panic!("fresh subscriber did not receive the retained response");
                 },
             };
             assert_operations_response(&fresh, request, &expected);
