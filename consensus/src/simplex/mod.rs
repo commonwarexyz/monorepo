@@ -221,8 +221,9 @@
 //! proposal and broadcasts its `notarize` vote before the parent is certified, if all of the
 //! following hold:
 //!
-//! * The proposal's view is in the same term as its parent (optimism never crosses a term
-//!   boundary; a term start always requires explicitly certified ancestry).
+//! * The proposal's view is in the same term as its parent. A term start requires explicitly
+//!   certified ancestry, except that a [pipelined handoff](#pipelined-handoff) lets the incoming
+//!   leader propose and cast its own vote early.
 //! * At most `optimistic_views` views lie between the proposal's view and the last *directly
 //!   notarized* view (a view with an observed notarization or finalization certificate; a view is
 //!   *indirectly notarized* when only a descendant's certificate implies it), bounding
@@ -240,6 +241,80 @@
 //! not yet observed the sender's ancestry. The setting is local: mismatched values across
 //! participants only degrade the optimization (votes beyond a peer's window are dropped until it
 //! catches up), never safety.
+//!
+//! ### Pipelined Handoff
+//!
+//! A pipelined handoff lets the incoming leader prepare its term-start proposal before the
+//! parent certifies. The application decides, per request, whether to prepare a candidate and
+//! whether consensus may publish it before the parent certifies.
+//!
+//! A **handoff request** asks the incoming leader for a term-start candidate before its parent
+//! certifies. **Preparation** builds or reuses a candidate in response to that request.
+//!
+//! Handoff requests require an elector that can select the incoming leader without a certificate
+//! (see [`elector::Elector::elect_without_certificate`]) and an available outgoing tip. Otherwise,
+//! the leader uses the ordinary proposal path.
+//!
+//! | Handoff response | Consensus behavior |
+//! | --- | --- |
+//! | [`crate::HandoffProposal::AwaitCertification`] | Request an ordinary proposal after parent certification |
+//! | [`crate::HandoffProposal::Proposed`] with [`crate::HandoffPublication::AfterCertification`] | Hold until the exact parent certifies or finalizes |
+//! | [`crate::HandoffProposal::Proposed`] with [`crate::HandoffPublication::AllowBeforeCertification`] | Permit early relay and own notarize vote |
+//! | Closed response | Abandon the local proposal opportunity |
+//!
+//! Consensus checks ordinary proposal eligibility before publication. Parent certification
+//! preserves unfinished builds and completed candidates. Consensus discards them on view exit
+//! or replacement of invalid ancestry. Restart also discards pending requests and held candidates.
+//! Other validators require explicitly certified ancestry before verifying or voting for a
+//! term-start proposal.
+//!
+//! Marshal applications use [`crate::Application::handoff_policy`] to choose
+//! [`crate::HandoffPolicy::Prepare`] or the default [`crate::HandoffPolicy::AwaitCertification`].
+//! Stateful Glue exposes the same policy. The application makes a synchronous decision from
+//! available information and cannot revoke it. `Prepare` uses the ordinary construction path,
+//! which may reuse an existing block without calling the application builder. With
+//! `AfterCertification`, construction can overlap certification while consensus holds publication.
+//! An application can choose this for individual handoffs whose outgoing leader it does not trust.
+//!
+//! With [`crate::HandoffPublication::AllowBeforeCertification`], rotating leaders can pipeline
+//! every view. The leader distributes each proposal in parallel with its parent's votes, allowing
+//! network-bound view time to drop from two network trips to one. With stable leaders,
+//! optimistic validation pipelines every view except the term start, so the
+//! handoff only moves each term's first view one network trip earlier.
+//!
+//! Publication before certification trusts the outgoing leader not to equivocate. If the outgoing
+//! tip never notarizes, validators cannot use the proposal built on it. The usual timeout path
+//! then nullifies the incoming term.
+//!
+//! ### Handoff Metrics
+//!
+//! `handoff_events` counts lifecycle events. One request can count several events. `Requested`
+//! counts requests to the automaton, not unique views. `Deferred` counts explicit deferrals.
+//! Consensus can still abandon a deferred request later. `CandidateReturned` counts candidates
+//! returned by the automaton, and `Held` counts candidates retained for parent certification.
+//! Releasing a held candidate does not count it as returned again. Publication events count
+//! local relay attempts after proposal acceptance, classified by whether the exact captured
+//! parent has certified or finalized at that point. They do not imply network delivery.
+//!
+//! `handoff_abandoned` counts requests or candidates discarded before publication, labeled by
+//! view exit, superseded ancestry, response closure, or ineligibility at recording.
+//! Neither family tracks losses across restart or distinguishes newly built candidates from
+//! reused blocks.
+//!
+//! ### Latency Metrics
+//!
+//! `notarization_latency` and `finalization_latency` measure leader-local time from accepted
+//! local proposal recording to local certificate readiness, falling back to first local view
+//! entry when no local proposal was recorded. Holding a prepared candidate happens before
+//! proposal recording, so that wait is excluded. Early publication can record the proposal
+//! before parent certification and include the remaining wait in these metrics.
+//!
+//! `notarization_latency_from_view_entry` and `finalization_latency_from_view_entry` use first
+//! local view entry as their starting point, regardless of proposal timing. They measure the
+//! remaining time after entry and omit samples when no entry was recorded. Both metric pairs
+//! sample only the view's leader at the same certificate-ready event, before certificate journal
+//! persistence and network publication. Timestamps are process-local and are not restored on
+//! restart. These durations do not measure transaction latency or total speculative work.
 //!
 //! ### Optimistic Finality
 //!
@@ -654,7 +729,7 @@ pub(crate) fn quorum(n: u32) -> u32 {
 mod tests {
     use super::*;
     use crate::{
-        Monitor, Viewable,
+        HandoffPublication, Monitor, Viewable,
         simplex::{
             elector::{self, Config as _, Elector as _, Random, RandomVersion, RoundRobin},
             mocks::{
@@ -1713,35 +1788,25 @@ mod tests {
         dishonest_leader_certification_rejected::<_, _>(secp256r1::fixture);
     }
 
-    /// Reporter used by the stable-leader end-to-end tests.
-    type StableLeaderReporter = mocks::reporter::Reporter<
+    /// Reporter used by the round-robin end-to-end tests.
+    type RoundRobinReporter = mocks::reporter::Reporter<
         deterministic::Context,
         ed25519::Scheme,
         RoundRobin<Sha256>,
         Sha256Digest,
     >;
 
-    /// Spins up the fully-linked five-validator ed25519 cluster shared by the
-    /// stable-leader end-to-end tests, parameterized by the knobs that differ
-    /// between them. Returns the per-validator reporters, the index of the
-    /// leader elected for view 1 (stable for the whole term), and the network
-    /// oracle.
-    ///
-    /// The 1.5s leader and 3.5s certification timeouts are tuned to the
-    /// callers' link latencies: with latency near or above
-    /// half the leader timeout, a view that waits for its parent's
-    /// certification (two or more network trips) times out, so runs stay
-    /// nullification-free only when views pipeline optimistically.
-    async fn setup_stable_leader_cluster(
+    /// Starts a fully linked five-validator ed25519 round-robin cluster.
+    /// Returns each validator's reporter, the view-1 leader's index, and the network oracle.
+    async fn setup_round_robin_cluster(
         context: &mut deterministic::Context,
         namespace: &[u8],
         link: Link,
-        term_length: TermLength,
-        optimistic_views: ViewDelta,
+        elector: RoundRobin<Sha256>,
         propose_latency: (f64, f64),
-        stall_timeout: Duration,
+        accept_handoffs: bool,
     ) -> (
-        Vec<StableLeaderReporter>,
+        Vec<RoundRobinReporter>,
         usize,
         Oracle<PublicKey, deterministic::Context>,
     ) {
@@ -1757,8 +1822,6 @@ mod tests {
         let mut registrations = register_validators(&mut oracle, &participants).await;
         link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-        let elector =
-            RoundRobin::<Sha256>::default().with_term(term_length, stall_timeout, optimistic_views);
         let relay = Arc::new(mocks::relay::Relay::new());
         let mut reporters = Vec::new();
 
@@ -1783,8 +1846,11 @@ mod tests {
                 certify_latency: (1.0, 0.0),
                 should_certify: mocks::application::Certifier::Always,
             };
-            let (actor, application) =
+            let (mut actor, application) =
                 mocks::application::Application::new(context.child("application"), application_cfg);
+            actor.set_handoff(
+                accept_handoffs.then_some(HandoffPublication::AllowBeforeCertification),
+            );
             actor.start();
 
             let blocker = oracle.control(validator.clone());
@@ -1836,7 +1902,7 @@ mod tests {
         let link_latency = Duration::from_millis(100);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
-            let (reporters, leader_idx, _oracle) = setup_stable_leader_cluster(
+            let (reporters, leader_idx, _oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_high_latency",
                 Link {
@@ -1844,10 +1910,13 @@ mod tests {
                     jitter: Duration::from_millis(0),
                     success_rate: probability!(1.0),
                 },
-                TermLength::new(NZU32!(128)),
-                ViewDelta::new(128),
+                RoundRobin::<Sha256>::default().with_term(
+                    TermLength::new(NZU32!(128)),
+                    /* stall_timeout */ Duration::from_secs(20),
+                    ViewDelta::new(128),
+                ),
                 /* propose_latency */ (10.0, 0.0),
-                /* stall_timeout */ Duration::from_secs(20),
+                /* accept_handoffs */ false,
             )
             .await;
 
@@ -1878,13 +1947,131 @@ mod tests {
         });
     }
 
+    /// A pipelined handoff lets the boundary view notarize about one link latency
+    /// after the outgoing tip. Waiting for parent certification takes two.
+    ///
+    /// Without the handoff, intra-term optimism refills the pipeline one view
+    /// after the boundary stall. The handoff therefore barely changes average
+    /// block time. This test measures each boundary view relative to its parent.
+    #[test_traced]
+    fn test_pipelined_handoff_reduces_boundary_latency() {
+        let measured_views = 10u64..=100;
+        let link_latency = Duration::from_millis(100);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (reporters, _, _oracle) = setup_round_robin_cluster(
+                &mut context,
+                b"consensus_pipelined_handoff_boundary_latency",
+                Link {
+                    latency: link_latency,
+                    jitter: Duration::from_millis(0),
+                    success_rate: probability!(1.0),
+                },
+                RoundRobin::<Sha256>::default()
+                    .with_term(
+                        term_length,
+                        /* stall_timeout */ Duration::from_secs(20),
+                        ViewDelta::new(4),
+                ),
+                /* propose_latency */ (10.0, 0.0),
+                /* accept_handoffs */ true,
+            )
+            .await;
+
+            // Record when each view's notarization is first observed.
+            let reporter = reporters[0].clone();
+            let mut observed_at = Vec::new();
+            for view in measured_views.clone() {
+                while !reporter.notarizations.lock().contains_key(&View::new(view)) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                observed_at.push(context.current());
+            }
+
+            // Each boundary view must notarize before the two network trips
+            // required when proposal distribution waits for parent certification.
+            for (view, window) in measured_views.skip(1).zip(observed_at.windows(2)) {
+                if !View::new(view).is_term_start(term_length) {
+                    continue;
+                }
+                let gap = window[1].duration_since(window[0]).unwrap_or_default();
+                assert!(
+                    gap < 2 * link_latency,
+                    "expected pipelined boundary view {view} within two link latencies of its parent, got {gap:?}"
+                );
+            }
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_invalid();
+                reporter.assert_no_faults();
+                assert!(
+                    reporter.nullifies.lock().is_empty(),
+                    "expected nullification-free boundaries"
+                );
+            }
+        });
+    }
+
+    /// With rotating leaders, pipelined handoffs reduce sustained view time
+    /// from two link latencies to about one.
+    #[test_traced]
+    fn test_pipelined_handoff_halves_rotating_view_time() {
+        let measured_views = 10u64..=100;
+        let link_latency = Duration::from_millis(100);
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            let (reporters, _, _oracle) = setup_round_robin_cluster(
+                &mut context,
+                b"consensus_pipelined_handoff_rotating",
+                Link {
+                    latency: link_latency,
+                    jitter: Duration::from_millis(0),
+                    success_rate: probability!(1.0),
+                },
+                RoundRobin::<Sha256>::default(),
+                /* propose_latency */ (10.0, 0.0),
+                /* accept_handoffs */ true,
+            )
+            .await;
+
+            // Time the span from the first measured notarization to the last.
+            let reporter = reporters[0].clone();
+            let start = View::new(*measured_views.start());
+            while !reporter.notarizations.lock().contains_key(&start) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let first = context.current();
+            let end = View::new(*measured_views.end());
+            while !reporter.notarizations.lock().contains_key(&end) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let elapsed = context.current().duration_since(first).unwrap_or_default();
+            let views = measured_views.end() - measured_views.start();
+            let average = elapsed / u32::try_from(views).unwrap();
+            assert!(
+                average < 3 * link_latency / 2,
+                "expected pipelined rotating views near one link latency, got {average:?}"
+            );
+
+            for reporter in reporters.iter() {
+                reporter.assert_no_invalid();
+                reporter.assert_no_faults();
+                assert!(
+                    reporter.nullifies.lock().is_empty(),
+                    "expected nullification-free views"
+                );
+            }
+        });
+    }
+
     #[test_group("slow")]
     #[test]
     fn test_stable_leader_finalizes_full_term_without_nullification() {
         let required_view = View::new(1000);
         let executor = deterministic::Runner::timed(Duration::from_secs(40));
         executor.start(|mut context| async move {
-            let (reporters, leader_idx, oracle) = setup_stable_leader_cluster(
+            let (reporters, leader_idx, oracle) = setup_round_robin_cluster(
                 &mut context,
                 b"consensus_stable_leader_full_term_no_nullify",
                 // 1s latency shrinks the 1.5s leader timeout below a
@@ -1895,10 +2082,13 @@ mod tests {
                     jitter: Duration::from_millis(1),
                     success_rate: probability!(1.0),
                 },
-                TermLength::new(NZU32!(1000)),
-                ViewDelta::new(100),
+                RoundRobin::<Sha256>::default().with_term(
+                    TermLength::new(NZU32!(1000)),
+                    /* stall_timeout */ Duration::from_secs(6),
+                    ViewDelta::new(100),
+                ),
                 /* propose_latency */ (1.0, 0.0),
-                /* stall_timeout */ Duration::from_secs(6),
+                /* accept_handoffs */ false,
             )
             .await;
 

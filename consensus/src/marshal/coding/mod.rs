@@ -64,7 +64,8 @@ pub use marshaled::{Marshaled, MarshaledConfig};
 #[cfg(test)]
 mod tests {
     use crate::{
-        Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
+        Automaton, Block, CertifiableAutomaton, CertifiableBlock, HandoffPolicy, HandoffProposal,
+        HandoffPublication, Heightable, Relay, Reporter,
         marshal::{
             ancestry::{Ancestry, BlockProvider},
             coding::{
@@ -4973,7 +4974,8 @@ mod tests {
     /// block for the same round would equivocate. The recovered proposal
     /// must also be staged for the relay, so the broadcast re-sends its
     /// shards and certification resolves through the deduplicated
-    /// re-persist.
+    /// re-persist. The request is issued as a handoff, which reaches
+    /// `propose` through the shared helper.
     #[test_traced("WARN")]
     fn test_propose_reuses_verified_block_on_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -5030,8 +5032,11 @@ mod tests {
             // only if the stored block is reused as-is and certification
             // resolves through the durability gate registered by the
             // recovery staging.
+            // A non-default permission catches a defaulted publication.
+            let publication = HandoffPublication::AllowBeforeCertification;
             let (mock_app, verify_started, _release_verify): (GatedVerifyingApp<CodingB, S>, _, _) =
                 GatedVerifyingApp::new();
+            let mock_app = mock_app.with_handoff_policy(HandoffPolicy::Prepare(publication));
             let cfg = MarshaledConfig {
                 application: mock_app,
                 marshal: marshal.clone(),
@@ -5042,14 +5047,23 @@ mod tests {
             };
             let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
 
-            let commitment = marshaled
-                .propose(ctx)
+            // Handoff requests use the ordinary proposal reuse path.
+            let decision = marshaled
+                .propose_handoff(ctx)
                 .await
                 .await
-                .expect("propose must return a commitment");
+                .expect("handoff proposal must return a decision");
+            let HandoffProposal::Proposed {
+                payload: commitment,
+                publication: forwarded,
+            } = decision
+            else {
+                panic!("application accepted handoff but marshal deferred");
+            };
+            assert_eq!(forwarded, publication);
             assert_eq!(
                 commitment, commitment_a,
-                "propose must reuse the block marshal already persisted for this round"
+                "handoff must reuse the block marshal already persisted for this round"
             );
 
             // The relay broadcast must find the recovered proposal staged and

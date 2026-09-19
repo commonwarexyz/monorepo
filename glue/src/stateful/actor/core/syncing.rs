@@ -581,7 +581,7 @@ mod tests {
             };
             (
                 harness,
-                StatefulMailbox::new(mailbox_sender),
+                StatefulMailbox::new(mailbox_sender, TestApp::default()),
                 syncer_receiver,
                 sync_complete,
             )

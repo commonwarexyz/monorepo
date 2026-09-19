@@ -134,6 +134,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         Some(leader)
     }
 
+    /// Clears the local proposal request. A new build may follow only while
+    /// the slot has no proposal.
+    pub const fn clear_proposal_request(&mut self) {
+        self.proposal.clear_request();
+    }
+
     /// Returns the leader info if we should verify a proposal.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
@@ -391,6 +397,12 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn elapsed_since_start(&self, now: SystemTime) -> Option<Duration> {
         self.proposed_at
             .or(self.entered_at)
+            .map(|start| now.duration_since(start).unwrap_or_default())
+    }
+
+    /// Returns time since first local view entry, without falling back to proposal recording.
+    pub fn elapsed_since_entry(&self, now: SystemTime) -> Option<Duration> {
+        self.entered_at
             .map(|start| now.duration_since(start).unwrap_or_default())
     }
 
@@ -819,6 +831,7 @@ mod tests {
         // Never started: no sample.
         let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
         assert!(round.elapsed_since_start(at(5)).is_none());
+        assert!(round.elapsed_since_entry(at(5)).is_none());
 
         // Follower: anchored at view entry, first entry wins.
         round.mark_entered(at(1));
@@ -828,15 +841,26 @@ mod tests {
             Some(Duration::from_secs(4))
         );
 
+        assert_eq!(
+            round.elapsed_since_entry(at(5)),
+            Some(Duration::from_secs(4))
+        );
+
         // Optimistic leader: proposing before entering the view anchors the
         // sample at the proposal.
         let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
         let proposal = Proposal::new(round_info, View::new(9), Sha256Digest::from([1u8; 32]));
         assert!(round.proposed(at(2), proposal.clone()));
+        assert!(round.elapsed_since_entry(at(3)).is_none());
         round.mark_entered(at(4));
         assert_eq!(
             round.elapsed_since_start(at(6)),
             Some(Duration::from_secs(4))
+        );
+
+        assert_eq!(
+            round.elapsed_since_entry(at(6)),
+            Some(Duration::from_secs(2))
         );
 
         // Normal leader: the proposal anchors the sample even when the view
@@ -847,6 +871,10 @@ mod tests {
         assert_eq!(
             round.elapsed_since_start(at(6)),
             Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            round.elapsed_since_entry(at(6)),
+            Some(Duration::from_secs(5))
         );
     }
 

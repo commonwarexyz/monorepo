@@ -1,10 +1,11 @@
 use crate::{
+    Automaton, HandoffPolicy, HandoffProposal,
     marshal::core::{Mailbox, Variant, durability::Durable as _},
     types::Round,
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_macros::select;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, Metrics, Spawner};
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     sync::Mutex,
@@ -202,6 +203,49 @@ pub(crate) async fn forward<T, U>(
     {
         output.send_lossy(value);
     }
+}
+
+/// Answers a handoff request through `automaton`'s ordinary proposal path.
+///
+/// [`HandoffPolicy::AwaitCertification`] resolves the receiver immediately.
+/// [`HandoffPolicy::Prepare`] clones `automaton` into a task that builds the
+/// candidate and forwards it with the granted publication permission while
+/// consensus still holds the receiver.
+pub(crate) fn propose_handoff<E, A>(
+    context: &E,
+    automaton: &A,
+    policy: HandoffPolicy,
+    round: Round,
+    consensus_context: A::Context,
+) -> oneshot::Receiver<HandoffProposal<A::Digest>>
+where
+    E: Spawner + Metrics,
+    A: Automaton + Clone + Send + 'static,
+    A::Context: Send + 'static,
+{
+    let (tx, rx) = oneshot::channel();
+    let publication = match policy {
+        HandoffPolicy::Prepare(publication) => publication,
+        HandoffPolicy::AwaitCertification => {
+            tx.send_lossy(HandoffProposal::AwaitCertification);
+            return rx;
+        }
+    };
+    let mut automaton = automaton.clone();
+    context
+        .child("propose_handoff")
+        .with_attribute("round", round)
+        .spawn(move |_| async move {
+            let proposal = automaton.propose(consensus_context).await;
+            forward(tx, proposal, |payload| {
+                Some(HandoffProposal::Proposed {
+                    payload,
+                    publication,
+                })
+            })
+            .await;
+        });
+    rx
 }
 
 /// Drives a certification gate `task` to a certify verdict, recovering through `fallback` when the
