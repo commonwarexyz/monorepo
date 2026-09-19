@@ -382,7 +382,7 @@ macro_rules! define_db_variants {
                             let ctx = $ctx_expr;
                             let cfg = $cfg(&ctx);
                             #[allow(unused_mut)]
-                            let mut $db_name = <$db>::init(ctx.child("storage"), cfg).await.unwrap();
+                            let mut $db_name = <$db>::init(ctx.child("storage"), cfg, None).await.unwrap();
                             $body
                         }
                     )+
@@ -403,7 +403,7 @@ macro_rules! define_db_variants {
                             for _ in 0..$iters {
                                 #[allow(unused_mut)]
                                 let mut $db_name =
-                                    <$db>::init(ctx.child("storage"), cfg.clone()).await.unwrap();
+                                    <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
                                 $body
                             }
                             start.elapsed()
