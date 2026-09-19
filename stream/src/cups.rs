@@ -17,9 +17,10 @@
 //! listener's bouncer may reject that claim before authentication. Accepting it only permits the
 //! handshake to continue; a successful handshake authenticates the returned identity.
 //!
-//! Peers must agree on a unique, application-specific namespace and have clocks within the
-//! configured timestamp acceptance windows. Callers must enforce a handshake deadline, for example
-//! with [crate::utils::Timeout]. Identities are exposed during the handshake, and there is no 0-RTT
+//! Peers must agree on a unique, application-specific namespace, a [Version], and have clocks
+//! within the configured timestamp acceptance windows. The version is not negotiated: a mismatch
+//! fails the handshake. Callers must enforce a handshake deadline, for example with
+//! [crate::utils::Timeout]. Identities are exposed during the handshake, and there is no 0-RTT
 //! resumption.
 //!
 //! # Records
@@ -108,6 +109,29 @@ impl From<HandshakeError> for Error {
     }
 }
 
+/// Handshake protocol used by [Handshake].
+///
+/// Both peers must use the same version. The version is not negotiated, so keep the older version
+/// until every peer has upgraded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Version {
+    /// [sake::Version::V0]: the first handshake message's signature does not cover the dialer
+    /// identity.
+    V0,
+    /// [sake::Version::V1]: every handshake signature covers both identities.
+    V1,
+}
+
+impl Version {
+    /// Returns the SAKE version used by this handshake version.
+    const fn sake(self) -> sake::Version {
+        match self {
+            Self::V0 => sake::Version::V0,
+            Self::V1 => sake::Version::V1,
+        }
+    }
+}
+
 /// Establishes CUPS streams with Simple Authenticated Key Exchange (SAKE).
 ///
 /// Implements [crate::Handshake] using [commonware_cryptography::handshake::sake].
@@ -115,6 +139,9 @@ impl From<HandshakeError> for Error {
 pub struct Handshake<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
+
+    /// Handshake protocol version.
+    pub version: Version,
 
     /// Maximum time drift allowed for future timestamps.
     pub synchrony_bound: Duration,
@@ -125,9 +152,10 @@ pub struct Handshake<S> {
 
 impl<S> Handshake<S> {
     /// Creates a SAKE handshake accepting timestamps up to five seconds ahead or ten seconds old.
-    pub const fn new(signer: S) -> Self {
+    pub const fn new(signer: S, version: Version) -> Self {
         Self {
             signer,
+            version,
             synchrony_bound: Duration::from_secs(5),
             max_handshake_age: Duration::from_secs(10),
         }
@@ -202,7 +230,14 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let (current_time, ok_timestamps) = self.time_information(&context);
         let (state, syn) = dial_start(
             context,
-            Context::new(namespace, current_time, ok_timestamps, self.signer, peer),
+            Context::new(
+                namespace,
+                self.version.sake(),
+                current_time,
+                ok_timestamps,
+                self.signer,
+                peer,
+            ),
         );
         send_handshake_frame(&mut sink, syn).await?;
 
@@ -260,6 +295,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
             context,
             Context::new(
                 namespace,
+                self.version.sake(),
                 current_time,
                 ok_timestamps,
                 self.signer,
@@ -565,7 +601,7 @@ mod test {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
-                    let handshake = Handshake::new(PrivateKey::from_seed(0));
+                    let handshake = Handshake::new(PrivateKey::from_seed(0), Version::V1);
                     let attempt = async {
                         if dialer {
                             handshake
@@ -607,9 +643,10 @@ mod test {
         });
     }
 
-    fn transport_handshake(signer: PrivateKey) -> Handshake<PrivateKey> {
+    fn transport_handshake(signer: PrivateKey, version: Version) -> Handshake<PrivateKey> {
         Handshake {
             signer,
+            version,
             synchrony_bound: Duration::from_secs(1),
             max_handshake_age: Duration::from_secs(1),
         }
@@ -684,8 +721,8 @@ mod test {
                 let (dialer_sink, listener_stream) = mocks::Channel::init();
                 let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-                let dialer_handshake = transport_handshake(dialer_signer.clone());
-                let listener_handshake = transport_handshake(listener_signer.clone());
+                let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
+                let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
 
                 let listener_handle = context.child("listener").spawn(move |context| async move {
                     Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -744,6 +781,70 @@ mod test {
         Ok(())
     }
 
+    /// Runs a handshake between a dialer and listener configured with the given versions.
+    fn handshake_with_versions(
+        dialer_version: Version,
+        listener_version: Version,
+    ) -> Result<(), Error> {
+        let executor = deterministic::Runner::timed(Duration::from_secs(5));
+        executor.start(move |context| async move {
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+
+            let dialer_handshake = transport_handshake(dialer_signer.clone(), dialer_version);
+            let listener_handshake = transport_handshake(listener_signer.clone(), listener_version);
+
+            let listener_handle = context.child("listener").spawn(move |context| async move {
+                listener_handshake
+                    .listen(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
+            });
+
+            let listener_public_key = listener_signer.public_key();
+            let dialer_handle = context.child("dialer").spawn(move |context| async move {
+                dialer_handshake
+                    .dial(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        listener_public_key,
+                        dialer_stream,
+                        dialer_sink,
+                    )
+                    .await
+            });
+
+            // The listener verifies the first signed message, so its error is the informative one.
+            let (peer, _, _) = listener_handle.await.unwrap()?;
+            assert_eq!(peer, dialer_signer.public_key());
+            dialer_handle.await.unwrap()?;
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_versions() {
+        for version in [Version::V0, Version::V1] {
+            handshake_with_versions(version, version).unwrap();
+        }
+        for (dialer, listener) in [(Version::V0, Version::V1), (Version::V1, Version::V0)] {
+            assert!(matches!(
+                handshake_with_versions(dialer, listener),
+                Err(Error::HandshakeError(HandshakeError::HandshakeFailed))
+            ));
+        }
+    }
+
     #[test]
     fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::default();
@@ -761,8 +862,8 @@ mod test {
                 last_alloc: last_alloc.clone(),
             };
 
-            let dialer_handshake = transport_handshake(dialer_signer);
-            let listener_handshake = transport_handshake(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer, Version::V1);
+            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -823,8 +924,8 @@ mod test {
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone());
-            let listener_handshake = transport_handshake(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
+            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -902,8 +1003,8 @@ mod test {
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone());
-            let listener_handshake = transport_handshake(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
+            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -981,8 +1082,8 @@ mod test {
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone());
-            let listener_handshake = transport_handshake(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
+            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -1045,8 +1146,8 @@ mod test {
             let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone());
-            let listener_handshake = transport_handshake(listener_signer.clone());
+            let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
+            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
 
             let listener_handle = context.child("listener").spawn(move |context| async move {
                 Timeout::new(listener_handshake, Duration::from_secs(1))
@@ -1114,7 +1215,7 @@ mod test {
 
             // Even with a large application limit, the listener should bound the
             // unauthenticated peer-key frame to the fixed public-key size.
-            let listener_handshake = transport_handshake(listener_signer);
+            let listener_handshake = transport_handshake(listener_signer, Version::V1);
             let max_message_size = 1024 * 1024;
 
             // Advertise a frame that is one byte larger than the encoded public
@@ -1147,7 +1248,7 @@ mod test {
 
             // Use a large application limit to make sure this path is guarded by
             // the fixed SynAck size rather than by post-handshake settings.
-            let dialer_handshake = transport_handshake(dialer_signer);
+            let dialer_handshake = transport_handshake(dialer_signer, Version::V1);
             let max_message_size = 1024 * 1024;
 
             // Build a valid SynAck only to derive its true encoded size for the
@@ -1159,6 +1260,7 @@ mod test {
                 context.child("dialer"),
                 Context::new(
                     NAMESPACE,
+                    dialer_handshake.version.sake(),
                     current_time,
                     ok_timestamps.clone(),
                     dialer_handshake.signer.clone(),
@@ -1169,6 +1271,7 @@ mod test {
                 context.child("listener"),
                 Context::new(
                     NAMESPACE,
+                    dialer_handshake.version.sake(),
                     current_time,
                     ok_timestamps,
                     listener_signer,

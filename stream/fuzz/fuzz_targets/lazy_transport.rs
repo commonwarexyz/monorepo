@@ -4,7 +4,7 @@ use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,
-    cups::{Handshake, Receiver, Sender},
+    cups::{Handshake, Receiver, Sender, Version},
     utils::Timeout,
 };
 use futures::executor::block_on;
@@ -33,6 +33,7 @@ thread_local! {
             let dialer_handshake = Timeout::new(
                 Handshake {
                     signer: dialer_signer.clone(),
+                    version: Version::V1,
                     synchrony_bound: Duration::from_secs(3),
                     max_handshake_age: Duration::from_secs(5),
                 },
@@ -42,6 +43,7 @@ thread_local! {
             let listener_handshake = Timeout::new(
                 Handshake {
                     signer: listener_signer.clone(),
+                    version: Version::V1,
                     synchrony_bound: Duration::from_secs(3),
                     max_handshake_age: Duration::from_secs(5),
                 },

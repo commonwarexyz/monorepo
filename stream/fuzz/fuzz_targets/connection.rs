@@ -2,7 +2,11 @@
 
 use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
-use commonware_stream::{Handshake as _, cups::Handshake, utils::Timeout};
+use commonware_stream::{
+    Handshake as _,
+    cups::{Handshake, Version},
+    utils::Timeout,
+};
 use futures::join;
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -96,6 +100,7 @@ fn fuzz(input: FuzzInput) {
         let dialer_handshake = Timeout::new(
             Handshake {
                 signer: dialer_signer.clone(),
+                version: Version::V1,
                 synchrony_bound,
                 max_handshake_age,
             },
@@ -105,6 +110,7 @@ fn fuzz(input: FuzzInput) {
         let listener_handshake = Timeout::new(
             Handshake {
                 signer: listener_signer.clone(),
+                version: Version::V1,
                 synchrony_bound,
                 max_handshake_age,
             },
