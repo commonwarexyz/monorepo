@@ -234,6 +234,10 @@
 .mm-result-panel { margin-bottom: 20px; padding: 12px 16px 10px; border: 1px solid #bdbdbd; background: #fff; }
 .mm-result-panel h3 { margin: 0; font-size: 14px; }
 .mm-result-panel > p { margin: 3px 0 10px; color: #666; font-size: 12px; }
+.mm-result-meta { position: relative; }
+.mm-results .mm-result-meta .mm-region-help { display: inline-grid; place-items: center; width: 1.35em; min-height: 0; height: 1.35em; margin: 0 0 0 .35em; padding: 0; border: 1px solid currentColor; border-radius: 50%; background: transparent; color: inherit; font: inherit; line-height: 1; vertical-align: .05em; cursor: help; }
+.mm-region-tooltip { position: absolute; z-index: 2; top: calc(100% + 6px); left: 0; width: max-content; max-width: min(560px, calc(100vw - 40px)); padding: 8px 10px; border: 1px solid #888; background: #fff; color: #333; box-shadow: 2px 2px 0 #e9e9f8; text-align: left; white-space: normal; visibility: hidden; opacity: 0; pointer-events: none; transition: opacity .12s ease, visibility .12s ease; }
+.mm-region-help:hover + .mm-region-tooltip, .mm-region-help:focus-visible + .mm-region-tooltip { visibility: visible; opacity: 1; }
 .mm-result-legend { display: flex; flex-wrap: wrap; gap: 12px 22px; margin-bottom: 10px; font-size: 12px; }
 .mm-result-legend span { display: inline-flex; align-items: center; gap: 8px; }
 .mm-result-plot { position: relative; }
