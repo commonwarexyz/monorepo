@@ -1193,6 +1193,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
     #[cfg_attr(
         all(target_os = "linux", feature = "iouring"),
