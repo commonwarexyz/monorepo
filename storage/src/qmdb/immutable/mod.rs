@@ -129,8 +129,10 @@ where
     C: Contiguous<Item = Operation<F, K, V>>,
     T: Translator,
 {
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
         .await?;
     pin_mut!(stream);
     while let Some(result) = stream.next().await {
