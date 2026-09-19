@@ -6,13 +6,10 @@
 //! factories run synchronously on the thread that calls [`crate::Spawner::spawn`].
 //!
 //! Sockets, blobs, and pending I/O and sleep futures can move between workers.
-//! Registrations stay on their original worker, forwarding completion when the
-//! observing future moves to another thread. Moving a future does not keep its
-//! original worker alive. Closing that worker causes unresolved I/O futures to
-//! return errors and unresolved sleep futures to panic when polled.
-//!
-//! Completion handles returned by [`crate::Blob::start_sync`] can be awaited on
-//! another thread, even after the original runner shuts down.
+//! Registrations stay on their original worker without keeping it alive. If it
+//! closes, pending I/O futures return errors and pending sleeps panic when polled.
+//! [`crate::Blob::start_sync`] handles can be awaited on another thread, even after
+//! the original runner shuts down.
 //!
 //! # Ownership
 //!
