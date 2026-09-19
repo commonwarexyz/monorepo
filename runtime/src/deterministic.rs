@@ -1654,6 +1654,7 @@ mod tests {
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
     use futures::{FutureExt as _, stream::FuturesUnordered};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -1766,18 +1767,18 @@ mod tests {
 
     #[test]
     fn test_sleep_refreshes_one_alarm_after_repolling() {
-        struct Counter(std::sync::atomic::AtomicUsize);
+        struct Counter(AtomicUsize);
 
         impl ArcWake for Counter {
             fn wake_by_ref(this: &Arc<Self>) {
-                this.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                this.0.fetch_add(1, Ordering::Relaxed);
             }
         }
 
         Runner::default().start(|context| async move {
             // Count notifications separately for the initial and final pollers.
-            let first = Arc::new(Counter(std::sync::atomic::AtomicUsize::new(0)));
-            let latest = Arc::new(Counter(std::sync::atomic::AtomicUsize::new(0)));
+            let first = Arc::new(Counter(AtomicUsize::new(0)));
+            let latest = Arc::new(Counter(AtomicUsize::new(0)));
             let mut sleep = context.sleep(Duration::from_millis(10)).boxed();
 
             // Changing the poller's waker must reuse the existing alarm.
@@ -1792,8 +1793,8 @@ mod tests {
 
             // Once due, the sleep must notify only its latest poller and resolve.
             context.sleep(Duration::from_millis(20)).await;
-            assert_eq!(first.0.load(std::sync::atomic::Ordering::Relaxed), 0);
-            assert_eq!(latest.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(first.0.load(Ordering::Relaxed), 0);
+            assert_eq!(latest.0.load(Ordering::Relaxed), 1);
             assert!(futures::poll!(&mut sleep).is_ready());
         });
     }
