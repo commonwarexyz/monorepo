@@ -57,13 +57,13 @@ library LibQMDBCurrent {
     /// @dev Fixed operations use 32-byte keys and fixed-size values. Variable operations accept
     /// fixed-width fields or `VARIABLE_SIZE` byte vectors with canonical unsigned 32-bit varint lengths.
     /// Keys use raw byte lexicographic ordering. All fields describe the authenticated database schema.
-    struct ExclusionEncoding {
+    struct Encoding {
         OperationEncoding operation;
         uint256 keySize;
         uint256 valueSize;
     }
 
-    /// @dev Select a length-prefixed byte vector in `ExclusionEncoding`.
+    /// @dev Select a length-prefixed byte vector in `Encoding`.
     uint256 internal constant VARIABLE_SIZE = type(uint256).max;
 
     /// @notice Verify ordered key exclusion in a current QMDB.
@@ -84,7 +84,7 @@ library LibQMDBCurrent {
         bytes memory key,
         bytes memory operation,
         Proof calldata proof,
-        ExclusionEncoding memory encoding,
+        Encoding memory encoding,
         LibMerkle.Family family,
         uint256 chunkBytes,
         address hasher
@@ -202,6 +202,7 @@ library LibQMDBCurrent {
     }
 
     /// @dev Authenticate an encoded operation and its active bit against the supplied current root.
+    /// The caller owns the interpretation of the authenticated operation bytes.
     /// The family determines leaf bounds, physical positions, and graftable chunks.
     function verify(
         bytes32 root,
@@ -317,12 +318,11 @@ library LibQMDBCurrent {
     }
 
     /// @dev Parse variable operation framing before interpreting an authenticated cyclic key interval.
-    function _excludesVariable(
-        bytes memory key,
-        bytes memory operation,
-        uint256 location,
-        ExclusionEncoding memory encoding
-    ) private pure returns (bool) {
+    function _excludesVariable(bytes memory key, bytes memory operation, uint256 location, Encoding memory encoding)
+        private
+        pure
+        returns (bool)
+    {
         if (operation.length == 0) return false;
         if (encoding.keySize == VARIABLE_SIZE) {
             if (key.length > type(uint32).max) return false;

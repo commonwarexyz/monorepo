@@ -49,8 +49,8 @@ abstract contract LibQMDBLifecycleTest is QMDBTest {
         bytes memory operation,
         LibQMDBCurrent.Proof calldata proof
     ) external view returns (bool) {
-        LibQMDBCurrent.ExclusionEncoding memory encoding =
-            LibQMDBCurrent.ExclusionEncoding(LibQMDBCurrent.OperationEncoding.Fixed, 32, 32);
+        LibQMDBCurrent.Encoding memory encoding =
+            LibQMDBCurrent.Encoding(LibQMDBCurrent.OperationEncoding.Fixed, 32, 32);
         return _family() == LibMerkle.Family.MMB
             ? LibQMDBCurrentMMB.verifyExclusion(root, key, operation, proof, encoding, 32, _hasher())
             : LibQMDBCurrentMMR.verifyExclusion(root, key, operation, proof, encoding, 32, _hasher());

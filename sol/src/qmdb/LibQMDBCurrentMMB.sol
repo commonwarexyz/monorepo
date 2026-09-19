@@ -13,6 +13,7 @@ import { LibQMDBCurrent } from "./LibQMDBCurrent.sol";
 /// A failed call or another return length reverts with `HashFailed()`.
 library LibQMDBCurrentMMB {
     /// @notice Verify an encoded operation and its active bit against a trusted current MMB root.
+    /// @dev The caller uses the database schema to bind operation bytes to the expected key and value.
     /// @param root Authenticated current QMDB MMB root with the specified schema and chunk size.
     /// @param operation Exact Commonware operation encoding, including codec tags, padding and length prefixes.
     /// @param proof Single-operation membership proof with an activity chunk.
@@ -85,7 +86,7 @@ library LibQMDBCurrentMMB {
         bytes memory key,
         bytes memory operation,
         LibQMDBCurrent.Proof calldata proof,
-        LibQMDBCurrent.ExclusionEncoding memory encoding,
+        LibQMDBCurrent.Encoding memory encoding,
         uint256 chunkBytes,
         address hasher
     ) internal view returns (bool) {

@@ -109,8 +109,7 @@ abstract contract LibQMDBHashTest is LibQMDBBatchTest {
 
     /// @dev Query an interior key in the fixed-width exclusion fixtures.
     function singleCurrentExclusion(QMDBCase calldata c, address hasher) external view returns (bool) {
-        LibQMDBCurrent.ExclusionEncoding memory encoding =
-            LibQMDBCurrent.ExclusionEncoding(LibQMDBCurrent.OperationEncoding.Fixed, 32, 0);
+        LibQMDBCurrent.Encoding memory encoding = LibQMDBCurrent.Encoding(LibQMDBCurrent.OperationEncoding.Fixed, 32, 0);
         return _family() == LibMerkle.Family.MMB
             ? LibQMDBCurrentMMB.verifyExclusion(
                 c.root, abi.encodePacked(bytes32(uint256(15))), c.operation, c.proof, encoding, c.chunkBytes, hasher
