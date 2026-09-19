@@ -24,6 +24,7 @@ commonware-parallel = { workspace = true, features = ["std"] }
 commonware-storage = { workspace = true, features = ["std"] }
 commonware-utils = { workspace = true, features = ["std"] }
 num-rational.workspace = true
+rand_core.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 
@@ -34,6 +35,7 @@ bench = false
 arbitrary.workspace = true
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
+commonware-math = { workspace = true, features = ["arbitrary"] }
 commonware-runtime = { workspace = true, features = ["test-utils"] }
 criterion.workspace = true
 rand.workspace = true
@@ -48,6 +50,7 @@ arbitrary = [
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]
+fuzz = [ "arbitrary" ]
 
 [[bench]]
 name = "coding_scheme_times"
