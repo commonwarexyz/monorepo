@@ -590,27 +590,120 @@ pub struct RecordingSnapshot {
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone, Default)]
 pub struct Recordings {
-    state: Arc<Mutex<RecordingSnapshot>>,
+    state: Arc<Mutex<RecordingState>>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Default)]
+struct RecordingState {
+    options: RecordingSnapshot,
+    storage_events: Vec<StorageEvent>,
+    next_incarnation: u64,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 impl Recordings {
-    /// Return a snapshot of all observations recorded so far.
+    /// Return the recorded read and write options.
     pub fn snapshot(&self) -> RecordingSnapshot {
-        self.state.lock().clone()
+        self.state.lock().options.clone()
     }
 
     /// Remove all recorded observations.
     pub fn clear(&self) {
-        *self.state.lock() = RecordingSnapshot::default();
+        let mut state = self.state.lock();
+        state.options = RecordingSnapshot::default();
+        state.storage_events.clear();
+    }
+
+    /// Return storage call and blob lifetime events in observation order.
+    pub fn storage_events(&self) -> Vec<StorageEvent> {
+        self.state.lock().storage_events.clone()
     }
 
     fn read(&self, options: ReadOptions) {
-        self.state.lock().reads.push(options);
+        self.state.lock().options.reads.push(options);
     }
 
     fn write(&self, options: WriteOptions) {
-        self.state.lock().writes.push(options);
+        self.state.lock().options.writes.push(options);
+    }
+
+    fn storage_event(&self, event: StorageEvent) {
+        self.state.lock().storage_events.push(event);
+    }
+
+    fn open_incarnation(&self, partition: &str, name: &[u8]) -> Arc<RecordedIncarnation> {
+        let mut state = self.state.lock();
+        let incarnation = state.next_incarnation;
+        state.next_incarnation += 1;
+        state.storage_events.push(StorageEvent::Opened {
+            incarnation,
+            partition: partition.to_owned(),
+            name: name.to_vec(),
+        });
+        Arc::new(RecordedIncarnation {
+            incarnation,
+            recordings: self.clone(),
+        })
+    }
+}
+
+/// A storage call or blob lifetime transition observed by [Recordings].
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StorageEvent {
+    /// A new blob incarnation was opened.
+    Opened {
+        /// Identifier unique within these recordings.
+        incarnation: u64,
+        /// Storage partition.
+        partition: String,
+        /// Blob name.
+        name: Vec<u8>,
+    },
+    /// A write completed successfully.
+    Wrote {
+        /// Blob incarnation.
+        incarnation: u64,
+        /// Write options.
+        options: WriteOptions,
+    },
+    /// A sync completed successfully.
+    Synced {
+        /// Blob incarnation.
+        incarnation: u64,
+    },
+    /// A start_sync call returned its completion handle.
+    StartedSync {
+        /// Blob incarnation.
+        incarnation: u64,
+    },
+    /// A blob or partition was removed successfully.
+    Removed {
+        /// Storage partition.
+        partition: String,
+        /// Blob name, or `None` when the entire partition was removed.
+        name: Option<Vec<u8>>,
+    },
+    /// The final recording wrapper for an incarnation was dropped.
+    Dropped {
+        /// Blob incarnation.
+        incarnation: u64,
+    },
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+struct RecordedIncarnation {
+    incarnation: u64,
+    recordings: Recordings,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Drop for RecordedIncarnation {
+    fn drop(&mut self) {
+        self.recordings.storage_event(StorageEvent::Dropped {
+            incarnation: self.incarnation,
+        });
     }
 }
 
@@ -684,18 +777,17 @@ impl<E: Storage> Storage for RecordingContext<E> {
         versions: std::ops::RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
-        Ok((
-            RecordingBlob {
-                inner,
-                recordings: self.recordings.clone(),
-            },
-            len,
-            version,
-        ))
+        let incarnation = self.recordings.open_incarnation(partition, name);
+        Ok((RecordingBlob { inner, incarnation }, len, version))
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.inner.remove(partition, name).await
+        self.inner.remove(partition, name).await?;
+        self.recordings.storage_event(StorageEvent::Removed {
+            partition: partition.to_owned(),
+            name: name.map(<[u8]>::to_vec),
+        });
+        Ok(())
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -708,7 +800,7 @@ impl<E: Storage> Storage for RecordingContext<E> {
 #[derive(Clone)]
 pub struct RecordingBlob<B> {
     inner: B,
-    recordings: Recordings,
+    incarnation: Arc<RecordedIncarnation>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -720,7 +812,7 @@ impl<B: Blob> Blob for RecordingBlob<B> {
         bufs: impl Into<IoBufsMut> + Send,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.recordings.read(options);
+        self.incarnation.recordings.read(options);
         self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
@@ -730,7 +822,7 @@ impl<B: Blob> Blob for RecordingBlob<B> {
         len: usize,
         options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
-        self.recordings.read(options);
+        self.incarnation.recordings.read(options);
         self.inner.read_at(offset, len, options).await
     }
 
@@ -740,8 +832,15 @@ impl<B: Blob> Blob for RecordingBlob<B> {
         bufs: impl Into<IoBufs> + Send,
         options: WriteOptions,
     ) -> Result<(), Error> {
-        self.recordings.write(options);
-        self.inner.write_at(offset, bufs, options).await
+        self.incarnation.recordings.write(options);
+        self.inner.write_at(offset, bufs, options).await?;
+        self.incarnation
+            .recordings
+            .storage_event(StorageEvent::Wrote {
+                incarnation: self.incarnation.incarnation,
+                options,
+            });
+        Ok(())
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -749,11 +848,23 @@ impl<B: Blob> Blob for RecordingBlob<B> {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.inner.sync().await
+        self.inner.sync().await?;
+        self.incarnation
+            .recordings
+            .storage_event(StorageEvent::Synced {
+                incarnation: self.incarnation.incarnation,
+            });
+        Ok(())
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        self.inner.start_sync().await
+        let handle = self.inner.start_sync().await;
+        self.incarnation
+            .recordings
+            .storage_event(StorageEvent::StartedSync {
+                incarnation: self.incarnation.incarnation,
+            });
+        handle
     }
 }
 
