@@ -411,14 +411,13 @@ pub trait Source: Send + Sync {
     /// Why this source could not answer.
     type Error: std::error::Error + Send + 'static;
 
-    /// Serve a request, returning the first value produced by `verify`.
+    /// Serve a request and pass responses to `verify`.
     ///
-    /// `verify` returns `Some(value)` to accept a response, in which case `serve` returns
-    /// `Ok(Some(value))`. Returning `None` rejects that response as invalid. The source may
-    /// try another response within the same `serve` call.
+    /// - `Some(value)` accepts the response and returns `Ok(Some(value))` from this call.
+    /// - `None` rejects it as invalid. The source may try another response.
     ///
-    /// `serve` returns `Ok(None)` when it stops without an accepted response.
-    /// Dropping the returned future cancels the request.
+    /// Returns `Ok(None)` if the source stops without an accepted response.
+    /// Dropping the future cancels the request.
     fn serve<'a, T: Send + 'static>(
         &'a self,
         request: Request<Self::Family>,
