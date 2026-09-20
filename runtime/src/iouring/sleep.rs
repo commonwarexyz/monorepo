@@ -11,7 +11,7 @@
 //! stay on the original worker. Observer callbacks run outside worker borrows.
 
 use super::{
-    mailbox::Message,
+    mailbox::{Cancel, Forward},
     registration::{Key, Observation, Registration},
     runtime::{Deferred, Local},
     slab::{Id, Slab},
@@ -137,12 +137,12 @@ impl Key for TimerId {
         )
     }
 
-    fn forward(self, sender: oneshot::Sender<Result<(), Error>>) -> Message {
-        Message::ForwardTimer(self, sender)
+    fn forward(self, sender: oneshot::Sender<Result<(), Error>>) -> Forward {
+        Forward::Timer(self, sender)
     }
 
-    fn cancel(self) -> Message {
-        Message::CancelTimer(self)
+    fn cancel(self) -> Cancel {
+        Cancel::Timer(self)
     }
 }
 

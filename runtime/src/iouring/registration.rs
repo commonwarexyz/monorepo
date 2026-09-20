@@ -5,7 +5,7 @@
 //! remains available for cancellation until observation ends.
 
 use super::{
-    mailbox::{Mailbox, Message},
+    mailbox::{Cancel, Forward, Mailbox, Message},
     runtime::Local,
 };
 use crate::Error;
@@ -40,10 +40,10 @@ pub trait Key: Copy + Unpin {
     fn refresh(self, local: &mut Local, waker: Waker) -> Option<Waker>;
 
     /// Transfer observation to a completion channel on the owning worker.
-    fn forward(self, sender: oneshot::Sender<Result<Self::Output, Error>>) -> Message;
+    fn forward(self, sender: oneshot::Sender<Result<Self::Output, Error>>) -> Forward;
 
     /// Release observation, leaving retirement policy to the owning subsystem.
-    fn cancel(self) -> Message;
+    fn cancel(self) -> Cancel;
 }
 
 /// Registration ownership retained between polls.
@@ -142,7 +142,7 @@ impl<K: Key> Future for Registration<K> {
             let receiver = receiver.get_or_insert_with(|| {
                 let (sender, receiver) = oneshot::channel();
                 if let Some(mailbox) = mailbox.upgrade() {
-                    let _ = mailbox.send(key.forward(sender));
+                    let _ = mailbox.send(Message::Forward(key.forward(sender)));
                 }
                 receiver
             });
