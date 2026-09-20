@@ -16,7 +16,7 @@ use std::{collections::VecDeque, future::Future};
 #[error("response dropped before completion")]
 pub struct ResponseDropped;
 
-/// A caller's verifier and final result channel, retained across rejected candidates.
+/// Verifier and result channel for a pending request.
 pub(super) struct Reply<R, V>
 where
     V: Verifier<R>,
@@ -42,7 +42,7 @@ where
             .is_none_or(oneshot::Sender::is_closed)
     }
 
-    /// Return a validity verdict, or `None` when the caller has stopped waiting.
+    /// Return whether the response is valid, or `None` if the caller stopped waiting.
     pub(super) fn deliver(&mut self, response: R) -> Option<bool> {
         if self.is_closed() {
             return None;
@@ -73,8 +73,7 @@ where
         request: Request<F>,
         response: Reply<Response<F, Op, D>, V>,
     },
-    /// Notify the actor that a caller stopped waiting for a response.
-    /// Only subscriptions whose response channels have closed are canceled.
+    /// Cancel subscriptions for this request whose response channels have closed.
     CancelOperations { request: Request<F> },
 }
 
@@ -172,10 +171,7 @@ where
     }
 }
 
-/// Client-facing resolver mailbox used by the QMDB sync engine.
-///
-/// Callers sharing a mailbox must verify responses against the same QMDB history.
-/// Verifiers run synchronously on the resolver actor's task.
+/// Resolver mailbox for a single QMDB history.
 pub struct Mailbox<DB, F, Op, D, V>
 where
     F: Family,
@@ -435,7 +431,6 @@ mod tests {
         });
     }
 
-    /// Rejection keeps the same endpoint alive until acceptance or caller cancellation.
     #[test]
     fn rejected_candidate_keeps_request_until_acceptance_or_cancellation() {
         deterministic::Runner::default().start(|context| async move {

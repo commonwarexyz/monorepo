@@ -1782,8 +1782,7 @@ where
     });
 }
 
-/// A source wrapper that corrupts the first pinned-node candidate, then offers correct data
-/// within the same request.
+/// Corrupts the first pinned-node candidate, then offers a valid one in the same request.
 #[derive(Clone)]
 struct CorruptFirstPinnedNodesSource<R> {
     inner: R,
@@ -1832,8 +1831,7 @@ where
     }
 }
 
-/// Test that corrupted pinned nodes are rejected and the sync succeeds when the source retries
-/// with correct data in the same request.
+/// Sync rejects corrupted pinned nodes and accepts a valid candidate from the same request.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Source<Identity, Family = H::Family, Op = OpOf<H>, Digest = Digest>
@@ -1878,8 +1876,6 @@ where
             max_retained_roots: 8,
         };
 
-        // Sync should succeed on the second candidate after the corrupted pinned nodes are
-        // rejected.
         let synced_db: H::Db = sync::sync(config).await.unwrap();
         assert_eq!(synced_db.root(), sync_root);
         synced_db.destroy().await.unwrap();

@@ -382,9 +382,7 @@ where
     }
 }
 
-/// A verifier that accepts a response by producing a value.
-///
-/// Returning `None` rejects the response as described by [`Source::serve`].
+/// Validates a response and produces a value.
 pub trait Verifier<R>: Send {
     /// The value produced for an accepted response.
     type Output: Send;
@@ -655,7 +653,7 @@ pub(crate) mod tests {
             }
         }
 
-        /// Return the acceptance verdict for each response offered so far.
+        /// Whether each offered response was accepted.
         pub fn verdicts(&self) -> Vec<bool> {
             self.verdicts.lock().clone()
         }

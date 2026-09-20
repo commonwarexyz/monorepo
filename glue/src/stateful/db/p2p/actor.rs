@@ -91,11 +91,10 @@ where
     config: Config<P, D, B, DB>,
     mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB, V>>,
     metrics: ResolverMetrics,
-    /// Callers awaiting verified results, indexed by request and resolver subscriber.
+    /// Pending replies, keyed by request and subscriber ID.
     pending: PendingSubs<F, DB, V>,
-    /// Next identity to allocate for a caller.
     next_subscriber: u64,
-    /// The active peer serve, limited to one database read.
+    /// At most one active database read for a peer.
     serves: FuturesPool<'static, ()>,
 }
 
@@ -185,10 +184,7 @@ where
             _ = &mut resolver_task => {
                 return;
             },
-            _ = self.serves.next_completed() => {
-                // Polling drives the serve future and removes it on completion, freeing the slot.
-                // The future sends the response and records metrics, leaving no result to handle.
-            },
+            _ = self.serves.next_completed() => {},
             Some(message) = mailbox_message else continue => {
                 self.handle_mailbox_message(&mut resolver_mailbox, message);
             },
@@ -209,21 +205,19 @@ where
         }
     }
 
-    /// Process database attachment, local requests, and caller cancellation.
     fn handle_mailbox_message<R>(&mut self, resolver: &mut R, message: SyncMessage<F, DB, V>)
     where
         R: Resolver<Key = Request<F>, Subscriber = u64>,
     {
         match message {
             mailbox::Message::AttachDatabase(db) => {
-                // Future serves use this handle; an active serve keeps its captured database.
+                // Active reads keep the database handle they started with.
                 let replacing_existing = self.config.database.replace(db).is_some();
                 info!(replacing_existing, "attached resolver database");
                 let _ = self.metrics.has_database.try_set(1i64);
             }
             mailbox::Message::GetOperations { request, response } => {
-                // Each caller owns a subscription. The resolver coalesces same-key fetches
-                // and redelivers cached responses to callers that join during verification.
+                // Give each caller a subscription that can be canceled independently.
                 let subscriber = self.next_subscriber;
                 self.next_subscriber = self
                     .next_subscriber
@@ -239,8 +233,7 @@ where
                 let _ = self.metrics.pending_requests.try_set(self.pending.len());
             }
             mailbox::Message::CancelOperations { request } => {
-                // Notices can lag behind new callers. Closed response channels identify
-                // exactly which subscriptions no longer have a waiting caller.
+                // Cancellation can arrive after a new caller, so remove only closed replies.
                 let canceled: BTreeSet<_> = self
                     .pending
                     .extract_if((request, 0)..=(request, u64::MAX), |_, response| {
@@ -268,8 +261,7 @@ where
         value: bytes::Bytes,
         feedback_tx: oneshot::Sender<bool>,
     ) {
-        // Queued deliveries can outlive their callers. Only IDs in this snapshot
-        // may consume a response; later subscribers remain with the resolver.
+        // Queued deliveries can outlive their callers.
         let key = delivery.key;
         if !delivery.subscribers.iter().any(|(subscriber, _)| {
             self.pending
@@ -280,8 +272,7 @@ where
             return;
         }
 
-        // Retain waiting callers until decoding and response shape checks succeed,
-        // so invalid bytes leave their subscriptions available for resolver retry.
+        // Leave subscriptions intact on invalid data so the resolver can retry.
         let cfg = (key.max_ops().get() as usize, ());
         let response = match Response::<F, Op<DB>, DatabaseRoot<DB>>::decode_cfg(value, &cfg) {
             Ok(response)
@@ -330,8 +321,7 @@ where
 
     /// Serve a peer's request by querying the local database.
     fn handle_produce(&mut self, key: Request<F>, response_tx: oneshot::Sender<bytes::Bytes>) {
-        // Keep one database read active while the event loop handles local requests
-        // and deliveries. Requesters can retry elsewhere while the database is busy.
+        // Peers can retry while the current database read finishes.
         if !self.serves.is_empty() {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
@@ -446,14 +436,14 @@ mod tests {
         V,
     >;
 
-    /// Resolver that records accepted fetches and retain effects.
+    /// Records fetches and cancellations.
     #[derive(Clone, Default)]
     struct RecordingResolver {
         /// Fetch keys and subscriber IDs in submission order.
         fetches: Vec<(Request<mmr::Family>, u64)>,
-        /// Resolver subscriptions surviving submitted retain predicates.
+        /// Current subscriptions, grouped by request.
         subscriptions: BTreeMap<Request<mmr::Family>, Vec<u64>>,
-        /// Number of retain predicates submitted by the actor.
+        /// Number of calls to `retain`.
         retains: usize,
     }
 
@@ -570,7 +560,7 @@ mod tests {
         Shared::new("test", db)
     }
 
-    /// Create a database with one committed update so responses contain real operations.
+    /// Create a database with one applied update.
     async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
@@ -591,9 +581,9 @@ mod tests {
 
     /// Two connected resolver services with distinct databases, indexed by peer.
     struct LivePair {
-        /// Local data each peer can serve, also available for expected-response checks.
+        /// Databases served by each peer.
         databases: [Shared<TestDb>; 2],
-        /// Local fetch entry points for each resolver service.
+        /// Mailboxes for requesting data from peers.
         mailboxes: [LiveMailbox; 2],
         /// Actor counters used to observe admission and cancellation.
         metrics: [ResolverMetrics; 2],
@@ -639,7 +629,7 @@ mod tests {
             init_seeded_db(context.child("database_1"), &format!("{prefix}-1")).await,
         ];
 
-        // Keep each actor's admission counters and handle alongside its local fetch interface.
+        // Start both actors and retain their task handles for cleanup.
         let mut mailboxes = Vec::new();
         let mut metrics = Vec::new();
         let mut handles = Vec::new();
@@ -677,7 +667,7 @@ mod tests {
         }
     }
 
-    /// Wait for actor admission; resolver consumption requires a separate ordering barrier.
+    /// Wait for the actor to accept fetches. The resolver may still have them queued.
     async fn wait_for_fetches(
         context: &deterministic::Context,
         metrics: &ResolverMetrics,
@@ -695,7 +685,7 @@ mod tests {
         }
     }
 
-    /// Stop all actors and verify their previously live task prefix drains completely.
+    /// Stop the actors and wait for their child tasks to exit.
     async fn shutdown_actors(
         context: &deterministic::Context,
         prefix: &str,
@@ -891,7 +881,7 @@ mod tests {
             assert_eq!(actor.pending.len(), 1);
             assert!(actor.pending.contains_key(&(request, fresh_id)));
 
-            // Each closed caller is retired once; repeated notices are harmless.
+            // Each closed caller is retired once. Repeated notices are harmless.
             drop(fresh_rx);
             actor.handle_mailbox_message(
                 &mut resolver,
@@ -1278,14 +1268,13 @@ mod tests {
             }
             let delivery = test_delivery(request, resolver.fetches.iter().map(|(_, id)| *id));
 
-            // The native snapshot still owns both IDs when one caller closes before rejection.
+            // The delivery still names both callers when one stops waiting before rejection.
             drop(closed_rx);
             let (feedback, verdict) = oneshot::channel();
             actor.handle_deliver(delivery, encoded_fetch_payload(), feedback);
             assert!(!verdict.await.unwrap());
 
-            // Invalid retains the entire native snapshot. The cancellation owner must therefore
-            // retain the closed local reply until it can retract both IDs without another delivery.
+            // Rejection keeps both resolver subscriptions, so cancellation must remove both IDs.
             drop(first_rx);
             actor.handle_mailbox_message(
                 &mut resolver,
@@ -1327,7 +1316,7 @@ mod tests {
             );
             let extra_was_dropped = matches!(extra_rx.now_or_never(), Some(Err(_)));
 
-            // Release the database and actor before reporting the admission-bound assertion.
+            // Release the database and actor before asserting.
             slot.put(database);
             drop(actor);
             assert!(
@@ -1435,7 +1424,7 @@ mod tests {
             let request = test_request_at(size);
             let expected = expected_payload(&pair.databases[1], request).await;
 
-            // Both callers register independently while the native resolver coalesces their key.
+            // Both callers register independently while the resolver coalesces their key.
             let (first, delayed) = futures::future::join(
                 pair.mailboxes[0].serve(request, Identity),
                 pair.mailboxes[0].serve(request, Identity),

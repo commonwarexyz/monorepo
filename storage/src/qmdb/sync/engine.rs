@@ -142,7 +142,7 @@ where
     }
 }
 
-/// Unwrap a verified response only when it belongs to this exact source call.
+/// Return the response only if its request and root match this fetch.
 fn into_bound_response<F: Family, Op, H: Hasher>(
     expected_request: Request<F>,
     expected_root: H::Digest,
@@ -333,7 +333,6 @@ where
             }));
         }
 
-        // Create the sync journal using the database's factory method.
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
             config.db_config.journal_config(),
@@ -470,8 +469,7 @@ where
         self.fetched_operations.clear();
         self.pinned_nodes = None;
 
-        // Fetch futures already own their verification roots. Track only which historical target
-        // sizes remain eligible so eviction cancels requests that can no longer be reused.
+        // Retain the prior target size so its fetches stay eligible until eviction.
         if self.max_retained_roots > 0 {
             self.retained_sizes.insert(self.target.range.end());
             if self.retained_sizes.len() > self.max_retained_roots {
@@ -1366,7 +1364,7 @@ mod tests {
         add(&mut requests, 15);
         requests.retain(|request| request.start() >= Location::new(10));
 
-        // A result already queued for the removed request cannot reclaim its ID or mutate state.
+        // The queued completion no longer resolves to a tracked request.
         assert!(requests.remove(queued_result.id).is_none());
 
         // New request at the same location gets a different ID
