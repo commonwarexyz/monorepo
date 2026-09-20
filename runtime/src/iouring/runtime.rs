@@ -104,13 +104,12 @@
 
 use super::{
     driver::Driver,
-    mailbox::{Mailbox, Message},
+    mailbox::{Cancel, Forward, Mailbox, Message},
     request::{RequestOutput, RetiredResources},
-    sleep::{Sleep, TimerId, Timers},
+    sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{BoxedTask, Running, Target, Task, TaskWaker, Tasks},
     timeout::TimeoutWheel,
-    waiter::WaiterId,
     waker::SUBMISSION_SEQ_MASK,
 };
 #[cfg(feature = "external")]
@@ -1027,34 +1026,27 @@ impl Local {
 
     /// Release an operation or timer on its worker, directly or through its mailbox.
     ///
-    /// Accepts only [`Message::Orphan`] and [`Message::CancelTimer`]. A worker whose
-    /// mailbox is closed or gone has already taken responsibility for cleanup.
-    pub fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
+    /// A worker whose mailbox is closed or gone has already taken responsibility
+    /// for cleanup.
+    pub fn cancel(mailbox: &Weak<Mailbox>, cancel: Cancel) {
         if let Some(local) = Self::owner(mailbox) {
             // Owner-local drops also reach this path after the mailbox has closed.
-            let mut local = local.borrow_mut();
-            match message {
-                Message::Orphan(id) => local.orphan(id),
-                Message::CancelTimer(id) => local.cancel_timer(id),
-                _ => unreachable!("invalid cancellation message"),
-            }
+            local.borrow_mut().release(cancel);
             return;
         }
 
         if let Some(mailbox) = mailbox.upgrade() {
             // If closure wins the race, worker cleanup will release the registration.
-            let _ = mailbox.send(message);
+            let _ = mailbox.send(Message::Cancel(cancel));
         }
     }
 
     /// Detach observation without running callbacks under the local borrow.
-    pub fn orphan(&mut self, id: WaiterId) {
-        self.driver.as_mut().unwrap().orphan(id, &mut self.deferred);
-    }
-
-    /// Remove a sleep registration and defer destruction of its waker.
-    fn cancel_timer(&mut self, id: TimerId) {
-        self.timers.cancel(id, &mut self.deferred);
+    fn release(&mut self, cancel: Cancel) {
+        match cancel {
+            Cancel::Waiter(id) => self.driver.as_mut().unwrap().orphan(id, &mut self.deferred),
+            Cancel::Timer(id) => self.timers.cancel(id, &mut self.deferred),
+        }
     }
 
     /// Update aggregate pending-operation metrics using only this worker's delta.
@@ -1558,22 +1550,22 @@ impl Worker {
                         Target::Task(id) => local.tasks.wake(id),
                     }
                 }
-                Message::Orphan(id) => self.local.borrow_mut().orphan(id),
-                Message::Forward(id, sender) => {
+                Message::Forward(forward) => {
                     let mut local = self.local.borrow_mut();
                     let Local {
-                        driver, deferred, ..
+                        driver,
+                        timers,
+                        deferred,
+                        ..
                     } = &mut *local;
-                    driver.as_mut().unwrap().forward(id, sender, deferred);
+                    match forward {
+                        Forward::Waiter(id, sender) => {
+                            driver.as_mut().unwrap().forward(id, sender, deferred);
+                        }
+                        Forward::Timer(id, sender) => timers.forward(id, sender, deferred),
+                    }
                 }
-                Message::CancelTimer(id) => self.local.borrow_mut().cancel_timer(id),
-                Message::ForwardTimer(id, sender) => {
-                    let mut local = self.local.borrow_mut();
-                    let Local {
-                        timers, deferred, ..
-                    } = &mut *local;
-                    timers.forward(id, sender, deferred);
-                }
+                Message::Cancel(cancel) => self.local.borrow_mut().release(cancel),
             }
         }
     }

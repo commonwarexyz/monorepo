@@ -11,7 +11,7 @@
 //! request or finish retained work such as writes and syncs.
 
 use super::{
-    mailbox::Message,
+    mailbox::{Cancel, Forward},
     registration::{Key, Observation, Registration},
     request::{Request, RequestOutput, SyncRequest},
     runtime::Local,
@@ -68,12 +68,12 @@ impl Key for WaiterId {
         local.driver.as_mut().unwrap().set_waker(self, waker)
     }
 
-    fn forward(self, sender: oneshot::Sender<Result<RequestOutput, Error>>) -> Message {
-        Message::Forward(self, sender)
+    fn forward(self, sender: oneshot::Sender<Result<RequestOutput, Error>>) -> Forward {
+        Forward::Waiter(self, sender)
     }
 
-    fn cancel(self) -> Message {
-        Message::Orphan(self)
+    fn cancel(self) -> Cancel {
+        Cancel::Waiter(self)
     }
 }
 
