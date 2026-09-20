@@ -8,7 +8,10 @@ use crate::{
     },
     types::{Participant, Round as Rnd},
 };
-use commonware_cryptography::{Digest, certificate::Verification as AttestationVerification};
+use commonware_cryptography::{
+    Digest,
+    certificate::{Attestation, Verification as AttestationVerification},
+};
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{non_empty, ordered::Set};
@@ -32,18 +35,60 @@ where
 }
 
 /// The result of processing a batch of pending votes.
-pub struct Verification<C> {
-    /// Number of pending votes processed.
-    pub batch: usize,
-    /// Signers identified as invalid by attestation verification.
-    ///
-    /// An empty result does not mean every input vote was individually verified:
-    /// successful optimistic recovery returns no per-vote results.
-    pub invalid: Vec<Participant>,
-    /// A certificate recovered and verified from the buffered votes.
-    pub certificate: Option<C>,
-    /// Whether optimistic recovery failed and required attestation verification.
-    pub fallback: bool,
+pub enum Verification<C> {
+    /// Each pending vote was checked, with invalid signers excluded.
+    Individual {
+        batch: usize,
+        invalid: Vec<Participant>,
+        fallback: bool,
+    },
+    /// The certificate was verified without checking the pending votes individually.
+    Certificate { batch: usize, certificate: C },
+}
+
+enum BatchResult<V, C> {
+    Individual {
+        verified: Vec<V>,
+        invalid: Vec<Participant>,
+    },
+    Certificate(C),
+}
+
+/// Processes a nonempty pending batch and verified priors for one subject.
+fn verify_batch<S: Scheme<D>, D: Digest, R: CryptoRng>(
+    rng: &mut R,
+    scheme: &S,
+    subject: Subject<'_, D>,
+    mut pending: impl ExactSizeIterator<Item = Attestation<S>> + Clone + Send,
+    prior: impl Iterator<Item = Attestation<S>> + Send,
+    optimistic: bool,
+    strategy: &impl Strategy,
+) -> BatchResult<Attestation<S>, S::Certificate> {
+    if optimistic
+        && let Ok(certificate) =
+            scheme.assemble(non_empty![@pending.clone().chain(prior)], strategy)
+        && scheme.verify_certificate::<_, D>(rng, subject, &certificate, strategy)
+    {
+        return BatchResult::Certificate(certificate);
+    }
+
+    // Failed recovery starts with the two halves. Each half still needs ordinary
+    // attestation verification, including both components of a VRF vote.
+    let chunk = if optimistic {
+        pending.len().div_ceil(2)
+    } else {
+        pending.len()
+    };
+    let AttestationVerification {
+        mut verified,
+        mut invalid,
+    } = scheme.verify_attestations::<_, D, _>(rng, subject, pending.by_ref().take(chunk), strategy);
+    if pending.len() != 0 {
+        let result = scheme.verify_attestations::<_, D, _>(rng, subject, pending, strategy);
+        verified.extend(result.verified);
+        invalid.extend(result.invalid);
+    }
+    BatchResult::Individual { verified, invalid }
 }
 
 /// Certification progress for one kind of vote.
@@ -126,18 +171,13 @@ impl<V> Certification<V> {
         }
     }
 
-    /// Runs `f` over the buffered votes and stores the verified set it
-    /// returns, or `None` if a batch is not worth verifying (see
-    /// [Self::should_verify]).
-    ///
-    /// `f` receives the pending and previously verified votes and returns the
-    /// new verified set, the signers that failed verification, and an optional
-    /// verified certificate. Its third argument permits one optimistic recovery
-    /// attempt per kind, only when the combined buffers could reach quorum.
+    /// Processes a ready batch, retaining individually verified votes or completing
+    /// with a verified certificate. The worker receives one optimistic opportunity
+    /// per kind, only when the combined buffers could reach quorum.
     async fn try_verify<C, F, Fut>(&mut self, f: F) -> Option<Verification<C>>
     where
         F: FnOnce(Vec<V>, Vec<V>, bool) -> Fut,
-        Fut: Future<Output = (Vec<V>, Vec<Participant>, Option<C>)>,
+        Fut: Future<Output = BatchResult<V, C>>,
     {
         if !self.should_verify() {
             return None;
@@ -151,21 +191,25 @@ impl<V> Certification<V> {
             self.optimistic = false;
         }
         let (pending, prior) = (mem::take(pending), mem::take(verified));
-        let (votes, invalid, certificate) = f(pending, prior, optimistic).await;
-        let fallback = optimistic && certificate.is_none();
-        if certificate.is_some() {
-            self.complete();
-        } else {
-            let State::Incomplete { verified, .. } = &mut self.state else {
-                unreachable!("certification completed mid-verification");
-            };
-            *verified = votes;
-        }
-        Some(Verification {
-            batch,
-            invalid,
-            certificate,
-            fallback,
+        Some(match f(pending, prior, optimistic).await {
+            BatchResult::Certificate(certificate) => {
+                self.complete();
+                Verification::Certificate { batch, certificate }
+            }
+            BatchResult::Individual {
+                verified: votes,
+                invalid,
+            } => {
+                let State::Incomplete { verified, .. } = &mut self.state else {
+                    unreachable!("certification completed mid-verification");
+                };
+                *verified = votes;
+                Verification::Individual {
+                    batch,
+                    invalid,
+                    fallback: optimistic,
+                }
+            }
         })
     }
 
@@ -264,8 +308,8 @@ impl<D: Digest> ProposalState<D> {
 ///
 /// For a non-attributable scheme, each vote kind gets at most one optimistic recovery attempt per view:
 /// the verifier assembles a certificate from unverified votes and verifies that certificate. Success does
-/// not individually verify the votes; failure falls back to attestation verification, which identifies
-/// invalid signers for blocking.
+/// not individually verify the votes; failure bisects the pending batch for attestation verification
+/// and identifies invalid signers for blocking.
 ///
 /// Once polled, async verification moves the pending batch and accumulated verified votes into
 /// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.
@@ -311,8 +355,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         // Hold quorum as usize to simplify comparisons against queue lengths.
         let quorum = quorum as usize;
         let batchable = S::is_batchable();
-        // Non-attributable schemes only need a valid group certificate. A failed
-        // attempt falls back to attestation verification to identify invalid signers.
         let optimistic = !S::is_attributable();
         Self {
             scheme: scheme.into(),
@@ -539,18 +581,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Batch verifies pending [Vote::Notarize] messages, if worthwhile: the
     /// proposal is known (notarizes reference one proposal) and the buffers
     /// warrant a batch (see [Certification::should_verify]).
-    ///
-    /// Non-attributable schemes use the optimistic recovery path described on
-    /// [`Verifier`]. All work runs in one CPU-bound job submitted through [Strategy::spawn].
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The batch outcome, including any recovered certificate and invalid signers,
-    /// or `None` if verification was not worthwhile.
     pub async fn try_verify_notarizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -576,54 +606,39 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     notarizes.len()
                 };
                 offload(len, span, strategy, move |strategy| {
-                    if optimistic
-                        && let Ok(certificate) = scheme.assemble(
-                            non_empty![@notarizes.iter().chain(&verified_notarizes)
-                                .map(|vote| vote.attestation.clone())],
-                            &strategy,
-                        )
-                        && scheme.verify_certificate::<_, D>(
-                            &mut rng,
-                            Subject::Notarize {
-                                proposal: &notarizes[0].proposal,
-                            },
-                            &certificate,
-                            &strategy,
-                        )
-                    {
-                        return (
-                            Vec::new(),
-                            Vec::new(),
-                            Some(Certificate::Notarization(Notarization {
-                                proposal: notarizes[0].proposal.clone(),
-                                certificate,
-                            })),
-                        );
-                    }
-
-                    let (proposals, attestations): (Vec<_>, Vec<_>) = notarizes
-                        .into_iter()
-                        .map(|n| (n.proposal, n.attestation))
-                        .unzip();
-                    // All proposals here are equal: pending votes are filtered to the
-                    // selected proposal before verification becomes ready.
-                    let proposal = &proposals[0];
-
-                    let AttestationVerification { verified, invalid } = scheme
-                        .verify_attestations::<_, D, _>(
-                            &mut rng,
-                            Subject::Notarize { proposal },
-                            attestations,
-                            &strategy,
-                        );
-
-                    verified_notarizes.extend(verified.into_iter().zip(proposals).map(
-                        |(attestation, proposal)| Notarize {
-                            proposal,
-                            attestation,
+                    let proposal = notarizes[0].proposal.clone();
+                    match verify_batch(
+                        &mut rng,
+                        scheme.as_ref(),
+                        Subject::Notarize {
+                            proposal: &proposal,
                         },
-                    ));
-                    (verified_notarizes, invalid, None)
+                        notarizes.iter().map(|vote| vote.attestation.clone()),
+                        verified_notarizes
+                            .iter()
+                            .map(|vote| vote.attestation.clone()),
+                        optimistic,
+                        &strategy,
+                    ) {
+                        BatchResult::Certificate(certificate) => {
+                            BatchResult::Certificate(Certificate::Notarization(Notarization {
+                                proposal,
+                                certificate,
+                            }))
+                        }
+                        BatchResult::Individual { verified, invalid } => {
+                            verified_notarizes.extend(verified.into_iter().map(|attestation| {
+                                Notarize {
+                                    proposal: proposal.clone(),
+                                    attestation,
+                                }
+                            }));
+                            BatchResult::Individual {
+                                verified: verified_notarizes,
+                                invalid,
+                            }
+                        }
+                    }
                 })
             })
             .await
@@ -631,18 +646,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
 
     /// Batch verifies pending [Vote::Nullify] messages, if worthwhile (see
     /// [Certification::should_verify]).
-    ///
-    /// Non-attributable schemes use the optimistic recovery path described on
-    /// [`Verifier`]. All work runs in one CPU-bound job submitted through [Strategy::spawn].
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The batch outcome, including any recovered certificate and invalid signers,
-    /// or `None` if verification was not worthwhile.
     pub async fn try_verify_nullifies<R: CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -664,43 +667,35 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     nullifies.len()
                 };
                 offload(len, span, strategy, move |strategy| {
-                    if optimistic
-                        && let Ok(certificate) = scheme.assemble(
-                            non_empty![@nullifies.iter().chain(&verified_nullifies)
-                                .map(|vote| vote.attestation.clone())],
-                            &strategy,
-                        )
-                        && scheme.verify_certificate::<_, D>(
-                            &mut rng,
-                            Subject::Nullify { round },
-                            &certificate,
-                            &strategy,
-                        )
-                    {
-                        return (
-                            Vec::new(),
-                            Vec::new(),
-                            Some(Certificate::Nullification(Nullification {
+                    match verify_batch(
+                        &mut rng,
+                        scheme.as_ref(),
+                        Subject::Nullify { round },
+                        nullifies.iter().map(|vote| vote.attestation.clone()),
+                        verified_nullifies
+                            .iter()
+                            .map(|vote| vote.attestation.clone()),
+                        optimistic,
+                        &strategy,
+                    ) {
+                        BatchResult::Certificate(certificate) => {
+                            BatchResult::Certificate(Certificate::Nullification(Nullification {
                                 round,
                                 certificate,
-                            })),
-                        );
+                            }))
+                        }
+                        BatchResult::Individual { verified, invalid } => {
+                            verified_nullifies.extend(
+                                verified
+                                    .into_iter()
+                                    .map(|attestation| Nullify { round, attestation }),
+                            );
+                            BatchResult::Individual {
+                                verified: verified_nullifies,
+                                invalid,
+                            }
+                        }
                     }
-
-                    let AttestationVerification { verified, invalid } = scheme
-                        .verify_attestations::<_, D, _>(
-                            &mut rng,
-                            Subject::Nullify { round },
-                            nullifies.into_iter().map(|nullify| nullify.attestation),
-                            &strategy,
-                        );
-
-                    verified_nullifies.extend(
-                        verified
-                            .into_iter()
-                            .map(|attestation| Nullify { round, attestation }),
-                    );
-                    (verified_nullifies, invalid, None)
                 })
             })
             .await
@@ -709,18 +704,6 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
     /// Batch verifies pending [Vote::Finalize] messages, if worthwhile: the
     /// proposal is known (finalizes reference one proposal) and the buffers
     /// warrant a batch (see [Certification::should_verify]).
-    ///
-    /// Non-attributable schemes use the optimistic recovery path described on
-    /// [`Verifier`]. All work runs in one CPU-bound job submitted through [Strategy::spawn].
-    ///
-    /// # Arguments
-    ///
-    /// * `rng` - Randomness source used by schemes that require batching randomness.
-    ///
-    /// # Returns
-    ///
-    /// The batch outcome, including any recovered certificate and invalid signers,
-    /// or `None` if verification was not worthwhile.
     pub async fn try_verify_finalizes<R: CryptoRng>(
         &mut self,
         rng: &mut R,
@@ -748,52 +731,39 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     finalizes.len()
                 };
                 offload(len, span, strategy, move |strategy| {
-                    if optimistic
-                        && let Ok(certificate) = scheme.assemble(
-                            non_empty![@finalizes.iter().chain(&verified_finalizes)
-                                .map(|vote| vote.attestation.clone())],
-                            &strategy,
-                        )
-                        && scheme.verify_certificate::<_, D>(
-                            &mut rng,
-                            Subject::Finalize {
-                                proposal: &finalizes[0].proposal,
-                            },
-                            &certificate,
-                            &strategy,
-                        )
-                    {
-                        return (
-                            Vec::new(),
-                            Vec::new(),
-                            Some(Certificate::Finalization(Finalization {
-                                proposal: finalizes[0].proposal.clone(),
-                                certificate,
-                            })),
-                        );
-                    }
-
-                    let (proposals, attestations): (Vec<_>, Vec<_>) = finalizes
-                        .into_iter()
-                        .map(|n| (n.proposal, n.attestation))
-                        .unzip();
-                    let proposal = &proposals[0];
-
-                    let AttestationVerification { verified, invalid } = scheme
-                        .verify_attestations::<_, D, _>(
-                            &mut rng,
-                            Subject::Finalize { proposal },
-                            attestations,
-                            &strategy,
-                        );
-
-                    verified_finalizes.extend(verified.into_iter().zip(proposals).map(
-                        |(attestation, proposal)| Finalize {
-                            proposal,
-                            attestation,
+                    let proposal = finalizes[0].proposal.clone();
+                    match verify_batch(
+                        &mut rng,
+                        scheme.as_ref(),
+                        Subject::Finalize {
+                            proposal: &proposal,
                         },
-                    ));
-                    (verified_finalizes, invalid, None)
+                        finalizes.iter().map(|vote| vote.attestation.clone()),
+                        verified_finalizes
+                            .iter()
+                            .map(|vote| vote.attestation.clone()),
+                        optimistic,
+                        &strategy,
+                    ) {
+                        BatchResult::Certificate(certificate) => {
+                            BatchResult::Certificate(Certificate::Finalization(Finalization {
+                                proposal,
+                                certificate,
+                            }))
+                        }
+                        BatchResult::Individual { verified, invalid } => {
+                            verified_finalizes.extend(verified.into_iter().map(|attestation| {
+                                Finalize {
+                                    proposal: proposal.clone(),
+                                    attestation,
+                                }
+                            }));
+                            BatchResult::Individual {
+                                verified: verified_finalizes,
+                                invalid,
+                            }
+                        }
+                    }
                 })
             })
             .await
@@ -827,6 +797,28 @@ mod tests {
     use commonware_utils::{Faults, N3f1, TestRng, test_rng};
 
     const NAMESPACE: &[u8] = b"test";
+
+    fn assert_valid<S: Scheme<D>, D: Digest>(
+        verification: Verification<Certificate<S, D>>,
+        expected_batch: usize,
+    ) {
+        match verification {
+            Verification::Individual {
+                batch,
+                invalid,
+                fallback,
+            } => {
+                assert!(S::is_attributable());
+                assert_eq!(batch, expected_batch);
+                assert!(invalid.is_empty());
+                assert!(!fallback);
+            }
+            Verification::Certificate { batch, .. } => {
+                assert!(!S::is_attributable());
+                assert_eq!(batch, expected_batch);
+            }
+        }
+    }
 
     impl<V> Certification<V> {
         /// Returns the pending buffer (empty once complete).
@@ -890,7 +882,10 @@ mod tests {
         certification
             .try_verify(|pending, mut verified, _| async move {
                 verified.extend(pending);
-                (verified, Vec::new(), None::<()>)
+                BatchResult::<_, ()>::Individual {
+                    verified,
+                    invalid: Vec::new(),
+                }
             })
             .await
             .expect("non-batchable pending votes must verify eagerly");
@@ -913,7 +908,10 @@ mod tests {
         certification
             .try_verify(|mut pending, _, _| async move {
                 pending.pop().expect("quorum batch must be non-empty");
-                (pending, Vec::new(), None::<()>)
+                BatchResult::<_, ()>::Individual {
+                    verified: pending,
+                    invalid: Vec::new(),
+                }
             })
             .await
             .expect("a quorum of pending votes must trigger batch verification");
@@ -1163,16 +1161,13 @@ mod tests {
         assert!(verifier.notarize.should_verify());
         assert_eq!(verifier.notarize.pending().len(), 4);
 
-        let Verification {
-            batch,
-            invalid: failed_bulk,
-            ..
-        } = verifier
-            .try_verify_notarizes(&mut rng, &Sequential)
-            .await
-            .unwrap();
-        assert_eq!(batch, 4);
-        assert!(failed_bulk.is_empty());
+        assert_valid(
+            verifier
+                .try_verify_notarizes(&mut rng, &Sequential)
+                .await
+                .unwrap(),
+            4,
+        );
         assert_eq!(verifier.notarize.is_complete(), !S::is_attributable());
         assert_eq!(
             verifier.notarize.verified().len(),
@@ -1202,14 +1197,17 @@ mod tests {
         }
         assert!(verifier2.notarize.should_verify());
 
-        let Verification {
+        let Verification::Individual {
             batch,
             invalid: failed_second,
             ..
         } = verifier2
             .try_verify_notarizes(&mut rng, &Sequential)
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("failed recovery must verify individual votes")
+        };
         assert_eq!(batch, quorum as usize);
         assert!(
             verifier2
@@ -1302,16 +1300,13 @@ mod tests {
         assert!(verifier.nullify.should_verify());
         assert_eq!(verifier.nullify.pending().len(), 3);
 
-        let Verification {
-            batch,
-            invalid: failed,
-            ..
-        } = verifier
-            .try_verify_nullifies(&mut rng, &Sequential)
-            .await
-            .unwrap();
-        assert_eq!(batch, 3);
-        assert!(failed.is_empty());
+        assert_valid(
+            verifier
+                .try_verify_nullifies(&mut rng, &Sequential)
+                .await
+                .unwrap(),
+            3,
+        );
         assert_eq!(verifier.nullify.is_complete(), !S::is_attributable());
         assert_eq!(
             verifier.nullify.verified().len(),
@@ -1424,16 +1419,13 @@ mod tests {
         verifier.add(Vote::Finalize(finalizes[3].clone()), false);
         assert!(verifier.finalize.should_verify());
 
-        let Verification {
-            batch,
-            invalid: failed,
-            ..
-        } = verifier
-            .try_verify_finalizes(&mut rng, &Sequential)
-            .await
-            .unwrap();
-        assert_eq!(batch, 3);
-        assert!(failed.is_empty());
+        assert_valid(
+            verifier
+                .try_verify_finalizes(&mut rng, &Sequential)
+                .await
+                .unwrap(),
+            3,
+        );
         assert_eq!(verifier.finalize.is_complete(), !S::is_attributable());
         assert_eq!(
             verifier.finalize.verified().len(),
@@ -1608,11 +1600,13 @@ mod tests {
             "Should be ready at quorum"
         );
 
-        let Verification { batch, .. } = verifier
-            .try_verify_notarizes(&mut rng, &Sequential)
-            .await
-            .unwrap();
-        assert_eq!(batch, quorum as usize);
+        assert_valid(
+            verifier
+                .try_verify_notarizes(&mut rng, &Sequential)
+                .await
+                .unwrap(),
+            quorum as usize,
+        );
         assert!(!verifier.notarize.should_verify());
     }
 
@@ -1794,16 +1788,13 @@ mod tests {
                 false,
             );
         }
-        let Verification {
-            batch,
-            invalid: failed,
-            ..
-        } = verifier
-            .try_verify_finalizes(&mut rng, &Sequential)
-            .await
-            .expect("finalizes should verify against the certificate proposal");
-        assert_eq!(batch, quorum as usize);
-        assert!(failed.is_empty());
+        assert_valid(
+            verifier
+                .try_verify_finalizes(&mut rng, &Sequential)
+                .await
+                .expect("finalizes should verify against the certificate proposal"),
+            quorum as usize,
+        );
     }
 
     #[test_async]
@@ -1855,16 +1846,13 @@ mod tests {
             Vote::Finalize(Finalize::sign(&schemes[0], proposal_a).unwrap()),
             false,
         );
-        let Verification {
-            batch,
-            invalid: failed,
-            ..
-        } = verifier
-            .try_verify_finalizes(&mut rng, &Sequential)
-            .await
-            .expect("nonbatchable schemes verify eagerly");
-        assert_eq!(batch, 1);
-        assert!(failed.is_empty());
+        assert_valid(
+            verifier
+                .try_verify_finalizes(&mut rng, &Sequential)
+                .await
+                .expect("nonbatchable schemes verify eagerly"),
+            1,
+        );
         assert_eq!(verifier.finalize.verified().len(), 1);
 
         // The override drops the verified finalize for the old proposal.
@@ -1876,16 +1864,13 @@ mod tests {
                 Vote::Finalize(Finalize::sign(scheme, proposal_b.clone()).unwrap()),
                 false,
             );
-            let Verification {
-                batch,
-                invalid: failed,
-                ..
-            } = verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
-                .await
-                .expect("nonbatchable schemes verify eagerly");
-            assert_eq!(batch, 1);
-            assert!(failed.is_empty());
+            assert_valid(
+                verifier
+                    .try_verify_finalizes(&mut rng, &Sequential)
+                    .await
+                    .expect("nonbatchable schemes verify eagerly"),
+                1,
+            );
         }
         assert_eq!(verifier.finalize.verified().len(), quorum - 1);
 
@@ -1893,16 +1878,13 @@ mod tests {
             Vote::Finalize(Finalize::sign(&schemes[quorum], proposal_b).unwrap()),
             false,
         );
-        let Verification {
-            batch,
-            invalid: failed,
-            ..
-        } = verifier
-            .try_verify_finalizes(&mut rng, &Sequential)
-            .await
-            .expect("nonbatchable schemes verify eagerly");
-        assert_eq!(batch, 1);
-        assert!(failed.is_empty());
+        assert_valid(
+            verifier
+                .try_verify_finalizes(&mut rng, &Sequential)
+                .await
+                .expect("nonbatchable schemes verify eagerly"),
+            1,
+        );
         assert_eq!(verifier.finalize.verified().len(), quorum);
     }
 
@@ -2051,16 +2033,13 @@ mod tests {
             }
         }
 
-        let Verification {
-            batch,
-            invalid: failed,
-            ..
-        } = verifier
-            .try_verify_notarizes(&mut rng, &Sequential)
-            .await
-            .unwrap();
-        assert_eq!(batch, quorum as usize - 1);
-        assert!(failed.is_empty());
+        assert_valid(
+            verifier
+                .try_verify_notarizes(&mut rng, &Sequential)
+                .await
+                .unwrap(),
+            quorum as usize - 1,
+        );
         assert_eq!(verifier.notarize.is_complete(), !S::is_attributable());
         assert_eq!(
             verifier.notarize.verified().len(),
@@ -2382,14 +2361,20 @@ mod tests {
 
         // Verification consumes both buffers and stores the new verified set.
         // Below quorum, recovery is refused.
-        let Verification { batch, invalid, .. } = votes
+        let Verification::Individual { batch, invalid, .. } = votes
             .try_verify(|pending, verified, _| async move {
                 assert_eq!(pending, vec![1, 3]);
                 assert_eq!(verified, vec![2]);
-                (vec![1, 2], vec![], None::<()>)
+                BatchResult::<_, ()>::Individual {
+                    verified: vec![1, 2],
+                    invalid: vec![],
+                }
             })
             .await
-            .unwrap();
+            .unwrap()
+        else {
+            panic!("expected individual verification")
+        };
         assert_eq!(batch, 2);
         assert!(invalid.is_empty());
         assert!(votes.pending().is_empty());
@@ -2483,6 +2468,83 @@ mod tests {
         }
 
         let _ = verifier.try_construct_certificate(&Sequential).await;
+    }
+
+    async fn failed_recovery_bisects_pending_votes<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256, PublicKey = PublicKey>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
+    {
+        for n in [1, 5, 6] {
+            for local in [false, true] {
+                if n == 1 && local {
+                    continue;
+                }
+                let mut rng = test_rng();
+                let Fixture { schemes, .. } = fixture(&mut rng, NAMESPACE, n);
+                let quorum = N3f1::quorum(schemes.len());
+                let pending = quorum as usize - usize::from(local);
+                let schemes: Vec<_> = schemes
+                    .into_iter()
+                    .map(|scheme| {
+                        wrapped::Scheme::new(
+                            scheme,
+                            wrapped::Behavior::LimitBatchSize(pending.div_ceil(2)),
+                        )
+                    })
+                    .collect();
+                let round = Round::new(Epoch::new(0), View::new(1));
+                let mut verifier = Verifier::new(round, schemes[0].clone(), quorum);
+                let leader = create_notarize(&schemes[0], round, View::zero(), 1);
+                verifier.set_leader(leader.signer(), Some(&leader));
+                for (i, scheme) in schemes.iter().take(quorum as usize).enumerate() {
+                    let mut notarize = create_notarize(scheme, round, View::zero(), 1);
+                    let mut nullify = create_nullify(scheme, round);
+                    let mut finalize = create_finalize(scheme, round, View::zero(), 1);
+                    if i == quorum as usize - 1 {
+                        notarize.attestation =
+                            create_notarize(scheme, round, View::zero(), 2).attestation;
+                        nullify.attestation =
+                            create_nullify(scheme, Round::new(Epoch::new(0), View::new(2)))
+                                .attestation;
+                        finalize.attestation =
+                            create_finalize(scheme, round, View::zero(), 2).attestation;
+                    }
+                    verifier.add(Vote::Notarize(notarize), local && i == 0);
+                    verifier.add(Vote::Nullify(nullify), local && i == 0);
+                    verifier.add(Vote::Finalize(finalize), local && i == 0);
+                }
+                let results = [
+                    verifier.try_verify_notarizes(&mut rng, &Sequential).await,
+                    verifier.try_verify_nullifies(&mut rng, &Sequential).await,
+                    verifier.try_verify_finalizes(&mut rng, &Sequential).await,
+                ];
+                for result in results {
+                    let Verification::Individual {
+                        batch,
+                        invalid,
+                        fallback,
+                    } = result.unwrap()
+                    else {
+                        panic!("failed recovery must verify individual votes");
+                    };
+                    assert_eq!(batch, pending);
+                    assert!(fallback);
+                    assert_eq!(invalid, vec![Participant::new(quorum - 1)]);
+                }
+                assert_eq!(verifier.notarize.verified().len(), quorum as usize - 1);
+                assert_eq!(verifier.nullify.verified().len(), quorum as usize - 1);
+                assert_eq!(verifier.finalize.verified().len(), quorum as usize - 1);
+            }
+        }
+    }
+
+    #[test_async]
+    async fn test_failed_recovery_bisects_pending_votes() {
+        failed_recovery_bisects_pending_votes(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        failed_recovery_bisects_pending_votes(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        failed_recovery_bisects_pending_votes(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        failed_recovery_bisects_pending_votes(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
     }
 
     #[test_async]

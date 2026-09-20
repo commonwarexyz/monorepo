@@ -19,6 +19,8 @@ pub enum Behavior {
     Honest,
     CorruptSignature,
     RecoveryFailure,
+    /// Panics if attestation verification receives a larger batch.
+    LimitBatchSize(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -202,7 +204,9 @@ where
     fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>> {
         let attestation = self.inner.sign(subject.clone())?;
         let signature = match self.behavior {
-            Behavior::Honest | Behavior::RecoveryFailure => attestation.signature,
+            Behavior::Honest | Behavior::RecoveryFailure | Behavior::LimitBatchSize(_) => {
+                attestation.signature
+            }
             Behavior::CorruptSignature => {
                 let signature = attestation
                     .signature
@@ -253,10 +257,18 @@ where
         let verification = self.inner.verify_attestations(
             rng,
             subject,
-            attestations.into_iter().map(|attestation| Attestation {
-                signer: attestation.signer,
-                signature: attestation.signature,
-            }),
+            attestations
+                .into_iter()
+                .enumerate()
+                .map(|(i, attestation)| {
+                    if let Behavior::LimitBatchSize(limit) = self.behavior {
+                        assert!(i < limit, "attestation batch exceeds {limit}");
+                    }
+                    Attestation {
+                        signer: attestation.signer,
+                        signature: attestation.signature,
+                    }
+                }),
             strategy,
         );
 

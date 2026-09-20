@@ -381,7 +381,7 @@ impl<
         } else {
             self.verifier.try_verify_finalizes(rng, strategy).await?
         };
-        if let Some(certificate) = &result.certificate {
+        if let Verification::Certificate { certificate, .. } = &result {
             self.record_certificate(certificate);
         }
         Some(result)

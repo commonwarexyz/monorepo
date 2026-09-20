@@ -110,7 +110,7 @@ where
         let scheme = Arc::new(cfg.scheme);
         let participants = scheme.participants();
         let added = context.counter("added", "number of messages added to the verifier");
-        let verified = context.counter("verified", "number of messages verified");
+        let verified = context.counter("verified", "number of messages processed by the verifier");
         let inbound_messages = context.family("inbound_messages", "number of inbound messages");
         let latest_vote: GaugeFamily<Peer<S::PublicKey>> =
             context.family("latest_vote", "view of latest vote received per peer");
@@ -119,7 +119,7 @@ where
         }
         let batch_size = context.histogram(
             "batch_size",
-            "number of messages in a signature verification batch",
+            "number of messages in a verification or recovery batch",
             [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
         let verify_latency = context.histogram(
@@ -331,12 +331,7 @@ where
     ) {
         loop {
             let timer = self.verify_latency.timer(self.context.as_ref());
-            let Some(Verification {
-                batch,
-                invalid: failed,
-                certificate,
-                fallback,
-            }) = round
+            let Some(verification) = round
                 .try_verify(self.context.as_mut(), &self.strategy)
                 .await
             else {
@@ -346,23 +341,36 @@ where
 
             timer.observe(self.context.as_ref());
 
+            let batch = match verification {
+                Verification::Individual {
+                    batch,
+                    invalid,
+                    fallback,
+                } => {
+                    if fallback {
+                        self.recover_fallback.inc();
+                    }
+                    for invalid in invalid {
+                        if let Some(signer) = self.scheme.participants().key(invalid) {
+                            commonware_p2p::block!(
+                                self.blocker,
+                                signer.clone(),
+                                "invalid signature"
+                            );
+                        }
+                    }
+                    batch
+                }
+                Verification::Certificate { batch, certificate } => {
+                    let kind = certificate.kind();
+                    debug!(%view, %kind, "recovered certificate, forwarding to voter");
+                    voter.recovered(certificate);
+                    batch
+                }
+            };
             trace!(%view, batch, "processed votes");
             self.verified.inc_by(batch as u64);
             self.batch_size.observe(batch as f64);
-            if fallback {
-                self.recover_fallback.inc();
-            }
-
-            for invalid in failed {
-                if let Some(signer) = self.scheme.participants().key(invalid) {
-                    commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
-                }
-            }
-            if let Some(certificate) = certificate {
-                let kind = certificate.kind();
-                debug!(%view, %kind, "recovered certificate, forwarding to voter");
-                voter.recovered(certificate);
-            }
         }
 
         // Construct and forward every certificate with a verified quorum.

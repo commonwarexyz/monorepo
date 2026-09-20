@@ -331,7 +331,7 @@
 //!
 //! For non-attributable schemes, when buffered votes of one kind reach quorum, the `Batcher` first
 //! assembles and verifies the certificate. Success authenticates the certificate, not its individual
-//! input votes. A failed attempt falls back to partial verification and blocks identified invalid senders;
+//! input votes. A failed attempt bisects the pending votes for partial verification and blocks invalid senders;
 //! there is at most one such optimistic attempt per view and certificate kind.
 //!
 //! If an invalid signature is detected, the `Batcher` will perform repeated bisections over collected

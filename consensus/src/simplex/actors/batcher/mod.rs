@@ -47,7 +47,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{verifier::Verification, *};
     use crate::{
         Viewable,
         simplex::{
@@ -461,18 +461,26 @@ mod tests {
             .try_verify(&mut rng, &strategy)
             .await
             .expect("quorum of notarizes must be ready");
-        assert_eq!(verification.batch, schemes.len());
-        assert!(verification.invalid.is_empty());
-        assert!(!verification.fallback);
-
-        // Threshold schemes recover optimistically during verification. Attributable
-        // schemes retain the verified votes for the legacy construction path.
-        let certificate = match verification.certificate {
-            Some(certificate) => certificate,
-            None => round
-                .try_construct_certificate(&strategy)
-                .await
-                .expect("verified quorum must construct a certificate"),
+        let certificate = match verification {
+            Verification::Certificate { batch, certificate } => {
+                assert!(!S::is_attributable());
+                assert_eq!(batch, schemes.len());
+                certificate
+            }
+            Verification::Individual {
+                batch,
+                invalid,
+                fallback,
+            } => {
+                assert!(S::is_attributable());
+                assert_eq!(batch, schemes.len());
+                assert!(invalid.is_empty());
+                assert!(!fallback);
+                round
+                    .try_construct_certificate(&strategy)
+                    .await
+                    .expect("verified quorum must construct a certificate")
+            }
         };
         let Certificate::Notarization(notarization) = certificate else {
             panic!("expected a notarization");
@@ -484,9 +492,7 @@ mod tests {
         assert!(round.try_construct_certificate(&strategy).await.is_none());
     }
 
-    /// Reproduces the pre-optimization path: verify every partial attestation,
-    /// then assemble the verified quorum.
-    fn legacy_certificate<S>(
+    fn verified_certificate<S>(
         rng: &mut TestRng,
         scheme: &S,
         kind: Kind,
@@ -497,73 +503,35 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
     {
+        let subject = match kind {
+            Kind::Notarization => Subject::Notarize { proposal },
+            Kind::Nullification => Subject::Nullify { round },
+            Kind::Finalization => Subject::Finalize { proposal },
+        };
+        let verification = scheme.verify_attestations::<_, Sha256Digest, _>(
+            rng,
+            subject,
+            votes.iter().map(|vote| match vote {
+                Vote::Notarize(vote) => vote.attestation.clone(),
+                Vote::Nullify(vote) => vote.attestation.clone(),
+                Vote::Finalize(vote) => vote.attestation.clone(),
+            }),
+            &Sequential,
+        );
+        assert!(verification.invalid.is_empty());
+        let certificate = scheme
+            .assemble(non_empty![@verification.verified.into_iter()], &Sequential)
+            .expect("verified quorum must assemble");
         match kind {
-            Kind::Notarization => {
-                let notarizes: Vec<_> = votes
-                    .iter()
-                    .map(|vote| match vote {
-                        Vote::Notarize(notarize) => notarize.clone(),
-                        _ => panic!("expected notarize votes"),
-                    })
-                    .collect();
-                let verification = scheme.verify_attestations::<_, Sha256Digest, _>(
-                    rng,
-                    Subject::Notarize { proposal },
-                    notarizes.iter().map(|vote| vote.attestation.clone()),
-                    &Sequential,
-                );
-                assert!(verification.invalid.is_empty());
-                let certificate = scheme
-                    .assemble(non_empty![@verification.verified.into_iter()], &Sequential)
-                    .expect("verified notarizes must assemble");
-                Certificate::Notarization(Notarization {
-                    proposal: proposal.clone(),
-                    certificate,
-                })
-            }
-            Kind::Nullification => {
-                let nullifies: Vec<_> = votes
-                    .iter()
-                    .map(|vote| match vote {
-                        Vote::Nullify(nullify) => nullify.clone(),
-                        _ => panic!("expected nullify votes"),
-                    })
-                    .collect();
-                let verification = scheme.verify_attestations::<_, Sha256Digest, _>(
-                    rng,
-                    Subject::Nullify { round },
-                    nullifies.iter().map(|vote| vote.attestation.clone()),
-                    &Sequential,
-                );
-                assert!(verification.invalid.is_empty());
-                let certificate = scheme
-                    .assemble(non_empty![@verification.verified.into_iter()], &Sequential)
-                    .expect("verified nullifies must assemble");
-                Certificate::Nullification(Nullification { round, certificate })
-            }
-            Kind::Finalization => {
-                let finalizes: Vec<_> = votes
-                    .iter()
-                    .map(|vote| match vote {
-                        Vote::Finalize(finalize) => finalize.clone(),
-                        _ => panic!("expected finalize votes"),
-                    })
-                    .collect();
-                let verification = scheme.verify_attestations::<_, Sha256Digest, _>(
-                    rng,
-                    Subject::Finalize { proposal },
-                    finalizes.iter().map(|vote| vote.attestation.clone()),
-                    &Sequential,
-                );
-                assert!(verification.invalid.is_empty());
-                let certificate = scheme
-                    .assemble(non_empty![@verification.verified.into_iter()], &Sequential)
-                    .expect("verified finalizes must assemble");
-                Certificate::Finalization(Finalization {
-                    proposal: proposal.clone(),
-                    certificate,
-                })
-            }
+            Kind::Notarization => Certificate::Notarization(Notarization {
+                proposal: proposal.clone(),
+                certificate,
+            }),
+            Kind::Nullification => Certificate::Nullification(Nullification { round, certificate }),
+            Kind::Finalization => Certificate::Finalization(Finalization {
+                proposal: proposal.clone(),
+                certificate,
+            }),
         }
     }
 
@@ -607,7 +575,7 @@ mod tests {
                 .map(|scheme| threshold_vote(scheme, kind, round_id, &proposal))
                 .collect();
             let expected =
-                legacy_certificate(&mut rng, &schemes[0], kind, round_id, &proposal, &votes);
+                verified_certificate(&mut rng, &schemes[0], kind, round_id, &proposal, &votes);
 
             let mut tracked = super::Round::new(
                 round_id,
@@ -631,16 +599,11 @@ mod tests {
                 .try_verify(&mut rng, &Sequential)
                 .await
                 .expect("mixed trusted and pending quorum must be ready");
-            assert_eq!(verification.batch, quorum - 1);
-            assert!(verification.invalid.is_empty());
-            assert!(!verification.fallback);
-            assert_eq!(
-                verification
-                    .certificate
-                    .expect("optimistic recovery must certify")
-                    .encode(),
-                expected.encode(),
-            );
+            let Verification::Certificate { batch, certificate } = verification else {
+                panic!("optimistic recovery must certify");
+            };
+            assert_eq!(batch, quorum - 1);
+            assert_eq!(certificate.encode(), expected.encode());
             assert!(tracked.has_certificate(kind));
 
             // Optimistic completion records proposal authority and compacts the
@@ -688,9 +651,8 @@ mod tests {
         optimistic_recovery_matches_legacy(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
     }
 
-    /// A failed optimistic recovery falls back once to signer attribution. A
-    /// later valid vote completes through the legacy path without attempting
-    /// optimistic recovery again.
+    /// A failed optimistic recovery verifies individual votes. A later valid vote
+    /// completes the quorum without another optimistic attempt.
     async fn optimistic_recovery_falls_back_once<S, F>(mut fixture: F, valid_quorum: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -741,14 +703,21 @@ mod tests {
                 assert!(tracked.add_network(participants[i].clone(), vote.clone()));
             }
 
-            let verification = tracked
+            let Verification::Individual {
+                batch: processed,
+                invalid,
+                fallback,
+            } = tracked
                 .try_verify(&mut rng, &Sequential)
                 .await
-                .expect("candidate quorum must attempt recovery");
-            assert_eq!(verification.batch, batch);
-            assert_eq!(verification.invalid, vec![Participant::from_usize(0)]);
-            assert!(verification.certificate.is_none());
-            assert!(verification.fallback);
+                .expect("candidate quorum must attempt recovery")
+            else {
+                panic!("expected individual verification")
+            };
+            assert_eq!(processed, batch);
+            assert_eq!(invalid, vec![Participant::from_usize(0)]);
+
+            assert!(fallback);
             assert!(!tracked.has_certificate(kind));
             if !valid_quorum {
                 assert!(
@@ -759,14 +728,21 @@ mod tests {
                 );
 
                 assert!(tracked.add_network(participants[quorum].clone(), votes[quorum].clone()));
-                let verification = tracked
+                let Verification::Individual {
+                    batch: processed,
+                    invalid,
+                    fallback,
+                } = tracked
                     .try_verify(&mut rng, &Sequential)
                     .await
-                    .expect("replacement vote must complete the verified quorum");
-                assert_eq!(verification.batch, 1);
-                assert!(verification.invalid.is_empty());
-                assert!(verification.certificate.is_none());
-                assert!(!verification.fallback);
+                    .expect("replacement vote must complete the verified quorum")
+                else {
+                    panic!("expected individual verification")
+                };
+                assert_eq!(processed, 1);
+                assert!(invalid.is_empty());
+
+                assert!(!fallback);
             }
 
             let certificate = tracked
@@ -774,7 +750,7 @@ mod tests {
                 .await
                 .expect("valid replacement must complete certification");
             let expected_votes: Vec<_> = votes.iter().skip(1).cloned().collect();
-            let expected = legacy_certificate(
+            let expected = verified_certificate(
                 &mut rng,
                 &schemes[0],
                 kind,
@@ -856,20 +832,27 @@ mod tests {
             .try_verify(&mut rng, &Sequential)
             .await
             .expect("notarize candidate quorum must be processed first");
-        assert!(notarize.fallback);
-        assert!(notarize.certificate.is_none());
-        assert_eq!(notarize.invalid, vec![Participant::from_usize(0)]);
+        let Verification::Individual {
+            invalid,
+            fallback: true,
+            ..
+        } = notarize
+        else {
+            panic!("failed recovery must verify individual votes");
+        };
+        assert_eq!(invalid, vec![Participant::from_usize(0)]);
         assert!(!tracked.has_certificate(Kind::Notarization));
 
         let nullify = tracked
             .try_verify(&mut rng, &Sequential)
             .await
             .expect("nullify quorum must retain its optimistic attempt");
-        assert!(!nullify.fallback);
-        assert!(nullify.invalid.is_empty());
         assert!(matches!(
-            nullify.certificate,
-            Some(Certificate::Nullification(_))
+            nullify,
+            Verification::Certificate {
+                certificate: Certificate::Nullification(_),
+                ..
+            }
         ));
         assert!(tracked.has_certificate(Kind::Nullification));
     }
@@ -923,13 +906,18 @@ mod tests {
         for (i, vote) in votes.into_iter().enumerate() {
             assert!(tracked.add_network(participants[i].clone(), Vote::Notarize(vote)));
         }
-        let verification = tracked
+        let Verification::Individual {
+            invalid, fallback, ..
+        } = tracked
             .try_verify(&mut rng, &Sequential)
             .await
-            .expect("candidate quorum must be processed");
-        assert!(verification.fallback);
-        assert!(verification.certificate.is_none());
-        assert_eq!(verification.invalid, vec![Participant::from_usize(0)]);
+            .expect("candidate quorum must be processed")
+        else {
+            panic!("expected individual verification")
+        };
+        assert!(fallback);
+
+        assert_eq!(invalid, vec![Participant::from_usize(0)]);
     }
 
     #[test_async]
@@ -976,14 +964,21 @@ mod tests {
 
         let vote = Notarize::sign(&schemes[quorum - 1], proposal).unwrap();
         assert!(round.add_network(participants[quorum - 1].clone(), Vote::Notarize(vote)));
-        let verification = round
+        let Verification::Individual {
+            batch: processed,
+            invalid,
+            fallback,
+        } = round
             .try_verify(&mut rng, &Sequential)
             .await
-            .expect("unique signer quorum must be ready");
-        assert_eq!(verification.batch, quorum - 1);
-        assert!(verification.invalid.is_empty());
-        assert!(verification.certificate.is_none());
-        assert!(!verification.fallback);
+            .expect("unique signer quorum must be ready")
+        else {
+            panic!("expected individual verification")
+        };
+        assert_eq!(processed, quorum - 1);
+        assert!(invalid.is_empty());
+
+        assert!(!fallback);
         assert!(matches!(
             round.try_construct_certificate(&Sequential).await,
             Some(Certificate::Notarization(_))
@@ -1484,14 +1479,21 @@ mod tests {
                 Kind::Nullification => unreachable!(),
             }
 
-            let verification = round
+            let Verification::Individual {
+                batch: processed,
+                invalid,
+                fallback,
+            } = round
                 .try_verify(&mut rng, &Sequential)
                 .await
-                .expect("certificate quorum must be ready");
-            assert_eq!(verification.batch, quorum_size);
-            assert!(verification.invalid.is_empty());
-            assert!(verification.certificate.is_none());
-            assert!(!verification.fallback);
+                .expect("certificate quorum must be ready")
+            else {
+                panic!("expected individual verification")
+            };
+            assert_eq!(processed, quorum_size);
+            assert!(invalid.is_empty());
+
+            assert!(!fallback);
             let certificate = round
                 .try_construct_certificate(&Sequential)
                 .await
@@ -1562,14 +1564,21 @@ mod tests {
         round.accept_vote(Vote::Finalize(finalize), true);
 
         // Only the network votes require verification.
-        let verification = round
+        let Verification::Individual {
+            batch: processed,
+            invalid,
+            fallback,
+        } = round
             .try_verify(&mut rng, &Sequential)
             .await
-            .expect("restored finalize quorum must be ready");
-        assert_eq!(verification.batch, quorum_size - 1);
-        assert!(verification.invalid.is_empty());
-        assert!(verification.certificate.is_none());
-        assert!(!verification.fallback);
+            .expect("restored finalize quorum must be ready")
+        else {
+            panic!("expected individual verification")
+        };
+        assert_eq!(processed, quorum_size - 1);
+        assert!(invalid.is_empty());
+
+        assert!(!fallback);
         let certificate = round
             .try_construct_certificate(&Sequential)
             .await
@@ -1624,14 +1633,21 @@ mod tests {
         // The authoritative notarization restores both sets of votes.
         let notarization = build_notarization(&schemes, &proposal, quorum_size);
         assert!(round.record_certificate(&Certificate::Notarization(notarization)));
-        let verification = round
+        let Verification::Individual {
+            batch: processed,
+            invalid,
+            fallback,
+        } = round
             .try_verify(&mut rng, &Sequential)
             .await
-            .expect("restored finalize quorum must be ready");
-        assert_eq!(verification.batch, quorum_size);
-        assert!(verification.invalid.is_empty());
-        assert!(verification.certificate.is_none());
-        assert!(!verification.fallback);
+            .expect("restored finalize quorum must be ready")
+        else {
+            panic!("expected individual verification")
+        };
+        assert_eq!(processed, quorum_size);
+        assert!(invalid.is_empty());
+
+        assert!(!fallback);
         let certificate = round
             .try_construct_certificate(&Sequential)
             .await
@@ -1673,10 +1689,20 @@ mod tests {
         round.set_leader(Participant::from_usize(0));
 
         // Notarizes verify first, then nullifies, then nothing
-        let verification = round.try_verify(&mut rng, &Sequential).await.unwrap();
-        assert_eq!(verification.batch, quorum);
-        let verification = round.try_verify(&mut rng, &Sequential).await.unwrap();
-        assert_eq!(verification.batch, schemes.len());
+        let Verification::Individual {
+            batch: processed, ..
+        } = round.try_verify(&mut rng, &Sequential).await.unwrap()
+        else {
+            panic!("expected individual verification")
+        };
+        assert_eq!(processed, quorum);
+        let Verification::Individual {
+            batch: processed, ..
+        } = round.try_verify(&mut rng, &Sequential).await.unwrap()
+        else {
+            panic!("expected individual verification")
+        };
+        assert_eq!(processed, schemes.len());
         assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
     }
 
