@@ -456,17 +456,20 @@ mod tests {
         stale_request_tx: mpsc::Sender<()>,
     }
 
-    impl sync::Source for SupersedingCompactSource {
+    impl<Verify> sync::Source<Verify> for SupersedingCompactSource {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
         type Error = <Arc<FixedDb> as sync::Source>::Error;
 
-        async fn serve<T: Send + 'static>(
+        async fn serve(
             &self,
             request: sync::Request<Self::Family>,
-            verify: impl sync::Verifier<Self, T>,
-        ) -> Result<Option<T>, Self::Error> {
+            verify: Verify,
+        ) -> Result<Option<Verify::Output>, Self::Error>
+        where
+            Verify: sync::Verifier<sync::Response<Self::Family, Self::Op, Self::Digest>>,
+        {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;

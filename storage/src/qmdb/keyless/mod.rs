@@ -51,8 +51,12 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root,
-        sync::Verifier,
+        Error,
+        any::value::ValueEncoding,
+        chain,
+        metrics::Metrics,
+        single_operation_root,
+        sync::{Response, Verifier},
     },
 };
 use commonware_codec::EncodeShared;
@@ -581,7 +585,7 @@ where
     }
 }
 
-impl<F, E, V, C, H, S> crate::qmdb::sync::Source for Keyless<F, E, V, C, H, S>
+impl<F, E, V, C, H, S, Verify> crate::qmdb::sync::Source<Verify> for Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
@@ -596,11 +600,14 @@ where
     type Op = Operation<F, V>;
     type Error = Error<F>;
 
-    async fn serve<T: Send + 'static>(
+    async fn serve(
         &self,
         request: crate::qmdb::sync::Request<F>,
-        verify: impl Verifier<Self, T>,
-    ) -> Result<Option<T>, Self::Error> {
+        verify: Verify,
+    ) -> Result<Option<Verify::Output>, Self::Error>
+    where
+        Verify: Verifier<Response<F, Operation<F, V>, H::Digest>>,
+    {
         self.journal.serve(request, verify).await
     }
 }

@@ -508,7 +508,7 @@ impl EngineDefinition for SingleDbEngine {
 
         // QMDB state-sync resolver.
         let (qmdb_resolver_actor, qmdb_sync_resolver) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, Qmdb<_>>::new(
+            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, Qmdb<_>, _>::new(
                 context.child("qmdb_resolver"),
                 qmdb_resolver::Config {
                     peer_provider: oracle.manager(),

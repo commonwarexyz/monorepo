@@ -38,7 +38,7 @@ use crate::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
         },
-        sync::{CompactTarget, Request, Source, Verifier},
+        sync::{CompactTarget, Request, Response, Source, Verifier},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -666,7 +666,7 @@ where
     }
 }
 
-impl<F, E, V, H, C, S> Source for Db<F, E, V, H, C, S>
+impl<F, E, V, H, C, S, Verify> Source<Verify> for Db<F, E, V, H, C, S>
 where
     F: Family,
     E: Context,
@@ -681,15 +681,18 @@ where
     type Op = Operation<F, V>;
     type Error = qmdb::Error<F>;
 
-    async fn serve<T: Send + 'static>(
+    async fn serve(
         &self,
         request: Request<F>,
-        verify: impl Verifier<Self, T>,
-    ) -> Result<Option<T>, Self::Error> {
+        verify: Verify,
+    ) -> Result<Option<Verify::Output>, Self::Error>
+    where
+        Verify: Verifier<Response<F, Operation<F, V>, H::Digest>>,
+    {
         let response = self
             .witness
             .compact_state(&self.commit_codec_config, request)?;
-        Ok(verify(response))
+        Ok(verify.verify(response))
     }
 }
 

@@ -382,23 +382,41 @@ where
     }
 }
 
-/// A callback that accepts a source response by producing a value.
+/// A verifier that accepts a response by producing a value.
 ///
 /// Returning `None` rejects the response as described by [`Source::serve`].
-pub trait Verifier<S: Source + ?Sized, T>:
-    Fn(Response<S::Family, S::Op, S::Digest>) -> Option<T> + Send + 'static
-{
+pub trait Verifier<R>: Send {
+    /// The value produced for an accepted response.
+    type Output: Send;
+
+    /// Return the accepted value, or `None` if the response is invalid.
+    fn verify(&self, response: R) -> Option<Self::Output>;
 }
 
-impl<S, T, V> Verifier<S, T> for V
+impl<R, T: Send, V> Verifier<R> for V
 where
-    S: Source + ?Sized,
-    V: Fn(Response<S::Family, S::Op, S::Digest>) -> Option<T> + Send + 'static,
+    V: Fn(R) -> Option<T> + Send,
 {
+    type Output = T;
+
+    fn verify(&self, response: R) -> Option<T> {
+        self(response)
+    }
+}
+
+/// A verifier that accepts any response unchanged.
+pub struct Identity;
+
+impl<R: Send> Verifier<R> for Identity {
+    type Output = R;
+
+    fn verify(&self, response: R) -> Option<R> {
+        Some(response)
+    }
 }
 
 /// A source for proofs and operations.
-pub trait Source: Send + Sync {
+pub trait Source<V = Identity>: Send + Sync {
     /// The merkle family backing this source's proofs.
     type Family: Family;
 
@@ -418,34 +436,39 @@ pub trait Source: Send + Sync {
     ///
     /// Returns `Ok(None)` if the source stops without an accepted response.
     /// Dropping the future cancels the request.
-    fn serve<'a, T: Send + 'static>(
-        &'a self,
+    fn serve(
+        &self,
         request: Request<Self::Family>,
-        verify: impl Verifier<Self, T>,
-    ) -> impl Future<Output = Result<Option<T>, Self::Error>> + Send + 'a;
+        verify: V,
+    ) -> impl Future<Output = Result<Option<V::Output>, Self::Error>> + Send
+    where
+        V: Verifier<Response<Self::Family, Self::Op, Self::Digest>>;
 }
 
-impl<T> Source for Arc<T>
+impl<T, V> Source<V> for Arc<T>
 where
-    T: Source + ?Sized,
+    T: Source<V> + ?Sized,
 {
     type Family = T::Family;
     type Digest = T::Digest;
     type Op = T::Op;
     type Error = T::Error;
 
-    fn serve<'a, U: Send + 'static>(
-        &'a self,
+    fn serve(
+        &self,
         request: Request<Self::Family>,
-        verify: impl Verifier<Self, U>,
-    ) -> impl Future<Output = Result<Option<U>, Self::Error>> + Send + 'a {
+        verify: V,
+    ) -> impl Future<Output = Result<Option<V::Output>, Self::Error>> + Send
+    where
+        V: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
+    {
         T::serve(self, request, verify)
     }
 }
 
-impl<T> Source for Option<T>
+impl<T, V> Source<V> for Option<T>
 where
-    T: Source,
+    T: Source<V>,
     ServeError<T::Family>: From<T::Error>,
 {
     type Family = T::Family;
@@ -453,11 +476,14 @@ where
     type Op = T::Op;
     type Error = ServeError<T::Family>;
 
-    async fn serve<U: Send + 'static>(
+    async fn serve(
         &self,
         request: Request<Self::Family>,
-        verify: impl Verifier<Self, U>,
-    ) -> Result<Option<U>, Self::Error> {
+        verify: V,
+    ) -> Result<Option<V::Output>, Self::Error>
+    where
+        V: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
+    {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
         Ok(source.serve(request, verify).await?)
     }
@@ -465,20 +491,23 @@ where
 
 macro_rules! impl_locked_source {
     ($lock:ident) => {
-        impl<T> Source for $lock<T>
+        impl<T, V> Source<V> for $lock<T>
         where
-            T: Source,
+            T: Source<V>,
         {
             type Family = T::Family;
             type Digest = T::Digest;
             type Op = T::Op;
             type Error = T::Error;
 
-            async fn serve<U: Send + 'static>(
+            async fn serve(
                 &self,
                 request: Request<Self::Family>,
-                verify: impl Verifier<Self, U>,
-            ) -> Result<Option<U>, Self::Error> {
+                verify: V,
+            ) -> Result<Option<V::Output>, Self::Error>
+            where
+                V: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
+            {
                 self.read().await.serve(request, verify).await
             }
         }
@@ -488,7 +517,7 @@ macro_rules! impl_locked_source {
 impl_locked_source!(AsyncRwLock);
 impl_locked_source!(TracedAsyncRwLock);
 
-impl<F, E, C, H, S> Source for authenticated::Journal<F, E, C, H, S>
+impl<F, E, C, H, S, V> Source<V> for authenticated::Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
@@ -511,11 +540,14 @@ where
             max_ops = request.max_ops().get(),
         ),
     )]
-    async fn serve<T: Send + 'static>(
+    async fn serve(
         &self,
         request: Request<F>,
-        verify: impl Verifier<Self, T>,
-    ) -> Result<Option<T>, qmdb::Error<F>> {
+        verify: V,
+    ) -> Result<Option<V::Output>, qmdb::Error<F>>
+    where
+        V: Verifier<Response<F, Self::Op, H::Digest>>,
+    {
         // Reject before the floor lookup so the error carries the requested size and the
         // floor read never touches out-of-range locations.
         if request.size() > self.size() {
@@ -548,11 +580,11 @@ where
                 }
             }
         };
-        Ok(verify(response))
+        Ok(verify.verify(response))
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S> Source
+impl<F, E, C, I, H, U, const N: usize, S, V> Source<V>
     for crate::qmdb::any::db::Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
@@ -569,11 +601,10 @@ where
     type Op = crate::qmdb::any::operation::Operation<F, U>;
     type Error = qmdb::Error<F>;
 
-    async fn serve<T: Send + 'static>(
-        &self,
-        request: Request<F>,
-        verify: impl Verifier<Self, T>,
-    ) -> Result<Option<T>, Self::Error> {
+    async fn serve(&self, request: Request<F>, verify: V) -> Result<Option<V::Output>, Self::Error>
+    where
+        V: Verifier<Response<F, Self::Op, H::Digest>>,
+    {
         self.log.serve(request, verify).await
     }
 }
@@ -593,7 +624,7 @@ pub(crate) mod tests {
         NZU64,
         sync::{AsyncRwLock, TracedAsyncRwLock},
     };
-    use std::{collections::VecDeque, marker::PhantomData, sync::Arc};
+    use std::{cell::Cell, collections::VecDeque, marker::PhantomData, sync::Arc};
 
     macro_rules! assert_source_variants {
         ($db:ty) => {
@@ -630,7 +661,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl<F, Op, D> Source for SequenceSource<F, Op, D>
+    impl<F, Op, D, V> Source<V> for SequenceSource<F, Op, D>
     where
         F: Family,
         D: Digest,
@@ -641,16 +672,19 @@ pub(crate) mod tests {
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn serve<T: Send + 'static>(
+        async fn serve(
             &self,
             _request: Request<F>,
-            verify: impl Verifier<Self, T>,
-        ) -> Result<Option<T>, qmdb::Error<F>> {
+            verify: V,
+        ) -> Result<Option<V::Output>, qmdb::Error<F>>
+        where
+            V: Verifier<Response<F, Op, D>>,
+        {
             loop {
                 let Some(response) = self.responses.lock().pop_front() else {
                     return Ok(None);
                 };
-                let verified = verify(response);
+                let verified = verify.verify(response);
                 self.verdicts.lock().push(verified.is_some());
                 if verified.is_some() {
                     return Ok(verified);
@@ -673,7 +707,7 @@ pub(crate) mod tests {
                     size: target.size,
                     start: target.size - 1,
                 },
-                Some,
+                Identity,
             )
             .await?
             .expect("identity transform accepts every response"))
@@ -684,7 +718,7 @@ pub(crate) mod tests {
         _phantom: PhantomData<(F, Op, D)>,
     }
 
-    impl<F, Op, D> Source for FailSource<F, Op, D>
+    impl<F, Op, D, V> Source<V> for FailSource<F, Op, D>
     where
         F: Family,
         D: Digest,
@@ -695,11 +729,14 @@ pub(crate) mod tests {
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn serve<T: Send + 'static>(
+        async fn serve(
             &self,
             _request: Request<F>,
-            _verify: impl Verifier<Self, T>,
-        ) -> Result<Option<T>, qmdb::Error<F>> {
+            _verify: V,
+        ) -> Result<Option<V::Output>, qmdb::Error<F>>
+        where
+            V: Verifier<Response<F, Op, D>>,
+        {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }
@@ -1028,15 +1065,27 @@ pub(crate) mod tests {
                 max_ops: NZU64!(1),
             };
 
-            let accepted = source
-                .serve(request, |response| match response {
-                    Response::Operations { operations, .. } if operations == [2] => Some(2),
-                    _ => None,
-                })
+            let locked = Arc::new(AsyncRwLock::new(Some(source.clone())));
+            let value = String::from("accepted");
+            let borrowed = value.as_str();
+            let attempts = Cell::new(0);
+            let accepted = locked
+                .serve(
+                    request,
+                    move |response: Response<mmr::Family, _, ShaDigest>| {
+                        attempts.set(attempts.get() + 1);
+                        match response {
+                            Response::Operations { operations, .. } if operations == [2] => {
+                                Some((borrowed, attempts.get()))
+                            }
+                            _ => None,
+                        }
+                    },
+                )
                 .await
                 .unwrap();
 
-            assert_eq!(accepted, Some(2));
+            assert_eq!(accepted, Some((value.as_str(), 2)));
             assert_eq!(source.verdicts(), vec![false, true]);
         });
     }

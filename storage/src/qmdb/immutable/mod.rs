@@ -80,8 +80,13 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
-        sync::Verifier,
+        Error,
+        any::ValueEncoding,
+        chain,
+        metrics::Metrics,
+        operation::Key,
+        single_operation_root,
+        sync::{Response, Verifier},
     },
     translator::Translator,
 };
@@ -838,7 +843,8 @@ where
     }
 }
 
-impl<F, E, K, V, C, H, T, S> crate::qmdb::sync::Source for Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S, Verify> crate::qmdb::sync::Source<Verify>
+    for Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -855,11 +861,14 @@ where
     type Op = Operation<F, K, V>;
     type Error = Error<F>;
 
-    async fn serve<TOutput: Send + 'static>(
+    async fn serve(
         &self,
         request: crate::qmdb::sync::Request<F>,
-        verify: impl Verifier<Self, TOutput>,
-    ) -> Result<Option<TOutput>, Self::Error> {
+        verify: Verify,
+    ) -> Result<Option<Verify::Output>, Self::Error>
+    where
+        Verify: Verifier<Response<F, Operation<F, K, V>, H::Digest>>,
+    {
         self.journal.serve(request, verify).await
     }
 }

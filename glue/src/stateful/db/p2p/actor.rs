@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{Request, Response, Source},
+    qmdb::sync::{Identity, Request, Response, Source, Verifier},
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
@@ -31,10 +31,10 @@ use tracing::{debug, info};
 
 type Op<DB> = <Shared<DB> as Source>::Op;
 type DatabaseRoot<DB> = <Shared<DB> as Source>::Digest;
-type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
-type SyncMessage<F, DB> = mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>;
-type PendingSubs<F, DB> =
-    BTreeMap<(Request<F>, u64), Box<dyn mailbox::PendingReply<F, Op<DB>, DatabaseRoot<DB>>>>;
+type SyncMailbox<F, DB, V> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>, V>;
+type SyncMessage<F, DB, V> = mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>, V>;
+type PendingSubs<F, DB, V> =
+    BTreeMap<(Request<F>, u64), mailbox::Reply<Response<F, Op<DB>, DatabaseRoot<DB>>, V>>;
 
 /// Configuration for [`Actor`].
 pub struct Config<P, D, B, DB>
@@ -75,7 +75,7 @@ where
 }
 
 /// Runs a QMDB sync resolver service over `commonware_resolver::p2p::Engine`.
-pub struct Actor<E, P, D, B, F, DB>
+pub struct Actor<E, P, D, B, F, DB, V>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
@@ -85,20 +85,21 @@ where
     DB: Send + Sync + 'static,
     Shared<DB>: Source<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    V: Verifier<Response<F, Op<DB>, DatabaseRoot<DB>>>,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
-    mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB>>,
+    mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB, V>>,
     metrics: ResolverMetrics,
     /// Callers awaiting verified results, indexed by request and resolver subscriber.
-    pending: PendingSubs<F, DB>,
+    pending: PendingSubs<F, DB, V>,
     /// Next identity to allocate for a caller.
     next_subscriber: u64,
     /// The active peer serve, limited to one database read.
     serves: FuturesPool<'static, ()>,
 }
 
-impl<E, P, D, B, F, DB> Actor<E, P, D, B, F, DB>
+impl<E, P, D, B, F, DB, V> Actor<E, P, D, B, F, DB, V>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
@@ -108,9 +109,10 @@ where
     DB: Send + Sync + 'static,
     Shared<DB>: Source<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
+    V: Verifier<Response<F, Op<DB>, DatabaseRoot<DB>>>,
 {
     /// Create a new resolver actor and mailbox.
-    pub fn new(context: E, cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB>) {
+    pub fn new(context: E, cfg: Config<P, D, B, DB>) -> (Self, SyncMailbox<F, DB, V>) {
         let metrics = ResolverMetrics::new(&context);
         let _ = metrics
             .has_database
@@ -134,7 +136,11 @@ where
     pub fn start(
         mut self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
-    ) -> Handle<()> {
+    ) -> Handle<()>
+    where
+        V: 'static,
+        V::Output: 'static,
+    {
         spawn_cell!(self.context, self.run(net))
     }
 
@@ -204,7 +210,7 @@ where
     }
 
     /// Process database attachment, local requests, and caller cancellation.
-    fn handle_mailbox_message<R>(&mut self, resolver: &mut R, message: SyncMessage<F, DB>)
+    fn handle_mailbox_message<R>(&mut self, resolver: &mut R, message: SyncMessage<F, DB, V>)
     where
         R: Resolver<Key = Request<F>, Subscriber = u64>,
     {
@@ -344,7 +350,7 @@ where
         let serve_requests = self.metrics.serve_requests.clone();
 
         self.serves.push(async move {
-            let result = database.serve(key, Some).await;
+            let result = database.serve(key, Identity).await;
 
             let Ok(Some(response)) = result else {
                 serve_requests.inc(status::Status::Failure);
@@ -430,13 +436,14 @@ mod tests {
     >;
     type TestOp = <Shared<TestDb> as Source>::Op;
 
-    type TestActor = Actor<
+    type TestActor<V = Identity> = Actor<
         deterministic::Context,
         ed25519::PublicKey,
         DummyProvider,
         DummyBlocker,
         mmr::Family,
         TestDb,
+        V,
     >;
 
     /// Resolver that records accepted fetches and retain effects.
@@ -580,7 +587,7 @@ mod tests {
         Shared::new("test", db)
     }
 
-    type LiveMailbox = SyncMailbox<mmr::Family, TestDb>;
+    type LiveMailbox = SyncMailbox<mmr::Family, TestDb, Identity>;
 
     /// Two connected resolver services with distinct databases, indexed by peer.
     struct LivePair {
@@ -642,7 +649,7 @@ mod tests {
                 .register(0, Quota::per_second(NZU32!(100)))
                 .await
                 .unwrap();
-            let (actor, mailbox) = Actor::<_, _, _, _, mmr::Family, TestDb>::new(
+            let (actor, mailbox) = Actor::<_, _, _, _, mmr::Family, TestDb, Identity>::new(
                 context.child(if index == 0 { "actor_0" } else { "actor_1" }),
                 Config {
                     peer_provider: manager.clone(),
@@ -738,17 +745,35 @@ mod tests {
     }
 
     type TestResponse = Response<mmr::Family, TestOp, sha256::Digest>;
-    type TestReply = Box<dyn mailbox::PendingReply<mmr::Family, TestOp, sha256::Digest>>;
+    type TestReply<V = Identity> = mailbox::Reply<TestResponse, V>;
 
-    fn test_reply<T: Send + 'static>(
-        verify: impl Fn(TestResponse) -> Option<T> + Send + 'static,
-    ) -> (TestReply, oneshot::Receiver<T>) {
+    fn test_reply<V>(verify: V) -> (TestReply<V>, oneshot::Receiver<V::Output>)
+    where
+        V: Verifier<TestResponse>,
+    {
         let (response, receiver) = oneshot::channel();
-        (Box::new(mailbox::Reply::new(verify, response)), receiver)
+        (mailbox::Reply::new(verify, response), receiver)
     }
 
     fn identity_reply() -> (TestReply, oneshot::Receiver<TestResponse>) {
-        test_reply(Some)
+        test_reply(Identity)
+    }
+
+    fn rejecting_verifier() -> impl Fn(TestResponse) -> Option<()> {
+        |_| None
+    }
+
+    fn transforming_verifier(
+        adjustment: u64,
+        transforms: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl Fn(TestResponse) -> Option<Location> {
+        move |response| {
+            transforms.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Response::Operations { proof, .. } = response else {
+                return None;
+            };
+            proof.leaves.checked_add(adjustment)
+        }
     }
 
     /// A decodable operations response for testing request/response shape checks.
@@ -771,7 +796,8 @@ mod tests {
     #[test]
     fn produce_denied_before_attach() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) =
+                TestActor::<Identity>::new(context.child("actor"), test_config(None));
 
             // An unattached actor must release the peer request without waiting for a database.
             let (response_tx, response_rx) = oneshot::channel();
@@ -784,7 +810,8 @@ mod tests {
     fn same_request_served_after_attach() {
         deterministic::Runner::default().start(|context| async move {
             // Attaching a database makes an initially unavailable actor able to serve.
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) =
+                TestActor::<Identity>::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
             let size = db.read().await.bounds().end;
             let mut resolver = RecordingResolver::default();
@@ -806,7 +833,8 @@ mod tests {
     fn produce_rejects_request_above_max_serve_ops() {
         deterministic::Runner::default().start(|context| async move {
             // Attach a usable database so the configured request bound is the only rejection cause.
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (mut actor, _mailbox) =
+                TestActor::<Identity>::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
             let size = db.read().await.bounds().end;
             let mut resolver = RecordingResolver::default();
@@ -1109,29 +1137,15 @@ mod tests {
     }
 
     #[test]
-    fn every_transformer_runs_and_receives_its_typed_result() {
+    fn same_verifier_type_uses_distinct_per_call_state() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
             let request = test_request_at(Location::new(1));
             let transforms = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-            let first_transforms = transforms.clone();
-            let (first, first_rx) = test_reply(move |response| {
-                first_transforms.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Response::Operations { proof, .. } = response else {
-                    return None;
-                };
-                Some(proof.leaves)
-            });
-            let second_transforms = transforms.clone();
-            let (second, second_rx) = test_reply(move |response| {
-                second_transforms.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Response::Operations { operations, .. } = response else {
-                    return None;
-                };
-                Some(operations.len())
-            });
+            let (first, first_rx) = test_reply(transforming_verifier(1, transforms.clone()));
+            let (second, second_rx) = test_reply(transforming_verifier(2, transforms.clone()));
+            let (mut actor, _mailbox) = TestActor::<_>::new(context, test_config(None));
             for response in [first, second] {
                 actor.handle_mailbox_message(
                     &mut resolver,
@@ -1147,8 +1161,8 @@ mod tests {
             );
 
             assert!(verdict.await.unwrap());
-            assert_eq!(first_rx.await.unwrap(), Location::new(7));
-            assert_eq!(second_rx.await.unwrap(), 0);
+            assert_eq!(first_rx.await.unwrap(), Location::new(8));
+            assert_eq!(second_rx.await.unwrap(), Location::new(9));
             assert_eq!(transforms.load(std::sync::atomic::Ordering::Relaxed), 2);
             assert!(actor.pending.is_empty());
         });
@@ -1157,15 +1171,15 @@ mod tests {
     #[test]
     fn rejected_candidate_keeps_same_reply_until_valid_candidate() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
             let request = test_request_at(Location::new(1));
-            let (response, mut receiver) = test_reply(|response| {
+            let (response, mut receiver) = test_reply(|response: TestResponse| {
                 let Response::Operations { proof, .. } = response else {
                     return None;
                 };
                 (proof.leaves == Location::new(1)).then_some(proof.leaves)
             });
+            let (mut actor, _mailbox) = TestActor::<_>::new(context, test_config(None));
             actor.handle_mailbox_message(
                 &mut resolver,
                 mailbox::Message::GetOperations { request, response },
@@ -1203,12 +1217,12 @@ mod tests {
     #[test]
     fn cancel_after_rejection_preserves_other_same_key_demand() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
             let request = test_request_at(Location::new(1));
 
-            let (canceled, canceled_rx) = test_reply(|_: TestResponse| None::<()>);
-            let (waiting, _waiting_rx) = test_reply(|_: TestResponse| None::<()>);
+            let (canceled, canceled_rx) = test_reply(rejecting_verifier());
+            let (waiting, _waiting_rx) = test_reply(rejecting_verifier());
+            let (mut actor, _mailbox) = TestActor::<_>::new(context, test_config(None));
             for response in [canceled, waiting] {
                 actor.handle_mailbox_message(
                     &mut resolver,
@@ -1230,7 +1244,7 @@ mod tests {
                 &mut resolver,
                 mailbox::Message::CancelOperations { request },
             );
-            let (fresh, _fresh_rx) = test_reply(|_: TestResponse| None::<()>);
+            let (fresh, _fresh_rx) = test_reply(rejecting_verifier());
             actor.handle_mailbox_message(
                 &mut resolver,
                 mailbox::Message::GetOperations {
@@ -1250,12 +1264,12 @@ mod tests {
     #[test]
     fn invalid_snapshot_keeps_closed_reply_for_exact_cancellation() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
             let request = test_request_at(Location::new(1));
 
-            let (first, first_rx) = test_reply(|_: TestResponse| None::<()>);
-            let (closed, closed_rx) = test_reply(|_: TestResponse| None::<()>);
+            let (first, first_rx) = test_reply(rejecting_verifier());
+            let (closed, closed_rx) = test_reply(rejecting_verifier());
+            let (mut actor, _mailbox) = TestActor::<_>::new(context, test_config(None));
             for response in [first, closed] {
                 actor.handle_mailbox_message(
                     &mut resolver,
@@ -1292,7 +1306,7 @@ mod tests {
             let actor_db = db.clone();
             let (slot, database) = db.write().await;
             let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(Some(actor_db)));
+                TestActor::<Identity>::new(context.child("actor"), test_config(Some(actor_db)));
 
             // Start the first serve while database access is blocked, then try to admit a second.
             let (first_tx, mut first_rx) = oneshot::channel();
@@ -1331,7 +1345,7 @@ mod tests {
             let request = test_request_at(size);
             let expected = expected_payload(&db, request).await;
             let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(Some(db)));
+                TestActor::<Identity>::new(context.child("actor"), test_config(Some(db)));
 
             // A well-formed request can name a history larger than the local database.
             let (failed_tx, failed_rx) = oneshot::channel();
@@ -1369,7 +1383,7 @@ mod tests {
 
             // Keep one peer's database unavailable while the other peer requests its data.
             let (slot, database) = pair.databases[0].write().await;
-            let blocked_1 = pair.mailboxes[1].serve(request_1, Some);
+            let blocked_1 = pair.mailboxes[1].serve(request_1, Identity);
             futures::pin_mut!(blocked_1);
             assert!(futures::poll!(blocked_1.as_mut()).is_pending());
             wait_for_fetches(&context, &pair.metrics[1], 1).await;
@@ -1377,7 +1391,7 @@ mod tests {
             assert!(blocked_1.as_mut().now_or_never().is_none());
 
             // A second request reaches the busy peer and must remain eligible for retry.
-            let blocked_2 = pair.mailboxes[1].serve(request_2, Some);
+            let blocked_2 = pair.mailboxes[1].serve(request_2, Identity);
             futures::pin_mut!(blocked_2);
             assert!(futures::poll!(blocked_2.as_mut()).is_pending());
             wait_for_fetches(&context, &pair.metrics[1], 2).await;
@@ -1386,7 +1400,7 @@ mod tests {
 
             // The busy actor must still fetch and validate data from the other peer.
             let response = select! {
-                result = pair.mailboxes[0].serve(request_1, Some) => result.unwrap().unwrap(),
+                result = pair.mailboxes[0].serve(request_1, Identity) => result.unwrap().unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
                     panic!("busy serve blocked an unrelated local fetch");
                 },
@@ -1423,8 +1437,8 @@ mod tests {
 
             // Both callers register independently while the native resolver coalesces their key.
             let (first, delayed) = futures::future::join(
-                pair.mailboxes[0].serve(request, Some),
-                pair.mailboxes[0].serve(request, Some),
+                pair.mailboxes[0].serve(request, Identity),
+                pair.mailboxes[0].serve(request, Identity),
             )
             .await;
             let first = first.unwrap().unwrap();
@@ -1495,7 +1509,7 @@ mod tests {
                     .register(0, Quota::per_second(NZU32!(1_000)))
                     .await
                     .unwrap();
-                let (actor, _mailbox) = Actor::<_, _, _, _, mmr::Family, TestDb>::new(
+                let (actor, _mailbox) = Actor::<_, _, _, _, mmr::Family, TestDb, Identity>::new(
                     test_context.child(label),
                     Config {
                         peer_provider: manager.clone(),
@@ -1518,7 +1532,15 @@ mod tests {
                 .register(0, Quota::per_second(NZU32!(1_000)))
                 .await
                 .unwrap();
-            let (actor, mailbox) = Actor::<_, _, _, _, mmr::Family, TestDb>::new(
+            let (actor, mailbox) = Actor::<
+                _,
+                _,
+                _,
+                _,
+                mmr::Family,
+                TestDb,
+                sync::RequestVerifier<mmr::Family, Sha256>,
+            >::new(
                 test_context.child("actor_2"),
                 Config {
                     peer_provider: manager,

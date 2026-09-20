@@ -17,45 +17,37 @@ use std::{collections::VecDeque, future::Future};
 pub struct ResponseDropped;
 
 /// A caller's verifier and final result channel, retained across rejected candidates.
-pub(super) trait PendingReply<F: Family, Op, D: Digest>: Send {
-    fn is_closed(&self) -> bool;
-
-    /// Return a validity verdict, or `None` when the caller has stopped waiting.
-    fn deliver(&mut self, response: Response<F, Op, D>) -> Option<bool>;
-}
-
-pub(super) struct Reply<T, V> {
+pub(super) struct Reply<R, V>
+where
+    V: Verifier<R>,
+{
     verify: V,
-    response: Option<oneshot::Sender<T>>,
+    response: Option<oneshot::Sender<V::Output>>,
 }
 
-impl<T, V> Reply<T, V> {
-    pub(super) const fn new(verify: V, response: oneshot::Sender<T>) -> Self {
+impl<R, V> Reply<R, V>
+where
+    V: Verifier<R>,
+{
+    pub(super) const fn new(verify: V, response: oneshot::Sender<V::Output>) -> Self {
         Self {
             verify,
             response: Some(response),
         }
     }
-}
 
-impl<F, Op, D, T, V> PendingReply<F, Op, D> for Reply<T, V>
-where
-    F: Family,
-    D: Digest,
-    T: Send,
-    V: Fn(Response<F, Op, D>) -> Option<T> + Send,
-{
-    fn is_closed(&self) -> bool {
+    pub(super) fn is_closed(&self) -> bool {
         self.response
             .as_ref()
             .is_none_or(oneshot::Sender::is_closed)
     }
 
-    fn deliver(&mut self, response: Response<F, Op, D>) -> Option<bool> {
+    /// Return a validity verdict, or `None` when the caller has stopped waiting.
+    pub(super) fn deliver(&mut self, response: R) -> Option<bool> {
         if self.is_closed() {
             return None;
         }
-        let Some(verified) = (self.verify)(response) else {
+        let Some(verified) = self.verify.verify(response) else {
             return Some(false);
         };
         self.response
@@ -68,20 +60,30 @@ where
 }
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
-pub(super) enum Message<DB, F: Family, Op, D: Digest> {
+pub(super) enum Message<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
     /// Provide a database handle so the actor can serve incoming requests.
     AttachDatabase(Shared<DB>),
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
         request: Request<F>,
-        response: Box<dyn PendingReply<F, Op, D>>,
+        response: Reply<Response<F, Op, D>, V>,
     },
     /// Notify the actor that a caller stopped waiting for a response.
     /// Only subscriptions whose response channels have closed are canceled.
     CancelOperations { request: Request<F> },
 }
 
-impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
+impl<DB, F, Op, D, V> Message<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
     fn response_closed(&self) -> bool {
         match self {
             Self::AttachDatabase(_) | Self::CancelOperations { .. } => false,
@@ -90,12 +92,22 @@ impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
     }
 }
 
-pub(super) struct Pending<DB, F: Family, Op, D: Digest> {
+pub(super) struct Pending<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
     database: Option<Shared<DB>>,
-    messages: VecDeque<Message<DB, F, Op, D>>,
+    messages: VecDeque<Message<DB, F, Op, D, V>>,
 }
 
-impl<DB, F: Family, Op, D: Digest> Default for Pending<DB, F, Op, D> {
+impl<DB, F, Op, D, V> Default for Pending<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
     fn default() -> Self {
         Self {
             database: None,
@@ -104,14 +116,19 @@ impl<DB, F: Family, Op, D: Digest> Default for Pending<DB, F, Op, D> {
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<DB, F, Op, D> {
+impl<DB, F, Op, D, V> Overflow<Message<DB, F, Op, D, V>> for Pending<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
     fn is_empty(&self) -> bool {
         self.database.is_none() && self.messages.is_empty()
     }
 
     fn drain<P>(&mut self, mut push: P)
     where
-        P: FnMut(Message<DB, F, Op, D>) -> Option<Message<DB, F, Op, D>>,
+        P: FnMut(Message<DB, F, Op, D, V>) -> Option<Message<DB, F, Op, D, V>>,
     {
         if let Some(database) = self.database.take()
             && let Some(Message::AttachDatabase(database)) = push(Message::AttachDatabase(database))
@@ -133,8 +150,13 @@ impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<D
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
-    type Overflow = Pending<DB, F, Op, D>;
+impl<DB, F, Op, D, V> Policy for Message<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
+    type Overflow = Pending<DB, F, Op, D, V>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
@@ -154,11 +176,21 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
 ///
 /// Callers sharing a mailbox must verify responses against the same QMDB history.
 /// Verifiers run synchronously on the resolver actor's task.
-pub struct Mailbox<DB, F: Family, Op, D: Digest> {
-    sender: Sender<Message<DB, F, Op, D>>,
+pub struct Mailbox<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
+    sender: Sender<Message<DB, F, Op, D, V>>,
 }
 
-impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D> {
+impl<DB, F, Op, D, V> Clone for Mailbox<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -166,39 +198,52 @@ impl<DB, F: Family, Op, D: Digest> Clone for Mailbox<DB, F, Op, D> {
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Mailbox<DB, F, Op, D> {
-    pub(super) const fn new(sender: Sender<Message<DB, F, Op, D>>) -> Self {
+impl<DB, F, Op, D, V> Mailbox<DB, F, Op, D, V>
+where
+    F: Family,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
+    pub(super) const fn new(sender: Sender<Message<DB, F, Op, D, V>>) -> Self {
         Self { sender }
     }
 }
 
-impl<DB: Send + Sync, F: Family, Op: Send, D: Digest> Mailbox<DB, F, Op, D> {
+impl<DB, F, Op, D, V> Mailbox<DB, F, Op, D, V>
+where
+    DB: Send + Sync,
+    F: Family,
+    Op: Send,
+    D: Digest,
+    V: Verifier<Response<F, Op, D>>,
+{
     pub fn attach_database(&self, db: Shared<DB>) {
         let _ = self.sender.enqueue(Message::AttachDatabase(db));
     }
 }
 
-impl<DB, F, Op, D> Source for Mailbox<DB, F, Op, D>
+impl<DB, F, Op, D, V> Source<V> for Mailbox<DB, F, Op, D, V>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
     DB: Send + Sync + 'static,
+    V: Verifier<Response<F, Op, D>>,
 {
     type Family = F;
     type Digest = D;
     type Op = Op;
     type Error = ResponseDropped;
 
-    async fn serve<T: Send + 'static>(
+    async fn serve(
         &self,
         request: Request<F>,
-        verify: impl Verifier<Self, T>,
-    ) -> Result<Option<T>, Self::Error> {
+        verify: V,
+    ) -> Result<Option<V::Output>, Self::Error> {
         let (response_tx, response_rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetOperations {
             request,
-            response: Box::new(Reply::new(verify, response_tx)),
+            response: Reply::new(verify, response_tx),
         });
 
         let mut guard =
@@ -209,12 +254,14 @@ where
     }
 }
 
-impl<DB, F, Op, D> AttachableResolver<DB> for Mailbox<DB, F, Op, D>
+impl<DB, F, Op, D, V> AttachableResolver<DB> for Mailbox<DB, F, Op, D, V>
 where
     F: Family,
     Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
     D: Digest,
     DB: Send + Sync + 'static,
+    V: Verifier<Response<F, Op, D>> + 'static,
+    V::Output: 'static,
 {
     fn attach_database(&self, db: Shared<DB>) -> impl Future<Output = ()> + Send {
         Self::attach_database(self, db);
@@ -227,13 +274,14 @@ mod tests {
     use super::*;
     use commonware_cryptography::sha256;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
-    use commonware_storage::mmr;
+    use commonware_storage::{mmr, qmdb::sync::Identity};
     use commonware_utils::{NZU64, NZUsize};
 
     #[test]
     fn overflow_keeps_latest_database_and_orders_live_requests() {
         deterministic::Runner::default().start(|_| async move {
-            let mut overflow = Pending::<u64, mmr::Family, u64, sha256::Digest>::default();
+            let mut overflow =
+                Pending::<u64, mmr::Family, u64, sha256::Digest, Identity>::default();
             let request = Request::Operations {
                 size: mmr::Location::new(10),
                 start: mmr::Location::new(3),
@@ -250,7 +298,7 @@ mod tests {
                 &mut overflow,
                 Message::GetOperations {
                     request,
-                    response: Box::new(Reply::new(Some, response)),
+                    response: Reply::new(Identity, response),
                 },
             );
             drop(canceled);
@@ -262,7 +310,7 @@ mod tests {
                 &mut overflow,
                 Message::GetOperations {
                     request,
-                    response: Box::new(Reply::new(Some, response)),
+                    response: Reply::new(Identity, response),
                 },
             );
             Message::handle(
@@ -311,7 +359,7 @@ mod tests {
     fn dropping_get_operations_sends_cancel_message() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
-            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest, Identity>::new(sender);
             let size = mmr::Location::new(10);
             let start_loc = mmr::Location::new(3);
             let max_ops = NZU64!(2);
@@ -324,7 +372,7 @@ mod tests {
                         start: start_loc,
                         max_ops,
                     },
-                    Some,
+                    Identity,
                 );
                 futures::pin_mut!(get);
                 assert!(futures::poll!(get.as_mut()).is_pending());
@@ -359,14 +407,14 @@ mod tests {
     fn completed_get_operations_sends_no_cancel() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
-            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+            let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest, Identity>::new(sender);
             let get = mailbox.serve(
                 Request::Operations {
                     size: mmr::Location::new(10),
                     start: mmr::Location::new(3),
                     max_ops: NZU64!(2),
                 },
-                Some,
+                Identity,
             );
             let observe = async move {
                 let Message::GetOperations { response, .. } =
@@ -396,18 +444,21 @@ mod tests {
                     context.child(if cancel { "cancel" } else { "accept" }),
                     NZUsize!(4),
                 );
-                let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest>::new(sender);
+                let mailbox = Mailbox::<(), mmr::Family, u64, sha256::Digest, _>::new(sender);
                 let request = Request::Operations {
                     size: mmr::Location::new(1),
                     start: mmr::Location::new(0),
                     max_ops: NZU64!(1),
                 };
-                let mut fetch = Box::pin(mailbox.serve(request, |candidate| match candidate {
-                    Response::Operations { operations, .. } => {
-                        operations.first().copied().filter(|value| *value == 2)
-                    }
-                    Response::Boundary { .. } => None,
-                }));
+                let mut fetch = Box::pin(mailbox.serve(
+                    request,
+                    |candidate: Response<mmr::Family, u64, sha256::Digest>| match candidate {
+                        Response::Operations { operations, .. } => {
+                            operations.first().copied().filter(|value| *value == 2)
+                        }
+                        Response::Boundary { .. } => None,
+                    },
+                ));
                 assert!(futures::poll!(fetch.as_mut()).is_pending());
                 let Message::GetOperations { mut response, .. } = receiver.recv().await.unwrap()
                 else {

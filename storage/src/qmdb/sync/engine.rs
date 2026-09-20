@@ -8,7 +8,7 @@ use crate::{
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
-            source::{Request, Response, Source},
+            source::{Request, Response, Source, Verifier},
         },
     },
 };
@@ -27,8 +27,11 @@ use std::{
 };
 
 /// Type alias for sync engine errors
-type Error<DB, S> =
-    qmdb::sync::Error<<DB as Database>::Family, <S as Source>::Error, <DB as Database>::Digest>;
+type Error<DB, S> = qmdb::sync::Error<
+    <DB as Database>::Family,
+    <S as Source<RequestVerifier<<DB as Database>::Family, <DB as Database>::Hasher>>>::Error,
+    <DB as Database>::Digest,
+>;
 
 /// Whether sync should continue or complete
 #[derive(Debug)]
@@ -63,68 +66,80 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
     pub result: Result<Option<Response<F, Op, D>>, E>,
 }
 
+/// Verifies responses for one sync request and trusted root.
+pub struct RequestVerifier<F: Family, H: Hasher> {
+    request: Request<F>,
+    root: H::Digest,
+}
+
+impl<F: Family, H: Hasher> RequestVerifier<F, H> {
+    const fn new(request: Request<F>, root: H::Digest) -> Self {
+        Self { request, root }
+    }
+}
+
 /// A response authenticated for one exact request and root.
 ///
-/// This private type prevents an untrusted [`Source`] from returning unchecked response bytes.
-/// The bindings are checked again after [`Source::serve`] returns to reject a response validated
-/// for another in-flight call.
-struct VerifiedResponse<F: Family, Op, H: Hasher> {
+/// Only [`RequestVerifier`] can construct this value. Sync checks its request and root
+/// after [`Source::serve`] returns before using the response.
+pub struct VerifiedResponse<F: Family, Op, H: Hasher> {
     request: Request<F>,
     root: H::Digest,
     response: Response<F, Op, H::Digest>,
 }
 
-/// Authenticate one candidate without mutating sync state.
-fn verify_response<F, Op, H>(
-    request: Request<F>,
-    root: H::Digest,
-    response: Response<F, Op, H::Digest>,
-) -> Option<VerifiedResponse<F, Op, H>>
+impl<F, Op, H> Verifier<Response<F, Op, H::Digest>> for RequestVerifier<F, H>
 where
     F: Family,
-    Op: Encode,
+    Op: Encode + Send,
     H: Hasher,
 {
-    if response.proof().leaves != request.size() {
-        return None;
-    }
+    type Output = VerifiedResponse<F, Op, H>;
 
-    let hasher = qmdb::hasher::<H>();
-    let valid = match (&request, &response) {
-        (
-            Request::Operations { start, max_ops, .. },
-            Response::Operations { proof, operations },
-        ) => {
-            let operations_len = operations.len() as u64;
-            if operations_len == 0 || operations_len > max_ops.get() {
-                false
-            } else {
-                let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
-                proof.verify_range_inclusion(&hasher, &elements, *start, &root)
-            }
+    fn verify(&self, response: Response<F, Op, H::Digest>) -> Option<Self::Output> {
+        let request = self.request;
+        let root = self.root;
+        if response.proof().leaves != request.size() {
+            return None;
         }
-        (
-            Request::Boundary { start, .. },
-            Response::Boundary {
-                proof,
-                op,
-                pinned_nodes,
-            },
-        ) => proof.verify_proof_and_pinned_nodes(
-            &hasher,
-            &[op.encode()],
-            *start,
-            pinned_nodes,
-            &root,
-        ),
-        _ => false,
-    };
 
-    valid.then_some(VerifiedResponse {
-        request,
-        root,
-        response,
-    })
+        let hasher = qmdb::hasher::<H>();
+        let valid = match (&request, &response) {
+            (
+                Request::Operations { start, max_ops, .. },
+                Response::Operations { proof, operations },
+            ) => {
+                let operations_len = operations.len() as u64;
+                if operations_len == 0 || operations_len > max_ops.get() {
+                    false
+                } else {
+                    let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
+                    proof.verify_range_inclusion(&hasher, &elements, *start, &root)
+                }
+            }
+            (
+                Request::Boundary { start, .. },
+                Response::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                },
+            ) => proof.verify_proof_and_pinned_nodes(
+                &hasher,
+                &[op.encode()],
+                *start,
+                pinned_nodes,
+                &root,
+            ),
+            _ => false,
+        };
+
+        valid.then_some(VerifiedResponse {
+            request,
+            root,
+            response,
+        })
+    }
 }
 
 /// Unwrap a verified response only when it belongs to this exact source call.
@@ -378,9 +393,10 @@ where
         self.outstanding_requests
             .insert(request, move |id| async move {
                 let result = source
-                    .serve(request, move |response| {
-                        verify_response::<DB::Family, DB::Op, DB::Hasher>(request, root, response)
-                    })
+                    .serve(
+                        request,
+                        RequestVerifier::<DB::Family, DB::Hasher>::new(request, root),
+                    )
                     .await
                     .map(|verified| {
                         verified.and_then(|verified| into_bound_response(request, root, verified))
@@ -801,10 +817,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        merkle::mmr::{Family as MmrFamily, Proof},
-        qmdb::sync::Verifier,
-    };
+    use crate::merkle::mmr::{Family as MmrFamily, Proof};
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU64, non_empty_range};
@@ -911,18 +924,21 @@ mod tests {
     #[derive(Clone)]
     struct TestSource;
 
-    impl Source for TestSource {
+    impl<V> Source<V> for TestSource {
         type Digest = sha256::Digest;
         type Error = Infallible;
         type Family = MmrFamily;
         type Op = i32;
 
-        async fn serve<T: Send + 'static>(
+        async fn serve(
             &self,
             _request: Request<MmrFamily>,
-            verify: impl Verifier<Self, T>,
-        ) -> Result<Option<T>, Self::Error> {
-            Ok(verify(Response::Operations {
+            verify: V,
+        ) -> Result<Option<V::Output>, Self::Error>
+        where
+            V: Verifier<Response<MmrFamily, i32, sha256::Digest>>,
+        {
+            Ok(verify.verify(Response::Operations {
                 proof: Proof {
                     leaves: Location::new(0),
                     inactive_peaks: 0,

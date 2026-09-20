@@ -15,6 +15,7 @@ use commonware_macros::boxed;
 
 pub mod engine;
 pub(crate) use engine::Engine;
+pub use engine::{RequestVerifier, VerifiedResponse};
 
 mod error;
 pub use error::{EngineError, Error, ServeError};
@@ -31,7 +32,7 @@ pub use database::Database;
 pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_pinned_nodes};
 
 pub mod source;
-pub use source::{Request, Response, Source, Verifier};
+pub use source::{Identity, Request, Response, Source, Verifier};
 
 mod target;
 pub use target::{CompactTarget, Target};
@@ -40,14 +41,24 @@ mod requests;
 
 /// A [`Source`] of operations for the given database.
 pub trait SourceFor<DB: Database>:
-    Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static
+    Source<
+        RequestVerifier<DB::Family, DB::Hasher>,
+        Family = DB::Family,
+        Op = DB::Op,
+        Digest = DB::Digest,
+    > + 'static
 {
 }
 
 impl<DB, S> SourceFor<DB> for S
 where
     DB: Database,
-    S: Source<Family = DB::Family, Op = DB::Op, Digest = DB::Digest> + 'static,
+    S: Source<
+            RequestVerifier<DB::Family, DB::Hasher>,
+            Family = DB::Family,
+            Op = DB::Op,
+            Digest = DB::Digest,
+        > + 'static,
 {
 }
 

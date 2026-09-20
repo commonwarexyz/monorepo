@@ -14,7 +14,6 @@ use crate::{
         sync::{
             self, Engine, Target,
             engine::{Config, NextStep},
-            source::Source,
         },
     },
     translator::TwoCap,
@@ -106,7 +105,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -177,7 +176,7 @@ where
 pub(crate) fn test_sync_empty_to_nonempty<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -225,7 +224,7 @@ where
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
@@ -291,7 +290,7 @@ where
 pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -380,7 +379,7 @@ where
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -427,7 +426,7 @@ where
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -481,7 +480,7 @@ where
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -532,7 +531,7 @@ where
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -592,7 +591,7 @@ where
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -647,7 +646,7 @@ where
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -718,7 +717,7 @@ where
 pub(crate) fn test_sync_nonzero_floor<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -796,7 +795,7 @@ where
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
