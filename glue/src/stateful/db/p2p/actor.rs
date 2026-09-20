@@ -93,7 +93,7 @@ where
     metrics: ResolverMetrics,
     /// Pending replies, keyed by request and subscriber ID.
     pending: PendingSubs<F, DB, V>,
-    next_subscriber: u64,
+    next_id: u64,
     /// At most one active database read for a peer.
     serves: FuturesPool<'static, ()>,
 }
@@ -125,7 +125,7 @@ where
             mailbox_rx,
             metrics,
             pending: BTreeMap::new(),
-            next_subscriber: 0,
+            next_id: 0,
             serves: FuturesPool::default(),
         };
         (actor, mailbox)
@@ -207,6 +207,7 @@ where
         }
     }
 
+    /// Process database attachment, fetch requests, and cancellations.
     fn handle_mailbox_message<R>(&mut self, resolver: &mut R, message: SyncMessage<F, DB, V>)
     where
         R: Resolver<Key = Request<F>, Subscriber = u64>,
@@ -220,11 +221,8 @@ where
             }
             mailbox::Message::GetOperations { request, response } => {
                 // Give each caller a subscription that can be canceled independently.
-                let subscriber = self.next_subscriber;
-                self.next_subscriber = self
-                    .next_subscriber
-                    .checked_add(1)
-                    .expect("request ID overflow");
+                let subscriber = self.next_id;
+                self.next_id = self.next_id.checked_add(1).expect("request ID overflow");
                 self.pending.insert((request, subscriber), response);
                 resolver.fetch(Fetch {
                     key: request,
@@ -955,7 +953,7 @@ mod tests {
                 },
             );
             let existing_id = resolver.fetches[0].1;
-            actor.next_subscriber = u64::MAX;
+            actor.next_id = u64::MAX;
             let (response, receiver) = identity_reply();
 
             // Exhaustion panics before insertion or resolver submission can reuse an ID.
