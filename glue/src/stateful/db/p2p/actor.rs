@@ -184,6 +184,8 @@ where
             _ = &mut resolver_task => {
                 return;
             },
+            // Drive the serve future and free its slot on completion.
+            // The future sends the response and records metrics.
             _ = self.serves.next_completed() => {},
             Some(message) = mailbox_message else continue => {
                 self.handle_mailbox_message(&mut resolver_mailbox, message);
