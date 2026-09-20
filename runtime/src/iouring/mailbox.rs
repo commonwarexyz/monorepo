@@ -34,7 +34,7 @@ pub enum Message {
 /// Registration and channel used to forward completion to another thread.
 pub enum Forward {
     /// Deliver an I/O operation's result through a thread-safe channel.
-    Io(WaiterId, oneshot::Sender<Result<RequestOutput, Error>>),
+    Waiter(WaiterId, oneshot::Sender<Result<RequestOutput, Error>>),
     /// Deliver timer completion through a thread-safe channel.
     Timer(TimerId, oneshot::Sender<Result<(), Error>>),
 }
@@ -42,7 +42,7 @@ pub enum Forward {
 /// Registration whose observer is being released.
 pub enum Cancel {
     /// Stop observing an admitted operation or retained result.
-    Io(WaiterId),
+    Waiter(WaiterId),
     /// Cancel a timer whose sleep future was dropped.
     Timer(TimerId),
 }

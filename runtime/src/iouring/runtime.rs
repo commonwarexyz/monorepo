@@ -1044,7 +1044,7 @@ impl Local {
     /// Detach observation without running callbacks under the local borrow.
     fn release(&mut self, cancel: Cancel) {
         match cancel {
-            Cancel::Io(id) => self.driver.as_mut().unwrap().orphan(id, &mut self.deferred),
+            Cancel::Waiter(id) => self.driver.as_mut().unwrap().orphan(id, &mut self.deferred),
             Cancel::Timer(id) => self.timers.cancel(id, &mut self.deferred),
         }
     }
@@ -1559,7 +1559,7 @@ impl Worker {
                         ..
                     } = &mut *local;
                     match forward {
-                        Forward::Io(id, sender) => {
+                        Forward::Waiter(id, sender) => {
                             driver.as_mut().unwrap().forward(id, sender, deferred);
                         }
                         Forward::Timer(id, sender) => timers.forward(id, sender, deferred),

@@ -69,11 +69,11 @@ impl Key for WaiterId {
     }
 
     fn forward(self, sender: oneshot::Sender<Result<RequestOutput, Error>>) -> Forward {
-        Forward::Io(self, sender)
+        Forward::Waiter(self, sender)
     }
 
     fn cancel(self) -> Cancel {
-        Cancel::Io(self)
+        Cancel::Waiter(self)
     }
 }
 
