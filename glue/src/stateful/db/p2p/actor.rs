@@ -94,7 +94,7 @@ where
     /// Pending replies, keyed by request and subscriber ID.
     pending: PendingSubs<F, DB, V>,
     next_id: u64,
-    /// At most one active database read for a peer.
+    /// Outstanding database reads for peers.
     serves: FuturesPool<'static, ()>,
 }
 
@@ -184,8 +184,8 @@ where
             _ = &mut resolver_task => {
                 return;
             },
-            // Drive the serve future and free its slot on completion.
-            // The future sends the response and records metrics.
+            // Drive the serve futures and remove them on completion.
+            // Each future sends its response and records metrics.
             _ = self.serves.next_completed() => {},
             Some(message) = mailbox_message else continue => {
                 self.handle_mailbox_message(&mut resolver_mailbox, message);
@@ -321,11 +321,6 @@ where
 
     /// Serve a peer's request by querying the local database.
     fn handle_produce(&mut self, key: Request<F>, response_tx: oneshot::Sender<bytes::Bytes>) {
-        // Peers can retry while the current database read finishes.
-        if !self.serves.is_empty() {
-            self.metrics.serve_requests.inc(status::Status::Dropped);
-            return;
-        }
         let Some(database) = &self.config.database else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
@@ -591,7 +586,8 @@ mod tests {
         handles: Vec<Handle<()>>,
     }
 
-    /// Connect two database-backed actors over reliable deterministic links.
+    /// Connect two replicas over reliable links, with wire timeouts beyond the
+    /// one-second progress checks.
     async fn spawn_live_pair(context: &deterministic::Context, prefix: &str) -> LivePair {
         // Reliable links isolate actor scheduling and database availability from packet loss.
         let peers = [1, 2].map(|seed| ed25519::PrivateKey::from_seed(seed).public_key());
@@ -623,11 +619,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Distinct data identifies which peer supplied each response.
+        // Independent replicas allow one database to serve while the other is locked.
         let databases = [
-            init_seeded_db(context.child("database_0"), &format!("{prefix}-0")).await,
-            init_seeded_db(context.child("database_1"), &format!("{prefix}-1")).await,
+            init_db(context.child("database_0"), &format!("{prefix}-0")).await,
+            init_db(context.child("database_1"), &format!("{prefix}-1")).await,
         ];
+        assert_eq!(
+            databases[0].read().await.root(),
+            databases[1].read().await.root()
+        );
 
         // Start both actors and retain their task handles for cleanup.
         let mut mailboxes = Vec::new();
@@ -647,7 +647,7 @@ mod tests {
                     database: Some(databases[index].clone()),
                     mailbox_size: NZUsize!(16),
                     me: Some(peer.clone()),
-                    timeout: Duration::from_millis(20),
+                    timeout: Duration::from_secs(5),
                     fetch_retry_timeout: Duration::from_millis(10),
                     max_serve_ops: NZU64!(16),
                     priority_requests: false,
@@ -1287,47 +1287,61 @@ mod tests {
     }
 
     #[test]
-    fn produce_keeps_one_busy_serve_slot() {
-        deterministic::Runner::default().start(|context| async move {
-            // Hold database access so the first serve cannot finish and free its slot.
-            let db = init_seeded_db(context.child("resolver_db"), "bounded-serve").await;
+    fn concurrent_serves_complete_after_database_is_available() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // Distinct response sizes identify the request each reply belongs to.
+            let db = init_seeded_db(context.child("resolver_db"), "concurrent-serves").await;
             let size = db.read().await.bounds().end;
-            let actor_db = db.clone();
-            let (slot, database) = db.write().await;
-            let (mut actor, _mailbox) =
-                TestActor::<Identity>::new(context.child("actor"), test_config(Some(actor_db)));
-
-            // Start the first serve while database access is blocked, then try to admit a second.
-            let (first_tx, mut first_rx) = oneshot::channel();
-            actor.handle_produce(test_request_at(size), first_tx);
-            assert!(actor.serves.next_completed().now_or_never().is_none());
-            assert!(matches!(
-                first_rx.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            ));
-            let (extra_tx, extra_rx) = oneshot::channel();
-            actor.handle_produce(
+            let requests = [
+                test_request_at(size),
                 Request::Operations {
                     size,
                     start: Location::new(0),
                     max_ops: NZU64!(2),
                 },
-                extra_tx,
-            );
-            let extra_was_dropped = matches!(extra_rx.now_or_never(), Some(Err(_)));
+            ];
+            let expected =
+                futures::future::join_all(requests.map(|request| expected_payload(&db, request)))
+                    .await;
+            assert_ne!(expected[0], expected[1]);
 
-            // Release the database and actor before asserting.
+            // Block both reads so the second request arrives while the first is still pending.
+            let actor_db = db.clone();
+            let (slot, database) = db.write().await;
+            let (mut actor, _mailbox) =
+                TestActor::<Identity>::new(context.child("actor"), test_config(Some(actor_db)));
+            let mut responses = requests.map(|request| {
+                let (response, receiver) = oneshot::channel();
+                actor.handle_produce(request, response);
+                receiver
+            });
+            let reads_pending = actor.serves.next_completed().now_or_never().is_none();
+            let replies_pending = responses.iter_mut().all(|response| {
+                matches!(
+                    response.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                )
+            });
+
+            // Restore database access before asserting, then finish both outstanding reads.
             slot.put(database);
-            drop(actor);
+            assert!(reads_pending);
             assert!(
-                extra_was_dropped,
-                "a busy actor retained more than one database serve"
+                replies_pending,
+                "a pending read caused another serve to be dropped"
             );
+            for _ in requests {
+                actor.serves.next_completed().await;
+            }
+            for (response, expected) in responses.into_iter().zip(expected) {
+                assert_eq!(response.await.unwrap(), expected);
+            }
+            assert!(actor.serves.is_empty());
         });
     }
 
     #[test]
-    fn failed_serve_releases_slot() {
+    fn failed_serve_does_not_block_another_request() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let db = init_seeded_db(context.child("resolver_db"), "failed-serve").await;
             let size = db.read().await.bounds().end;
@@ -1336,38 +1350,37 @@ mod tests {
             let (mut actor, _mailbox) =
                 TestActor::<Identity>::new(context.child("actor"), test_config(Some(db)));
 
-            // A well-formed request can name a history larger than the local database.
+            // Queue an unavailable history beside a request the database can serve.
             let (failed_tx, failed_rx) = oneshot::channel();
             actor.handle_produce(test_request_at(size + 1), failed_tx);
-            actor.serves.next_completed().await;
-            assert!(failed_rx.await.is_err());
-            assert!(actor.serves.is_empty());
-
-            // The failed read must release capacity for a request the database can serve.
             let (response_tx, response_rx) = oneshot::channel();
             actor.handle_produce(request, response_tx);
-            actor.serves.next_completed().await;
+
+            // Both reads finish independently, with only the unavailable request failing.
+            for _ in 0..2 {
+                actor.serves.next_completed().await;
+            }
+            assert!(failed_rx.await.is_err());
             assert_eq!(response_rx.await.unwrap(), expected);
             assert!(actor.serves.is_empty());
         });
     }
 
     #[test]
-    fn busy_serve_preserves_actor_progress_and_reuses_slot() {
+    fn concurrent_serves_preserve_actor_progress() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            // Distinct request keys distinguish the active read from a request that must retry.
-            const PREFIX: &str = "busy_serve_live";
+            // Distinct request types keep the two reads from being coalesced.
+            const PREFIX: &str = "concurrent_serves_live";
             let pair_context = context.child(PREFIX);
             let pair = spawn_live_pair(&pair_context, PREFIX).await;
             let size = pair.databases[0].read().await.bounds().end;
             let request_1 = test_request_at(size);
-            let request_2 = Request::Operations {
+            let request_2 = Request::Boundary {
                 size,
                 start: Location::new(0),
-                max_ops: NZU64!(2),
             };
             let expected_1 = expected_payload(&pair.databases[0], request_1).await;
-            let expected_2 = expected_payload(&pair.databases[0], request_2).await;
+            let expected_2 = expected_payload(&pair.databases[1], request_2).await;
             let peer_expected = expected_payload(&pair.databases[1], request_1).await;
 
             // Keep one peer's database unavailable while the other peer requests its data.
@@ -1379,14 +1392,6 @@ mod tests {
             context.sleep(Duration::from_millis(5)).await;
             assert!(blocked_1.as_mut().now_or_never().is_none());
 
-            // A second request reaches the busy peer and must remain eligible for retry.
-            let blocked_2 = pair.mailboxes[1].serve(request_2, Identity);
-            futures::pin_mut!(blocked_2);
-            assert!(futures::poll!(blocked_2.as_mut()).is_pending());
-            wait_for_fetches(&context, &pair.metrics[1], 2).await;
-            context.sleep(Duration::from_millis(5)).await;
-            assert!(blocked_2.as_mut().now_or_never().is_none());
-
             // The busy actor must still fetch and validate data from the other peer.
             let response = select! {
                 result = pair.mailboxes[0].serve(request_1, Identity) => result.unwrap().unwrap(),
@@ -1396,18 +1401,27 @@ mod tests {
             };
             assert_operations_response(&response, request_1, &peer_expected);
 
-            // Restoring the database lets the active request and the dropped request finish.
+            // A newly attached database can serve a second request while the first read waits.
+            pair.mailboxes[0].attach_database(pair.databases[1].clone());
+            let response_2 = select! {
+                result = pair.mailboxes[1].serve(request_2, Identity) => Some(result),
+                _ = context.sleep(Duration::from_secs(1)) => None,
+            };
+            let first_pending = blocked_1.as_mut().now_or_never().is_none();
+
+            // Restore access before asserting. The first read must use its original database.
             slot.put(database);
+            let response_2 = response_2
+                .expect("a pending read blocked another serve")
+                .unwrap()
+                .unwrap();
+            assert!(first_pending);
+            assert_eq!(response_2.encode(), expected_2);
             let response_1 = select! {
                 result = blocked_1 => result.unwrap().unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => panic!("first serve did not resume"),
             };
             assert_operations_response(&response_1, request_1, &expected_1);
-            let response_2 = select! {
-                result = blocked_2 => result.unwrap().unwrap(),
-                _ = context.sleep(Duration::from_secs(1)) => panic!("retried serve did not resume"),
-            };
-            assert_operations_response(&response_2, request_2, &expected_2);
 
             // Both actor trees must release their work on shutdown.
             shutdown_actors(&context, PREFIX, pair.handles).await;

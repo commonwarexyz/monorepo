@@ -72,9 +72,8 @@ impl<F: Family> Policy for EngineMessage<F> {
     type Overflow = EnginePending<F>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
-        // Drop produce requests so the serve backlog stays bounded by the ready
-        // queue. We prefer handling our own responses over serving peers, who can
-        // ask a less loaded peer instead.
+        // Drop produce requests when the ready queue is full. We prefer handling our own
+        // responses over serving peers, who can ask a less loaded peer instead.
         if matches!(message, Self::Produce { .. }) {
             return;
         }
