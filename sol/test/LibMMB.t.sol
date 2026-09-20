@@ -1,16 +1,23 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
+import { LibMerkle } from "../src/merkle/LibMerkle.sol";
 import { LibMMB } from "../src/merkle/LibMMB.sol";
-import { MerkleTestCommon, CompatibilityHarness, IMerkleGasHarness, HashSelection } from "./Common.t.sol";
+import {
+    MerkleTestCommon,
+    Keccak256RootPolicyHarness,
+    Sha256RootPolicyHarness,
+    IMerkleGasHarness,
+    HashSelection
+} from "./Common.t.sol";
 
-contract MMBHarness is HashSelection {
+abstract contract MMBHarness is HashSelection {
     function verify(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] memory proof)
         external
         view
         returns (bool)
     {
-        return LibMMB.verify(root, leaves, index, element, proof, _hasher());
+        return LibMMB.verify(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
     }
 
     function verifyRange(bytes32 root, uint256 leaves, uint256 start, bytes32[] memory elements, bytes32[] memory proof)
@@ -18,7 +25,7 @@ contract MMBHarness is HashSelection {
         view
         returns (bool)
     {
-        return LibMMB.verifyRange(root, leaves, start, elements, proof, _hasher());
+        return LibMMB.verifyRange(root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
     }
 
     function verifyCalldata(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] calldata proof)
@@ -26,7 +33,7 @@ contract MMBHarness is HashSelection {
         view
         returns (bool)
     {
-        return LibMMB.verifyCalldata(root, leaves, index, element, proof, _hasher());
+        return LibMMB.verifyCalldata(root, leaves, index, element, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher());
     }
 
     function verifyRangeCalldata(
@@ -36,18 +43,14 @@ contract MMBHarness is HashSelection {
         bytes32[] calldata elements,
         bytes32[] calldata proof
     ) external view returns (bool) {
-        return LibMMB.verifyRangeCalldata(root, leaves, start, elements, proof, _hasher());
+        return LibMMB.verifyRangeCalldata(
+            root, leaves, start, elements, proof, LibMerkle.Bagging.ForwardFold, 0, _hasher()
+        );
     }
 }
 
-contract MMBCompatibilityHarness is CompatibilityHarness { }
-
-contract LibMMBTest is MerkleTestCommon {
-    MMBHarness internal gasHarness = new MMBHarness();
-
-    function setUp() public virtual {
-        harness = new MMBCompatibilityHarness();
-    }
+abstract contract LibMMBTest is MerkleTestCommon {
+    MMBHarness internal gasHarness;
 
     function testGas_IndividualTwoLeaves() public {
         bytes32 a = bytes32(uint256(11));
@@ -58,9 +61,9 @@ contract LibMMBTest is MerkleTestCommon {
         bytes32[] memory proof = new bytes32[](1);
         proof[0] = right;
         assertTrue(gasHarness.verify(root, 2, 0, a, proof));
-        vm.snapshotGasLastFrame(_group("MMB"), "individual-2");
+        vm.snapshotGasLastFrame(_group("MMB"), "single-2-memory");
         assertTrue(gasHarness.verifyCalldata(root, 2, 0, a, proof));
-        vm.snapshotGasLastFrame(_group("MMB"), "individual-2-calldata");
+        vm.snapshotGasLastFrame(_group("MMB"), "single-2-calldata");
     }
 
     function testGas_RangeTwoLeaves() public {
@@ -72,61 +75,61 @@ contract LibMMBTest is MerkleTestCommon {
         bytes32 root = _hash(abi.encodePacked(uint64(2), _hash(abi.encodePacked(uint64(2), left, right))));
         bytes32[] memory proof = new bytes32[](0);
         assertTrue(gasHarness.verifyRange(root, 2, 0, elements, proof));
-        vm.snapshotGasLastFrame(_group("MMB"), "range-2");
+        vm.snapshotGasLastFrame(_group("MMB"), "range-2-memory");
         assertTrue(gasHarness.verifyRangeCalldata(root, 2, 0, elements, proof));
         vm.snapshotGasLastFrame(_group("MMB"), "range-2-calldata");
     }
 
     function testFuzz_CalldataSlices(bytes32 a, bytes32 b) public view {
-        checkCalldataSlices(true, a, b);
+        checkCalldataSlices(LibMerkle.Family.MMB, a, b);
     }
 
     function testFuzz_FullRange(uint8 size, bytes32 seed) public view {
-        checkFullRange(true, size, seed);
+        checkFullRange(LibMerkle.Family.MMB, size, seed);
     }
 
     function testFuzz_SingleLeaf(bytes32 element) public view {
-        checkSingleLeaf(true, element);
+        checkSingleLeaf(LibMerkle.Family.MMB, element);
     }
 
     function testFuzz_TwoLeaves(bytes32 a, bytes32 b) public view {
-        checkTwoLeaves(true, a, b);
+        checkTwoLeaves(LibMerkle.Family.MMB, a, b);
     }
 
     function testFuzz_InvalidBounds(uint256 leaves, uint256 start) public view {
-        checkInvalidBounds(true, leaves, start);
+        checkInvalidBounds(LibMerkle.Family.MMB, leaves, start);
     }
 
     function test_EmptyTree() public view {
-        checkEmptyTree(true);
+        checkEmptyTree(LibMerkle.Family.MMB);
     }
 
     function test_MemoryExitPaths() public {
-        checkMemoryExitPaths(true);
+        checkMemoryExitPaths(LibMerkle.Family.MMB);
     }
 
     function testFuzz_MemorySafety(uint8 n, bytes32 seed, bool malformed) public {
-        checkMemorySafety(true, n, seed, malformed);
+        checkMemorySafety(LibMerkle.Family.MMB, n, seed, malformed);
     }
 
     function testFuzz_DifferentialRange(uint16 n, uint16 s, uint16 len, uint64 seed) public {
-        checkDifferentialRange(true, n, s, len, seed);
+        checkDifferentialRange(LibMerkle.Family.MMB, n, s, len, seed);
     }
 
     function testFuzz_DifferentialIndividual(uint16 n, uint16 s, uint64 seed) public {
-        checkDifferentialIndividual(true, n, s, seed);
+        checkDifferentialIndividual(LibMerkle.Family.MMB, n, s, seed);
     }
 
     function testFuzz_DifferentialDeep(uint8 exponent, uint64 offset, uint64 seed) public {
-        checkDifferentialDeep(true, exponent, offset, seed);
+        checkDifferentialDeep(LibMerkle.Family.MMB, exponent, offset, seed);
     }
 
     function test_DifferentialPositionBitBoundaries() public {
-        checkDifferentialPositionBitBoundaries(true);
+        checkDifferentialPositionBitBoundaries(LibMerkle.Family.MMB);
     }
 
     function test_DifferentialMaximumSize() public {
-        checkDifferentialMaximumSize(true);
+        checkDifferentialMaximumSize(LibMerkle.Family.MMB);
     }
 
     function testFuzz_DifferentialMalformed(
@@ -136,110 +139,117 @@ contract LibMMBTest is MerkleTestCommon {
         bytes32[] memory elements,
         bytes32[] memory proof
     ) public {
-        checkDifferentialMalformed(true, leaves, start, root, elements, proof);
+        checkDifferentialMalformed(LibMerkle.Family.MMB, leaves, start, root, elements, proof);
     }
 
     function test_DifferentialSmallRanges() public {
-        checkDifferentialSmallRanges(true);
+        checkDifferentialSmallRanges(LibMerkle.Family.MMB);
     }
 
     function test_DifferentialEmpty() public {
-        checkDifferentialEmpty(true);
+        checkDifferentialEmpty(LibMerkle.Family.MMB);
     }
 
     function test_DifferentialGas() public {
-        checkDifferentialGas(true, IMerkleGasHarness(address(gasHarness)));
+        checkDifferentialGas(LibMerkle.Family.MMB, IMerkleGasHarness(address(gasHarness)));
     }
 
-    function test_DifferentialCompatibilityInactiveBoundaryMatrix() public {
-        checkCompatibilityInactiveBoundaryMatrix(true);
+    function test_DifferentialRootPolicyInactiveBoundaryMatrix() public {
+        checkRootPolicyInactiveBoundaryMatrix(LibMerkle.Family.MMB);
     }
 
-    function test_DifferentialCompatibilityRangeMutations() public {
-        checkCompatibilityRangeMutations(true);
+    function test_DifferentialRootPolicyRangeMutations() public {
+        checkRootPolicyRangeMutations(LibMerkle.Family.MMB);
     }
 
-    function testFuzz_DifferentialCompatibilityRange(
-        bool backward,
+    function testFuzz_DifferentialRootPolicyRange(
+        LibMerkle.Bagging bagging,
         uint8 n,
         uint8 s,
         uint8 len,
         uint8 inactive,
         uint64 seed
     ) public {
-        checkCompatibilityRange(true, backward, n, s, len, inactive, seed);
+        checkRootPolicyRange(LibMerkle.Family.MMB, bagging, n, s, len, inactive, seed);
     }
 
-    function test_DifferentialCompatibilityMaximumSize() public {
-        checkCompatibilityMaximumSize(true);
+    function test_DifferentialRootPolicyMaximumSize() public {
+        checkRootPolicyMaximumSize(LibMerkle.Family.MMB);
     }
 
-    function testFuzz_DifferentialCompatibilityDeep(bool backward, uint8 exponent, uint64 offset, uint64 seed) public {
-        checkCompatibilityDeep(true, backward, exponent, offset, seed);
+    function testFuzz_DifferentialRootPolicyDeep(LibMerkle.Bagging bagging, uint8 exponent, uint64 offset, uint64 seed)
+        public
+    {
+        checkRootPolicyDeep(LibMerkle.Family.MMB, bagging, exponent, offset, seed);
     }
 
-    function test_DifferentialCompatibilityEmpty() public {
-        checkCompatibilityEmpty(true);
+    function test_DifferentialRootPolicyEmpty() public {
+        checkRootPolicyEmpty(LibMerkle.Family.MMB);
     }
 
-    function test_DifferentialCompatibilitySparseMatrix() public {
-        checkCompatibilitySparseMatrix(true);
+    function test_DifferentialRootPolicySparseMatrix() public {
+        checkRootPolicySparseMatrix(LibMerkle.Family.MMB);
     }
 
-    function test_DifferentialCompatibilitySparseWitnessOrdering() public {
-        checkCompatibilitySparseWitnessOrdering(true);
+    function test_DifferentialRootPolicySparseWitnessOrdering() public {
+        checkRootPolicySparseWitnessOrdering(LibMerkle.Family.MMB);
     }
 
-    function testFuzz_DifferentialCompatibilitySparse(bool backward, uint8 n, uint64 seed) public {
-        checkCompatibilitySparse(true, backward, n, seed);
+    function testFuzz_DifferentialRootPolicySparse(LibMerkle.Bagging bagging, uint8 n, uint64 seed) public {
+        checkRootPolicySparse(LibMerkle.Family.MMB, bagging, n, seed);
     }
 
-    function test_DifferentialCompatibilitySparseMaximumSize() public {
-        checkCompatibilitySparseMaximumSize(true);
+    function test_DifferentialRootPolicySparseMaximumSize() public {
+        checkRootPolicySparseMaximumSize(LibMerkle.Family.MMB);
     }
 
     function test_DifferentialRootPolicyGas() public {
-        checkRootPolicyGas(true);
+        checkRootPolicyGas(LibMerkle.Family.MMB);
     }
 
-    function test_DifferentialCompatibilitySparseExactUnion() public {
-        checkCompatibilitySparseExactUnion(true);
+    function test_DifferentialRootPolicySparseExactUnion() public {
+        checkRootPolicySparseExactUnion(LibMerkle.Family.MMB);
     }
 
-    function test_DifferentialCompatibilityInvalidBounds() public {
-        checkCompatibilityInvalidBounds(true);
+    function test_DifferentialRootPolicyInvalidBounds() public {
+        checkRootPolicyInvalidBounds(LibMerkle.Family.MMB);
     }
 
-    function test_DifferentialCompatibilityRootPolicyBinding() public {
-        checkCompatibilityRootPolicyBinding(true);
+    function test_DifferentialRootPolicyBinding() public {
+        checkRootPolicyBinding(LibMerkle.Family.MMB);
     }
 }
 
-/// @dev SHA-256 specialization keeps the verifier's hasher constant at each call site.
+contract MMBKeccak256Harness is MMBHarness {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
+    }
+}
+
+contract LibMMBKeccak256Test is LibMMBTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
+    }
+
+    function setUp() public {
+        gasHarness = new MMBKeccak256Harness();
+        harness = new Keccak256RootPolicyHarness();
+    }
+}
+
 contract MMBSha256Harness is MMBHarness {
-    /// @dev Select the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-contract MMBSha256CompatibilityHarness is CompatibilityHarness {
-    /// @dev Select the SHA-256 precompile.
-    function _hasher() internal pure override returns (address) {
-        return address(2);
-    }
-}
-
-/// @dev Run the complete family suite against Commonware SHA-256 roots.
 contract LibMMBSha256Test is LibMMBTest {
-    /// @dev Select the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 
-    /// @dev Install harnesses with the same hash algorithm as the reference builder.
-    function setUp() public override {
+    function setUp() public {
         gasHarness = new MMBSha256Harness();
-        harness = new MMBSha256CompatibilityHarness();
+        harness = new Sha256RootPolicyHarness();
     }
 }

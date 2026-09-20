@@ -14,10 +14,10 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
-    iobuf::EncodeExt, telemetry::metrics::CounterFamily,
+    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
+    telemetry::metrics::CounterFamily,
 };
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRng;
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -70,11 +70,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     /// Converts a control message into an outbound metric/payload pair.
     ///
     /// Returns `Err` for `Kill` so the caller can terminate the connection.
-    fn prepare_control(
+    fn prepare_control<S, R>(
         peer: &C,
         msg: Message<C>,
         pool: &commonware_runtime::BufferPool,
-    ) -> Result<(metrics::Message<C>, IoBufs), Error> {
+    ) -> Result<(metrics::Message<C>, IoBufs), Error<S, R>> {
         let (metric, payload) = match msg {
             Message::BitVec(bit_vec) => (
                 metrics::Message::new_bit_vec(peer),
@@ -116,10 +116,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     /// Drains already-queued messages into `batch`.
     ///
     /// Priority order: control > high > low. Only consumes messages that are
-    /// already ready (via `try_recv`), so this reduces runtime write calls
-    /// without introducing a per-connection timer or extra buffering latency.
+    /// already ready, so batching adds no buffering latency.
     #[allow(clippy::too_many_arguments)]
-    fn extend_send_many<V>(
+    fn extend_send_many<V, S, R>(
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
@@ -129,7 +128,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<S, R>> {
         while batch.len() < batch_size {
             if let Ok(msg) = control.try_recv() {
                 let (metric, payload) = Self::prepare_control(peer, msg, pool)?;
@@ -151,14 +150,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         Ok(())
     }
 
-    pub async fn run<O: Sink, I: Stream>(
+    pub async fn run<S: Sender, R: Receiver>(
         self,
         peer: C,
         greeting: types::Info<C>,
-        (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
+        (mut conn_sender, mut conn_receiver): (S, R),
         tracker: tracker::Mailbox<C>,
         channels: Channels<C>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<S::Error, R::Error>> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
@@ -175,21 +174,21 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         let rate_limits = Arc::new(rate_limits);
         let pool = self.context.network_buffer_pool().clone();
 
-        // Send greeting first before any other messages
-        self.sent_messages
-            .get_or_create(&metrics::Message::new_greeting(&peer))
-            .inc();
-        conn_sender
-            .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
-            .await
-            .map_err(Error::SendFailed)?;
-
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
+        let mut send_handler = self.context.child("sender").spawn({
             let peer = peer.clone();
             let tracker = tracker.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
+                // Send the greeting before queued messages while the receiver runs concurrently.
+                self.sent_messages
+                    .get_or_create(&metrics::Message::new_greeting(&peer))
+                    .inc();
+                conn_sender
+                    .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
+                    .await
+                    .map_err(Error::SendFailed)?;
+
                 // Set the initial deadline to now to start gossiping immediately
                 let mut deadline = context.current();
 
@@ -207,7 +206,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         deadline = context.current() + self.gossip_bit_vec_frequency;
                     },
                     // Await any outbound message (control, high, or low), then
-                    // drain already-queued messages into a single runtime write.
+                    // drain already-queued messages into one `send_many` call.
                     // Priority order: control > high > low.
                     msg = recv_prioritized(control, high, low) => {
                         let (metric, payload) = match msg {
@@ -239,7 +238,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 Ok(())
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self
+        let mut receive_handler = self
             .context
             .child("receiver")
             .spawn(move |context| async move {
@@ -401,7 +400,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{discovery::actors::tracker, router};
+    use crate::{
+        Receiver as _,
+        authenticated::{discovery::actors::tracker, router},
+    };
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -411,8 +413,10 @@ mod tests {
         BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap};
+    use commonware_stream::{
+        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
+    };
+    use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -441,15 +445,15 @@ mod tests {
         }
     }
 
-    fn stream_config<S: Signer>(key: S) -> StreamConfig<S> {
-        StreamConfig {
-            signing_key: key,
-            namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(10),
-            max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(10),
-        }
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
+        Timeout::new(
+            StreamHandshake {
+                signer,
+                synchrony_bound: Duration::from_secs(10),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            Duration::from_secs(10),
+        )
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
@@ -464,49 +468,150 @@ mod tests {
     }
 
     #[test]
+    fn greeting_and_queued_data_progress_with_backpressure() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            // Complete authentication over buffers smaller than a signed greeting.
+            let signers = [PrivateKey::from_seed(1), PrivateKey::from_seed(2)];
+            let public_keys = signers.each_ref().map(Signer::public_key);
+            let (local_sink, remote_stream) = mocks::Channel::init_with_buffer_size(64);
+            let (remote_sink, local_stream) = mocks::Channel::init_with_buffer_size(64);
+            let remote_handshake = handshake(signers[1].clone());
+            let listener = context.child("listener").spawn(move |context| async move {
+                remote_handshake
+                    .listen(
+                        context,
+                        STREAM_NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .unwrap()
+            });
+            let local_connection = handshake(signers[0].clone())
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    public_keys[1].clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .unwrap();
+            let (authenticated, remote_sender, remote_receiver) = listener.await.unwrap();
+            assert_eq!(authenticated, public_keys[0]);
+
+            // Queue application data before startup so greeting ordering is exercised too.
+            let messages: [&[u8]; 2] = [b"from dialer", b"from listener"];
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(10),
+            );
+            let tracker = tracker::Mailbox::new(tracker_mailbox);
+            let mut peer_mailboxes = Vec::new();
+            let mut receivers = Vec::new();
+            let mut tasks = Vec::new();
+            for (index, (signer, connection)) in signers
+                .into_iter()
+                .zip([local_connection, (remote_sender, remote_receiver)])
+                .enumerate()
+            {
+                let context = context.child(["dial_peer", "listen_peer"][index]);
+                let (actor, mailbox, relay) = Actor::new(
+                    context.child("actor"),
+                    default_peer_config(context.child("config"), signer.public_key()),
+                );
+                let greeting = types::Info::sign(
+                    signer.public_key(),
+                    IP_NAMESPACE,
+                    SocketAddr::from(([127, 0, 0, 1], 8080 + index as u16)),
+                    context.current().epoch_millis(),
+                    |namespace, message| signer.sign(namespace, message),
+                );
+                let mut channels = create_channels(context.child("channels"));
+                let (_, receiver) =
+                    channels.register(0, Quota::per_second(NZU32!(1)), context.child("channel"));
+                let message = EncodedData::new(
+                    context.network_buffer_pool(),
+                    0,
+                    IoBuf::from(messages[index]).into(),
+                );
+                assert!(relay.send(message, false).accepted());
+                peer_mailboxes.push((mailbox, relay));
+                receivers.push(receiver);
+                let peer = public_keys[1 - index].clone();
+                let tracker = tracker.clone();
+                tasks.push(
+                    context
+                        .spawn(move |_| actor.run(peer, greeting, connection, tracker, channels)),
+                );
+            }
+
+            // Each receiver accepts data only after validating its peer's greeting.
+            for (index, receiver) in receivers.iter_mut().enumerate() {
+                let (peer, message) = receiver.recv().await.unwrap();
+                assert_eq!(peer, public_keys[1 - index]);
+                assert_eq!(message, messages[1 - index]);
+            }
+            for task in &tasks {
+                task.abort();
+            }
+            for task in tasks {
+                assert!(task.await.is_err());
+            }
+        });
+    }
+
+    #[test]
     fn test_missing_greeting_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -522,10 +627,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -569,46 +675,50 @@ mod tests {
     fn test_duplicate_greeting_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -624,10 +734,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -675,48 +786,52 @@ mod tests {
     fn test_greeting_public_key_mismatch_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let wrong_key = PrivateKey::from_seed(3);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
-            let wrong_pk = wrong_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let wrong_signer = PrivateKey::from_seed(3);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
+            let wrong_pk = wrong_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -732,10 +847,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -749,10 +865,11 @@ mod tests {
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
             let mut wrong_greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
             wrong_greeting.public_key = wrong_pk;
             let greeting_payload = types::Payload::<PublicKey>::Greeting(wrong_greeting);
@@ -783,46 +900,50 @@ mod tests {
     fn test_invalid_channel_no_unbounded_metric_cardinality() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Establish an encrypted connection between local (attacker) and
             // remote (victim) peers via mock channels.
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -844,10 +965,11 @@ mod tests {
 
             // Greeting the actor will send upon connecting to the peer.
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
 
             let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
@@ -871,10 +993,11 @@ mod tests {
             context.child("task").spawn(move |_ctx| async move {
                 // Valid greeting so the actor accepts subsequent messages.
                 let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
-                    &local_key,
+                    signer.public_key(),
                     IP_NAMESPACE,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                     0,
+                    |namespace, message| signer.sign(namespace, message),
                 ));
                 local_sender
                     .send(greeting_payload.encode())

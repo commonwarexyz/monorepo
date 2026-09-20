@@ -1,0 +1,9 @@
+{
+  "active-singleton-383-grafted-opaque-65-byte-operation": "16718",
+  "fixed-k32-v0-exclusion-empty-database-commit-65-byte-operation": "10173",
+  "fixed-k32-v32-exclusion-383-grafted-interval-97-byte-operation": "17905",
+  "historical-ops-multi-383-three-opaque-4-25-12-byte-operations": "47544",
+  "range-383-cross-chunk-34-opaque-4-to-37-byte-operations": "103844",
+  "variable-vector-k32-v0-exclusion-empty-database-commit-3-byte-operation": "10212",
+  "variable-vector-k32-v32-exclusion-383-grafted-interval-100-byte-operation": "20804"
+}

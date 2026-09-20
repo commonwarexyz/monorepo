@@ -84,7 +84,7 @@ use commonware_utils::{
 use futures::task::noop_waker;
 use futures::{
     Future,
-    task::{ArcWake, waker},
+    task::{ArcWake, AtomicWaker, waker},
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -101,7 +101,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     sync::{Arc, Weak},
-    task::{self, Poll, Waker},
+    task::{self, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::trace;
@@ -1352,7 +1352,7 @@ impl crate::Metrics for Context {
 struct Sleeper {
     executor: Weak<Executor>,
     time: SystemTime,
-    registered: bool,
+    waker: Option<Arc<AtomicWaker>>,
 }
 
 impl Sleeper {
@@ -1364,7 +1364,7 @@ impl Sleeper {
 
 struct Alarm {
     time: SystemTime,
-    waker: Waker,
+    waker: Arc<AtomicWaker>,
 }
 
 impl PartialEq for Alarm {
@@ -1399,12 +1399,16 @@ impl Future for Sleeper {
                 return Poll::Ready(());
             }
         }
-        if !self.registered {
-            self.registered = true;
+        if let Some(waker) = &self.waker {
+            waker.register(cx.waker());
+        } else {
+            let waker = Arc::new(AtomicWaker::new());
+            waker.register(cx.waker());
             executor.sleeping.lock().push(Alarm {
                 time: self.time,
-                waker: cx.waker().clone(),
+                waker: waker.clone(),
             });
+            self.waker = Some(waker);
         }
         Poll::Pending
     }
@@ -1415,7 +1419,7 @@ impl Clock for Context {
         *self.executor().time.lock()
     }
 
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
         let deadline = self
             .current()
             .checked_add(duration)
@@ -1423,12 +1427,15 @@ impl Clock for Context {
         self.sleep_until(deadline)
     }
 
-    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep_until(
+        &self,
+        deadline: SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static + use<> {
         Sleeper {
             executor: self.executor.clone(),
 
             time: deadline,
-            registered: false,
+            waker: None,
         }
     }
 }
@@ -1439,13 +1446,11 @@ impl Clock for Context {
 #[cfg(feature = "external")]
 #[pin_project]
 struct Waiter<F: Future> {
-    executor: Weak<Executor>,
-    target: SystemTime,
+    sleeper: Sleeper,
     #[pin]
     future: F,
     ready: Option<F::Output>,
     started: bool,
-    registered: bool,
 }
 
 #[cfg(feature = "external")]
@@ -1460,7 +1465,7 @@ where
 
         // Poll once with a noop waker so the future can register interest or start work
         // without being able to wake this task before the sampled delay expires. Any ready
-        // value is cached and only released after the clock reaches `self.target`.
+        // value is cached and only released after the sleeper's deadline.
         if !*this.started {
             *this.started = true;
             let waker = noop_waker();
@@ -1471,20 +1476,7 @@ where
         }
 
         // Only allow the task to progress once the sampled delay has elapsed.
-        let executor = this.executor.upgrade().expect("executor already dropped");
-        let current_time = *executor.time.lock();
-        if current_time < *this.target {
-            // Register exactly once with the deterministic sleeper queue so the executor
-            // wakes us once the clock reaches the scheduled target time.
-            if !*this.registered {
-                *this.registered = true;
-                executor.sleeping.lock().push(Alarm {
-                    time: *this.target,
-                    waker: cx.waker().clone(),
-                });
-            }
-            return Poll::Pending;
-        }
+        std::task::ready!(Pin::new(this.sleeper).poll(cx));
 
         // If the underlying future completed during the noop pre-poll, surface the cached value.
         if let Some(value) = this.ready.take() {
@@ -1523,12 +1515,14 @@ impl Pacer for Context {
             .expect("overflow when setting wake time");
 
         Waiter {
-            executor: self.executor.clone(),
-            target,
+            sleeper: Sleeper {
+                executor: self.executor.clone(),
+                time: target,
+                waker: None,
+            },
             future,
             ready: None,
             started: false,
-            registered: false,
         }
     }
 }
@@ -1659,7 +1653,8 @@ mod tests {
     use futures::future::pending;
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
-    use futures::{FutureExt as _, stream::FuturesUnordered, task::noop_waker};
+    use futures::{FutureExt as _, stream::FuturesUnordered};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -1734,19 +1729,19 @@ mod tests {
         let alarms = vec![
             Alarm {
                 time: now + Duration::new(10, 0),
-                waker: noop_waker(),
+                waker: Arc::new(AtomicWaker::new()),
             },
             Alarm {
                 time: now + Duration::new(5, 0),
-                waker: noop_waker(),
+                waker: Arc::new(AtomicWaker::new()),
             },
             Alarm {
                 time: now + Duration::new(15, 0),
-                waker: noop_waker(),
+                waker: Arc::new(AtomicWaker::new()),
             },
             Alarm {
                 time: now + Duration::new(5, 0),
-                waker: noop_waker(),
+                waker: Arc::new(AtomicWaker::new()),
             },
         ];
         let mut heap = BinaryHeap::new();
@@ -1768,6 +1763,40 @@ mod tests {
                 now + Duration::new(15, 0),
             ]
         );
+    }
+
+    #[test]
+    fn test_sleep_refreshes_one_alarm_after_repolling() {
+        struct Counter(AtomicUsize);
+
+        impl ArcWake for Counter {
+            fn wake_by_ref(this: &Arc<Self>) {
+                this.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        Runner::default().start(|context| async move {
+            // Count notifications separately for the initial and final pollers.
+            let first = Arc::new(Counter(AtomicUsize::new(0)));
+            let latest = Arc::new(Counter(AtomicUsize::new(0)));
+            let mut sleep = context.sleep(Duration::from_millis(10)).boxed();
+
+            // Changing the poller's waker must reuse the existing alarm.
+            for counter in [&first, &latest].into_iter().cycle().take(100) {
+                assert!(
+                    sleep
+                        .poll_unpin(&mut task::Context::from_waker(&waker(counter.clone())))
+                        .is_pending()
+                );
+            }
+            assert_eq!(context.executor().sleeping.lock().len(), 1);
+
+            // Once due, the sleep must notify only its latest poller and resolve.
+            context.sleep(Duration::from_millis(20)).await;
+            assert_eq!(first.0.load(Ordering::Relaxed), 0);
+            assert_eq!(latest.0.load(Ordering::Relaxed), 1);
+            assert!(futures::poll!(&mut sleep).is_ready());
+        });
     }
 
     #[test]
@@ -2168,6 +2197,27 @@ mod tests {
         // Start runtime
         executor.start(|_| async move {
             rx.await.unwrap();
+        });
+    }
+
+    #[cfg(feature = "external")]
+    #[test]
+    fn test_paced_future_moves_between_tasks() {
+        Runner::timed(Duration::from_secs(1)).start(|context| async move {
+            // An immediately ready payload makes the pacing timer the only wakeup source.
+            let clock = context.child("clock");
+            let latency = Duration::from_millis(10);
+            let deadline = context.current() + latency;
+            let mut future = async move { async { 7 }.pace(&clock, latency).await }.boxed();
+
+            // Register the source task's waker before transferring the pending future.
+            // The destination must receive the timer's eventual notification.
+            assert!(futures::poll!(&mut future).is_pending());
+            let moved = context.child("moved").spawn(move |_| future);
+
+            // Changing tasks must preserve both the result and the pacing deadline.
+            assert_eq!(moved.await.unwrap(), 7);
+            assert!(context.current() >= deadline);
         });
     }
 

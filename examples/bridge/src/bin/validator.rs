@@ -1,6 +1,7 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX, application,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE, P2P_SUFFIX,
+    application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
@@ -24,7 +25,7 @@ use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::encrypted::{Config as StreamConfig, dial};
+use commonware_stream::{Config as StreamConfig, encrypted::Handshake, utils::Timeout};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -160,24 +161,28 @@ fn main() {
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let indexer_cfg = StreamConfig {
-        signing_key: signer.clone(),
-        namespace: INDEXER_NAMESPACE.to_vec(),
-        max_message_size: 1024 * 1024,
-        synchrony_bound: Duration::from_secs(1),
-        max_handshake_age: Duration::from_secs(60),
-        handshake_timeout: Duration::from_secs(5),
-    };
+    let indexer_handshake = StreamConfig::new(
+        Timeout::new(
+            Handshake {
+                signer: signer.clone(),
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(60),
+            },
+            Duration::from_secs(5),
+        ),
+        INDEXER_NAMESPACE,
+        MAX_MESSAGE_SIZE,
+    );
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        signer,
+        Handshake::new(signer),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        1024 * 1024, // 1MB
+        MAX_MESSAGE_SIZE,
     );
 
     // Start context
@@ -187,7 +192,8 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = dial(context.child("dialer"), indexer_cfg, indexer, stream, sink)
+        let indexer = indexer_handshake
+            .dial(context.child("dialer"), indexer, stream, sink)
             .await
             .expect("Failed to upgrade connection with indexer");
 

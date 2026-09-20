@@ -15,7 +15,7 @@ use commonware_runtime::{
 };
 use futures::future::{join_all, try_join_all};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     future::Future,
     mem::take,
     num::NonZeroUsize,
@@ -276,15 +276,16 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn get_or_create(&mut self, section: u64) -> Result<&mut F::Buffer, Error> {
         self.prune_guard(section)?;
 
-        if !self.blobs.contains_key(&section) {
-            let name = section.to_be_bytes();
-            let (blob, size) = self.context.open(&self.partition, &name).await?;
-            let buffer = self.factory.create(blob, size).await?;
-            self.tracked.inc();
-            self.blobs.insert(section, buffer);
+        match self.blobs.entry(section) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let name = section.to_be_bytes();
+                let (blob, size) = self.context.open(&self.partition, &name).await?;
+                let buffer = self.factory.create(blob, size).await?;
+                self.tracked.inc();
+                Ok(entry.insert(buffer))
+            }
         }
-
-        Ok(self.blobs.get_mut(&section).unwrap())
     }
 
     /// Sync the given `sections` to storage.

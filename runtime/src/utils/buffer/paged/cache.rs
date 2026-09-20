@@ -594,10 +594,10 @@ mod tests {
     use crate::{
         BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufs, IoBufsMut, Runner as _,
         Spawner as _, Storage as _, Supervisor as _, WriteOptions, buffer::paged::CHECKSUM_SIZE,
-        deterministic, telemetry::metrics::Registry,
+        deterministic, mocks::MigratingReadBlob, telemetry::metrics::Registry,
     };
     use commonware_cryptography::Crc32;
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
     use futures::{future::pending, poll};
     use rstest::rstest;
@@ -904,6 +904,110 @@ mod tests {
 
             // Cleanup.
             blob.sync().await.unwrap();
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default(), false)]
+    #[case::tokio(crate::tokio::Runner::default(), false)]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default(), true)
+    )]
+    fn test_page_fetch_migrates_between_dedicated_workers<R: crate::Runner>(
+        #[case] runner: R,
+        #[case] require_pending: bool,
+    ) where
+        R::Context: crate::BufferPooler + crate::Clock + crate::Spawner + crate::Storage,
+    {
+        runner.start(|context| async move {
+            // Build a valid checksummed page in the runtime's real storage backend.
+            let logical_page = vec![7u8; PAGE_SIZE.get() as usize];
+            let crc = Crc32::checksum(&logical_page);
+            let mut physical_page = logical_page.clone();
+            physical_page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
+
+            let partition = "cache_page_fetch_migration";
+            let (blob, size) = context.open(partition, b"blob").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, physical_page, WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Count reads beneath an empty cache so duplicate physical misses remain observable.
+            let blob = MigratingReadBlob::new(blob, require_pending);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+            let blob_id = cache_ref.next_id();
+
+            // The source polls its cache read once and then stays alive without repolling it. Once
+            // that poll has fully unwound, the destination joins and solely drives the shared fetch
+            // to completion before the source is released.
+            let concurrent_reads = async {
+                let (source_polled_tx, source_polled_rx) = oneshot::channel();
+                let (source_release_tx, source_release_rx) = oneshot::channel();
+                let first_cache = cache_ref.clone();
+                let first_blob = blob.clone();
+                let first = context.child("first").dedicated().spawn(move |_| async move {
+                    let mut buf = vec![0; PAGE_SIZE.get() as usize];
+                    let mut read = Box::pin(first_cache.read_after_miss(
+                        &first_blob,
+                        blob_id,
+                        &mut buf,
+                        0,
+                    ));
+
+                    // Publish the handoff only after Shared has released its polling lock, then
+                    // park on an unrelated signal so source wakeups cannot repoll the cache read.
+                    assert!(poll!(&mut read).is_pending());
+                    source_polled_tx
+                        .send(())
+                        .expect("source poll receiver dropped");
+                    source_release_rx
+                        .await
+                        .expect("source release signal dropped");
+                    read.await.unwrap();
+                    buf
+                });
+                source_polled_rx
+                    .await
+                    .expect("source cache poll never completed");
+
+                // Join the installed PageFetch from a second worker, which becomes its only active
+                // poller while the source remains parked.
+                let second_cache = cache_ref.clone();
+                let second_blob = blob.clone();
+                let second = context
+                    .child("second")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        let mut buf = vec![0; PAGE_SIZE.get() as usize];
+                        second_cache
+                            .read_after_miss(&second_blob, blob_id, &mut buf, 0)
+                            .await
+                            .unwrap();
+                        buf
+                    });
+
+                // Release the source only after the destination completes the shared fetch.
+                let second_buf = second.await.unwrap();
+                source_release_tx
+                    .send(())
+                    .expect("source worker exited before release");
+                (first.await.unwrap(), second_buf)
+            };
+
+            // Bound the coordination independently of either worker so a lost migration wakeup
+            // fails instead of leaving the runtime parked indefinitely.
+            let (first_buf, second_buf) = select! {
+                result = concurrent_reads => result,
+                _ = context.sleep(Duration::from_secs(10)) => panic!("concurrent page fetch timed out"),
+            };
+
+            // Both waiters must receive the validated logical page from one physical backend read.
+            assert_eq!(first_buf, logical_page);
+            assert_eq!(second_buf, logical_page);
+            assert_eq!(blob.reads(), 1);
+            context.remove(partition, None).await.unwrap();
         });
     }
 
