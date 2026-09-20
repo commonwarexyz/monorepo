@@ -24,6 +24,7 @@ use futures::future;
 use rand_core::Rng;
 use std::{
     collections::{BTreeMap, BTreeSet},
+    iter::repeat_n,
     num::{NonZeroU64, NonZeroUsize},
     time::Duration,
 };
@@ -295,11 +296,12 @@ where
         // cancellation retracts their resolver IDs. Callers verify the same QMDB history,
         // so one explicit verdict classifies the response.
         let mut verdict = None;
+        let mut responses = repeat_n(response, delivery.subscribers.len().get());
         for (subscriber, _) in delivery.subscribers.iter() {
             let Some(caller) = self.pending.get_mut(&(key, *subscriber)) else {
                 continue;
             };
-            let outcome = caller.deliver(response.clone());
+            let outcome = caller.deliver(responses.next().expect("one response per subscriber"));
             verdict = verdict.or(outcome);
             if outcome == Some(true) {
                 self.pending.remove(&(key, *subscriber));
