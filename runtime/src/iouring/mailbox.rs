@@ -25,17 +25,17 @@ pub enum Message {
     Wake(Target),
     /// Place a spawned task on this worker.
     Spawn(BoxedTask),
-    /// Deliver completion through a thread-safe channel.
+    /// Transfer observation of an operation or timer to a channel.
     Forward(Forward),
-    /// Release observation of an I/O operation or timer.
+    /// Release observation of an operation or timer.
     Cancel(Cancel),
 }
 
 /// Registration and channel used to forward completion to another thread.
 pub enum Forward {
-    /// Deliver an I/O operation's result through a thread-safe channel.
+    /// Deliver an operation's result through a thread-safe channel.
     Waiter(WaiterId, oneshot::Sender<Result<RequestOutput, Error>>),
-    /// Deliver timer completion through a thread-safe channel.
+    /// Deliver a timer's result through a thread-safe channel.
     Timer(TimerId, oneshot::Sender<Result<(), Error>>),
 }
 
