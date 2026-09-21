@@ -1,7 +1,9 @@
 //! A stream that yields the ancestors of a block while prefetching parents.
 
 use crate::{Block, Heightable, types::Height};
-use commonware_cryptography::{Digest, Digestible};
+use commonware_cryptography::Digest;
+#[commonware_macros::stability(ALPHA)]
+use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
 use futures::{
     FutureExt, Stream,
@@ -343,6 +345,7 @@ impl<M: BlockProvider, C: Clock> AncestorStream<M, C> {
     /// # Panics
     ///
     /// Panics if the initial blocks are not contiguous.
+    #[commonware_macros::stability(ALPHA)]
     pub(crate) fn new(
         clock: Arc<C>,
         marshal: M,

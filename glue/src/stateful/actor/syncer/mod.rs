@@ -8,7 +8,7 @@ use commonware_consensus::{
     Heightable,
     marshal::{
         Identifier,
-        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Processed, Variant},
+        core::{Floor, Mailbox as MarshalMailbox, Processed, Variant},
     },
     simplex::types::Finalization,
     types::Height,
@@ -166,11 +166,9 @@ where
             V::into_shared(anchor)
         }
     } else {
-        // Marshal fetches the configured floor block itself, so wait for it without starting
-        // another fetch.
         let selected = {
             let block = marshal
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .acquire(finalization.proposal.payload)
                 .await
                 .expect("marshal must yield floor block");
             V::into_shared(block)

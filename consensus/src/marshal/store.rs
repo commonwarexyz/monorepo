@@ -87,9 +87,6 @@ pub trait Certificates: Send + Sync + Sized + 'static {
         Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
     > + Send;
 
-    /// Check whether a finalization is stored at `height` without fetching it.
-    fn has(&self, height: Height) -> impl Future<Output = Result<bool, Self::Error>> + Send;
-
     /// Prune the store to the provided minimum height (inclusive).
     ///
     /// Heights below `min` may also remain.
@@ -184,21 +181,8 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     /// The store when pruning is applied or unnecessary, or `Err` if pruning fails.
     fn prune(self, min: Height) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
-    /// Returns up to `max` missing items starting from `start`.
-    ///
-    /// This method iterates through gaps between existing ranges, collecting missing indices
-    /// until either `max` items are found or there are no more gaps to fill.
-    ///
-    /// # Arguments
-    ///
-    /// * `start`: The height to start searching from (inclusive).
-    /// * `max`: The maximum number of missing items to return.
-    ///
-    /// # Returns
-    ///
-    /// A vector containing up to `max` missing heights from gaps between ranges.
-    /// The vector may contain fewer than `max` items if there aren't enough gaps.
-    /// If there are no more ranges after the current position, no items are returned.
+    /// Returns up to `max` missing heights at or above `start`, in ascending order.
+    /// Only gaps before a subsequent stored range are included.
     fn missing_items(&self, start: Height, max: usize) -> Vec<Height>;
 
     /// Finds the end of the range containing `value` and the start of the
@@ -265,10 +249,6 @@ where
         id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
-    }
-
-    async fn has(&self, height: Height) -> Result<bool, Self::Error> {
-        <Self as Archive>::has(self, Identifier::Index(height.get())).await
     }
 
     async fn prune(self, _: Height) -> Result<Self, Self::Error> {
@@ -370,10 +350,6 @@ where
         id: Identifier<'_, Self::BlockDigest>,
     ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
         <Self as Archive>::get(self, id).await
-    }
-
-    async fn has(&self, height: Height) -> Result<bool, Self::Error> {
-        <Self as Archive>::has(self, Identifier::Index(height.get())).await
     }
 
     async fn prune(self, min: Height) -> Result<Self, Self::Error> {
