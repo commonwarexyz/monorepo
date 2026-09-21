@@ -282,15 +282,16 @@ impl Blob {
         ))
     }
 
-    fn sync_inner(&self) -> Result<(), crate::Error> {
+    fn sync_inner(
+        &self,
+        #[cfg(test)] before_publication: impl FnOnce(),
+    ) -> Result<(), crate::Error> {
         // Hold the live contents until the snapshot is published so a concurrent clone cannot
         // publish a newer image that this snapshot then overwrites.
         let live = self.content.read();
         let new_content = live.clone();
         #[cfg(test)]
-        if let Some(before_publication) = tests::BEFORE_PUBLICATION.with_borrow_mut(Option::take) {
-            before_publication();
-        }
+        before_publication();
 
         // Update partition content
         let generations = self.generations.lock();
@@ -491,7 +492,10 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), crate::Error> {
-        self.sync_inner()
+        self.sync_inner(
+            #[cfg(test)]
+            || {},
+        )
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -518,11 +522,7 @@ mod tests {
     use commonware_utils::{ScriptedRng, probability};
     use futures::executor::block_on;
     use rstest::rstest;
-    use std::{cell::RefCell, sync::mpsc, time::Duration};
-
-    thread_local! {
-        pub(super) static BEFORE_PUBLICATION: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
-    }
+    use std::{sync::mpsc, time::Duration};
 
     #[rstest]
     #[case::range(true)]
@@ -535,13 +535,10 @@ mod tests {
         let (entered, entering) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let sync = std::thread::spawn(move || {
-            BEFORE_PUBLICATION.with_borrow_mut(|hook| {
-                *hook = Some(Box::new(move || {
-                    entered.send(()).unwrap();
-                    released.recv_timeout(Duration::from_secs(10)).unwrap();
-                }))
-            });
-            block_on(snapshot.sync())
+            snapshot.sync_inner(|| {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+            })
         });
         entering.recv_timeout(Duration::from_secs(10)).unwrap();
 
