@@ -754,46 +754,54 @@ mod tests {
     immutable_conformance!(
         ImmutableMmrCompactFixedConf,
         ImmutableMmrCompactFixed,
-        immutable_fixed_compact_config
+        immutable_fixed_compact_config,
+        init_arg: None
     );
     immutable_conformance!(
         ImmutableMmbCompactFixedConf,
         ImmutableMmbCompactFixed,
-        immutable_fixed_compact_config
+        immutable_fixed_compact_config,
+        init_arg: None
     );
     immutable_conformance!(
         ImmutableMmrCompactVariableConf,
         ImmutableMmrCompactVariable,
-        immutable_variable_compact_config
+        immutable_variable_compact_config,
+        init_arg: None
     );
     immutable_conformance!(
         ImmutableMmbCompactVariableConf,
         ImmutableMmbCompactVariable,
-        immutable_variable_compact_config
+        immutable_variable_compact_config,
+        init_arg: None
     );
 
     db_conformance!(
         KeylessMmrCompactFixedConf,
         KeylessMmrCompactFixed,
         keyless_fixed_compact_config,
+        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     db_conformance!(
         KeylessMmbCompactFixedConf,
         KeylessMmbCompactFixed,
         keyless_fixed_compact_config,
+        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     db_conformance!(
         KeylessMmrCompactVariableConf,
         KeylessMmrCompactVariable,
         keyless_variable_compact_config,
+        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
     db_conformance!(
         KeylessMmbCompactVariableConf,
         KeylessMmbCompactVariable,
         keyless_variable_compact_config,
+        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
 
@@ -960,25 +968,29 @@ mod tests {
         ImmutableMmrCompactFixedStorage,
         mmr::Family,
         ImmutableMmrCompactFixed,
-        immutable_fixed_compact_config
+        immutable_fixed_compact_config,
+        init_arg: None
     );
     immutable_storage_audit!(
         ImmutableMmbCompactFixedStorage,
         mmb::Family,
         ImmutableMmbCompactFixed,
-        immutable_fixed_compact_config
+        immutable_fixed_compact_config,
+        init_arg: None
     );
     immutable_storage_audit!(
         ImmutableMmrCompactVariableStorage,
         mmr::Family,
         ImmutableMmrCompactVariable,
-        immutable_variable_compact_config
+        immutable_variable_compact_config,
+        init_arg: None
     );
     immutable_storage_audit!(
         ImmutableMmbCompactVariableStorage,
         mmb::Family,
         ImmutableMmbCompactVariable,
-        immutable_variable_compact_config
+        immutable_variable_compact_config,
+        init_arg: None
     );
 
     storage_audit_conformance!(
@@ -986,6 +998,7 @@ mod tests {
         mmr::Family,
         KeylessMmrCompactFixed,
         keyless_fixed_compact_config,
+        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     storage_audit_conformance!(
@@ -993,6 +1006,7 @@ mod tests {
         mmb::Family,
         KeylessMmbCompactFixed,
         keyless_fixed_compact_config,
+        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| U64::new(x)) }
     );
     storage_audit_conformance!(
@@ -1000,6 +1014,7 @@ mod tests {
         mmr::Family,
         KeylessMmrCompactVariable,
         keyless_variable_compact_config,
+        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
     storage_audit_conformance!(
@@ -1007,6 +1022,7 @@ mod tests {
         mmb::Family,
         KeylessMmbCompactVariable,
         keyless_variable_compact_config,
+        init_arg: None,
         |db, seed| { keyless_root!(db, seed, |x| x.to_be_bytes().to_vec()) }
     );
 
@@ -1359,23 +1375,27 @@ order_test!(
     test_order_immutable_mmr_compact_fixed,
     ImmutableMmrCompactFixed,
     immutable_fixed_compact_config,
+    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmb_compact_fixed,
     ImmutableMmbCompactFixed,
     immutable_fixed_compact_config,
+    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmr_compact_variable,
     ImmutableMmrCompactVariable,
     immutable_variable_compact_config,
+    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
 order_test!(
     test_order_immutable_mmb_compact_variable,
     ImmutableMmbCompactVariable,
     immutable_variable_compact_config,
+    init_arg: None,
     |fwd, rev| assert_immutable_order_independent!(fwd, rev)
 );
