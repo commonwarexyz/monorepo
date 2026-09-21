@@ -30,7 +30,7 @@ fn bench_prove_multi(c: &mut Criterion) {
                         let samples: Vec<_> =
                             queries.sample(&mut sampler, SAMPLE_SIZE).cloned().collect();
                         let positions: Vec<u32> = samples.iter().map(|(pos, _)| *pos).collect();
-                        let proof = tree.multi_proof(&positions).unwrap();
+                        let proof = tree.multi_proof(positions).unwrap();
                         (samples, proof)
                     },
                     |(samples, proof)| {
@@ -38,7 +38,7 @@ fn bench_prove_multi(c: &mut Criterion) {
                             samples.iter().map(|(pos, elem)| (*elem, *pos)).collect();
                         assert!(
                             proof
-                                .verify_multi_inclusion::<Sha256>(&elements, &root)
+                                .verify_multi_inclusion::<Sha256>(elements, &root)
                                 .is_ok()
                         );
                     },

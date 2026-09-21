@@ -582,7 +582,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
                     .flat_map(|&i| encoded_data[i as usize].iter().copied()),
             );
             let inclusion_proof = bmt
-                .multi_proof(indices)
+                .multi_proof(indices.iter().copied())
                 .map_err(Error::FailedToCreateInclusionProof)?;
             Ok(StrongShard {
                 data_bytes,

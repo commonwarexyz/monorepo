@@ -322,7 +322,7 @@ fn fuzz(input: FuzzInput) {
                 .into_iter()
                 .collect();
 
-            let Ok(original_proof) = tree.multi_proof(&positions) else {
+            let Ok(original_proof) = tree.multi_proof(positions.iter().copied()) else {
                 return;
             };
             let elements: Vec<(Digest, u32)> = positions
@@ -332,7 +332,7 @@ fn fuzz(input: FuzzInput) {
 
             assert!(
                 original_proof
-                    .verify_multi_inclusion::<Sha256>(&elements, &root)
+                    .verify_multi_inclusion::<Sha256>(elements.iter().copied(), &root)
                     .is_ok()
             );
 
@@ -342,7 +342,7 @@ fn fuzz(input: FuzzInput) {
                 if mutated_proof != original_proof {
                     assert!(
                         mutated_proof
-                            .verify_multi_inclusion::<Sha256>(&elements, &root)
+                            .verify_multi_inclusion::<Sha256>(elements.iter().copied(), &root)
                             .is_err()
                     );
                 }
