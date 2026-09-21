@@ -50,7 +50,9 @@ impl<
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
-    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+    /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
+    /// commit's inactivity floor.
     /// `None` selects the latest retained state.
     pub async fn init(
         context: E,
@@ -99,7 +101,9 @@ pub mod partitioned {
     > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
-        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+        /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
+        /// commit's inactivity floor.
         /// `None` selects the latest retained state.
         pub async fn init(
             context: E,

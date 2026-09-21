@@ -405,66 +405,6 @@ where
         Ok(self)
     }
 
-    /// Rewind the database to `size` operations, where `size` is the location of the next append.
-    ///
-    /// This rewinds both the operations journal and its Merkle structure to the historical state
-    /// at `size`. The inactivity floor is restored from the rewind target commit operation, so
-    /// the post-rewind floor matches the floor that was in effect at that commit.
-    ///
-    /// # Errors
-    ///
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::InvalidRewind`] if `size` is 0
-    ///   or exceeds the current committed size.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if the operation at
-    ///   `size - 1` has been pruned.
-    /// - Returns [`Error::UnexpectedData`] if the operation at `size - 1` is not a commit.
-    ///
-    /// Any error from this method is fatal for this handle. Rewind may mutate journal state
-    /// before this method finishes updating in-memory rewind state. Callers must drop this
-    /// database handle after any `Err` from `rewind` and reopen from storage.
-    ///
-    /// A successful rewind is not restart-stable until a subsequent [`Self::commit`] or
-    /// [`Self::sync`] completes, or until the handle returned by a subsequent
-    /// [`Self::start_sync`] completes.
-    #[tracing::instrument(name = "qmdb.keyless.db.rewind", level = "info", skip_all)]
-    #[boxed]
-    pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
-        let rewind_size = *size;
-        let current_size = *self.journal.size();
-        if rewind_size == current_size {
-            return Ok(self);
-        }
-        if rewind_size == 0 || rewind_size > current_size {
-            return Err(Error::Journal(crate::journal::Error::InvalidRewind(
-                rewind_size,
-            )));
-        }
-
-        let rewind_last_loc = Location::new(rewind_size - 1);
-        let rewind_floor = {
-            let bounds = self.journal.bounds();
-            if rewind_size <= bounds.start {
-                return Err(Error::Journal(crate::journal::Error::ItemPruned(
-                    *rewind_last_loc,
-                )));
-            }
-            let rewind_last_op = self.journal.read(*rewind_last_loc).await?;
-            let Operation::Commit(_, floor) = rewind_last_op else {
-                return Err(Error::UnexpectedData(rewind_last_loc));
-            };
-            floor
-        };
-
-        // Journal rewind happens before the in-memory floor and root updates. If a later step fails,
-        // this handle may be internally diverged and must be dropped by the caller.
-        self.journal = self.journal.rewind(rewind_size).await?;
-        self.inactivity_floor_loc = rewind_floor;
-        let inactive_peaks = F::inactive_peaks(size, rewind_floor);
-        self.root = self.journal.root(inactive_peaks)?;
-        self.update_metrics();
-        Ok(self)
-    }
-
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
