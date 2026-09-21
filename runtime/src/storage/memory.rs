@@ -290,6 +290,8 @@ impl Blob {
         // publish a newer image that this snapshot then overwrites.
         let live = self.content.read();
         let new_content = live.clone();
+
+        // Let tests pause between snapshot capture and publication to control competing syncs.
         #[cfg(test)]
         before_publication();
 
@@ -469,11 +471,13 @@ impl crate::Blob for Blob {
         let required = offset
             .checked_add(buf.len())
             .ok_or(crate::Error::OffsetOverflow)?;
-        let mut content = self.content.write();
-        if required > content.len() {
-            content.resize(required, 0);
+        {
+            let mut content = self.content.write();
+            if required > content.len() {
+                content.resize(required, 0);
+            }
+            content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
         }
-        content[offset..offset + buf.len()].copy_from_slice(buf.as_ref());
         if sync {
             self.sync_range_inner(offset, buf.as_ref())
         } else {
