@@ -460,7 +460,7 @@ impl<K, V> Map<K, V> {
     /// Consumes the map and maps each value in key order, reusing the key allocation.
     ///
     /// The closure receives a reference to the key and the owned value. Keys are
-    /// neither cloned, sorted, nor validated.
+    /// not cloned, sorted, or validated.
     ///
     /// # Examples
     ///
