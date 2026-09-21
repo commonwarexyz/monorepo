@@ -15,11 +15,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Per-platform guarantee:
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
+    ///   Assumes storage lives on one filesystem; reliable error detection needs kernel >= 5.8.
     /// - **macOS**: best-effort `sync(2)` for contents, followed by a crash-durable storage
     ///   directory sync. Existing partition directories are synchronized on first access.
-    ///
-    /// The Linux guarantee assumes storage lives on one filesystem; reliable error detection needs
-    /// kernel >= 5.8.
     pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
