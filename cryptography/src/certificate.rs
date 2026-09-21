@@ -410,20 +410,21 @@ pub trait Scheme: Verifier {
         Verification::new(verified.collect(), invalid.into_iter().collect())
     }
 
-    /// Recovers a verified certificate or verifies pending attestations.
+    /// Verifies an assembled certificate or the pending attestations.
     ///
-    /// Non-attributable schemes attempt recovery using `pending` and `additional`.
-    /// `Ok` authenticates only the certificate for `subject`. `Err` partitions
-    /// `pending` into individually verified attestations and invalid signers.
+    /// Non-attributable schemes first assemble and verify a certificate using
+    /// `pending` and `additional`. `Ok` authenticates only the certificate for `subject`.
+    /// Failed assembly or certificate verification falls back to bisecting `pending`.
+    /// `Err` contains the individual result of [`Self::verify_attestations`] for `pending`.
     /// Attributable schemes always return this individual result.
     ///
-    /// `additional` contributes only to recovery, need not be verified, and is
+    /// `additional` contributes only to assembly, need not be verified, and is
     /// excluded from the individual results. Empty `pending` returns an empty
     /// partition without consuming `additional`.
     ///
     /// As with [`Self::verify_attestations`], `pending` must contain at most one
     /// attestation per signer.
-    fn recover_or_verify<R, D, I, J>(
+    fn verify_certificate_or_attestations<R, D, I, J>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
@@ -751,7 +752,7 @@ pub mod mocks;
 #[cfg(test)]
 mod tests {
     #[cfg(feature = "bls12381")]
-    mod recovery;
+    mod verification;
 
     use super::*;
     use crate::{Signer as _, ed25519::PrivateKey, sha256::Digest as Sha256Digest};

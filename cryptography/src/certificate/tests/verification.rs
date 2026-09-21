@@ -94,7 +94,7 @@ fn threshold_success<V: Variant>() {
         calls: Arc::clone(&calls),
     };
 
-    let Ok(recovered) = verifier.recover_or_verify::<_, Sha256Digest, _, _>(
+    let Ok(recovered) = verifier.verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         pending
@@ -127,7 +127,7 @@ fn threshold_success<V: Variant>() {
 
     // Threshold recovery uses the lowest quorum of signer indices.
     let unused_bad = Recording::outer(schemes[quorum].sign::<Sha256Digest>(OTHER_SUBJECT).unwrap());
-    let Ok(recovered) = verifier.recover_or_verify::<_, Sha256Digest, _, _>(
+    let Ok(recovered) = verifier.verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         attestations
@@ -150,10 +150,10 @@ fn test_threshold_recovers_exact_certificate_with_additional_attestations() {
 }
 
 #[test]
-fn test_empty_and_attributable_inputs_skip_recovery() {
+fn test_empty_and_attributable_inputs_skip_assembly() {
     let mut rng = test_rng();
     let schemes = threshold_signers::<MinPk>(&mut rng, 5);
-    let result = schemes[0].recover_or_verify::<_, Sha256Digest, _, _>(
+    let result = schemes[0].verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         Vec::new(),
@@ -161,7 +161,7 @@ fn test_empty_and_attributable_inputs_skip_recovery() {
         &Sequential,
     );
     let Err(Verification { verified, invalid }) = result else {
-        panic!("empty pending input cannot recover a certificate")
+        panic!("empty pending input cannot assemble a certificate")
     };
     assert!(verified.is_empty());
     assert!(invalid.is_empty());
@@ -170,7 +170,7 @@ fn test_empty_and_attributable_inputs_skip_recovery() {
     let valid = schemes[0].sign::<Sha256Digest>(SUBJECT).unwrap();
     let invalid_attestation = schemes[1].sign::<Sha256Digest>(OTHER_SUBJECT).unwrap();
     let invalid_signer = invalid_attestation.signer;
-    let result = schemes[0].recover_or_verify::<_, Sha256Digest, _, _>(
+    let result = schemes[0].verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         vec![valid.clone(), invalid_attestation],
@@ -352,7 +352,7 @@ fn test_rejected_certificate_verifies_pending_halves_directly() {
             .map(|scheme| Recording::outer(scheme.sign::<Sha256Digest>(OTHER_SUBJECT).unwrap()))
             .collect();
 
-        let result = verifier.recover_or_verify::<_, Sha256Digest, _, _>(
+        let result = verifier.verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
             pending,
@@ -389,7 +389,7 @@ fn test_malformed_assembly_falls_back_to_pending_halves() {
     let mut malformed = Bytes::from_static(&[0]);
     pending[0].signature = Lazy::deferred(&mut malformed, ());
 
-    let result = verifier.recover_or_verify::<_, Sha256Digest, _, _>(
+    let result = verifier.verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         pending,
@@ -414,7 +414,7 @@ fn test_fallback_classifies_pending_only() {
         .map(|scheme| scheme.sign::<Sha256Digest>(SUBJECT).unwrap())
         .collect();
 
-    let result = schemes[0].recover_or_verify::<_, Sha256Digest, _, _>(
+    let result = schemes[0].verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         pending.clone(),
@@ -438,7 +438,7 @@ fn test_fallback_classifies_pending_only() {
         calls: Arc::clone(&calls),
     };
     let recorded_pending: Vec<_> = pending.iter().cloned().map(Recording::outer).collect();
-    let result = verifier.recover_or_verify::<_, Sha256Digest, _, _>(
+    let result = verifier.verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         recorded_pending.clone(),
@@ -458,7 +458,7 @@ fn test_fallback_classifies_pending_only() {
         vec![vec![pending[0].signer], vec![pending[1].signer]]
     );
 
-    let result = schemes[0].recover_or_verify::<_, Sha256Digest, _, _>(
+    let result = schemes[0].verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         pending.clone(),
@@ -473,7 +473,7 @@ fn test_fallback_classifies_pending_only() {
 
     let mut unknown = pending[0].clone();
     unknown.signer = Participant::new(999);
-    let result = schemes[0].recover_or_verify::<_, Sha256Digest, _, _>(
+    let result = schemes[0].verify_certificate_or_attestations::<_, Sha256Digest, _, _>(
         &mut rng,
         SUBJECT,
         vec![unknown, pending[1].clone()],

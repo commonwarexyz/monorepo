@@ -561,7 +561,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     };
                     let pending = notarizes.iter().map(|vote| vote.attestation.clone());
                     let result = if optimistic {
-                        scheme.recover_or_verify::<_, D, _, _>(
+                        scheme.verify_certificate_or_attestations::<_, D, _, _>(
                             &mut rng,
                             subject,
                             pending,
@@ -620,7 +620,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     let subject = Subject::Nullify { round };
                     let pending = nullifies.iter().map(|vote| vote.attestation.clone());
                     let result = if optimistic {
-                        scheme.recover_or_verify::<_, D, _, _>(
+                        scheme.verify_certificate_or_attestations::<_, D, _, _>(
                             &mut rng,
                             subject,
                             pending,
@@ -688,7 +688,7 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
                     };
                     let pending = finalizes.iter().map(|vote| vote.attestation.clone());
                     let result = if optimistic {
-                        scheme.recover_or_verify::<_, D, _, _>(
+                        scheme.verify_certificate_or_attestations::<_, D, _, _>(
                             &mut rng,
                             subject,
                             pending,
