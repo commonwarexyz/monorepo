@@ -3,7 +3,7 @@ use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use std::{
     fs,
-    io::{Seek as _, SeekFrom, Write as _},
+    io::{ErrorKind, Seek as _, SeekFrom, Write as _},
     ops::RangeInclusive,
     path::PathBuf,
     sync::Arc,
@@ -192,7 +192,12 @@ impl crate::Storage for Storage {
                 // Sync the partition directory to ensure the removal is durable.
                 sync_dir(&path)?;
             } else {
-                fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition))?;
+                // Only absence is a missing partition: consumers treat PartitionMissing as
+                // already removed, never as a failed removal.
+                fs::remove_dir_all(&path).map_err(|error| match error.kind() {
+                    ErrorKind::NotFound => Error::PartitionMissing(partition),
+                    _ => Error::Io(error.into()),
+                })?;
 
                 // Sync the storage directory to ensure the removal is durable.
                 sync_dir(&storage_directory)?;
@@ -208,9 +213,12 @@ impl crate::Storage for Storage {
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
         self.dispatch(move || {
-            // Scan the partition directory
-            let entries =
-                fs::read_dir(path).map_err(|_| Error::PartitionMissing(partition.clone()))?;
+            // Scan the partition directory. Only absence is a missing partition: consumers
+            // initialize an empty journal over PartitionMissing, never over a read failure.
+            let entries = fs::read_dir(path).map_err(|error| match error.kind() {
+                ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
+                _ => Error::ReadFailed,
+            })?;
             let mut blobs = Vec::new();
             for entry in entries {
                 let entry = entry.map_err(|_| Error::ReadFailed)?;
@@ -862,5 +870,38 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&storage_directory);
         }
+    }
+
+    /// A partition path that exists but cannot be enumerated or removed is not a missing
+    /// partition: only absence may let a consumer treat it as empty or already removed.
+    #[tokio::test]
+    async fn test_partition_failures_are_not_absence() {
+        let directory = env::temp_dir().join(format!("storage_tokio_enotdir_{}", random_suffix()));
+        fs::create_dir_all(&directory).unwrap();
+        let partition = directory.join("partition");
+        fs::write(&partition, b"not a directory").unwrap();
+        let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), test_pool());
+
+        assert!(matches!(
+            storage.scan("partition").await,
+            Err(Error::ReadFailed)
+        ));
+        assert!(matches!(
+            storage.scan("missing").await,
+            Err(Error::PartitionMissing(_))
+        ));
+
+        assert!(matches!(
+            storage.remove("partition", None).await,
+            Err(Error::Io(_))
+        ));
+        assert!(partition.exists());
+        assert!(matches!(
+            storage.remove("missing", None).await,
+            Err(Error::PartitionMissing(_))
+        ));
+
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -111,10 +111,9 @@ impl<B: Blob> PageReader<B> {
             return Ok(None); // No more data
         }
 
-        // Calculate how many pages to read
-        let remaining_physical = (self.physical_blob_size - start_offset) as usize;
-        let max_pages = remaining_physical / self.physical_page_size;
-        let pages_to_read = max_pages.min(self.prefetch_count);
+        // Keep the total page count in u64 and narrow only the bounded batch.
+        let max_pages = (self.physical_blob_size - start_offset) / self.physical_page_size as u64;
+        let pages_to_read = max_pages.min(self.prefetch_count as u64) as usize;
         if pages_to_read == 0 {
             return Ok(None);
         }
@@ -132,7 +131,7 @@ impl<B: Blob> PageReader<B> {
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
-        let is_final_batch = pages_to_read == max_pages;
+        let is_final_batch = pages_to_read as u64 == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
