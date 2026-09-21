@@ -332,21 +332,27 @@ where
                 break;
             };
 
+            // Record completed work even when no certificate was produced.
             timer.observe(self.context.as_ref());
-
             if verification.fallback {
                 self.verify_fallback.inc();
             }
+
+            // Block invalid signers even when the remaining votes produced a certificate.
             for invalid in verification.invalid {
                 if let Some(signer) = self.scheme.participants().key(invalid) {
                     commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
                 }
             }
+
+            // Forward the certificate already recorded by the round.
             if let Some(certificate) = verification.certificate {
                 let kind = certificate.kind();
                 debug!(%view, %kind, "recovered certificate, forwarding to voter");
                 voter.recovered(certificate);
             }
+
+            // Count processed pending votes, including rejected inputs.
             let batch = verification.batch;
             if batch != 0 {
                 trace!(%view, batch, "processed votes");

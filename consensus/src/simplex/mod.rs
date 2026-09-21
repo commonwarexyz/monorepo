@@ -329,13 +329,10 @@
 //! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
 //! arrive since there is no batching benefit.
 //!
-//! For non-attributable schemes, when buffered votes of one kind reach quorum, the `Batcher` first
-//! assembles and verifies the certificate. Success authenticates the certificate, not its individual
-//! input votes. A failed attempt bisects the pending votes for partial verification and blocks invalid senders;
-//! there is at most one such optimistic attempt per view and certificate kind.
-//!
-//! If an invalid signature is detected, the `Batcher` will perform repeated bisections over collected
-//! messages to find the offending message (and block the peer(s) that sent it via [commonware_p2p::Blocker]).
+//! When buffered votes of one kind reach quorum, the `Batcher` first assembles and verifies
+//! the certificate. Success authenticates the certificate without establishing individual input validity.
+//! A failed attempt bisects pending votes for verification, retains valid votes for subsequent assembly,
+//! and blocks identified invalid senders via [commonware_p2p::Blocker].
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._

@@ -579,9 +579,9 @@ mod tests {
         certify_mixed_votes(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
     }
 
-    /// A failed optimistic recovery verifies individual votes. Later invalid and valid votes
-    /// are verified without another optimistic attempt, and the valid vote completes the quorum.
-    async fn optimistic_recovery_falls_back_once<S, F>(mut fixture: F, valid_quorum: bool)
+    /// Failed optimistic assembly retains valid votes for later attempts. Invalid replacements
+    /// trigger another fallback, and a valid replacement completes the quorum.
+    async fn optimistic_assembly_fallback<S, F>(mut fixture: F, valid_quorum: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -652,12 +652,13 @@ mod tests {
                         .await
                         .expect("replacement vote must be processed");
                     assert_eq!(result.batch, 1);
-                    assert!(!result.fallback);
                     if i == quorum {
+                        assert!(result.fallback);
                         assert_eq!(result.invalid, vec![Participant::from_usize(i)]);
                         assert!(result.certificate.is_none());
                         assert!(!tracked.has_certificate(kind));
                     } else {
+                        assert!(!result.fallback);
                         assert!(result.invalid.is_empty());
                     }
                 }
@@ -669,35 +670,34 @@ mod tests {
     }
 
     #[test_async]
-    async fn test_optimistic_threshold_recovery_falls_back_once() {
+    async fn test_optimistic_assembly_fallback() {
         for valid_quorum in [false, true] {
-            optimistic_recovery_falls_back_once(
-                bls12381_threshold_std::fixture::<MinPk, _>,
-                valid_quorum,
-            )
-            .await;
-            optimistic_recovery_falls_back_once(
+            optimistic_assembly_fallback(bls12381_threshold_std::fixture::<MinPk, _>, valid_quorum)
+                .await;
+            optimistic_assembly_fallback(
                 bls12381_threshold_std::fixture::<MinSig, _>,
                 valid_quorum,
             )
             .await;
-            optimistic_recovery_falls_back_once(
-                bls12381_threshold_vrf::fixture::<MinPk, _>,
-                valid_quorum,
-            )
-            .await;
-            optimistic_recovery_falls_back_once(
+            optimistic_assembly_fallback(bls12381_threshold_vrf::fixture::<MinPk, _>, valid_quorum)
+                .await;
+            optimistic_assembly_fallback(
                 bls12381_threshold_vrf::fixture::<MinSig, _>,
                 valid_quorum,
             )
             .await;
+            optimistic_assembly_fallback(bls12381_multisig::fixture::<MinPk, _>, valid_quorum)
+                .await;
+            optimistic_assembly_fallback(bls12381_multisig::fixture::<MinSig, _>, valid_quorum)
+                .await;
+            optimistic_assembly_fallback(ed25519::fixture, valid_quorum).await;
+            optimistic_assembly_fallback(secp256r1::fixture, valid_quorum).await;
         }
     }
 
-    /// A failed attempt for one kind must not disable optimistic recovery for
-    /// another kind in the same view.
+    /// A failed attempt for one kind must not prevent another kind from assembling a certificate.
     #[test_async]
-    async fn test_optimistic_recovery_state_is_per_kind() {
+    async fn test_optimistic_assembly_after_other_kind_fails() {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -746,7 +746,7 @@ mod tests {
         let nullify = tracked
             .try_construct(&mut rng, &Sequential)
             .await
-            .expect("nullify quorum must retain its optimistic attempt");
+            .expect("nullify quorum must still certify");
         assert!(matches!(
             nullify.certificate,
             Some(Certificate::Nullification(_))

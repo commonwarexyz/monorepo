@@ -38,8 +38,14 @@ where
 pub struct Batch<C> {
     /// Pending votes processed, whether individually or through a certificate.
     pub batch: usize,
+    /// Signers identified as invalid by attestation verification.
+    ///
+    /// An empty result does not mean every input vote was individually verified:
+    /// successful optimistic recovery returns no per-vote results.
     pub invalid: Vec<Participant>,
+    /// A certificate recovered and verified from the buffered votes.
     pub certificate: Option<C>,
+    /// Whether optimistic recovery failed and required attestation verification.
     pub fallback: bool,
 }
 
@@ -50,8 +56,6 @@ pub struct Batch<C> {
 struct Certification<C, S: CertificateScheme> {
     /// Verified votes required to recover a certificate.
     quorum: usize,
-    /// Whether this kind's optimistic attempt remains available for the view.
-    optimistic: bool,
     /// Progress toward a certificate.
     state: State<C, S>,
 }
@@ -71,10 +75,9 @@ enum State<C, S: CertificateScheme> {
 
 impl<C, S: CertificateScheme> Certification<C, S> {
     /// Creates an empty [State::Incomplete] whose vote buffers allocate lazily.
-    fn new(quorum: usize) -> Self {
+    const fn new(quorum: usize) -> Self {
         Self {
             quorum,
-            optimistic: !S::is_attributable(),
             state: State::Incomplete {
                 pending: Vec::new(),
                 verified: Vec::new(),
@@ -121,7 +124,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         }
     }
 
-    /// Verifies pending votes and assembles any resulting quorum in one worker.
+    /// Processes pending votes and assembles any resulting quorum in one worker.
     /// Pending verification requires one context, retained with every attestation so
     /// proposal changes can filter both buffers. An existing verified quorum skips
     /// pending votes and can complete before proposal selection.
@@ -154,10 +157,6 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         let batch = pending.len();
         let len = batch + verified.len();
         let quorum = self.quorum;
-        let optimistic = self.optimistic && batch != 0 && len >= quorum;
-        if optimistic {
-            self.optimistic = false;
-        }
         let (pending, mut verified) = (mem::take(pending), mem::take(verified));
         let scheme = Arc::clone(scheme);
         let mut rng = StdRng::from_rng(rng);
@@ -168,7 +167,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                 .expect("ready certification has votes")
                 .0
                 .clone();
-            let mut result = if optimistic {
+            let (mut result, fallback) = if len >= quorum {
                 match scheme.optimistic_assemble::<_, D, _, _>(
                     &mut rng,
                     subject(&context),
@@ -187,14 +186,17 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                             },
                         );
                     }
-                    Err(result) => result,
+                    Err(result) => (result, true),
                 }
             } else {
-                scheme.verify_attestations::<_, D, _>(
-                    &mut rng,
-                    subject(&context),
-                    pending.into_iter().map(|(_, attestation)| attestation),
-                    &strategy,
+                (
+                    scheme.verify_attestations::<_, D, _>(
+                        &mut rng,
+                        subject(&context),
+                        pending.into_iter().map(|(_, attestation)| attestation),
+                        &strategy,
+                    ),
+                    false,
                 )
             };
             let certificate = if verified.len() + result.verified.len() >= quorum {
@@ -221,7 +223,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                     batch,
                     invalid: result.invalid,
                     certificate,
-                    fallback: optimistic,
+                    fallback,
                 },
             )
         })
@@ -316,8 +318,8 @@ impl<D: Digest> ProposalState<D> {
 /// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
 ///
-/// For non-attributable schemes, each vote kind gets at most one optimistic
-/// [assembly attempt](CertificateScheme::optimistic_assemble) per view.
+/// Candidate quorums use [optimistic assembly](CertificateScheme::optimistic_assemble), retaining
+/// verified votes between attempts.
 ///
 /// Once polled, async verification moves the pending batch and accumulated verified votes into
 /// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.
