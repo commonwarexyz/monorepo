@@ -35,6 +35,7 @@ use tracing::{Instrument as _, debug, error, info_span};
 enum FinalizedHandoff<B> {
     Covered(B, Exact),
     Reflected(B, Exact),
+    /// An above-artifact report whose receipt waits for handoff durability, including duplicates.
     Apply(B, Exact),
 }
 
@@ -263,17 +264,19 @@ where
 
     /// Classify finalized messages relative to the completed sync artifact.
     ///
-    /// Marshal dispatches heights strictly ascending within one actor lifetime (redelivery
-    /// happens only after a restart), and the artifact anchors at the newest recorded target,
-    /// so handoff blocks reflect the anchor or extend it consecutively.
+    /// Live floor changes can redeliver a suffix. Order those receipts by height so each
+    /// unique block extends the artifact consecutively and all duplicates share its barrier.
     fn prepare_handoffs(
         &self,
-        finalized: impl IntoIterator<Item = PendingFinalization<Arc<A::Block>>>,
+        mut finalized: VecDeque<PendingFinalization<Arc<A::Block>>>,
     ) -> VecDeque<FinalizedHandoff<Arc<A::Block>>> {
         let artifact = self
             .artifact
             .as_ref()
             .expect("sync artifact must exist after sync handoff");
+        finalized
+            .make_contiguous()
+            .sort_unstable_by_key(|pending| pending.block.height());
         let finalized = finalized.into_iter();
         let mut previous_height = artifact.anchor.height;
         let mut handoffs = VecDeque::with_capacity(finalized.size_hint().0);
@@ -297,12 +300,23 @@ where
                 continue;
             }
 
-            assert_eq!(
-                block.height(),
-                previous_height.next(),
-                "finalized blocks must ascend consecutively from the sync anchor",
-            );
-            previous_height = block.height();
+            if block.height() == previous_height {
+                let Some(FinalizedHandoff::Apply(previous, _)) = handoffs.back() else {
+                    unreachable!("a height above the artifact must be applied");
+                };
+                assert_eq!(
+                    block.digest(),
+                    previous.digest(),
+                    "duplicate finalized block must match its original digest"
+                );
+            } else {
+                assert_eq!(
+                    block.height(),
+                    previous_height.next(),
+                    "finalized blocks must ascend consecutively from the sync anchor",
+                );
+                previous_height = block.height();
+            }
             handoffs.push_back(FinalizedHandoff::Apply(block, acknowledgement));
         }
         handoffs
@@ -336,13 +350,14 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let Applied { prune, .. } = processor
+                    if let Some(Applied { prune, .. }) = processor
                         .finalize(self.context.as_present(), block.as_ref(), false)
                         .await
-                        .expect("sync handoff block cannot be a duplicate");
+                    {
+                        pending_prune = prune.or(pending_prune);
+                        completed_height = block.height();
+                    }
                     pending_acknowledgements.push(acknowledgement);
-                    pending_prune = prune.or(pending_prune);
-                    completed_height = block.height();
                 }
             }
         }
@@ -399,7 +414,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        super::Mailbox as StatefulMailbox, FinalizedHandoff, PendingFinalization, Syncing,
+        super::Mailbox as StatefulMailbox, FinalizedHandoff, Message, PendingFinalization, Syncing,
     };
     use crate::stateful::{
         PruneConfig,
@@ -421,10 +436,13 @@ mod tests {
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable, Reporter as _,
         marshal::{self, Update, ancestry, core::Mailbox as MarshalMailbox},
-        simplex::mocks::scheme as scheme_mocks,
+        simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::Height,
     };
-    use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
+    use commonware_cryptography::{
+        Digestible as _,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
@@ -651,6 +669,8 @@ mod tests {
                 (u64::MAX - 2, 9),
                 (u64::MAX - 1, 10),
                 (u64::MAX, 11),
+                (u64::MAX - 1, 10),
+                (u64::MAX, 11),
             ] {
                 finalized.push_back(pending(TestBlock::new(height, digest)));
             }
@@ -665,7 +685,7 @@ mod tests {
                 Some(FinalizedHandoff::Reflected(block, _))
                     if block.height() == Height::new(u64::MAX - 2)
             ));
-            for height in [u64::MAX - 1, u64::MAX] {
+            for height in [u64::MAX - 1, u64::MAX - 1, u64::MAX, u64::MAX] {
                 assert!(matches!(
                     handoffs.pop_front(),
                     Some(FinalizedHandoff::Apply(block, _))
@@ -683,7 +703,7 @@ mod tests {
             let harness = TestHarness::new(context, anchor(7, 9)).await;
             let _ = harness
                 .syncing
-                .prepare_handoffs([pending(TestBlock::new(7, 10))]);
+                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(7, 10))]));
         });
     }
 
@@ -694,7 +714,7 @@ mod tests {
             let harness = TestHarness::new(context, anchor(7, 9)).await;
             let _ = harness
                 .syncing
-                .prepare_handoffs([pending(TestBlock::new(9, 10))]);
+                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(9, 10))]));
         });
     }
 
@@ -704,7 +724,7 @@ mod tests {
             let harness = TestHarness::new(context, anchor(7, 9)).await;
             let handoffs = harness
                 .syncing
-                .prepare_handoffs([pending(TestBlock::new(6, 8))]);
+                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(6, 8))]));
             assert!(matches!(
                 handoffs.front(),
                 Some(FinalizedHandoff::Covered(block, _)) if block.height() == Height::new(6)
@@ -874,6 +894,167 @@ mod tests {
                 StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
                     .await;
             assert_eq!(reopened.sync_height(), None);
+        });
+    }
+
+    #[test]
+    fn live_floor_reports_handoff_once_after_durability() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let fixture = fixtures::single_validator(b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR");
+            let (sender, mut reports) = actor_mailbox::new(context.child("reports"), NZUsize!(8));
+            let reporter = StatefulMailbox::<_, TestApp>::new(sender);
+            let marshal = fixtures::marshal_fixture_with_reporter(
+                context.child("marshal"),
+                "syncing-live-floor",
+                fixture.schemes[0].clone(),
+                NZUsize!(4),
+                reporter,
+            )
+            .await;
+            let mut ingress = marshal.mailbox.clone();
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let second = TestBlock::child(&first, 2);
+            let third = TestBlock::child(&second, 3);
+            let first_finalization = fixtures::finalization(&fixture, 1, first.digest());
+            let floor_finalization = fixtures::finalization(&fixture, 2, second.digest());
+
+            let Some(Message::Finalized {
+                block,
+                acknowledgement,
+                ..
+            }) = reports.recv().await
+            else {
+                panic!("marshal must report genesis");
+            };
+            assert_eq!(block.height(), Height::zero());
+            acknowledgement.acknowledge();
+            assert!(
+                ingress
+                    .verified(first.context().round, Arc::new(first.clone()))
+                    .await
+            );
+            ingress.report(Activity::Finalization(first_finalization.clone()));
+            let Some(Message::Finalized {
+                block,
+                acknowledgement,
+                ..
+            }) = reports.recv().await
+            else {
+                panic!("marshal must report the recoverable anchor");
+            };
+            assert_eq!(block.height(), Height::new(1));
+            acknowledgement.acknowledge();
+            while marshal.mailbox.get_processed_height().await != Some(Height::new(1)) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let (mut harness, _mailbox, mut coordinator, _complete) =
+                TestHarness::new_syncing(context.child("harness"), marshal.mailbox.clone()).await;
+            harness.syncing.sync_metadata = harness
+                .syncing
+                .sync_metadata
+                .begin_sync(first_finalization)
+                .await;
+            assert!(harness.syncing.sync_metadata.in_progress());
+
+            // The interrupted sync has a recoverable artifact at 1, but has not recorded Complete.
+            // Its coordinator can finish before a later target update is recorded.
+            let control = FlushControl::default();
+            let artifact = SyncResult {
+                databases: Shared::new("test", TestDb::gated(control.clone())),
+                anchor: anchor(1, 1),
+            };
+            for block in [&second, &third] {
+                assert!(
+                    ingress
+                        .verified(block.context().round, Arc::new(block.clone()))
+                        .await
+                );
+                ingress.report(Activity::Finalization(fixtures::finalization(
+                    &fixture,
+                    block.height().get(),
+                    block.digest(),
+                )));
+                let Some(Message::Finalized {
+                    block: reported,
+                    acknowledgement,
+                    ..
+                }) = reports.recv().await
+                else {
+                    panic!("marshal must report the original suffix");
+                };
+                assert_eq!(reported.height(), block.height());
+                let (syncing, handoff) = harness
+                    .syncing
+                    .process_finalized(reported, acknowledgement)
+                    .await;
+                assert!(handoff.is_none());
+                harness.syncing = syncing;
+            }
+            marshal.mailbox.set_floor(floor_finalization);
+            assert_eq!(
+                marshal.mailbox.get_processed_height().await,
+                Some(Height::new(1))
+            );
+            let Some(Message::Finalized {
+                block,
+                acknowledgement,
+                ..
+            }) = reports.recv().await
+            else {
+                panic!("floor installation must report its anchor again");
+            };
+            assert_eq!(block.height(), Height::new(2));
+            let (syncing, handoff) = harness
+                .syncing
+                .process_finalized(block, acknowledgement)
+                .await;
+            assert!(handoff.is_none());
+            harness.syncing = syncing;
+            assert!(coordinator.try_recv().is_err());
+            let Some(Message::Finalized {
+                block,
+                acknowledgement,
+                ..
+            }) = reports.recv().await
+            else {
+                panic!("floor installation must report the suffix again");
+            };
+            assert_eq!(block.height(), Height::new(3));
+            harness.syncing.mailbox = reports;
+            let process = context
+                .child("full_window")
+                .spawn(move |_| harness.syncing.process_finalized(block, acknowledgement));
+            let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+                coordinator.recv().await
+            else {
+                panic!("four actual receipts must fill the acknowledgement window");
+            };
+            assert!(response.send(Some(artifact)).is_ok());
+            drop(update);
+            let (syncing, handoffs) = process.await.unwrap();
+            let transition = context.child("transition").spawn(move |_| {
+                syncing.transition(handoffs.expect("completed artifact must hand off reports"))
+            });
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.applied.load(Ordering::Relaxed), 2);
+            assert_eq!(control.flushes.lock().len(), 1);
+            assert_eq!(
+                marshal.mailbox.get_processed_height().await,
+                Some(Height::new(1))
+            );
+            control.flushes.lock().remove(0).send(Ok(())).unwrap();
+            while marshal.mailbox.get_processed_height().await != Some(Height::new(3)) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.applied.load(Ordering::Relaxed), 2);
+            assert!(control.flushes.lock().is_empty());
+            transition.abort();
+            let _ = transition.await;
+            marshal.abort().await;
         });
     }
 

@@ -21,8 +21,10 @@
 //!
 //! ## Delivery
 //!
-//! The actor will deliver a block to the reporter at-least-once. The reporter should be prepared to
-//! handle duplicate deliveries. However the blocks will be in order.
+//! The actor delivers each finalized block at least once. Reports are consecutive and increase
+//! in height between floor installations. Installing a floor can redeliver an already reported suffix
+//! with fresh acknowledgements, even when a newer accepted round keeps the starting height
+//! unchanged, so reporters must handle duplicates.
 //!
 //! ## Finalization
 //!
@@ -47,12 +49,12 @@
 //! needed for a short period of time, such as unverified blocks or notarizations. External storage
 //! (archive backends) is used to persist finalized blocks and certificates indefinitely.
 //!
-//! Marshal will store all blocks after a configurable starting height (or, floor) onward.
+//! Marshal stores finalized blocks from a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. The floor
 //! is supplied as a finalization; marshal fetches the corresponding block asynchronously
-//! before dispatching application blocks above it. When updating the starting height,
-//! marshal will attempt to prune blocks in external storage that are no longer needed, if
-//! the backing [`store::Blocks`] supports pruning.
+//! before dispatching application blocks starting at that height. Older history may be pruned
+//! if the backing [`store::Blocks`] supports pruning, while the processed predecessor and
+//! section-aligned history may remain available.
 //!
 //! _Setting a configurable starting height will prevent others from backfilling blocks below said height. This
 //! feature is only recommended for applications that support state sync (i.e., those that don't require full
@@ -132,7 +134,9 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 /// An update reported to the application, either a new finalized tip or a finalized block.
 ///
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
-/// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
+/// Finalized blocks are reported without gaps and in increasing height order between floor
+/// installations. Installing a floor can redeliver a suffix with fresh acknowledgements,
+/// including when a newer accepted round keeps the starting height unchanged.
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip and the finalization round.
