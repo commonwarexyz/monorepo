@@ -594,9 +594,9 @@ pub(crate) mod tests {
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         NZU64,
-        sync::{AsyncRwLock, TracedAsyncRwLock},
+        sync::{AsyncRwLock, Mutex, TracedAsyncRwLock},
     };
-    use std::{collections::VecDeque, marker::PhantomData, sync::Arc};
+    use std::{marker::PhantomData, mem, sync::Arc};
 
     macro_rules! assert_source_variants {
         ($db:ty) => {
@@ -610,34 +610,31 @@ pub(crate) mod tests {
 
     fn assert_serves<S: Source>() {}
 
-    /// A source that offers scripted responses until one is accepted.
+    /// A source that offers a fixed response sequence for one request.
     #[derive(Clone)]
     pub struct SequenceSource<F: Family, Op, D: Digest> {
-        context: Arc<deterministic::Context>,
-        responses: Arc<commonware_utils::sync::Mutex<VecDeque<Response<F, Op, D>>>>,
-        verdicts: Arc<commonware_utils::sync::Mutex<Vec<bool>>>,
-        completion: Arc<commonware_utils::sync::Mutex<Option<oneshot::Receiver<()>>>>,
+        responses: Arc<Mutex<Vec<Response<F, Op, D>>>>,
+        verdicts: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
     }
 
     impl<F: Family, Op, D: Digest> SequenceSource<F, Op, D> {
-        pub fn new(context: deterministic::Context, responses: Vec<Response<F, Op, D>>) -> Self {
+        pub fn new(responses: Vec<Response<F, Op, D>>) -> Self {
             Self {
-                context: Arc::new(context),
-                responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from(
-                    responses,
-                ))),
-                verdicts: Arc::new(commonware_utils::sync::Mutex::new(Vec::new())),
-                completion: Arc::new(commonware_utils::sync::Mutex::new(None)),
+                responses: Arc::new(Mutex::new(responses)),
+                verdicts: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
-        /// Whether each offered response was accepted.
-        pub async fn verdicts(&self) -> Vec<bool> {
-            let completion = self.completion.lock().take();
-            if let Some(completion) = completion {
-                let _ = completion.await;
+        /// Collects the reported verdicts, omitting unjudged responses.
+        pub async fn take_verdicts(&self) -> Vec<bool> {
+            let receivers = mem::take(&mut *self.verdicts.lock());
+            let mut verdicts = Vec::with_capacity(receivers.len());
+            for receiver in receivers {
+                if let Ok(verdict) = receiver.await {
+                    verdicts.push(verdict);
+                }
             }
-            self.verdicts.lock().clone()
+            verdicts
         }
     }
 
@@ -645,7 +642,7 @@ pub(crate) mod tests {
     where
         F: Family,
         D: Digest,
-        Op: Send + Sync + Clone + 'static,
+        Op: Send,
     {
         type Family = F;
         type Digest = D;
@@ -653,48 +650,17 @@ pub(crate) mod tests {
         type Error = qmdb::Error<F>;
 
         async fn serve(&self, _request: Request<F>) -> Result<Self> {
-            let response = self
-                .responses
-                .lock()
-                .pop_front()
-                .ok_or(qmdb::Error::KeyNotFound)?;
-            let responses = Arc::clone(&self.responses);
-            let verdicts = Arc::clone(&self.verdicts);
-            let (candidate_tx, candidate_rx) = mpsc::channel(1);
-            let (verdict_tx, mut verdict_rx) = oneshot::channel();
-            let (completion_tx, completion_rx) = oneshot::channel();
-            *self.completion.lock() = Some(completion_rx);
-
-            drop(
-                self.context
-                    .child("sequence_source")
-                    .spawn(move |_| async move {
-                        let _completion_tx = completion_tx;
-                        loop {
-                            let Ok(verdict) = verdict_rx.await else {
-                                return;
-                            };
-                            verdicts.lock().push(verdict);
-                            if verdict {
-                                return;
-                            }
-
-                            let Some(response) = responses.lock().pop_front() else {
-                                return;
-                            };
-                            let (next_verdict_tx, next_verdict_rx) = oneshot::channel();
-                            if candidate_tx
-                                .send((response, next_verdict_tx))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                            verdict_rx = next_verdict_rx;
-                        }
-                    }),
-            );
-
+            let mut responses = mem::take(&mut *self.responses.lock()).into_iter();
+            let response = responses.next().ok_or(qmdb::Error::KeyNotFound)?;
+            let (candidate_tx, candidate_rx) = mpsc::channel(responses.len().max(1));
+            let (verdict_tx, verdict_rx) = oneshot::channel();
+            let mut verdicts = self.verdicts.lock();
+            verdicts.push(verdict_rx);
+            for response in responses {
+                let (verdict_tx, verdict_rx) = oneshot::channel();
+                assert!(candidate_tx.try_send((response, verdict_tx)).is_ok());
+                verdicts.push(verdict_rx);
+            }
             Ok((response, Some(Feedback::new(verdict_tx, candidate_rx))))
         }
     }
@@ -1158,7 +1124,7 @@ pub(crate) mod tests {
 
     #[test]
     fn sequence_source_offers_candidates_until_accepted() {
-        deterministic::Runner::default().start(|context| async move {
+        deterministic::Runner::default().start(|_context| async move {
             let response = |op| Response::Operations {
                 proof: Proof {
                     leaves: Location::new(1),
@@ -1167,10 +1133,11 @@ pub(crate) mod tests {
                 },
                 operations: vec![op],
             };
-            let source = SequenceSource::<mmr::Family, _, ShaDigest>::new(
-                context.child("source"),
-                vec![response(1), response(2)],
-            );
+            let source = SequenceSource::<mmr::Family, _, ShaDigest>::new(vec![
+                response(1),
+                response(2),
+                response(3),
+            ]);
             let request = Request::Operations {
                 size: Location::new(1),
                 start: Location::new(0),
@@ -1189,7 +1156,11 @@ pub(crate) mod tests {
                 Response::Operations { operations, .. } if operations == [2]
             ));
             feedback.accept();
-            assert_eq!(source.verdicts().await, vec![false, true]);
+            assert_eq!(source.take_verdicts().await, vec![false, true]);
+            assert!(matches!(
+                source.serve(request).await,
+                Err(qmdb::Error::KeyNotFound)
+            ));
         });
     }
 }
