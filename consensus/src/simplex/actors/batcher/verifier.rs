@@ -14,7 +14,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::ordered::Set;
+use commonware_utils::{non_empty, ordered::Set};
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{future::Future, mem, sync::Arc};
@@ -153,7 +153,8 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         }
         let batch = pending.len();
         let len = batch + verified.len();
-        let optimistic = self.optimistic && batch != 0 && len >= self.quorum;
+        let quorum = self.quorum;
+        let optimistic = self.optimistic && batch != 0 && len >= quorum;
         if optimistic {
             self.optimistic = false;
         }
@@ -167,41 +168,60 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                 .expect("ready certification has votes")
                 .0
                 .clone();
-            let prior = verified.iter().map(|(_, attestation)| attestation);
-            let result = if optimistic {
-                scheme.try_assemble::<_, D, _, _>(
+            let mut result = if optimistic {
+                match scheme.optimistic_assemble::<_, D, _, _>(
                     &mut rng,
                     subject(&context),
                     pending.iter().map(|(_, attestation)| attestation.clone()),
-                    prior,
-                    true,
+                    verified.iter().map(|(_, attestation)| attestation),
                     &strategy,
-                )
+                ) {
+                    Ok(certificate) => {
+                        return (
+                            Vec::new(),
+                            Batch {
+                                batch,
+                                invalid: Vec::new(),
+                                certificate: Some(wrap(context, certificate)),
+                                fallback: false,
+                            },
+                        );
+                    }
+                    Err(result) => result,
+                }
             } else {
-                scheme.try_assemble::<_, D, _, _>(
+                scheme.verify_attestations::<_, D, _>(
                     &mut rng,
                     subject(&context),
                     pending.into_iter().map(|(_, attestation)| attestation),
-                    prior,
-                    false,
                     &strategy,
                 )
             };
-            verified.extend(
-                result
-                    .verified
-                    .into_iter()
-                    .map(|attestation| (context.clone(), attestation)),
-            );
+            let certificate = if verified.len() + result.verified.len() >= quorum {
+                let prior = verified.drain(..).map(|(_, attestation)| attestation);
+                let certificate = scheme
+                    .assemble(
+                        non_empty![@prior.chain(result.verified.drain(..))],
+                        &strategy,
+                    )
+                    .expect("verified quorum must assemble");
+                Some(wrap(context, certificate))
+            } else {
+                verified.extend(
+                    result
+                        .verified
+                        .into_iter()
+                        .map(|attestation| (context.clone(), attestation)),
+                );
+                None
+            };
             (
                 verified,
                 Batch {
                     batch,
                     invalid: result.invalid,
-                    certificate: result
-                        .certificate
-                        .map(|certificate| wrap(context, certificate)),
-                    fallback: result.fallback,
+                    certificate,
+                    fallback: optimistic,
                 },
             )
         })
@@ -297,7 +317,7 @@ impl<D: Digest> ProposalState<D> {
 /// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
 ///
 /// For non-attributable schemes, each vote kind gets at most one optimistic
-/// [assembly attempt](CertificateScheme::try_assemble) per view.
+/// [assembly attempt](CertificateScheme::optimistic_assemble) per view.
 ///
 /// Once polled, async verification moves the pending batch and accumulated verified votes into
 /// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.

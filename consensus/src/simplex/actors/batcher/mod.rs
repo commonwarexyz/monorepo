@@ -579,8 +579,8 @@ mod tests {
         certify_mixed_votes(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
     }
 
-    /// A failed optimistic recovery verifies individual votes. A later valid vote
-    /// completes the quorum without another optimistic attempt.
+    /// A failed optimistic recovery verifies individual votes. Later invalid and valid votes
+    /// are verified without another optimistic attempt, and the valid vote completes the quorum.
     async fn optimistic_recovery_falls_back_once<S, F>(mut fixture: F, valid_quorum: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -592,7 +592,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut rng, b"batcher_optimistic_fallback", 5);
+            } = fixture(&mut rng, b"batcher_optimistic_fallback", 7);
             let quorum = quorum(schemes.len().try_into().unwrap()) as usize;
             let round_id = Round::new(Epoch::new(10), View::new(8));
             let proposal = Proposal::new(round_id, View::new(7), Sha256::hash(&[b"fallback"]));
@@ -601,16 +601,19 @@ mod tests {
                 .map(|scheme| threshold_vote(scheme, kind, round_id, &proposal))
                 .collect();
 
-            // Keep signer 0 in range but replace its signature with signer 4's.
-            let replacement = match &votes[quorum] {
+            // Keep the claimed signers in range while using another participant's signature.
+            let replacement = match votes.last().unwrap() {
                 Vote::Notarize(vote) => vote.attestation.signature.clone(),
                 Vote::Nullify(vote) => vote.attestation.signature.clone(),
                 Vote::Finalize(vote) => vote.attestation.signature.clone(),
             };
-            match &mut votes[0] {
-                Vote::Notarize(vote) => vote.attestation.signature = replacement,
-                Vote::Nullify(vote) => vote.attestation.signature = replacement,
-                Vote::Finalize(vote) => vote.attestation.signature = replacement,
+            let invalid_count = if valid_quorum { 1 } else { 2 };
+            for index in [0, quorum].into_iter().take(invalid_count) {
+                match &mut votes[index] {
+                    Vote::Notarize(vote) => vote.attestation.signature = replacement.clone(),
+                    Vote::Nullify(vote) => vote.attestation.signature = replacement.clone(),
+                    Vote::Finalize(vote) => vote.attestation.signature = replacement.clone(),
+                }
             }
 
             let mut tracked = super::Round::new(
@@ -641,15 +644,23 @@ mod tests {
             assert_eq!(tracked.has_certificate(kind), valid_quorum);
             if !valid_quorum {
                 assert!(result.certificate.is_none());
-                assert!(tracked.try_construct(&mut rng, &Sequential).await.is_none());
-                assert!(tracked.add_network(participants[quorum].clone(), votes[quorum].clone()));
-                result = tracked
-                    .try_construct(&mut rng, &Sequential)
-                    .await
-                    .expect("replacement vote must complete the verified quorum");
-                assert_eq!(result.batch, 1);
-                assert!(result.invalid.is_empty());
-                assert!(!result.fallback);
+                for i in quorum..schemes.len() {
+                    assert!(tracked.try_construct(&mut rng, &Sequential).await.is_none());
+                    assert!(tracked.add_network(participants[i].clone(), votes[i].clone()));
+                    result = tracked
+                        .try_construct(&mut rng, &Sequential)
+                        .await
+                        .expect("replacement vote must be processed");
+                    assert_eq!(result.batch, 1);
+                    assert!(!result.fallback);
+                    if i == quorum {
+                        assert_eq!(result.invalid, vec![Participant::from_usize(i)]);
+                        assert!(result.certificate.is_none());
+                        assert!(!tracked.has_certificate(kind));
+                    } else {
+                        assert!(result.invalid.is_empty());
+                    }
+                }
             }
             let certificate = result.certificate.expect("valid quorum must certify");
             assert_eq!(certificate.kind(), kind);

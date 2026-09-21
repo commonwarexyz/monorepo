@@ -76,13 +76,7 @@ use commonware_codec::{
     types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    Faults, Participant,
-    bitmap::BitMap,
-    iter::NonEmpty,
-    non_empty,
-    ordered::{Quorum, Set},
-};
+use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -165,18 +159,6 @@ impl<S: Scheme> Verification<S> {
     pub const fn new(verified: Vec<Attestation<S>>, invalid: Vec<Participant>) -> Self {
         Self { verified, invalid }
     }
-}
-
-/// Result of [`Scheme::try_assemble`].
-pub struct Assembly<S: Scheme> {
-    /// Certificate authenticated for the requested subject.
-    pub certificate: Option<S::Certificate>,
-    /// Newly verified pending attestations to retain. Empty when a certificate is produced.
-    pub verified: Vec<Attestation<S>>,
-    /// Pending signers rejected by individual verification, even if a certificate is produced.
-    pub invalid: Vec<Participant>,
-    /// Whether an optimistic assembly attempt failed.
-    pub fallback: bool,
 }
 
 /// Errors returned while assembling attestations into a certificate.
@@ -426,102 +408,58 @@ pub trait Scheme: Verifier {
         Verification::new(verified.collect(), invalid.into_iter().collect())
     }
 
-    /// Attempts to assemble an authenticated certificate from pending and verified attestations.
+    /// Attempts to assemble and authenticate a certificate before verifying pending attestations.
     ///
     /// `verified` must already be valid for this exact scheme configuration and `subject`.
-    /// Signers must be unique across both inputs. Verified attestations are not reverified.
+    /// Signers must be unique across both inputs. Only pending attestations undergo fallback
+    /// verification.
     ///
-    /// `optimistic` permits non-attributable schemes to authenticate an assembled certificate
-    /// without individually verifying `pending`. Otherwise, `pending` is verified individually
-    /// and assembly is attempted if a verified quorum is available.
-    /// Certificate authentication does not establish the validity of every contributing attestation.
+    /// `Ok` authenticates the certificate for `subject`, without establishing the validity of
+    /// each pending attestation. Callers requiring individual correctness should use
+    /// [`Self::verify_attestations`] followed by [`Self::assemble`].
     ///
-    /// Empty `pending` can complete a verified quorum. An empty participant set cannot produce
-    /// a certificate.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a verified quorum violates the successful-assembly contract of [`Self::assemble`].
-    fn try_assemble<'a, R, D, I, J>(
+    /// On failure, `Err` contains the verification results for `pending`. Accepted attestations
+    /// can be retained alongside `verified` for subsequent assembly, and may already form a quorum.
+    fn optimistic_assemble<'a, R, D, I, J>(
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
         pending: I,
         verified: J,
-        optimistic: bool,
         strategy: &impl Strategy,
-    ) -> Assembly<Self>
+    ) -> Result<Self::Certificate, Verification<Self>>
     where
         R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: ExactSizeIterator + Clone + Send,
         J: IntoIterator<Item = &'a Attestation<Self>>,
-        J::IntoIter: ExactSizeIterator + Clone + Send,
+        J::IntoIter: Send,
     {
         let mut pending = pending.into_iter();
-        let verified = verified.into_iter();
-        let needed = (!self.participants().is_empty()).then(|| {
-            (self.participants().quorum::<Self::Faults>() as usize).saturating_sub(verified.len())
-        });
-        let mut result = Verification::new(Vec::new(), Vec::new());
-        let mut fallback = false;
+        let attestations = pending.clone().chain(verified.into_iter().cloned());
+        if let Some(attestations) = NonEmpty::try_new(attestations)
+            && let Ok(certificate) = self.assemble(attestations, strategy)
+            && self.verify_certificate(rng, subject.clone(), &certificate, strategy)
+        {
+            return Ok(certificate);
+        }
+
+        if pending.len() == 0 {
+            return Err(Verification::new(Vec::new(), Vec::new()));
+        }
+
+        // Each half needs ordinary verification, including every signed component
+        // of schemes with more than one signature per attestation.
+        let chunk = pending.len().div_ceil(2);
+        let mut result =
+            self.verify_attestations(rng, subject.clone(), pending.by_ref().take(chunk), strategy);
         if pending.len() != 0 {
-            if optimistic
-                && !Self::is_attributable()
-                && needed.is_some_and(|needed| pending.len() >= needed)
-            {
-                if let Ok(certificate) = self.assemble(
-                    non_empty![@pending.clone().chain(verified.clone().cloned())],
-                    strategy,
-                ) && self.verify_certificate(rng, subject.clone(), &certificate, strategy)
-                {
-                    return Assembly {
-                        certificate: Some(certificate),
-                        verified: Vec::new(),
-                        invalid: Vec::new(),
-                        fallback: false,
-                    };
-                }
-                fallback = true;
-            }
-
-            result = if fallback {
-                // Each half needs ordinary verification, including every signed component
-                // of schemes with more than one signature per attestation.
-                let chunk = pending.len().div_ceil(2);
-                let mut result = self.verify_attestations(
-                    rng,
-                    subject.clone(),
-                    pending.by_ref().take(chunk),
-                    strategy,
-                );
-                if pending.len() != 0 {
-                    let rest = self.verify_attestations(rng, subject, pending, strategy);
-                    result.verified.extend(rest.verified);
-                    result.invalid.extend(rest.invalid);
-                }
-                result
-            } else {
-                self.verify_attestations(rng, subject, pending, strategy)
-            };
+            let rest = self.verify_attestations(rng, subject, pending, strategy);
+            result.verified.extend(rest.verified);
+            result.invalid.extend(rest.invalid);
         }
-
-        let certificate = needed
-            .filter(|needed| result.verified.len() >= *needed)
-            .map(|_| {
-                self.assemble(
-                    non_empty![@verified.cloned().chain(result.verified.drain(..))],
-                    strategy,
-                )
-                .expect("verified quorum must assemble")
-            });
-        Assembly {
-            certificate,
-            verified: result.verified,
-            invalid: result.invalid,
-            fallback,
-        }
+        Err(result)
     }
 
     /// Assembles a non-empty stream of attestations into a candidate certificate.
@@ -1171,29 +1109,26 @@ mod tests {
             calls: Arc::clone(&calls),
         };
 
-        let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+        let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
             attestations[..2].iter().cloned().map(Recording::outer),
             &prior,
-            true,
             &Sequential,
         );
-        assert_eq!(result.certificate.as_ref(), Some(&expected));
-        assert!(result.verified.is_empty());
-        assert!(result.invalid.is_empty());
-        assert!(!result.fallback);
+        let certificate = result.ok().expect("valid quorum must certify");
+        assert_eq!(certificate, expected);
         assert!(calls.lock().is_empty());
         assert!(schemes[0].verify_certificate::<_, Sha256Digest>(
             &mut rng,
             SUBJECT,
-            result.certificate.as_ref().unwrap(),
+            &certificate,
             &Sequential,
         ));
         assert!(!schemes[0].verify_certificate::<_, Sha256Digest>(
             &mut rng,
             OTHER_SUBJECT,
-            result.certificate.as_ref().unwrap(),
+            &certificate,
             &Sequential,
         ));
 
@@ -1204,18 +1139,14 @@ mod tests {
             .chain([unused_bad])
             .map(Recording::outer)
             .collect();
-        let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+        let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
             pending,
             std::iter::empty(),
-            true,
             &Sequential,
         );
-        assert_eq!(result.certificate, Some(expected));
-        assert!(result.verified.is_empty());
-        assert!(result.invalid.is_empty());
-        assert!(!result.fallback);
+        assert_eq!(result.ok(), Some(expected));
         assert!(calls.lock().is_empty());
     }
 
@@ -1228,7 +1159,7 @@ mod tests {
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_try_assemble_attributable_inputs() {
+    fn test_optimistic_assemble_attributable_inputs() {
         let mut rng = test_rng();
         let (schemes, inner) = setup_ed25519(5);
         let calls = Arc::new(Mutex::new(Vec::new()));
@@ -1236,19 +1167,39 @@ mod tests {
             inner,
             calls: Arc::clone(&calls),
         };
-        let empty = verifier.try_assemble::<_, Sha256Digest, _, _>(
+        let empty = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
             Vec::new(),
             std::iter::empty(),
-            true,
             &Sequential,
         );
-        assert!(empty.certificate.is_none());
-        assert!(empty.verified.is_empty());
-        assert!(empty.invalid.is_empty());
-        assert!(!empty.fallback);
+        let verification = empty.unwrap_err();
+        assert!(verification.verified.is_empty());
+        assert!(verification.invalid.is_empty());
         assert!(calls.lock().is_empty());
+
+        let pending: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Recording::outer(scheme.sign::<Sha256Digest>(SUBJECT).unwrap()))
+            .collect();
+        let certificate = verifier
+            .optimistic_assemble::<_, Sha256Digest, _, _>(
+                &mut rng,
+                SUBJECT,
+                pending,
+                std::iter::empty(),
+                &Sequential,
+            )
+            .ok()
+            .expect("valid quorum must certify");
+        assert!(calls.lock().is_empty());
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            SUBJECT,
+            &certificate,
+            &Sequential,
+        ));
 
         let pending: Vec<_> = schemes
             .iter()
@@ -1262,29 +1213,41 @@ mod tests {
             })
             .collect();
         let signers: Vec<_> = pending.iter().map(|a| a.signer).collect();
-        let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+        let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
             pending,
             std::iter::empty(),
-            true,
             &Sequential,
         );
-        assert_eq!(*calls.lock(), vec![signers.clone()]);
-        assert_eq!(result.invalid, vec![signers[0]]);
-        assert!(!result.fallback);
-        assert!(result.verified.is_empty());
+        let verification = result.unwrap_err();
+        assert_eq!(
+            *calls.lock(),
+            vec![signers[..3].to_vec(), signers[3..].to_vec()]
+        );
+        assert_eq!(verification.invalid, vec![signers[0]]);
+        assert_eq!(
+            verification
+                .verified
+                .iter()
+                .map(|a| a.signer)
+                .collect::<Vec<_>>(),
+            signers[1..]
+        );
+        let certificate = verifier
+            .assemble(non_empty![@verification.verified], &Sequential)
+            .unwrap();
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             SUBJECT,
-            result.certificate.as_ref().unwrap(),
+            &certificate,
             &Sequential,
         ));
     }
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_try_assemble_verified_only() {
+    fn test_optimistic_assemble_verified_only() {
         let mut rng = test_rng();
         let (schemes, inner) = setup_ed25519(5);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -1299,51 +1262,49 @@ mod tests {
             calls: Arc::clone(&calls),
         };
         for count in [quorum - 1, quorum] {
-            let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+            let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 SUBJECT,
                 Vec::new(),
                 &prior[..count],
-                true,
                 &Sequential,
             );
-            assert_eq!(result.certificate.is_some(), count == quorum);
-            assert!(result.verified.is_empty());
-            assert!(result.invalid.is_empty());
-            assert!(!result.fallback);
+            assert_eq!(result.is_ok(), count == quorum);
             assert!(calls.lock().is_empty());
-            if let Some(certificate) = result.certificate {
-                assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            match result {
+                Ok(certificate) => assert!(verifier.verify_certificate::<_, Sha256Digest>(
                     &mut rng,
                     SUBJECT,
                     &certificate,
                     &Sequential,
-                ));
+                )),
+                Err(verification) => {
+                    assert!(verification.verified.is_empty());
+                    assert!(verification.invalid.is_empty());
+                }
             }
         }
     }
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_try_assemble_empty_committee() {
+    fn test_optimistic_assemble_empty_committee() {
         let mut rng = test_rng();
         let (_, verifier) = setup_ed25519(0);
         let (schemes, _) = setup_ed25519(1);
         let unknown = schemes[0].sign::<Sha256Digest>(SUBJECT).unwrap();
         for pending in [Vec::new(), vec![unknown]] {
             let expected: Vec<_> = pending.iter().map(|a| a.signer).collect();
-            let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+            let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 SUBJECT,
                 pending,
                 std::iter::empty(),
-                true,
                 &Sequential,
             );
-            assert!(result.certificate.is_none());
-            assert!(result.verified.is_empty());
-            assert_eq!(result.invalid, expected);
-            assert!(!result.fallback);
+            let verification = result.unwrap_err();
+            assert!(verification.verified.is_empty());
+            assert_eq!(verification.invalid, expected);
         }
     }
 
@@ -1520,21 +1481,19 @@ mod tests {
                 .take(quorum)
                 .map(|s| Recording::outer(s.sign::<Sha256Digest>(OTHER_SUBJECT).unwrap()))
                 .collect();
-            let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+            let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 SUBJECT,
                 pending,
                 std::iter::empty(),
-                true,
                 &Sequential,
             );
-            assert!(result.certificate.is_none());
-            assert!(result.verified.is_empty());
+            let verification = result.unwrap_err();
+            assert!(verification.verified.is_empty());
             assert_eq!(
-                result.invalid,
+                verification.invalid,
                 (0..quorum).map(Participant::from_usize).collect::<Vec<_>>()
             );
-            assert!(result.fallback);
             assert_eq!(*calls.lock(), expected_halves(quorum));
         }
     }
@@ -1558,21 +1517,21 @@ mod tests {
                 .collect();
             let mut malformed = Bytes::from_static(&[0]);
             pending[0].signature = Lazy::deferred(&mut malformed, ());
-            let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+            let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 SUBJECT,
                 pending,
                 std::iter::empty(),
-                true,
                 &Sequential,
             );
-            let complete = count > quorum;
-            assert_eq!(result.certificate.is_some(), complete);
-            assert_eq!(result.verified.len(), if complete { 0 } else { quorum - 1 });
-            assert_eq!(result.invalid, vec![Participant::new(0)]);
-            assert!(result.fallback);
+            let verification = result.unwrap_err();
+            assert_eq!(verification.verified.len(), count - 1);
+            assert_eq!(verification.invalid, vec![Participant::new(0)]);
             assert_eq!(*calls.lock(), expected_halves(count));
-            if let Some(certificate) = result.certificate {
+            if count > quorum {
+                let certificate = verifier
+                    .assemble(non_empty![@verification.verified], &Sequential)
+                    .unwrap();
                 assert!(verifier.verify_certificate::<_, Sha256Digest>(
                     &mut rng,
                     SUBJECT,
@@ -1585,7 +1544,7 @@ mod tests {
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_try_assemble_retains_verified_inputs() {
+    fn test_optimistic_assemble_retains_verified_inputs() {
         let mut rng = test_rng();
         let schemes = threshold_signers::<MinPk>(&mut rng, 5);
         let mut prior: Vec<_> = schemes[..2]
@@ -1600,47 +1559,44 @@ mod tests {
             inner: schemes[0].clone(),
             calls: Arc::clone(&calls),
         };
-        let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+        let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
             vec![accepted.clone(), rejected],
             &prior,
-            true,
             &Sequential,
         );
-        assert!(result.certificate.is_none());
-        assert_eq!(result.verified, vec![accepted.clone()]);
-        assert_eq!(result.invalid, vec![invalid]);
-        assert!(result.fallback);
+        let verification = result.unwrap_err();
+        assert_eq!(verification.verified, vec![accepted.clone()]);
+        assert_eq!(verification.invalid, vec![invalid]);
         assert_eq!(*calls.lock(), vec![vec![accepted.signer], vec![invalid]]);
 
-        prior.extend(result.verified);
+        prior.extend(verification.verified);
         calls.lock().clear();
         let replacement = Recording::outer(schemes[4].sign::<Sha256Digest>(SUBJECT).unwrap());
         let signer = replacement.signer;
-        let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+        let verification = verifier.verify_attestations::<_, Sha256Digest, _>(
             &mut rng,
             SUBJECT,
-            vec![replacement],
-            &prior,
-            false,
+            vec![replacement.clone()],
             &Sequential,
         );
-        assert!(result.verified.is_empty());
-        assert!(result.invalid.is_empty());
-        assert!(!result.fallback);
+        assert_eq!(verification.verified, vec![replacement]);
+        assert!(verification.invalid.is_empty());
         assert_eq!(*calls.lock(), vec![vec![signer]]);
+        prior.extend(verification.verified);
+        let certificate = verifier.assemble(non_empty![@prior], &Sequential).unwrap();
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             SUBJECT,
-            result.certificate.as_ref().unwrap(),
+            &certificate,
             &Sequential,
         ));
     }
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_try_assemble_below_quorum() {
+    fn test_optimistic_assemble_below_quorum() {
         let mut rng = test_rng();
         let schemes = threshold_signers::<MinPk>(&mut rng, 5);
         let pending: Vec<_> = schemes[..2]
@@ -1653,27 +1609,22 @@ mod tests {
             inner: schemes[0].clone(),
             calls: Arc::clone(&calls),
         };
-        let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+        let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
             pending,
             std::iter::empty(),
-            true,
             &Sequential,
         );
-        assert!(result.certificate.is_none());
-        assert_eq!(result.verified, expected);
-        assert!(result.invalid.is_empty());
-        assert!(!result.fallback);
-        assert_eq!(
-            *calls.lock(),
-            vec![vec![Participant::new(0), Participant::new(1)]]
-        );
+        let verification = result.unwrap_err();
+        assert_eq!(verification.verified, expected);
+        assert!(verification.invalid.is_empty());
+        assert_eq!(*calls.lock(), expected_halves(expected.len()));
     }
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_try_assemble_unknown_pending_signer() {
+    fn test_optimistic_assemble_unknown_pending_signer() {
         let mut rng = test_rng();
         let schemes = threshold_signers::<MinPk>(&mut rng, 5);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -1688,18 +1639,16 @@ mod tests {
             inner: schemes[0].clone(),
             calls: Arc::clone(&calls),
         };
-        let result = verifier.try_assemble::<_, Sha256Digest, _, _>(
+        let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
             pending,
             std::iter::empty(),
-            true,
             &Sequential,
         );
-        assert!(result.certificate.is_none());
-        assert_eq!(result.verified.len(), quorum - 1);
-        assert_eq!(result.invalid, vec![Participant::new(999)]);
-        assert!(result.fallback);
+        let verification = result.unwrap_err();
+        assert_eq!(verification.verified.len(), quorum - 1);
+        assert_eq!(verification.invalid, vec![Participant::new(999)]);
         assert_eq!(
             *calls.lock(),
             vec![
