@@ -52,7 +52,7 @@ use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
-    io::{Error as IoError, Seek, SeekFrom, Write},
+    io::{Error as IoError, ErrorKind, Seek, SeekFrom, Write},
     ops::{Deref, RangeInclusive},
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -232,7 +232,12 @@ impl crate::Storage for Storage {
 
             &path
         } else {
-            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            // Only absence is a missing partition: consumers treat PartitionMissing as
+            // already removed, never as a failed removal.
+            fs::remove_dir_all(&path).map_err(|error| match error.kind() {
+                ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                _ => Error::Io(error.into()),
+            })?;
 
             &self.storage_directory
         };
@@ -250,8 +255,12 @@ impl crate::Storage for Storage {
 
         let path = self.storage_directory.join(partition);
 
-        let entries =
-            std::fs::read_dir(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+        // Only absence is a missing partition: consumers initialize an empty journal over
+        // PartitionMissing, never over a read failure.
+        let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
+            ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+            _ => Error::ReadFailed,
+        })?;
 
         let mut blobs = Vec::new();
         for entry in entries {
@@ -2277,6 +2286,38 @@ mod tests {
 
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+    /// A partition path that exists but cannot be enumerated or removed is not a missing
+    /// partition: only absence may let a consumer treat it as empty or already removed.
+    #[test]
+    fn test_partition_failures_are_not_absence() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            let partition = storage_directory.join("partition");
+            fs::write(&partition, b"not a directory").unwrap();
+
+            assert!(matches!(
+                storage.scan("partition").await,
+                Err(Error::ReadFailed)
+            ));
+            assert!(matches!(
+                storage.scan("missing").await,
+                Err(Error::PartitionMissing(_))
+            ));
+
+            assert!(matches!(
+                storage.remove("partition", None).await,
+                Err(Error::Io(_))
+            ));
+            assert!(partition.exists());
+            assert!(matches!(
+                storage.remove("missing", None).await,
+                Err(Error::PartitionMissing(_))
+            ));
+
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
         });
     }
 }

@@ -32,6 +32,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions};
+use commonware_utils::NZU64;
 use core::{
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
@@ -624,7 +625,7 @@ where
         merkle: Merkle<F, E, H::Digest, S>,
         journal: C,
         hasher: StandardHasher<H>,
-        apply_batch_size: u64,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
 
@@ -648,7 +649,7 @@ where
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,
         hasher: &StandardHasher<H>,
-        apply_batch_size: u64,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Merkle<F, E, H::Digest, S>, Error<F>> {
         let journal_size = journal.bounds().end;
         let mut merkle_leaves = merkle.leaves();
@@ -667,7 +668,7 @@ where
             );
 
             while merkle_leaves < journal_size {
-                let count = apply_batch_size.min(journal_size - *merkle_leaves);
+                let count = apply_batch_size.get().min(journal_size - *merkle_leaves);
                 let mut items = Vec::with_capacity(count as usize);
                 for _ in 0..count {
                     items.push(journal.read(*merkle_leaves).await?);
@@ -896,7 +897,7 @@ where
 }
 
 /// The number of items to apply to the Merkle structure in a single batch.
-const APPLY_BATCH_SIZE: u64 = 1 << 16;
+const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
@@ -1792,7 +1793,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let serial = TestJournal::<F>::align(serial, &journal, &hasher, 7)
+        let serial = TestJournal::<F>::align(serial, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 
@@ -1807,7 +1808,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, 7)
+        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 

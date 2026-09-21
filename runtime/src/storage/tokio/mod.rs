@@ -6,7 +6,7 @@ use commonware_utils::channel::oneshot;
 use std::{collections::HashSet, path::Path};
 use std::{
     fs,
-    io::{Seek as _, SeekFrom, Write as _},
+    io::{ErrorKind, Seek as _, SeekFrom, Write as _},
     ops::RangeInclusive,
     path::PathBuf,
     sync::Arc,
@@ -42,7 +42,8 @@ pub struct Storage {
 #[derive(Default)]
 struct Namespace {
     /// Partitions whose inherited directory changes are durable. Creation and removal maintain
-    /// this state under the same lock. Removing a partition retires its entry.
+    /// this state under the same lock. Removal retires the entry before unlinking, and a blob
+    /// removal restores it once the partition directory is synced.
     #[cfg(target_os = "macos")]
     synced: HashSet<PathBuf>,
     #[cfg(all(test, target_os = "macos"))]
@@ -282,9 +283,7 @@ impl crate::Storage for Storage {
         // durable.
         self.dispatch(move |_namespace| {
             #[cfg(target_os = "macos")]
-            if name.is_none() {
-                _namespace.synced.remove(&path);
-            }
+            _namespace.synced.remove(&path);
 
             // Remove all related files
             let sync_path = if let Some(name) = &name {
@@ -294,13 +293,21 @@ impl crate::Storage for Storage {
 
                 path
             } else {
-                fs::remove_dir_all(&path)
-                    .map_err(|_| Error::PartitionMissing(partition.clone()))?;
+                // Only absence is a missing partition: consumers treat PartitionMissing as
+                // already removed, never as a failed removal.
+                fs::remove_dir_all(&path).map_err(|error| match error.kind() {
+                    ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
+                    _ => Error::Io(error.into()),
+                })?;
 
                 storage_directory
             };
 
             pending.forget(&partition, name.as_deref());
+            #[cfg(all(test, target_os = "macos"))]
+            if let Some(error) = _namespace.fail_sync.take() {
+                return Err(error);
+            }
             sync_dir(&sync_path)?;
             #[cfg(target_os = "macos")]
             if name.is_some() {
@@ -317,9 +324,14 @@ impl crate::Storage for Storage {
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
         self.dispatch(move |_namespace| {
-            // Scan the partition directory
-            let entries =
-                fs::read_dir(&path).map_err(|_| Error::PartitionMissing(partition.clone()))?;
+            // Scan the partition directory. Only absence is a missing partition: consumers
+            // initialize an empty journal over PartitionMissing, never over a read failure.
+            let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
+                ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
+                _ => Error::ReadFailed,
+            })?;
+
+            // Make inherited entry changes durable before reporting the names.
             #[cfg(target_os = "macos")]
             _namespace.sync_once(&path)?;
             let mut blobs = Vec::new();
@@ -1322,6 +1334,48 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
+    /// A blob removal whose directory sync fails leaves an unsynced unlink behind. The
+    /// partition must not stay marked synced, so the next scan or open flushes it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_blob_remove_sync_failure_retires_partition() {
+        let directory =
+            env::temp_dir().join(format!("storage_tokio_remove_fail_{}", random_suffix()));
+        let partition = directory.join("partition");
+        let config = Config::new(directory.clone(), Layout::ALL);
+        {
+            let storage = Storage::new(config.clone(), test_pool());
+            drop(storage.open("partition", b"blob").await.unwrap());
+            settle(&storage).await;
+        }
+
+        let storage = Storage::new(config, test_pool());
+        crate::storage::sync(&directory).unwrap();
+        assert_eq!(
+            storage.scan("partition").await.unwrap(),
+            vec![b"blob".to_vec()]
+        );
+        assert_eq!(storage.lock.lock().await.syncs, 1);
+        assert!(storage.lock.lock().await.synced.contains(&partition));
+
+        // The unlink lands, then the directory sync fails.
+        storage.lock.lock().await.fail_sync = Some(Error::WriteFailed);
+        assert!(matches!(
+            storage.remove("partition", Some(b"blob")).await,
+            Err(Error::WriteFailed)
+        ));
+        assert!(!partition.join(hex(b"blob")).exists());
+        assert!(!storage.lock.lock().await.synced.contains(&partition));
+
+        // The next scan flushes the directory the removal left unsynced.
+        assert!(storage.scan("partition").await.unwrap().is_empty());
+        assert_eq!(storage.lock.lock().await.syncs, 2);
+        assert!(storage.lock.lock().await.synced.contains(&partition));
+
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn test_remove_forgets_first_open_names() {
@@ -1811,5 +1865,38 @@ mod tests {
         assert!(storage.pending.entries.lock().is_empty());
 
         let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    /// A partition path that exists but cannot be enumerated or removed is not a missing
+    /// partition: only absence may let a consumer treat it as empty or already removed.
+    #[tokio::test]
+    async fn test_partition_failures_are_not_absence() {
+        let directory = env::temp_dir().join(format!("storage_tokio_enotdir_{}", random_suffix()));
+        fs::create_dir_all(&directory).unwrap();
+        let partition = directory.join("partition");
+        fs::write(&partition, b"not a directory").unwrap();
+        let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), test_pool());
+
+        assert!(matches!(
+            storage.scan("partition").await,
+            Err(Error::ReadFailed)
+        ));
+        assert!(matches!(
+            storage.scan("missing").await,
+            Err(Error::PartitionMissing(_))
+        ));
+
+        assert!(matches!(
+            storage.remove("partition", None).await,
+            Err(Error::Io(_))
+        ));
+        assert!(partition.exists());
+        assert!(matches!(
+            storage.remove("missing", None).await,
+            Err(Error::PartitionMissing(_))
+        ));
+
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
     }
 }
