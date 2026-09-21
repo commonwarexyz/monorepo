@@ -12,7 +12,7 @@ use crate::{
         any::traits::DbAny,
         operation::Operation as OperationTrait,
         sync::{
-            self, Engine, Feedback, Target,
+            self, Engine, Feedback, ServeResult, Target,
             engine::{Config, NextStep},
             source::{self, Request, Response, Source},
         },
@@ -1823,16 +1823,7 @@ where
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<
-        (
-            Response<F, R::Op, Digest>,
-            Option<Feedback<Response<F, R::Op, Digest>>>,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: Request<F>) -> ServeResult<Self> {
         let (mut response, feedback) = self.inner.serve(request).await?;
         assert!(feedback.is_none(), "test wrapper requires a direct source");
 
@@ -1938,16 +1929,7 @@ where
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<
-        (
-            Response<F, R::Op, Digest>,
-            Option<Feedback<Response<F, R::Op, Digest>>>,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: Request<F>) -> ServeResult<Self> {
         if request.size() == self.historical_target_size {
             if matches!(request, Request::Boundary { .. }) {
                 // Simulate a source that has not answered the old target's pinned-nodes

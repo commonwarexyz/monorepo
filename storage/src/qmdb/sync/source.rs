@@ -418,6 +418,13 @@ impl<R> Feedback<R> {
     }
 }
 
+/// The response type of a [`Source`].
+pub type ResponseOf<S> = Response<<S as Source>::Family, <S as Source>::Op, <S as Source>::Digest>;
+
+/// The result of [`Source::serve`].
+pub type ServeResult<S> =
+    Result<(ResponseOf<S>, Option<Feedback<ResponseOf<S>>>), <S as Source>::Error>;
+
 /// A source for proofs and operations.
 pub trait Source: Send + Sync {
     /// The merkle family backing this source's proofs.
@@ -435,19 +442,10 @@ pub trait Source: Send + Sync {
     /// Serves a response with optional [`Feedback`] for reporting its validity.
     ///
     /// Dropping the future or feedback cancels the request without judging the response.
-    #[allow(clippy::type_complexity)]
     fn serve(
         &self,
         request: Request<Self::Family>,
-    ) -> impl Future<
-        Output = Result<
-            (
-                Response<Self::Family, Self::Op, Self::Digest>,
-                Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
-            ),
-            Self::Error,
-        >,
-    > + Send;
+    ) -> impl Future<Output = ServeResult<Self>> + Send;
 }
 
 impl<T> Source for Arc<T>
@@ -462,15 +460,7 @@ where
     fn serve(
         &self,
         request: Request<Self::Family>,
-    ) -> impl Future<
-        Output = Result<
-            (
-                Response<Self::Family, Self::Op, Self::Digest>,
-                Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
-            ),
-            Self::Error,
-        >,
-    > + Send {
+    ) -> impl Future<Output = ServeResult<Self>> + Send {
         T::serve(self, request)
     }
 }
@@ -485,16 +475,7 @@ where
     type Op = T::Op;
     type Error = ServeError<T::Family>;
 
-    async fn serve(
-        &self,
-        request: Request<Self::Family>,
-    ) -> Result<
-        (
-            Response<Self::Family, Self::Op, Self::Digest>,
-            Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: Request<Self::Family>) -> ServeResult<Self> {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
         Ok(source.serve(request).await?)
     }
@@ -511,16 +492,7 @@ macro_rules! impl_locked_source {
             type Op = T::Op;
             type Error = T::Error;
 
-            async fn serve(
-                &self,
-                request: Request<Self::Family>,
-            ) -> Result<
-                (
-                    Response<Self::Family, Self::Op, Self::Digest>,
-                    Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
-                ),
-                Self::Error,
-            > {
+            async fn serve(&self, request: Request<Self::Family>) -> ServeResult<Self> {
                 self.read().await.serve(request).await
             }
         }
@@ -543,7 +515,6 @@ where
     type Op = C::Item;
     type Error = qmdb::Error<F>;
 
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.sync.serve",
         level = "info",
@@ -554,16 +525,7 @@ where
             max_ops = request.max_ops().get(),
         ),
     )]
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<
-        (
-            Response<F, Self::Op, H::Digest>,
-            Option<Feedback<Response<F, Self::Op, H::Digest>>>,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: Request<F>) -> ServeResult<Self> {
         // Reject before the floor lookup so the error carries the requested size and the
         // floor read never touches out-of-range locations.
         if request.size() > self.size() {
@@ -617,16 +579,7 @@ where
     type Op = crate::qmdb::any::operation::Operation<F, U>;
     type Error = qmdb::Error<F>;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<
-        (
-            Response<F, Self::Op, H::Digest>,
-            Option<Feedback<Response<F, Self::Op, H::Digest>>>,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: Request<F>) -> ServeResult<Self> {
         self.log.serve(request).await
     }
 }
@@ -702,11 +655,7 @@ pub(crate) mod tests {
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn serve(
-            &self,
-            _request: Request<F>,
-        ) -> Result<(Response<F, Op, D>, Option<Feedback<Response<F, Op, D>>>), qmdb::Error<F>>
-        {
+        async fn serve(&self, _request: Request<F>) -> ServeResult<Self> {
             let response = self
                 .responses
                 .lock()
@@ -900,11 +849,7 @@ pub(crate) mod tests {
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn serve(
-            &self,
-            _request: Request<F>,
-        ) -> Result<(Response<F, Op, D>, Option<Feedback<Response<F, Op, D>>>), qmdb::Error<F>>
-        {
+        async fn serve(&self, _request: Request<F>) -> ServeResult<Self> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }

@@ -783,7 +783,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::{Family as MmrFamily, Proof};
+    use crate::{
+        merkle::mmr::{Family as MmrFamily, Proof},
+        qmdb::sync::ServeResult,
+    };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU64, non_empty_range};
@@ -896,16 +899,7 @@ mod tests {
         type Family = MmrFamily;
         type Op = i32;
 
-        async fn serve(
-            &self,
-            _request: Request<MmrFamily>,
-        ) -> Result<
-            (
-                Response<MmrFamily, i32, sha256::Digest>,
-                Option<crate::qmdb::sync::Feedback<Response<MmrFamily, i32, sha256::Digest>>>,
-            ),
-            Self::Error,
-        > {
+        async fn serve(&self, _request: Request<MmrFamily>) -> ServeResult<Self> {
             Ok((
                 Response::Operations {
                     proof: Proof {

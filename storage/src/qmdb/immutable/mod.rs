@@ -80,13 +80,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error,
-        any::ValueEncoding,
-        chain,
-        metrics::Metrics,
-        operation::Key,
-        single_operation_root,
-        sync::{Feedback, Response},
+        Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
+        sync::ServeResult,
     },
     translator::Translator,
 };
@@ -862,16 +857,7 @@ where
     type Op = Operation<F, K, V>;
     type Error = Error<F>;
 
-    async fn serve(
-        &self,
-        request: crate::qmdb::sync::Request<F>,
-    ) -> Result<
-        (
-            Response<F, Operation<F, K, V>, H::Digest>,
-            Option<Feedback<Response<F, Operation<F, K, V>, H::Digest>>>,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: crate::qmdb::sync::Request<F>) -> ServeResult<Self> {
         self.journal.serve(request).await
     }
 }
