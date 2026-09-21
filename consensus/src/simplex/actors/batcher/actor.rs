@@ -1,4 +1,4 @@
-use super::{Config, Mailbox, Message, Round, verifier::Verification};
+use super::{Config, Mailbox, Message, Round};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
@@ -92,8 +92,7 @@ where
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     batch_size: Histogram,
     verify_latency: histogram::Timed,
-    recover_latency: histogram::Timed,
-    recover_fallback: Counter,
+    verify_fallback: Counter,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
@@ -110,7 +109,7 @@ where
         let scheme = Arc::new(cfg.scheme);
         let participants = scheme.participants();
         let added = context.counter("added", "number of messages added to the verifier");
-        let verified = context.counter("verified", "number of messages verified");
+        let verified = context.counter("verified", "number of messages processed by the verifier");
         let inbound_messages = context.family("inbound_messages", "number of inbound messages");
         let latest_vote: GaugeFamily<Peer<S::PublicKey>> =
             context.family("latest_vote", "view of latest vote received per peer");
@@ -119,22 +118,17 @@ where
         }
         let batch_size = context.histogram(
             "batch_size",
-            "number of messages in a signature verification batch",
+            "number of pending messages processed per batch",
             [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
         let verify_latency = context.histogram(
             "verify_latency",
-            "latency of signature verification",
+            "latency of vote verification and certificate assembly",
             Buckets::CRYPTOGRAPHY,
         );
-        let recover_latency = context.histogram(
-            "recover_latency",
-            "certificate recover latency",
-            Buckets::CRYPTOGRAPHY,
-        );
-        let recover_fallback = context.counter(
-            "recover_fallback",
-            "number of failed optimistic certificate recoveries",
+        let verify_fallback = context.counter(
+            "verify_fallback",
+            "number of fallbacks to vote verification after failed optimistic assembly",
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;
@@ -173,8 +167,7 @@ where
                 latest_vote,
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency),
-                recover_latency: histogram::Timed::new(recover_latency),
-                recover_fallback,
+                verify_fallback,
             },
             Mailbox::new(sender),
         )
@@ -321,8 +314,8 @@ where
         }
     }
 
-    /// Batch-verifies any ready votes for `view` and forwards newly
-    /// constructible certificates to the voter.
+    /// Attempts to construct certificates from ready votes for `view` and forwards
+    /// them to the voter.
     async fn process_view(
         &mut self,
         voter: &mut voter::Mailbox<S, D>,
@@ -331,52 +324,41 @@ where
     ) {
         loop {
             let timer = self.verify_latency.timer(self.context.as_ref());
-            let Some(Verification {
-                batch,
-                invalid: failed,
-                certificate,
-                fallback,
-            }) = round
-                .try_verify(self.context.as_mut(), &self.strategy)
+            let Some(verification) = round
+                .try_construct(self.context.as_mut(), &self.strategy)
                 .await
             else {
                 trace!(%view, "no verifier ready");
                 break;
             };
 
+            // Record completed work even when no certificate was produced.
             timer.observe(self.context.as_ref());
-
-            trace!(%view, batch, "processed votes");
-            self.verified.inc_by(batch as u64);
-            self.batch_size.observe(batch as f64);
-            if fallback {
-                self.recover_fallback.inc();
+            if verification.fallback {
+                self.verify_fallback.inc();
             }
 
-            for invalid in failed {
+            // Block invalid signers even when the remaining votes produced a certificate.
+            for invalid in verification.invalid {
                 if let Some(signer) = self.scheme.participants().key(invalid) {
                     commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
                 }
             }
-            if let Some(certificate) = certificate {
+
+            // Forward the certificate already recorded by the round.
+            if let Some(certificate) = verification.certificate {
                 let kind = certificate.kind();
                 debug!(%view, %kind, "recovered certificate, forwarding to voter");
                 voter.recovered(certificate);
             }
-        }
 
-        // Construct and forward every certificate with a verified quorum.
-        while let Some(certificate) = self
-            .recover_latency
-            .time_some(
-                self.context.as_ref(),
-                round.try_construct_certificate(&self.strategy),
-            )
-            .await
-        {
-            let kind = certificate.kind();
-            debug!(%view, %kind, "constructed certificate, forwarding to voter");
-            voter.recovered(certificate);
+            // Count processed pending votes, including rejected inputs.
+            let batch = verification.batch;
+            if batch != 0 {
+                trace!(%view, batch, "processed votes");
+                self.verified.inc_by(batch as u64);
+                self.batch_size.observe(batch as f64);
+            }
         }
     }
 

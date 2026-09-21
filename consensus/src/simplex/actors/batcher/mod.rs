@@ -47,7 +47,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{verifier::Batch, *};
     use crate::{
         Viewable,
         simplex::{
@@ -66,7 +66,7 @@ mod tests {
             },
             types::{
                 Activity, Certificate, Finalization, Finalize, Kind, Notarization, Notarize,
-                Nullification, Nullify, Outcome, Proposal, Subject, Vote,
+                Nullification, Nullify, Outcome, Proposal, Vote,
             },
         },
         types::{Epoch, Participant, Round, TermLength, View},
@@ -425,8 +425,7 @@ mod tests {
         }
     }
 
-    /// Drives a full quorum of network votes through a [Round]'s batch-verify and
-    /// certificate-recovery offloads using `strategy`.
+    /// Drives a quorum of network votes through a [Round] using `strategy`.
     async fn verify_and_construct<S, F>(mut fixture: F, strategy: impl Strategy)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
@@ -456,115 +455,23 @@ mod tests {
             assert!(round.add_network(participants[i].clone(), Vote::Notarize(notarize)));
         }
 
-        // Batch verify the pending votes on the strategy's pool.
+        // Process the pending votes on the strategy's pool.
         let verification = round
-            .try_verify(&mut rng, &strategy)
+            .try_construct(&mut rng, &strategy)
             .await
             .expect("quorum of notarizes must be ready");
         assert_eq!(verification.batch, schemes.len());
         assert!(verification.invalid.is_empty());
         assert!(!verification.fallback);
-
-        // Threshold schemes recover optimistically during verification. Attributable
-        // schemes retain the verified votes for the legacy construction path.
-        let certificate = match verification.certificate {
-            Some(certificate) => certificate,
-            None => round
-                .try_construct_certificate(&strategy)
-                .await
-                .expect("verified quorum must construct a certificate"),
-        };
+        let certificate = verification.certificate.expect("quorum must certify");
         let Certificate::Notarization(notarization) = certificate else {
             panic!("expected a notarization");
         };
         assert_eq!(notarization.proposal, proposal);
         assert!(notarization.verify(&mut rng, &verifier, &Sequential));
 
-        // Construction is one-shot per round.
-        assert!(round.try_construct_certificate(&strategy).await.is_none());
-    }
-
-    /// Reproduces the pre-optimization path: verify every partial attestation,
-    /// then assemble the verified quorum.
-    fn legacy_certificate<S>(
-        rng: &mut TestRng,
-        scheme: &S,
-        kind: Kind,
-        round: Round,
-        proposal: &Proposal<Sha256Digest>,
-        votes: &[Vote<S, Sha256Digest>],
-    ) -> Certificate<S, Sha256Digest>
-    where
-        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-    {
-        match kind {
-            Kind::Notarization => {
-                let notarizes: Vec<_> = votes
-                    .iter()
-                    .map(|vote| match vote {
-                        Vote::Notarize(notarize) => notarize.clone(),
-                        _ => panic!("expected notarize votes"),
-                    })
-                    .collect();
-                let verification = scheme.verify_attestations::<_, Sha256Digest, _>(
-                    rng,
-                    Subject::Notarize { proposal },
-                    notarizes.iter().map(|vote| vote.attestation.clone()),
-                    &Sequential,
-                );
-                assert!(verification.invalid.is_empty());
-                let certificate = scheme
-                    .assemble(non_empty![@verification.verified.into_iter()], &Sequential)
-                    .expect("verified notarizes must assemble");
-                Certificate::Notarization(Notarization {
-                    proposal: proposal.clone(),
-                    certificate,
-                })
-            }
-            Kind::Nullification => {
-                let nullifies: Vec<_> = votes
-                    .iter()
-                    .map(|vote| match vote {
-                        Vote::Nullify(nullify) => nullify.clone(),
-                        _ => panic!("expected nullify votes"),
-                    })
-                    .collect();
-                let verification = scheme.verify_attestations::<_, Sha256Digest, _>(
-                    rng,
-                    Subject::Nullify { round },
-                    nullifies.iter().map(|vote| vote.attestation.clone()),
-                    &Sequential,
-                );
-                assert!(verification.invalid.is_empty());
-                let certificate = scheme
-                    .assemble(non_empty![@verification.verified.into_iter()], &Sequential)
-                    .expect("verified nullifies must assemble");
-                Certificate::Nullification(Nullification { round, certificate })
-            }
-            Kind::Finalization => {
-                let finalizes: Vec<_> = votes
-                    .iter()
-                    .map(|vote| match vote {
-                        Vote::Finalize(finalize) => finalize.clone(),
-                        _ => panic!("expected finalize votes"),
-                    })
-                    .collect();
-                let verification = scheme.verify_attestations::<_, Sha256Digest, _>(
-                    rng,
-                    Subject::Finalize { proposal },
-                    finalizes.iter().map(|vote| vote.attestation.clone()),
-                    &Sequential,
-                );
-                assert!(verification.invalid.is_empty());
-                let certificate = scheme
-                    .assemble(non_empty![@verification.verified.into_iter()], &Sequential)
-                    .expect("verified finalizes must assemble");
-                Certificate::Finalization(Finalization {
-                    proposal: proposal.clone(),
-                    certificate,
-                })
-            }
-        }
+        // Completed kinds do not emit another certificate.
+        assert!(round.try_construct(&mut rng, &strategy).await.is_none());
     }
 
     fn threshold_vote<S: Scheme<Sha256Digest>>(
@@ -582,10 +489,7 @@ mod tests {
         }
     }
 
-    /// Threshold recovery must produce the exact same certificate as the
-    /// verify-attestations-plus-assemble path, including when one vote was
-    /// already trusted locally.
-    async fn optimistic_recovery_matches_legacy<S, F>(mut fixture: F)
+    async fn certify_mixed_votes<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -606,9 +510,6 @@ mod tests {
                 .take(quorum)
                 .map(|scheme| threshold_vote(scheme, kind, round_id, &proposal))
                 .collect();
-            let expected =
-                legacy_certificate(&mut rng, &schemes[0], kind, round_id, &proposal, &votes);
-
             let mut tracked = super::Round::new(
                 round_id,
                 Arc::new(schemes[0].clone()),
@@ -628,19 +529,15 @@ mod tests {
             }
 
             let verification = tracked
-                .try_verify(&mut rng, &Sequential)
+                .try_construct(&mut rng, &Sequential)
                 .await
                 .expect("mixed trusted and pending quorum must be ready");
             assert_eq!(verification.batch, quorum - 1);
             assert!(verification.invalid.is_empty());
             assert!(!verification.fallback);
-            assert_eq!(
-                verification
-                    .certificate
-                    .expect("optimistic recovery must certify")
-                    .encode(),
-                expected.encode(),
-            );
+            let certificate = verification.certificate.expect("quorum must certify");
+            assert_eq!(certificate.kind(), kind);
+            assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
             assert!(tracked.has_certificate(kind));
 
             // Optimistic completion records proposal authority and compacts the
@@ -670,28 +567,21 @@ mod tests {
 
             let late = threshold_vote(&schemes[quorum], kind, round_id, &proposal);
             assert!(tracked.add_network(participants[quorum].clone(), late));
-            assert!(tracked.try_verify(&mut rng, &Sequential).await.is_none());
-            assert!(
-                tracked
-                    .try_construct_certificate(&Sequential)
-                    .await
-                    .is_none()
-            );
+            assert!(tracked.try_construct(&mut rng, &Sequential).await.is_none());
         }
     }
 
     #[test_async]
-    async fn test_optimistic_threshold_recovery_matches_legacy() {
-        optimistic_recovery_matches_legacy(bls12381_threshold_std::fixture::<MinPk, _>).await;
-        optimistic_recovery_matches_legacy(bls12381_threshold_std::fixture::<MinSig, _>).await;
-        optimistic_recovery_matches_legacy(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
-        optimistic_recovery_matches_legacy(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+    async fn test_threshold_certifies_mixed_votes() {
+        certify_mixed_votes(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        certify_mixed_votes(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        certify_mixed_votes(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        certify_mixed_votes(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
     }
 
-    /// A failed optimistic recovery falls back once to signer attribution. A
-    /// later valid vote completes through the legacy path without attempting
-    /// optimistic recovery again.
-    async fn optimistic_recovery_falls_back_once<S, F>(mut fixture: F, valid_quorum: bool)
+    /// Failed optimistic assembly retains valid votes for later attempts. Invalid replacements
+    /// trigger another fallback, and a valid replacement completes the quorum.
+    async fn optimistic_assembly_fallback<S, F>(mut fixture: F, valid_quorum: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -702,7 +592,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = fixture(&mut rng, b"batcher_optimistic_fallback", 5);
+            } = fixture(&mut rng, b"batcher_optimistic_fallback", 7);
             let quorum = quorum(schemes.len().try_into().unwrap()) as usize;
             let round_id = Round::new(Epoch::new(10), View::new(8));
             let proposal = Proposal::new(round_id, View::new(7), Sha256::hash(&[b"fallback"]));
@@ -711,16 +601,19 @@ mod tests {
                 .map(|scheme| threshold_vote(scheme, kind, round_id, &proposal))
                 .collect();
 
-            // Keep signer 0 in range but replace its signature with signer 4's.
-            let replacement = match &votes[quorum] {
+            // Keep the claimed signers in range while using another participant's signature.
+            let replacement = match votes.last().unwrap() {
                 Vote::Notarize(vote) => vote.attestation.signature.clone(),
                 Vote::Nullify(vote) => vote.attestation.signature.clone(),
                 Vote::Finalize(vote) => vote.attestation.signature.clone(),
             };
-            match &mut votes[0] {
-                Vote::Notarize(vote) => vote.attestation.signature = replacement,
-                Vote::Nullify(vote) => vote.attestation.signature = replacement,
-                Vote::Finalize(vote) => vote.attestation.signature = replacement,
+            let invalid_count = if valid_quorum { 1 } else { 2 };
+            for index in [0, quorum].into_iter().take(invalid_count) {
+                match &mut votes[index] {
+                    Vote::Notarize(vote) => vote.attestation.signature = replacement.clone(),
+                    Vote::Nullify(vote) => vote.attestation.signature = replacement.clone(),
+                    Vote::Finalize(vote) => vote.attestation.signature = replacement.clone(),
+                }
             }
 
             let mut tracked = super::Round::new(
@@ -741,81 +634,70 @@ mod tests {
                 assert!(tracked.add_network(participants[i].clone(), vote.clone()));
             }
 
-            let verification = tracked
-                .try_verify(&mut rng, &Sequential)
+            let mut result = tracked
+                .try_construct(&mut rng, &Sequential)
                 .await
-                .expect("candidate quorum must attempt recovery");
-            assert_eq!(verification.batch, batch);
-            assert_eq!(verification.invalid, vec![Participant::from_usize(0)]);
-            assert!(verification.certificate.is_none());
-            assert!(verification.fallback);
-            assert!(!tracked.has_certificate(kind));
+                .expect("candidate quorum must be ready");
+            assert_eq!(result.batch, batch);
+            assert_eq!(result.invalid, vec![Participant::from_usize(0)]);
+            assert!(result.fallback);
+            assert_eq!(tracked.has_certificate(kind), valid_quorum);
             if !valid_quorum {
-                assert!(
-                    tracked
-                        .try_construct_certificate(&Sequential)
+                assert!(result.certificate.is_none());
+                for i in quorum..schemes.len() {
+                    assert!(tracked.try_construct(&mut rng, &Sequential).await.is_none());
+                    assert!(tracked.add_network(participants[i].clone(), votes[i].clone()));
+                    result = tracked
+                        .try_construct(&mut rng, &Sequential)
                         .await
-                        .is_none()
-                );
-
-                assert!(tracked.add_network(participants[quorum].clone(), votes[quorum].clone()));
-                let verification = tracked
-                    .try_verify(&mut rng, &Sequential)
-                    .await
-                    .expect("replacement vote must complete the verified quorum");
-                assert_eq!(verification.batch, 1);
-                assert!(verification.invalid.is_empty());
-                assert!(verification.certificate.is_none());
-                assert!(!verification.fallback);
+                        .expect("replacement vote must be processed");
+                    assert_eq!(result.batch, 1);
+                    if i == quorum {
+                        assert!(result.fallback);
+                        assert_eq!(result.invalid, vec![Participant::from_usize(i)]);
+                        assert!(result.certificate.is_none());
+                        assert!(!tracked.has_certificate(kind));
+                    } else {
+                        assert!(!result.fallback);
+                        assert!(result.invalid.is_empty());
+                    }
+                }
             }
-
-            let certificate = tracked
-                .try_construct_certificate(&Sequential)
-                .await
-                .expect("valid replacement must complete certification");
-            let expected_votes: Vec<_> = votes.iter().skip(1).cloned().collect();
-            let expected = legacy_certificate(
-                &mut rng,
-                &schemes[0],
-                kind,
-                round_id,
-                &proposal,
-                &expected_votes,
-            );
-            assert_eq!(certificate.encode(), expected.encode());
+            let certificate = result.certificate.expect("valid quorum must certify");
+            assert_eq!(certificate.kind(), kind);
+            assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
         }
     }
 
     #[test_async]
-    async fn test_optimistic_threshold_recovery_falls_back_once() {
+    async fn test_optimistic_assembly_fallback() {
         for valid_quorum in [false, true] {
-            optimistic_recovery_falls_back_once(
-                bls12381_threshold_std::fixture::<MinPk, _>,
-                valid_quorum,
-            )
-            .await;
-            optimistic_recovery_falls_back_once(
+            optimistic_assembly_fallback(bls12381_threshold_std::fixture::<MinPk, _>, valid_quorum)
+                .await;
+            optimistic_assembly_fallback(
                 bls12381_threshold_std::fixture::<MinSig, _>,
                 valid_quorum,
             )
             .await;
-            optimistic_recovery_falls_back_once(
-                bls12381_threshold_vrf::fixture::<MinPk, _>,
-                valid_quorum,
-            )
-            .await;
-            optimistic_recovery_falls_back_once(
+            optimistic_assembly_fallback(bls12381_threshold_vrf::fixture::<MinPk, _>, valid_quorum)
+                .await;
+            optimistic_assembly_fallback(
                 bls12381_threshold_vrf::fixture::<MinSig, _>,
                 valid_quorum,
             )
             .await;
+            optimistic_assembly_fallback(bls12381_multisig::fixture::<MinPk, _>, valid_quorum)
+                .await;
+            optimistic_assembly_fallback(bls12381_multisig::fixture::<MinSig, _>, valid_quorum)
+                .await;
+            optimistic_assembly_fallback(ed25519::fixture, valid_quorum).await;
+            optimistic_assembly_fallback(secp256r1::fixture, valid_quorum).await;
         }
     }
 
-    /// A failed attempt for one kind must not disable optimistic recovery for
-    /// another kind in the same view.
+    /// A failed attempt for one kind must not prevent another kind from assembling a certificate.
     #[test_async]
-    async fn test_optimistic_recovery_state_is_per_kind() {
+    async fn test_optimistic_assembly_after_other_kind_fails() {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -853,7 +735,7 @@ mod tests {
         }
 
         let notarize = tracked
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("notarize candidate quorum must be processed first");
         assert!(notarize.fallback);
@@ -862,11 +744,9 @@ mod tests {
         assert!(!tracked.has_certificate(Kind::Notarization));
 
         let nullify = tracked
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
-            .expect("nullify quorum must retain its optimistic attempt");
-        assert!(!nullify.fallback);
-        assert!(nullify.invalid.is_empty());
+            .expect("nullify quorum must still certify");
         assert!(matches!(
             nullify.certificate,
             Some(Certificate::Nullification(_))
@@ -923,19 +803,69 @@ mod tests {
         for (i, vote) in votes.into_iter().enumerate() {
             assert!(tracked.add_network(participants[i].clone(), Vote::Notarize(vote)));
         }
-        let verification = tracked
-            .try_verify(&mut rng, &Sequential)
+        let Batch {
+            invalid, fallback, ..
+        } = tracked
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("candidate quorum must be processed");
-        assert!(verification.fallback);
-        assert!(verification.certificate.is_none());
-        assert_eq!(verification.invalid, vec![Participant::from_usize(0)]);
+        assert!(fallback);
+
+        assert_eq!(invalid, vec![Participant::from_usize(0)]);
     }
 
     #[test_async]
     async fn test_vrf_seed_only_corruption_triggers_fallback() {
         vrf_seed_only_corruption::<MinPk>().await;
         vrf_seed_only_corruption::<MinSig>().await;
+    }
+
+    async fn constructed_quorum_without_leader<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
+    {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = fixture(&mut rng, b"batcher_test", 1);
+        let round_id = Round::new(Epoch::new(0), View::new(2));
+        let proposal = Proposal::new(round_id, View::new(1), Sha256::hash(&[b"constructed"]));
+        let mut round = super::Round::new(
+            round_id,
+            Arc::new(schemes[0].clone()),
+            NoopBlocker,
+            NoopReporter(PhantomData),
+            false,
+        );
+        round.accept_vote(
+            Vote::Notarize(Notarize::sign(&schemes[0], proposal.clone()).unwrap()),
+            true,
+        );
+        assert!(round.try_forward_proposal(Participant::new(0)).is_none());
+
+        let result = round
+            .try_construct(&mut rng, &Sequential)
+            .await
+            .expect("a constructed quorum must complete before the leader update");
+        assert_eq!(result.batch, 0);
+        assert!(result.invalid.is_empty());
+        assert!(!result.fallback);
+        let Some(Certificate::Notarization(certificate)) = result.certificate else {
+            panic!("expected a notarization")
+        };
+        assert_eq!(certificate.proposal, proposal);
+        assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
+        assert_eq!(
+            round.try_forward_proposal(Participant::new(0)),
+            Some(proposal)
+        );
+        assert!(round.has_certificate(Kind::Notarization));
+        assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
+    }
+
+    #[test_async]
+    async fn test_constructed_quorum_completes_before_leader_update() {
+        constructed_quorum_without_leader(ed25519::fixture).await;
+        constructed_quorum_without_leader(bls12381_threshold_std::fixture::<MinPk, _>).await;
     }
 
     /// A locally constructed vote and its network duplicate must count once
@@ -972,22 +902,24 @@ mod tests {
             let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
             assert!(round.add_network(participants[i].clone(), Vote::Notarize(vote)));
         }
-        assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
+        assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
 
         let vote = Notarize::sign(&schemes[quorum - 1], proposal).unwrap();
         assert!(round.add_network(participants[quorum - 1].clone(), Vote::Notarize(vote)));
-        let verification = round
-            .try_verify(&mut rng, &Sequential)
+        let Batch {
+            batch: processed,
+            invalid,
+            fallback,
+            certificate,
+        } = round
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("unique signer quorum must be ready");
-        assert_eq!(verification.batch, quorum - 1);
-        assert!(verification.invalid.is_empty());
-        assert!(verification.certificate.is_none());
-        assert!(!verification.fallback);
-        assert!(matches!(
-            round.try_construct_certificate(&Sequential).await,
-            Some(Certificate::Notarization(_))
-        ));
+        assert_eq!(processed, quorum - 1);
+        assert!(invalid.is_empty());
+
+        assert!(!fallback);
+        assert!(matches!(certificate, Some(Certificate::Notarization(_))));
     }
 
     /// Deterministic-runtime tests drive `Strategy::spawn` inline: the deterministic runtime's
@@ -1484,18 +1416,20 @@ mod tests {
                 Kind::Nullification => unreachable!(),
             }
 
-            let verification = round
-                .try_verify(&mut rng, &Sequential)
+            let Batch {
+                batch: processed,
+                invalid,
+                fallback,
+                certificate,
+            } = round
+                .try_construct(&mut rng, &Sequential)
                 .await
                 .expect("certificate quorum must be ready");
-            assert_eq!(verification.batch, quorum_size);
-            assert!(verification.invalid.is_empty());
-            assert!(verification.certificate.is_none());
-            assert!(!verification.fallback);
-            let certificate = round
-                .try_construct_certificate(&Sequential)
-                .await
-                .expect("verified quorum must construct a certificate");
+            assert_eq!(processed, quorum_size);
+            assert!(invalid.is_empty());
+
+            assert!(!fallback);
+            let certificate = certificate.expect("verified quorum must construct a certificate");
             assert_eq!(certificate.kind(), kind);
 
             let conflicting =
@@ -1562,18 +1496,21 @@ mod tests {
         round.accept_vote(Vote::Finalize(finalize), true);
 
         // Only the network votes require verification.
-        let verification = round
-            .try_verify(&mut rng, &Sequential)
+        let Batch {
+            batch: processed,
+            invalid,
+            fallback,
+            certificate,
+        } = round
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("restored finalize quorum must be ready");
-        assert_eq!(verification.batch, quorum_size - 1);
-        assert!(verification.invalid.is_empty());
-        assert!(verification.certificate.is_none());
-        assert!(!verification.fallback);
-        let certificate = round
-            .try_construct_certificate(&Sequential)
-            .await
-            .expect("restored finalize quorum must construct a certificate");
+        assert_eq!(processed, quorum_size - 1);
+        assert!(invalid.is_empty());
+
+        assert!(!fallback);
+        let certificate =
+            certificate.expect("restored finalize quorum must construct a certificate");
         assert!(
             matches!(certificate, Certificate::Finalization(finalization) if finalization.proposal == proposal)
         );
@@ -1624,18 +1561,21 @@ mod tests {
         // The authoritative notarization restores both sets of votes.
         let notarization = build_notarization(&schemes, &proposal, quorum_size);
         assert!(round.record_certificate(&Certificate::Notarization(notarization)));
-        let verification = round
-            .try_verify(&mut rng, &Sequential)
+        let Batch {
+            batch: processed,
+            invalid,
+            fallback,
+            certificate,
+        } = round
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("restored finalize quorum must be ready");
-        assert_eq!(verification.batch, quorum_size);
-        assert!(verification.invalid.is_empty());
-        assert!(verification.certificate.is_none());
-        assert!(!verification.fallback);
-        let certificate = round
-            .try_construct_certificate(&Sequential)
-            .await
-            .expect("restored finalize quorum must construct a certificate");
+        assert_eq!(processed, quorum_size);
+        assert!(invalid.is_empty());
+
+        assert!(!fallback);
+        let certificate =
+            certificate.expect("restored finalize quorum must construct a certificate");
         assert!(
             matches!(certificate, Certificate::Finalization(finalization) if finalization.proposal == proposal)
         );
@@ -1643,7 +1583,7 @@ mod tests {
 
     /// When multiple kinds are verifiable, votes verify in kind order.
     #[test_async]
-    async fn test_verify_prioritizes_kinds_in_order() {
+    async fn test_construct_prioritizes_kinds_in_order() {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -1673,11 +1613,15 @@ mod tests {
         round.set_leader(Participant::from_usize(0));
 
         // Notarizes verify first, then nullifies, then nothing
-        let verification = round.try_verify(&mut rng, &Sequential).await.unwrap();
-        assert_eq!(verification.batch, quorum);
-        let verification = round.try_verify(&mut rng, &Sequential).await.unwrap();
-        assert_eq!(verification.batch, schemes.len());
-        assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
+        let Batch {
+            batch: processed, ..
+        } = round.try_construct(&mut rng, &Sequential).await.unwrap();
+        assert_eq!(processed, quorum);
+        let Batch {
+            batch: processed, ..
+        } = round.try_construct(&mut rng, &Sequential).await.unwrap();
+        assert_eq!(processed, schemes.len());
+        assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
     }
 
     /// The leader's notarize reveals the proposal while both a finalize
@@ -1818,6 +1762,9 @@ mod tests {
             assert!(received_proposal);
             assert!(received_notarization);
             assert!(received_finalization);
+
+            let metrics = context.encode();
+            assert!(metrics.contains("actor_verify_latency_count 2\n"), "{metrics}");
         });
     }
 
@@ -1863,7 +1810,7 @@ mod tests {
                 true,
             );
             assert!(
-                round.try_construct_certificate(&Sequential).await.is_none(),
+                round.try_construct(&mut rng, &Sequential).await.is_none(),
                 "mixed finalizes for old and certified proposals must not form a certificate"
             );
 
@@ -1887,8 +1834,10 @@ mod tests {
                 );
             }
             let certificate = round
-                .try_construct_certificate(&Sequential)
+                .try_construct(&mut rng, &Sequential)
                 .await
+                .expect("matching finalizes should be ready")
+                .certificate
                 .expect("matching finalizes should form a certificate");
             let Certificate::Finalization(finalization) = certificate else {
                 panic!("expected a finalization certificate");
@@ -3096,12 +3045,7 @@ mod tests {
             traces
                 .get_by_level(Level::DEBUG)
                 .expect_event(|event| {
-                    event.metadata.content
-                        == if S::is_attributable() {
-                            "constructed certificate, forwarding to voter"
-                        } else {
-                            "recovered certificate, forwarding to voter"
-                        }
+                    event.metadata.content == "recovered certificate, forwarding to voter"
                         && event
                             .expect_span_at_index(0, |span| {
                                 span.expect_content_exact("simplex.voter.view")
@@ -3186,7 +3130,7 @@ mod tests {
             let batcher_cfg = test_config(
                 schemes[0].clone(),
                 blocker,
-                reporter,
+                reporter.clone(),
                 MockRelay::new(),
                 epoch,
                 options,
@@ -3278,8 +3222,12 @@ mod tests {
             assert_eq!(blocked.lock().as_slice(), &[participants[1].clone()]);
             let metrics = context.encode();
             assert!(
-                metrics.contains("recover_fallback_total 1"),
+                metrics.contains("verify_fallback_total 1\n"),
                 "optimistic recovery failure must increment the fallback counter: {metrics}"
+            );
+            assert!(
+                metrics.contains("actor_verify_latency_count 1\n"),
+                "{metrics}"
             );
 
             // Three valid votes are insufficient, so no certificate may have
@@ -3300,7 +3248,7 @@ mod tests {
 
             let replacement = Notarize::sign(&schemes[quorum], proposal.clone()).unwrap();
             participant_senders[quorum].as_mut().unwrap().send(
-                Recipients::One(me),
+                Recipients::One(me.clone()),
                 Vote::Notarize(replacement).encode(),
                 true,
             );
@@ -3323,7 +3271,51 @@ mod tests {
                 }
             }
             assert_eq!(blocked.lock().as_slice(), &[participants[1].clone()]);
-            assert!(context.encode().contains("recover_fallback_total 1"));
+            let metrics = context.encode();
+            assert!(metrics.contains("verify_fallback_total 1\n"), "{metrics}");
+            assert!(
+                metrics.contains("actor_verify_latency_count 2\n"),
+                "{metrics}"
+            );
+
+            batcher_mailbox.update(Span::none(), view.next(), leader, view, None);
+
+            let late = Nullify::sign::<Sha256Digest>(&schemes[2], round).unwrap();
+            participant_senders[2].as_mut().unwrap().send(
+                Recipients::One(me.clone()),
+                Vote::<_, Sha256Digest>::Nullify(late).encode(),
+                true,
+            );
+            while reporter
+                .nullifies
+                .lock()
+                .get(&view)
+                .is_none_or(|votes| !votes.contains(&participants[2]))
+            {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // Repeated finalization, retained traffic, and pruning cannot emit another sample.
+            for (current, finalized) in [(view.next(), view), (View::new(13), View::new(12))] {
+                batcher_mailbox.update(Span::none(), current, leader, finalized, None);
+                batcher_mailbox.constructed(Vote::Nullify(
+                    Nullify::sign::<Sha256Digest>(&schemes[0], Round::new(epoch, current)).unwrap(),
+                ));
+                while reporter
+                    .nullifies
+                    .lock()
+                    .get(&current)
+                    .is_none_or(|votes| !votes.contains(&me))
+                {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                let metrics = context.encode();
+                assert!(
+                    metrics.contains("actor_verify_latency_count 2\n"),
+                    "{metrics}"
+                );
+                assert!(metrics.contains("verify_fallback_total 1\n"), "{metrics}");
+            }
         });
     }
 

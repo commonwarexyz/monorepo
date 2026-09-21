@@ -1,6 +1,6 @@
 use super::{
     Verifier,
-    verifier::{ProposalState, Verification},
+    verifier::{Batch, ProposalState},
 };
 use crate::{
     Reporter,
@@ -364,16 +364,15 @@ impl<
         Some(proposal)
     }
 
-    /// Batch verifies the first kind of vote worth verifying (notarizes, then
-    /// nullifies, then finalizes), or `None` if no kind is worthwhile.
+    /// Attempts to construct a certificate from the first ready kind (notarizes,
+    /// nullifies, then finalizes), recording it before returning it to the caller.
     ///
-    /// Returns the batch outcome, recording any optimistically recovered certificate
-    /// before returning it to the caller.
-    pub async fn try_verify<E: CryptoRng>(
+    /// Do not cancel unless the round will also be discarded.
+    pub async fn try_construct<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
-    ) -> Option<Verification<Certificate<S, D>>> {
+    ) -> Option<Batch<Certificate<S, D>>> {
         let result = if let Some(result) = self.verifier.try_verify_notarizes(rng, strategy).await {
             result
         } else if let Some(result) = self.verifier.try_verify_nullifies(rng, strategy).await {
@@ -415,20 +414,5 @@ impl<
             .map(Participant::from_usize)
             .filter(|&p| self.is_missing_voter(proposal, p))
             .collect()
-    }
-
-    /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with a verified
-    /// quorum. Call repeatedly to drain every constructible kind.
-    ///
-    /// Once recovery starts, it consumes the verified votes. Do not cancel unless the round will
-    /// also be discarded.
-    pub async fn try_construct_certificate(
-        &mut self,
-        strategy: &impl Strategy,
-    ) -> Option<Certificate<S, D>> {
-        let certificate = self.verifier.try_construct_certificate(strategy).await?;
-        self.record_certificate(&certificate);
-        Some(certificate)
     }
 }
