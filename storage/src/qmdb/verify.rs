@@ -1,9 +1,25 @@
 use crate::{
-    merkle::{Encoded, Error, Family, Location, Position, Proof, verification::ProofStore},
+    merkle::{Error, Family, Location, Position, Proof, verification::ProofStore},
     qmdb,
 };
+use bytes::{Bytes, BytesMut};
 use commonware_codec::Encode;
 use commonware_cryptography::{Digest, DigestOf, Hasher};
+
+/// Encode operations on demand. Dropping each result before requesting the next lets the
+/// scratch buffer reclaim its backing allocation.
+pub(super) fn encode_operations<'a, Op: Encode + 'a>(
+    operations: impl ExactSizeIterator<Item = &'a Op>,
+) -> impl ExactSizeIterator<Item = Bytes> {
+    let mut scratch = BytesMut::new();
+    operations.map(move |op| {
+        let len = op.encode_size();
+        scratch.reserve(len);
+        op.write(&mut scratch);
+        assert_eq!(scratch.len(), len, "write() did not write expected bytes");
+        scratch.split().freeze()
+    })
+}
 
 /// Digests extracted from a verified proof, paired with their Merkle positions.
 pub type ExtractedDigests<F, H> = Vec<(Position<F>, DigestOf<H>)>;
@@ -21,7 +37,7 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(Encoded);
+    let elements = encode_operations(operations.iter());
     proof.verify_range_inclusion(&hasher, elements, start_loc, target_root)
 }
 
@@ -39,7 +55,7 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(Encoded);
+    let elements = encode_operations(operations.iter());
     proof.verify_proof_and_pinned_nodes(&hasher, elements, start_loc, pinned_nodes, target_root)
 }
 
@@ -57,7 +73,7 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(Encoded);
+    let elements = encode_operations(operations.iter());
     proof.verify_range_inclusion_and_extract_digests(&hasher, elements, start_loc, target_root)
 }
 
@@ -74,7 +90,7 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(Encoded);
+    let elements = encode_operations(operations.iter());
     ProofStore::new(&hasher, proof, elements, start_loc, root)
 }
 
@@ -111,11 +127,9 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations
-        .iter()
-        .map(|(loc, op)| (Encoded(op), *loc))
-        .collect::<Vec<_>>();
-    proof.verify_multi_inclusion(&hasher, &elements, target_root)
+    let elements = encode_operations(operations.iter().map(|(_, op)| op))
+        .zip(operations.iter().map(|(loc, _)| *loc));
+    proof.verify_multi_inclusion(&hasher, elements, target_root)
 }
 
 #[cfg(test)]
@@ -129,6 +143,45 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, deterministic};
     use core::ops::Range;
+
+    #[test]
+    fn test_encode_operations_reuses_allocation() {
+        let operations: Vec<_> = (0..128u64).map(|i| (i, vec![i as u8; 1024])).collect();
+        let mut encoded = encode_operations(operations.iter());
+        assert_eq!(encoded.len(), operations.len());
+        let first = encoded.next().unwrap();
+        let allocation = first.as_ptr();
+        assert_eq!(first, operations[0].encode());
+        drop(first);
+        for (bytes, operation) in encoded.zip(&operations[1..]) {
+            assert_eq!(bytes.as_ptr(), allocation);
+            assert_eq!(bytes, operation.encode());
+        }
+    }
+
+    #[test]
+    fn test_encode_operations_varying_sizes() {
+        let operations: Vec<_> = [0, 4096, 1, 8192, 0, 17, 1024]
+            .into_iter()
+            .enumerate()
+            .map(|(i, len)| (i as u64, vec![i as u8; len]))
+            .collect();
+        for (bytes, operation) in encode_operations(operations.iter()).zip(&operations) {
+            assert_eq!(bytes, operation.encode());
+        }
+        assert_eq!(encode_operations(operations[..0].iter()).next(), None);
+    }
+
+    #[test]
+    fn test_encode_operations_retained_bytes() {
+        let operations = [vec![1u8; 1024], vec![2; 1024]];
+        let mut encoded = encode_operations(operations.iter());
+        let first = encoded.next().unwrap();
+        let second = encoded.next().unwrap();
+        assert_eq!(first, operations[0].encode());
+        assert_eq!(second, operations[1].encode());
+        assert!(encoded.next().is_none());
+    }
 
     fn test_digest(v: u8) -> Digest {
         Sha256::hash(&[&[v]])

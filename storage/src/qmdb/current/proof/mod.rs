@@ -31,8 +31,8 @@
 use crate::{
     journal::contiguous::Contiguous,
     merkle::{
-        self, Encoded, Family, Graftable, Location, PendingChunk, Position, Proof,
-        hasher::Hasher as _, storage::Storage,
+        self, Family, Graftable, Location, PendingChunk, Position, Proof, hasher::Hasher as _,
+        storage::Storage,
     },
     qmdb::{
         self, Error,
@@ -40,6 +40,7 @@ use crate::{
             db::{combine_roots, graftable_chunk_window, partial_chunk, pending_chunk},
             grafting,
         },
+        verify::encode_operations,
     },
 };
 use bytes::BufMut;
@@ -488,7 +489,7 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
 
         let merkle_root = match self.proof.reconstruct_root_inner(
             &grafting_verifier,
-            ops.iter().map(Encoded),
+            encode_operations(ops.iter()),
             start_loc,
             collected,
         ) {

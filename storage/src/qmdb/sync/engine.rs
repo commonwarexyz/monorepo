@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::{Encoded, Family, Location, hasher::Standard as StandardHasher},
+    merkle::{Family, Location, hasher::Standard as StandardHasher},
     qmdb::{
         self,
         sync::{
@@ -10,6 +10,7 @@ use crate::{
             requests::{Id as RequestId, Requests},
             source::{FeedbackTx, Request, Response, Source},
         },
+        verify::encode_operations,
     },
 };
 use commonware_codec::Encode;
@@ -596,7 +597,7 @@ where
                 };
                 if !proof.verify_range_inclusion(
                     &self.hasher,
-                    operations.iter().map(Encoded),
+                    encode_operations(operations.iter()),
                     start_loc,
                     root,
                 ) {

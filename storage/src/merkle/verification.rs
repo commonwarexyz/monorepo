@@ -13,7 +13,6 @@
 
 use crate::merkle::{
     Bagging, Error, Family, Location, Position, Proof,
-    element::Element,
     hasher::Hasher,
     proof::{self as merkle_proof, Blueprint},
     storage::Storage,
@@ -60,7 +59,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
     ) -> Result<Self, Error<F>>
     where
         H: Hasher<F, Digest = D>,
-        E: Element,
+        E: AsRef<[u8]>,
     {
         let bagging = hasher.root_bagging();
         let elements = elements.into_iter();
