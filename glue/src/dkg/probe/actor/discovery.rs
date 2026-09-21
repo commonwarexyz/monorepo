@@ -3,8 +3,8 @@ use crate::{
     dkg::{
         ReshareBlock,
         network::Manager,
-        probe::{ActorArtifact, Artifact, mailbox::Message, wire},
-        types::{EpochInfo, Participants, Payload},
+        probe::{ActorArtifact, Artifact, Bootstrap, mailbox::Message, wire},
+        types::{EpochInfo, Payload},
     },
     stateful::probe::sample::Sample,
 };
@@ -82,8 +82,7 @@ where
     pub(super) context: ContextCell<E>,
     pub(super) mailbox: ActorReceiver<Message<S, V>>,
     pub(super) manager: M,
-    pub(super) bootstrap_participants: Participants<S::PublicKey>,
-    pub(super) bootstrap_directory: <V::ApplicationBlock as ReshareBlock>::Directory,
+    pub(super) bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
     pub(super) verifier: S,
     pub(super) genesis: EpochInfo<
         <V::ApplicationBlock as ReshareBlock>::Variant,
@@ -159,7 +158,7 @@ where
                         Ok(false) => {}
                         Err(error) => {
                             warn!(
-                                epoch = %self.sample.minimum_epoch(),
+                                epoch = %self.bootstrap.epoch,
                                 %error,
                                 "failed to activate bootstrap peer set, shutting down",
                             );
@@ -224,9 +223,9 @@ where
             // bootstraps must not claim an ID above the epochs its
             // orchestrator still enters.
             self.manager.track(
-                self.sample.minimum_epoch(),
-                self.bootstrap_participants.tracked_peers(),
-                &self.bootstrap_directory,
+                self.bootstrap.epoch,
+                self.bootstrap.participants.tracked_peers(),
+                &self.bootstrap.directory,
             )?;
             self.request_latest(boundary_sender);
         }
@@ -239,7 +238,8 @@ where
         self.sample.reset();
         boundary_sender.send(
             Recipients::Some(
-                self.bootstrap_participants
+                self.bootstrap
+                    .participants
                     .dealers
                     .iter()
                     .cloned()
@@ -312,9 +312,8 @@ where
     ///
     /// At most one reply is counted per peer. Replies must come from the
     /// configured committee and verify under the all-epoch verifier. Replies
-    /// below the bootstrap epoch are ignored without blocking: the chain
-    /// reached the bootstrap epoch by definition, so they are stale but not
-    /// proof of misbehavior.
+    /// below the minimum epoch are ignored without blocking: an older reply
+    /// does not prove misbehavior.
     fn handle_latest(
         &mut self,
         peer: S::PublicKey,
@@ -327,7 +326,8 @@ where
             return false;
         }
         if self
-            .bootstrap_participants
+            .bootstrap
+            .participants
             .dealers
             .position(&peer)
             .is_none()
@@ -338,8 +338,8 @@ where
         if finalization.epoch() < self.sample.minimum_epoch() {
             debug!(
                 epoch = %finalization.epoch(),
-                bootstrap_epoch = %self.sample.minimum_epoch(),
-                "ignoring latest finalization below bootstrap epoch"
+                minimum_epoch = %self.sample.minimum_epoch(),
+                "ignoring latest finalization below minimum epoch"
             );
             return false;
         }
@@ -370,7 +370,7 @@ where
         // The all-epoch verifier judges every recorded reply.
         let Some(floor) = self
             .sample
-            .select(self.bootstrap_participants.dealers.len(), |_| true)
+            .select(self.bootstrap.participants.dealers.len(), |_| true)
         else {
             return false;
         };

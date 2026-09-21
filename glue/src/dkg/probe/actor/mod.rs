@@ -5,7 +5,11 @@ use crate::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
-use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::FixedEpocher};
+use commonware_consensus::{
+    marshal::core::Variant,
+    simplex::scheme::Scheme,
+    types::{Epoch, FixedEpocher},
+};
 use commonware_cryptography::Signer;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -40,6 +44,9 @@ where
     pub manager: M,
     /// The weakly subjective checkpoint to bootstrap from.
     pub bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
+    /// Minimum acceptable floor epoch, also bounded by the bootstrap epoch.
+    /// Set this to the persisted application state-sync floor's epoch on restart.
+    pub minimum_epoch: Epoch,
     /// All-epoch certificate verifier built from the constant BLS identity.
     pub verifier: S,
     /// Public epoch information carried by genesis.
@@ -81,6 +88,7 @@ where
     mailbox: ActorReceiver<Message<S, V>>,
     manager: M,
     bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
+    minimum_epoch: Epoch,
     verifier: S,
     genesis: EpochInfo<
         <V::ApplicationBlock as ReshareBlock>::Variant,
@@ -119,6 +127,7 @@ where
                 mailbox,
                 manager: config.manager,
                 bootstrap: config.bootstrap,
+                minimum_epoch: config.minimum_epoch,
                 verifier: config.verifier,
                 genesis: config.genesis,
                 strategy: config.strategy,
@@ -154,9 +163,8 @@ where
             context: self.context,
             mailbox: self.mailbox,
             manager: self.manager,
-            sample: Sample::new(self.bootstrap.epoch),
-            bootstrap_participants: self.bootstrap.participants,
-            bootstrap_directory: self.bootstrap.directory,
+            sample: Sample::new(self.bootstrap.epoch.max(self.minimum_epoch)),
+            bootstrap: self.bootstrap,
             verifier: self.verifier,
             genesis: self.genesis,
             strategy: self.strategy,
