@@ -751,6 +751,8 @@ mod tests {
     use crate::bls12381::{
         dkg::feldman_desmedt as dkg,
         primitives::{
+            group::Private as BlsPrivate,
+            ops::{compute_public, sign_proof_of_possession, verify_proof_of_possession},
             sharing::Mode,
             variant::{MinPk, MinSig, Variant},
         },
@@ -760,8 +762,10 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     #[cfg(feature = "bls12381")]
-    use commonware_utils::{N3f1, NZU32, sync::Mutex};
+    use commonware_utils::{N3f1, NZU32, ordered::BiMap, sync::Mutex};
     use commonware_utils::{TryCollect, non_empty, ordered::Set, test_rng};
+    #[cfg(feature = "bls12381")]
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
 
     #[test]
@@ -1050,6 +1054,16 @@ mod tests {
     }
 
     #[cfg(feature = "bls12381")]
+    #[allow(dead_code)]
+    mod multisig {
+        use super::TestSubject;
+        use crate::impl_certificate_bls12381_multisig;
+        use commonware_utils::N3f1;
+
+        impl_certificate_bls12381_multisig!(TestSubject, Vec<u8>, N3f1);
+    }
+
+    #[cfg(feature = "bls12381")]
     const SUBJECT: TestSubject = TestSubject {
         message: b"subject",
     };
@@ -1057,6 +1071,13 @@ mod tests {
     const OTHER_SUBJECT: TestSubject = TestSubject {
         message: b"other-subject",
     };
+
+    #[cfg(feature = "bls12381")]
+    const MULTISIG_NAMESPACE: &[u8] =
+        b"_COMMONWARE_CRYPTOGRAPHY_CERTIFICATE_MULTISIG_OPTIMISTIC_ASSEMBLE";
+    #[cfg(feature = "bls12381")]
+    const MULTISIG_POP_NAMESPACE: &[u8] =
+        b"_COMMONWARE_CRYPTOGRAPHY_CERTIFICATE_MULTISIG_OPTIMISTIC_ASSEMBLE_POP";
 
     #[cfg(feature = "bls12381")]
     fn threshold_signers<V: Variant>(
@@ -1086,6 +1107,36 @@ mod tests {
     }
 
     #[cfg(feature = "bls12381")]
+    fn multisig_signers<V: Variant>(
+        rng: &mut impl CryptoRng,
+        n: u32,
+    ) -> Vec<multisig::Scheme<crate::ed25519::PublicKey, V>> {
+        let identity_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
+        let signing_keys: Vec<_> = (0..n).map(|_| BlsPrivate::random(&mut *rng)).collect();
+        let signing_publics: Vec<_> = signing_keys.iter().map(compute_public::<V>).collect();
+
+        for (private, public) in signing_keys.iter().zip(&signing_publics) {
+            let proof = sign_proof_of_possession::<V>(private, MULTISIG_POP_NAMESPACE);
+            verify_proof_of_possession::<V>(public, MULTISIG_POP_NAMESPACE, &proof)
+                .expect("proof of possession must verify");
+        }
+
+        let participants: BiMap<_, _> = identity_keys
+            .iter()
+            .map(|key| key.public_key())
+            .zip(signing_publics)
+            .try_collect()
+            .unwrap();
+        signing_keys
+            .into_iter()
+            .map(|private| {
+                multisig::Scheme::signer(MULTISIG_NAMESPACE, participants.clone(), private)
+                    .expect("signer must be a participant")
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "bls12381")]
     fn threshold_success<V: Variant>() {
         let mut rng = test_rng();
         let schemes = threshold_signers::<V>(&mut rng, 5);
@@ -1103,7 +1154,7 @@ mod tests {
             .cloned()
             .map(Recording::outer)
             .collect();
-        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(RecordingCalls::default());
         let verifier = Recording {
             inner: schemes[0].clone(),
             calls: Arc::clone(&calls),
@@ -1118,7 +1169,7 @@ mod tests {
         );
         let certificate = result.ok().expect("valid quorum must certify");
         assert_eq!(certificate, expected);
-        assert!(calls.lock().is_empty());
+        assert!(calls.attestations.lock().is_empty());
         assert!(schemes[0].verify_certificate::<_, Sha256Digest>(
             &mut rng,
             SUBJECT,
@@ -1147,7 +1198,7 @@ mod tests {
             &Sequential,
         );
         assert_eq!(result.ok(), Some(expected));
-        assert!(calls.lock().is_empty());
+        assert!(calls.attestations.lock().is_empty());
     }
 
     #[cfg(feature = "bls12381")]
@@ -1158,11 +1209,66 @@ mod tests {
     }
 
     #[cfg(feature = "bls12381")]
+    fn multisig_optimistic_assemble_uses_one_certificate_check<V: Variant>() {
+        let mut rng = test_rng();
+        let schemes = multisig_signers::<V>(&mut rng, 5);
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| scheme.sign::<Sha256Digest>(SUBJECT).unwrap())
+            .collect();
+        let prior: Vec<_> = attestations[2..]
+            .iter()
+            .cloned()
+            .map(Recording::outer)
+            .collect();
+        let calls = Arc::new(RecordingCalls::default());
+        let verifier = Recording {
+            inner: schemes[0].clone(),
+            calls: Arc::clone(&calls),
+        };
+
+        let certificate = verifier
+            .optimistic_assemble::<_, Sha256Digest, _, _>(
+                &mut rng,
+                SUBJECT,
+                attestations[..2].iter().cloned().map(Recording::outer),
+                &prior,
+                &Sequential,
+            )
+            .ok()
+            .expect("valid mixed quorum must certify");
+
+        assert_eq!(calls.certificates.load(Ordering::Relaxed), 1);
+        assert!(calls.attestations.lock().is_empty());
+        assert!(schemes[0].verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            SUBJECT,
+            &certificate,
+            &Sequential,
+        ));
+        assert!(!schemes[0].verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            OTHER_SUBJECT,
+            &certificate,
+            &Sequential,
+        ));
+    }
+
+    #[cfg(feature = "bls12381")]
+    #[test]
+    fn test_multisig_optimistic_assemble_uses_one_certificate_check() {
+        multisig_optimistic_assemble_uses_one_certificate_check::<MinPk>();
+        multisig_optimistic_assemble_uses_one_certificate_check::<MinSig>();
+    }
+
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_optimistic_assemble_attributable_inputs() {
         let mut rng = test_rng();
         let (schemes, inner) = setup_ed25519(5);
-        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(RecordingCalls::default());
         let verifier = Recording {
             inner,
             calls: Arc::clone(&calls),
@@ -1177,7 +1283,7 @@ mod tests {
         let verification = empty.unwrap_err();
         assert!(verification.verified.is_empty());
         assert!(verification.invalid.is_empty());
-        assert!(calls.lock().is_empty());
+        assert!(calls.attestations.lock().is_empty());
 
         let pending: Vec<_> = schemes
             .iter()
@@ -1193,7 +1299,7 @@ mod tests {
             )
             .ok()
             .expect("valid quorum must certify");
-        assert!(calls.lock().is_empty());
+        assert!(calls.attestations.lock().is_empty());
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             SUBJECT,
@@ -1222,7 +1328,7 @@ mod tests {
         );
         let verification = result.unwrap_err();
         assert_eq!(
-            *calls.lock(),
+            *calls.attestations.lock(),
             vec![signers[..3].to_vec(), signers[3..].to_vec()]
         );
         assert_eq!(verification.invalid, vec![signers[0]]);
@@ -1256,7 +1362,7 @@ mod tests {
             .take(quorum)
             .map(|s| Recording::outer(s.sign::<Sha256Digest>(SUBJECT).unwrap()))
             .collect();
-        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(RecordingCalls::default());
         let verifier = Recording {
             inner,
             calls: Arc::clone(&calls),
@@ -1270,7 +1376,7 @@ mod tests {
                 &Sequential,
             );
             assert_eq!(result.is_ok(), count == quorum);
-            assert!(calls.lock().is_empty());
+            assert!(calls.attestations.lock().is_empty());
             match result {
                 Ok(certificate) => assert!(verifier.verify_certificate::<_, Sha256Digest>(
                     &mut rng,
@@ -1309,10 +1415,17 @@ mod tests {
     }
 
     #[cfg(feature = "bls12381")]
+    #[derive(Debug, Default)]
+    struct RecordingCalls {
+        attestations: Mutex<Vec<Vec<Participant>>>,
+        certificates: AtomicUsize,
+    }
+
+    #[cfg(feature = "bls12381")]
     #[derive(Clone, Debug)]
     struct Recording<S> {
         inner: S,
-        calls: Arc<Mutex<Vec<Vec<Participant>>>>,
+        calls: Arc<RecordingCalls>,
     }
 
     #[cfg(feature = "bls12381")]
@@ -1350,6 +1463,7 @@ mod tests {
             R: CryptoRng,
             D: Digest,
         {
+            self.calls.certificates.fetch_add(1, Ordering::Relaxed);
             self.inner
                 .verify_certificate(rng, subject, certificate, strategy)
         }
@@ -1394,6 +1508,10 @@ mod tests {
             R: CryptoRng,
             D: Digest,
         {
+            self.calls
+                .attestations
+                .lock()
+                .push(vec![attestation.signer]);
             self.inner.verify_attestation(
                 rng,
                 subject,
@@ -1420,6 +1538,7 @@ mod tests {
         {
             let attestations: Vec<_> = attestations.into_iter().collect();
             self.calls
+                .attestations
                 .lock()
                 .push(attestations.iter().map(|a| a.signer).collect());
             let result = self.inner.verify_attestations(
@@ -1470,7 +1589,7 @@ mod tests {
         for n in [1, 5, 7] {
             let mut rng = test_rng();
             let schemes = threshold_signers::<MinPk>(&mut rng, n);
-            let calls = Arc::new(Mutex::new(Vec::new()));
+            let calls = Arc::new(RecordingCalls::default());
             let verifier = Recording {
                 inner: schemes[0].clone(),
                 calls: Arc::clone(&calls),
@@ -1494,7 +1613,7 @@ mod tests {
                 verification.invalid,
                 (0..quorum).map(Participant::from_usize).collect::<Vec<_>>()
             );
-            assert_eq!(*calls.lock(), expected_halves(quorum));
+            assert_eq!(*calls.attestations.lock(), expected_halves(quorum));
         }
     }
 
@@ -1505,7 +1624,7 @@ mod tests {
         let schemes = threshold_signers::<MinPk>(&mut rng, 5);
         let quorum = N3f1::quorum(schemes.len()) as usize;
         for count in [quorum, schemes.len()] {
-            let calls = Arc::new(Mutex::new(Vec::new()));
+            let calls = Arc::new(RecordingCalls::default());
             let verifier = Recording {
                 inner: schemes[0].clone(),
                 calls: Arc::clone(&calls),
@@ -1527,7 +1646,7 @@ mod tests {
             let verification = result.unwrap_err();
             assert_eq!(verification.verified.len(), count - 1);
             assert_eq!(verification.invalid, vec![Participant::new(0)]);
-            assert_eq!(*calls.lock(), expected_halves(count));
+            assert_eq!(*calls.attestations.lock(), expected_halves(count));
             if count > quorum {
                 let certificate = verifier
                     .assemble(non_empty![@verification.verified], &Sequential)
@@ -1554,7 +1673,7 @@ mod tests {
         let accepted = Recording::outer(schemes[2].sign::<Sha256Digest>(SUBJECT).unwrap());
         let rejected = Recording::outer(schemes[3].sign::<Sha256Digest>(OTHER_SUBJECT).unwrap());
         let invalid = rejected.signer;
-        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(RecordingCalls::default());
         let verifier = Recording {
             inner: schemes[0].clone(),
             calls: Arc::clone(&calls),
@@ -1569,10 +1688,13 @@ mod tests {
         let verification = result.unwrap_err();
         assert_eq!(verification.verified, vec![accepted.clone()]);
         assert_eq!(verification.invalid, vec![invalid]);
-        assert_eq!(*calls.lock(), vec![vec![accepted.signer], vec![invalid]]);
+        assert_eq!(
+            *calls.attestations.lock(),
+            vec![vec![accepted.signer], vec![invalid]]
+        );
 
         prior.extend(verification.verified);
-        calls.lock().clear();
+        calls.attestations.lock().clear();
         let replacement = Recording::outer(schemes[4].sign::<Sha256Digest>(SUBJECT).unwrap());
         let signer = replacement.signer;
         let verification = verifier.verify_attestations::<_, Sha256Digest, _>(
@@ -1583,7 +1705,7 @@ mod tests {
         );
         assert_eq!(verification.verified, vec![replacement]);
         assert!(verification.invalid.is_empty());
-        assert_eq!(*calls.lock(), vec![vec![signer]]);
+        assert_eq!(*calls.attestations.lock(), vec![vec![signer]]);
         prior.extend(verification.verified);
         let certificate = verifier.assemble(non_empty![@prior], &Sequential).unwrap();
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
@@ -1604,7 +1726,7 @@ mod tests {
             .map(|s| Recording::outer(s.sign::<Sha256Digest>(SUBJECT).unwrap()))
             .collect();
         let expected = pending.clone();
-        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(RecordingCalls::default());
         let verifier = Recording {
             inner: schemes[0].clone(),
             calls: Arc::clone(&calls),
@@ -1619,7 +1741,7 @@ mod tests {
         let verification = result.unwrap_err();
         assert_eq!(verification.verified, expected);
         assert!(verification.invalid.is_empty());
-        assert_eq!(*calls.lock(), expected_halves(expected.len()));
+        assert_eq!(*calls.attestations.lock(), expected_halves(expected.len()));
     }
 
     #[cfg(feature = "bls12381")]
@@ -1634,7 +1756,7 @@ mod tests {
             .map(|s| Recording::outer(s.sign::<Sha256Digest>(SUBJECT).unwrap()))
             .collect();
         pending[0].signer = Participant::new(999);
-        let calls = Arc::new(Mutex::new(Vec::new()));
+        let calls = Arc::new(RecordingCalls::default());
         let verifier = Recording {
             inner: schemes[0].clone(),
             calls: Arc::clone(&calls),
@@ -1650,7 +1772,7 @@ mod tests {
         assert_eq!(verification.verified.len(), quorum - 1);
         assert_eq!(verification.invalid, vec![Participant::new(999)]);
         assert_eq!(
-            *calls.lock(),
+            *calls.attestations.lock(),
             vec![
                 vec![Participant::new(999), Participant::new(1)],
                 vec![Participant::new(2), Participant::new(3)],
