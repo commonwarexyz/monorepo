@@ -2,12 +2,12 @@ use crate::stateful::{
     Application,
     actor::{
         BlockDigest,
-        core::mailbox::{Verification, WeakAncestry},
+        core::mailbox::Verification,
         processor::{Disposition, VerificationProgress, Verifier},
     },
 };
 use commonware_consensus::marshal::{
-    ancestry::BlockProvider,
+    blocks::Blocks,
     core::{Mailbox as MarshalMailbox, Variant},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -16,12 +16,13 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{channel::oneshot, futures::Pool};
 use futures::FutureExt as _;
 use rand_core::Rng;
-use std::{collections::BTreeMap, future::Future};
+use std::{collections::BTreeMap, future::Future, sync::Weak};
 use tracing::{Instrument as _, Span, info_span};
 
 /// A caller-scoped verification request that can be deferred or restarted.
 ///
-/// Restarting a request reuses its caller's ancestry without taking ownership of it.
+/// Restarting a request reuses its caller's bodies and selected history without taking ownership
+/// of the bodies.
 pub(super) struct Request<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -29,7 +30,9 @@ where
 {
     pub(super) span: Span,
     pub(super) context: (E, A::Context),
-    pub(super) ancestry: WeakAncestry<A::Block>,
+    pub(super) block: Weak<A::Block>,
+    pub(super) parent: Weak<A::Block>,
+    pub(super) blocks: Blocks<A::Block>,
     pub(super) verification: Verification,
 }
 
@@ -86,7 +89,6 @@ where
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub(super) fn new(marshal: MarshalMailbox<S, V>) -> Self {
         Self {
@@ -100,9 +102,11 @@ where
     /// Starts an attempt for `request` with `verifier`, or drops `request` if its caller has
     /// cancelled.
     pub(super) fn schedule(&mut self, mut verifier: Verifier<E, A>, mut request: Request<E, A>) {
-        let Some(ancestry) = request.ancestry.upgrade() else {
+        let (Some(block), Some(parent)) = (request.block.upgrade(), request.parent.upgrade())
+        else {
             return;
         };
+        let blocks = request.blocks.clone();
 
         let id = self.next_id;
         self.next_id = self
@@ -133,7 +137,9 @@ where
                         &request.context.0,
                         marshal,
                         request.context.1.clone(),
-                        ancestry,
+                        block,
+                        parent,
+                        blocks,
                         &progress,
                         &mut request.verification,
                     ) => JobResult::Finished { id, request, valid },

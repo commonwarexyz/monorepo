@@ -27,7 +27,7 @@ use commonware_consensus::{
     CertifiableAutomaton as _, Reporter,
     marshal::{
         self,
-        ancestry::Ancestry,
+        blocks::Blocks,
         core::Actor as MarshalActor,
         resolver::handler,
         standard::{Deferred, Standard},
@@ -961,14 +961,16 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn propose(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, deterministic::Context>> {
         let proposed = <MultiApp as Application<deterministic::Context>>::propose(
             &mut self.inner,
             context,
-            ancestry,
+            parent,
+            blocks,
             batches,
             input,
         )
@@ -982,7 +984,9 @@ impl Application<deterministic::Context> for GatedMultiApp {
     async fn verify(
         &mut self,
         context: (deterministic::Context, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Arc<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
         let gate = self.verify_gates.lock().pop_front();
@@ -993,7 +997,9 @@ impl Application<deterministic::Context> for GatedMultiApp {
         <MultiApp as Application<deterministic::Context>>::verify(
             &mut self.inner,
             context,
-            ancestry,
+            block,
+            parent,
+            blocks,
             batches,
         )
         .await
