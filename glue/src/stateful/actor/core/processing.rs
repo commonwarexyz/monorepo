@@ -83,6 +83,21 @@ impl Durability {
         self.acknowledgements.push_back((height, acknowledgement));
     }
 
+    /// Bind another receipt for an applied height to its existing durability boundary.
+    fn retain_duplicate(&mut self, height: Height, acknowledgement: Exact) {
+        if self.covers(height) {
+            acknowledgement.acknowledge();
+            return;
+        }
+        let index = self
+            .acknowledgements
+            .iter()
+            .rposition(|(applied, _)| *applied == height)
+            .expect("an undurable applied height must retain its acknowledgement");
+        self.acknowledgements
+            .insert(index + 1, (height, acknowledgement));
+    }
+
     /// Return whether applied state remains uncovered and no sync is active.
     fn needs_sync(&self) -> bool {
         self.sync.is_none() && self.durable < self.latest_applied()
@@ -416,6 +431,8 @@ where
                         // The block is already reflected in the database set by a
                         // completed state sync, so there is nothing to capture or apply.
                         acknowledgement.acknowledge();
+                    } else if block.height() < self.processor.last_processed().height {
+                        durability.retain_duplicate(block.height(), acknowledgement);
                     } else {
                         let process = info_span!(parent: &span, "stateful.actor.finalized");
                         let boundary = self.processor.finalization_boundary(block.as_ref());
@@ -433,11 +450,9 @@ where
                                 ))
                                 .await;
                             let Some(Applied { barrier, prune }) = applied else {
-                                // A duplicate report is the startup anchor redelivered by
-                                // marshal: genesis on a fresh boot or a newly installed
-                                // floor. Its state is durable before the actor starts, so
-                                // no barrier is needed.
-                                acknowledgement.acknowledge();
+                                // Already-applied reports share the durability boundary of
+                                // their original application.
+                                durability.retain_duplicate(block.height(), acknowledgement);
                                 return;
                             };
                             debug!(
@@ -447,9 +462,8 @@ where
 
                             // Retain marshal acknowledgements until a barrier makes their database
                             // prefix durable. This keeps marshal's processed floor within
-                            // recoverable database state while later work proceeds. The
-                            // acknowledgement window bounds the queue; a barrier that returns false
-                            // leaves the suffix unacknowledged for restart replay.
+                            // recoverable database state while later work proceeds. A barrier that
+                            // returns false leaves the suffix unacknowledged for restart replay.
                             let height = block.height();
                             durability.applied(height, acknowledgement);
                             if let Some(barrier) = barrier {
@@ -562,14 +576,15 @@ mod tests {
     };
     use commonware_actor::mailbox as actor_mailbox;
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Heightable as _, Reporter as _,
+        Application as _, CertifiableBlock as _, Heightable as _, Reporter as _, Reporters,
         marshal::{
             Update,
             ancestry::{self, Ancestry},
         },
-        simplex::mocks::scheme as scheme_mocks,
+        simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::Height,
     };
+    use commonware_cryptography::Digestible as _;
     use commonware_macros::select;
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Name, Runner as _, Spawner as _,
@@ -3033,6 +3048,203 @@ mod tests {
 
             actor.abort();
             drop(marshal.guards);
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::success(true)]
+    #[case::failure(false)]
+    fn duplicate_reports_wait_for_durability(#[case] succeeds: bool) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _marshal, actor) =
+                spawn_processing(&context, "duplicate-durability", None).await;
+            let first = TestBlock::child(&TestBlock::new(0, 0), 1);
+            let (ack, original) = Exact::handle();
+            mailbox.report(Update::Block(Arc::new(first.clone()), ack));
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            drop(original);
+            let (ack, mut duplicate) = Exact::handle();
+            mailbox.report(Update::Block(Arc::new(first.clone()), ack));
+
+            // The subscription is a FIFO fence after both reports have been handled.
+            drop(mailbox.subscribe_databases().await);
+            assert_eq!(control.applied.load(Ordering::Relaxed), 1);
+            assert!(poll!(&mut duplicate).is_pending());
+            assert_eq!(control.flushes.lock().len(), 1);
+
+            let release = control.flushes.lock().remove(0);
+            if !succeeds {
+                drop(release);
+                actor.await.expect("failed durability stops processing");
+                assert!(duplicate.await.is_err());
+                return;
+            }
+            release.send(Ok(())).unwrap();
+            duplicate.await.unwrap();
+            assert!(control.flushes.lock().is_empty());
+            assert_eq!(control.applied.load(Ordering::Relaxed), 1);
+            actor.abort();
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::unprocessed_genesis(1, false)]
+    #[case::same_start(1, true)]
+    #[case::forward_start(2, true)]
+    fn live_floor_fences_suffix_ack(#[case] floor_height: u64, #[case] genesis_processed: bool) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let fixture = fixtures::single_validator(b"_COMMONWARE_GLUE_PROCESSING_LIVE_FLOOR");
+            let mut blocks = vec![TestBlock::new(0, 0)];
+            for view in 1..=floor_height + 1 {
+                blocks.push(TestBlock::child(
+                    blocks.last().unwrap(),
+                    view.try_into().unwrap(),
+                ));
+            }
+            let floor_finalization = fixtures::finalization(
+                &fixture,
+                floor_height,
+                blocks[floor_height as usize].digest(),
+            );
+            let heights: Vec<_> = blocks[usize::from(genesis_processed)..]
+                .iter()
+                .map(|block| block.height())
+                .collect();
+            let (sender, receiver) = actor_mailbox::new(context.child("mailbox"), NZUsize!(8));
+            let mailbox = Mailbox::<_, GatedApp>::new(sender);
+
+            // The fanout observer keeps Marshal behind the durable application anchor.
+            let observer = fixtures::FixtureReporter::new(false);
+            let marshal = fixtures::marshal_fixture_with_reporter(
+                context.child("marshal"),
+                "floor-redelivery",
+                fixture.schemes[0].clone(),
+                heights.len().try_into().unwrap(),
+                Reporters::from((mailbox.clone(), observer.clone())),
+            )
+            .await;
+            let control = FlushControl::default();
+            let processing = Processing {
+                context: ContextCell::new(context.child("processing")),
+                mailbox: receiver,
+                provider: (),
+                marshal: marshal.mailbox.clone(),
+                processor: Processor::new(
+                    GatedApp {
+                        verify_gates: Arc::default(),
+                        proposal_gate: Arc::default(),
+                        verify_valid: true,
+                        observed_contexts: Arc::default(),
+                    },
+                    Shared::new("test", TestDb::gated(control.clone())),
+                    anchor(0, 0),
+                    StatefulMetrics::new(&context),
+                    None,
+                ),
+                deferred_verifications: Vec::new(),
+                skip_finalized_until: None,
+            };
+            let actor = context.child("loop").spawn(move |_| processing.start());
+            while observer.pending_ack_heights().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(observer.pending_ack_heights(), [Height::zero()]);
+            assert_eq!(marshal.mailbox.get_processed_height().await, None);
+            if genesis_processed {
+                assert_eq!(observer.acknowledge_next(), Some(Height::zero()));
+                while marshal.mailbox.get_processed_height().await != Some(Height::zero()) {
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+            }
+
+            let mut ingress = marshal.mailbox.clone();
+            for block in &blocks[1..] {
+                assert!(
+                    ingress
+                        .verified(block.context().round, Arc::new(block.clone()))
+                        .await
+                );
+                let finalization = if block.height().get() == floor_height {
+                    floor_finalization.clone()
+                } else {
+                    fixtures::finalization(&fixture, block.height().get(), block.digest())
+                };
+                ingress.report(Activity::Finalization(finalization));
+                while control.flushes.lock().is_empty() {
+                    context.sleep(Duration::from_millis(10)).await;
+                }
+                if block.height().get() <= floor_height {
+                    control.flushes.lock().remove(0).send(Ok(())).unwrap();
+                }
+            }
+            while observer.pending_ack_heights().len() < heights.len()
+                || control.flushes.lock().is_empty()
+            {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(observer.pending_ack_heights(), heights);
+            assert_eq!(
+                marshal.mailbox.get_processed_height().await,
+                genesis_processed.then_some(Height::zero())
+            );
+
+            assert_eq!(
+                control.applied.load(Ordering::Relaxed),
+                floor_height as usize + 1
+            );
+            assert_eq!(control.flushes.lock().len(), 1);
+            marshal.mailbox.set_floor(floor_finalization);
+            assert_eq!(
+                marshal.mailbox.get_processed_height().await,
+                Some(Height::new(floor_height - 1))
+            );
+            drop(mailbox.subscribe_databases().await);
+            let mut expected = heights.clone();
+            expected.extend([Height::new(floor_height), Height::new(floor_height + 1)]);
+            assert_eq!(observer.pending_ack_heights(), expected);
+            assert_eq!(
+                control.applied.load(Ordering::Relaxed),
+                floor_height as usize + 1
+            );
+            assert_eq!(control.flushes.lock().len(), 1);
+
+            for height in heights {
+                assert_eq!(observer.acknowledge_next(), Some(height));
+            }
+
+            // Retired receipts cannot advance the active processed prefix.
+            assert_eq!(
+                marshal.mailbox.get_processed_height().await,
+                Some(Height::new(floor_height - 1))
+            );
+            assert_eq!(observer.acknowledge_next(), Some(Height::new(floor_height)));
+            assert_eq!(
+                observer.acknowledge_next(),
+                Some(Height::new(floor_height + 1))
+            );
+
+            // The anchor is durable, but its suffix still owns the parked barrier.
+            context.sleep(Duration::from_secs(1)).await;
+            assert_eq!(
+                marshal.mailbox.get_processed_height().await,
+                Some(Height::new(floor_height))
+            );
+            control.flushes.lock().remove(0).send(Ok(())).unwrap();
+            while marshal.mailbox.get_processed_height().await
+                != Some(Height::new(floor_height + 1))
+            {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                control.applied.load(Ordering::Relaxed),
+                floor_height as usize + 1
+            );
+            assert!(control.flushes.lock().is_empty());
+            actor.abort();
+            let _ = actor.await;
+            marshal.abort().await;
         });
     }
 
