@@ -47,8 +47,9 @@ struct SealedInner<B: Blob> {
     cache_ref: CacheRef,
 
     /// Page-cache id. [`super::Writer::seal`] preserves the writer id so hot full pages remain
-    /// valid across the transition. Snapshots share this identity. Full pages stay immutable within
-    /// one writer incarnation, and each snapshot owns its frozen partial page.
+    /// valid across the transition. Snapshots share this identity. Full pages below a snapshot's
+    /// tail are never rewritten once the writer is published (recovery may still rewrite the tail
+    /// page before publication), and each snapshot owns its frozen partial page.
     id: u64,
 }
 

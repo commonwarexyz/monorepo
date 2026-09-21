@@ -524,13 +524,14 @@ where
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
     ///
-    /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
-    /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
-    /// tree advance to `prune_loc` rounded down to a chunk boundary and never move backwards.
-    /// The log may retain operations below `prune_loc` for section or blob alignment, so bounded
-    /// initialization can reject a commit the log still holds when the bitmap boundary lies
-    /// above that commit's inactivity floor. Callers that must keep an older commit
-    /// initializable prune no further than the sync boundary observed at that commit.
+    /// `prune_loc` must be at most [`Self::sync_boundary`] so every bitmap chunk it prunes is
+    /// settled and pair-absorbed in the ops tree. The bitmap and grafted tree advance to
+    /// `prune_loc` rounded down to a chunk boundary and never move backwards. The log retains
+    /// from a section or blob boundary at or below `prune_loc`, which may lie above or below the
+    /// bitmap boundary, so bounded initialization can reject a commit the log still holds when
+    /// the bitmap boundary lies above that commit's inactivity floor. Callers that must keep an
+    /// older commit initializable prune no further than the sync boundary observed at that
+    /// commit.
     ///
     /// # Errors
     ///

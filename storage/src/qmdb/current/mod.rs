@@ -3202,8 +3202,9 @@ pub mod tests {
             .await
             .unwrap();
 
-            // Each round updates one key, moves the previous write and commits, so every commit
-            // keeps a floor two operations below its size.
+            // Each round updates one key. The floor raise skips the superseded previous write
+            // and moves the round's own write, so every commit keeps a floor two operations
+            // below its size.
             let mut history = Vec::new();
             for round in 0..COMMITS {
                 (db, _) =

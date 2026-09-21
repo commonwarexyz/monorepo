@@ -1245,6 +1245,11 @@ fn test_keyless_synced_range_reopens() {
             reopened.is_ok(),
             "valid synced Keyless must reopen: {reopened:?}"
         );
+        let reopened = reopened.unwrap();
+        assert_eq!(*reopened.bounds().start, 5);
+        assert_eq!(reopened.bounds().end, source.bounds().end);
+        assert_eq!(*reopened.inactivity_floor_loc(), 0);
+        assert_eq!(reopened.root(), source.root());
     });
 }
 

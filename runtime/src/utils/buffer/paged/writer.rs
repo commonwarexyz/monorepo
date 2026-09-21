@@ -29,6 +29,13 @@
 //! bytes. [Writer::new] backs up over any trailing bytes not covered by a valid checksum,
 //! treating them as an incomplete write.
 //!
+//! # Recovery
+//!
+//! [Recovery::open] trims the invalid tail and [Recovery::truncate] may shorten the blob
+//! further. Within this module, no other path shortens it. Conversion into an append-only
+//! [Writer] gives that permission up. An owner that never converts keeps it. All previous
+//! writers and disk-backed readers must close before recovery opens.
+//!
 //! # Raw [Blob] handles
 //!
 //! The [Writer] owns the page layout, page cache entries, and durability bookkeeping of its
@@ -103,13 +110,15 @@ const fn too_big_for_buffer(
 /// An initialized, append-only paged blob.
 pub struct Append;
 
-/// A paged blob whose retained end has not yet been published.
+/// A paged blob whose owner may still shorten its retained prefix.
 pub struct Recovering;
 
-/// Exclusive initialization owner for a paged blob's retained prefix.
+/// Exclusive owner of a paged blob that may shorten its retained prefix.
 ///
-/// All previous writers and disk-backed readers must close before recovery opens.
-/// Only recovery may shorten the retained logical prefix.
+/// Contiguous journals convert it into a [Writer] once the prefix is selected. Segmented
+/// journals keep it as the section buffer so replay can shorten a section they have not yet
+/// validated. All previous writers and disk-backed readers must close before it opens. Only
+/// recovery may shorten the retained logical prefix.
 pub type Recovery<B> = Writer<B, Recovering>;
 
 /// Unique writer to a cache-wrapped [Blob].
@@ -148,11 +157,11 @@ pub struct Writer<B: Blob, Phase = Append> {
 }
 
 impl<B: Blob> Recovery<B> {
-    /// Open `blob` for initialization repair.
+    /// Open `blob` with permission to shorten it.
     ///
     /// `blob` must already hold `original_blob_size` physical bytes. Reads are cached through
-    /// `cache_ref` and appends stage in a write buffer of capacity `capacity`. Trims any invalid tail
-    /// so the blob ends at a checksum-validated page. Earlier pages are not scanned.
+    /// `cache_ref` and appends stage in a write buffer of capacity `capacity`. Trims any invalid
+    /// tail so the blob ends at a checksum-validated page. Earlier pages are not scanned.
     ///
     /// Before appending, the tail-page contents must be durable: either open after a crash or
     /// call [Self::sync]. Until then, recovery may read or truncate the blob. The discovered
@@ -392,7 +401,7 @@ impl<B: Blob> Recovery<B> {
 
     /// Durably retain at most `size` logical bytes.
     ///
-    /// A size above the current length leaves the length unchanged. Pending repair writes are
+    /// A size above the current length leaves the length unchanged. Pending writes are
     /// synchronized even when the length does not change.
     pub async fn truncate(&mut self, size: u64) -> Result<(), Error> {
         if size < self.size() {
@@ -422,7 +431,7 @@ impl<B: Blob> From<Recovery<B>> for Writer<B> {
 }
 
 impl<B: Blob> Writer<B> {
-    /// Open a paged blob, repairing incomplete tail pages before publishing its writer.
+    /// Open a paged blob, trimming any invalid tail before publishing its writer.
     /// The existing tail must be durable, and no previous writer or disk-backed reader may
     /// access this storage incarnation during initialization.
     pub async fn new(
@@ -516,7 +525,7 @@ impl<B: Blob> Writer<B> {
     /// [`Self::sync`] if the returned handle's bytes must survive a crash.
     ///
     /// Later appends preserve this view, including its frozen partial page. Close all
-    /// disk-backed views before reopening the storage for initialization repair.
+    /// disk-backed views before opening the blob again.
     pub async fn snapshot(&mut self) -> Result<Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))

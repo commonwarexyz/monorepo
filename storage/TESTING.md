@@ -30,7 +30,7 @@ fn test_storage_operations() {
 
 ## Recovery and corruption
 
-Persist data, drop the database, and initialize it again to test clean recovery. To simulate an interrupted write, resize a blob after writing it; to simulate corruption, overwrite a checksum or truncate data. Reinitialize and verify that replay recovers to the last valid item.
+Persist data, drop the database, and initialize it again to test clean recovery. To simulate an interrupted write, resize a blob after writing it; to simulate corruption, overwrite a checksum or truncate data. Reinitialize and verify that replay recovers to the last valid item. A blob has one open at a time, so drop the handle used to damage it before reinitializing the structure.
 
 ```rust
 let (blob, size) = context.open(&partition, &name).await.unwrap();

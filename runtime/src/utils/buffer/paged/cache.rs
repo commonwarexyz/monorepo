@@ -102,9 +102,9 @@ impl Drop for PageFetchGuard<'_> {
 /// [Self::hint_index] to the [cache::Cache] slot the page was last cached in: a lookup is one array
 /// load instead of a hash-table probe chain, which the out-of-order core cannot overlap across
 /// items. Hints are best-effort, never truth: [cache::Cache::get_at] only resolves a slot that
-/// still holds the page's key live, so entries staled by eviction, invalidation, or hint collisions
+/// still holds the page's key live, so entries staled by eviction, clearing, or hint collisions
 /// read as misses and fall back to the [cache::Cache]'s own lookup. Hints need no maintenance on
-/// eviction or invalidation, and their memory is fixed at construction, so no blob offset can grow
+/// eviction or clearing, and their memory is fixed at construction, so no blob offset can grow
 /// them.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.

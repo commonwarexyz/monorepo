@@ -52,7 +52,9 @@ impl<
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
     /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
-    /// commit's inactivity floor.
+    /// commit's inactivity floor. For delayed-merge families it also fails with that error
+    /// when the commit lies in the unsettled chunk-pair window above the bitmap's pruning
+    /// boundary (see the delayed-merge settlement section of [crate::qmdb::current]).
     /// `None` selects the latest retained state.
     pub async fn init(
         context: E,
@@ -108,7 +110,9 @@ pub mod partitioned {
         /// The configured [`Strategy`] is used to parallelize merkleization.
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
         /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
-        /// commit's inactivity floor.
+        /// commit's inactivity floor. For delayed-merge families it also fails with that error
+        /// when the commit lies in the unsettled chunk-pair window above the bitmap's pruning
+        /// boundary (see the delayed-merge settlement section of [crate::qmdb::current]).
         /// `None` selects the latest retained state.
         pub async fn init(
             context: E,

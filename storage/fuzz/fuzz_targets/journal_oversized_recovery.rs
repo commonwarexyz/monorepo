@@ -531,8 +531,8 @@ fn fuzz(input: FuzzInput) {
                                 .expect("empty flush failed");
                     }
                     7 if tracked => {
-                        // Await held syncs before pruning or rewinding so the durable counts can
-                        // be adjusted to match the retained entries.
+                        // Await held syncs before pruning or bounded initialization so the
+                        // durable counts can be adjusted to match the retained entries.
                         release_pending_syncs(&pending);
                         for (covered_section, covered, handle) in held.drain(..) {
                             handle.await.expect("pipelined sync failed");
@@ -604,6 +604,18 @@ fn fuzz(input: FuzzInput) {
                                 })
                                 .await
                                 .expect("bounded initialization failed");
+                                for partition in [INDEX_PARTITION, VALUE_PARTITION] {
+                                    for name in context.scan(partition).await.expect("scan failed")
+                                    {
+                                        let stored = u64::from_be_bytes(
+                                            name.as_slice().try_into().expect("section name"),
+                                        );
+                                        assert!(
+                                            stored <= section,
+                                            "bounded init left section {stored} in {partition}"
+                                        );
+                                    }
+                                }
                                 counts.retain(|candidate, _| *candidate <= section);
                                 model.retain(|candidate, _| *candidate <= section);
                                 counts.insert(section, keep);

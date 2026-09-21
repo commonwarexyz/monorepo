@@ -79,8 +79,11 @@
 //! recovery still fails loudly when a blob no longer physically backs its acknowledged items.
 //!
 //! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
-//! exceeds the recovered size, recovery returns a corruption error. Both the pruning boundary
-//! and watermark are persisted before `init` returns.
+//! exceeds the recovered size, an unbounded open returns a corruption error. A bounded open
+//! (`init_at_most`) compares the watermark clamped to its cap, since blobs at or above the cap
+//! are discarded (a blob starting at the cap is reopened only as the empty durable tail), and
+//! publication persists the retained end as the watermark. Both the
+//! pruning boundary and watermark are persisted before `init` returns.
 //!
 //! The recovery watermark is therefore an external recovery checkpoint, not a complete record of
 //! every item that may have become durable through `commit` or storage behavior.
@@ -664,23 +667,6 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         self.watermark
     }
 
-    /// Whether stored blobs hold bytes past the retained end: a blob was discarded unopened, or
-    /// the newest opened blob is longer than the items it retains. A partial trailing item counts
-    /// as excess.
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn exceeded(&self) -> bool {
-        if !self.discarded.is_empty() {
-            return true;
-        }
-        let Some((&blob, writer)) = self.pending.last_key_value() else {
-            return false;
-        };
-        let items_per_blob = self.cfg.items_per_blob.get();
-        first_in_blob(self.bounds.start, blob, items_per_blob)
-            .and_then(|first| Inner::<E, A>::items_to_bytes(self.bounds.end.saturating_sub(first)))
-            .is_ok_and(|retained| writer.size() > retained)
-    }
-
     /// Read an item for recovery selection or validation.
     pub(super) async fn item(&self, pos: u64) -> Result<A, Error> {
         if pos < self.bounds.start {
@@ -692,6 +678,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
         let first = first_in_blob(self.bounds.start, blob, self.cfg.items_per_blob.get())?;
         let offset = Inner::<E, A>::items_to_bytes(pos - first)?;
+
         // `bounds.end` is derived by walking `pending`, and every mutation keeps `pending`
         // contiguous over `bounds`, so a position inside `bounds` always has a blob.
         let writer = self
@@ -710,11 +697,10 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let pos = self.bounds.end;
         let end = pos.checked_add(1).ok_or(Error::SizeOverflow)?;
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
-        if !self.pending.contains_key(&blob) {
-            self.pending
-                .insert(blob, self.partition.open_recovery(blob).await?);
-        }
-        let writer = self.pending.get_mut(&blob).expect("opened recovery blob");
+        let writer = match self.pending.entry(blob) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(self.partition.open_recovery(blob).await?),
+        };
         let mut bytes = Vec::with_capacity(A::SIZE);
         item.write(&mut bytes);
         writer.append(&bytes).await?;
@@ -778,6 +764,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             if bytes < writer.size() {
                 writer.truncate(bytes).await?;
             } else {
+                // Appended tail bytes must be durable before publication raises the watermark.
                 writer.sync().await?;
             }
         }
@@ -1422,6 +1409,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// Unlike `destroy`, this keeps the journal alive so it can be reused. After clearing, the
     /// journal will behave as if initialized with `init_at_size(new_size)`.
     ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end. A live handle never
+    /// moves the end backward. Use bounded initialization for that. Returns [Error::SizeOverflow]
+    /// if `new_size` is `u64::MAX`.
+    ///
     /// # Crash Safety
     ///
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
@@ -1470,6 +1463,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end and
+    /// [Error::SizeOverflow] if it is `u64::MAX`.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
@@ -1495,8 +1493,11 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 /// [sqlite](https://github.com/sqlite/sqlite/blob/8658a8df59f00ec8fcfea336a2a6a4b5ef79d2ee/src/wal.c#L1504-L1505)
 /// and
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
-/// the first invalid data read will be considered the new end of the journal (and the
-/// underlying blob will be truncated to the last valid item). Repair is performed during init.
+/// the first invalid data read above the recovery watermark's acknowledged prefix is considered
+/// the new end of the journal (and the underlying blob is truncated to the last valid item).
+/// Data at or below that prefix is never repaired: a blob that no longer backs its acknowledged
+/// items fails init, and other damage there surfaces as a read error. Repair is performed
+/// during init.
 ///
 /// Mutating functions consume the journal and return it only on success: an error (or a dropped
 /// future) destroys the handle.
@@ -1537,6 +1538,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// journal behaves as if `size` items were appended then pruned. It is empty (`bounds` is
     /// `size..size`) and the next `append` writes at position `size`. Used for state sync.
     ///
+    /// # Errors
+    ///
+    /// Returns [Error::SizeOverflow] if `size` is `u64::MAX`.
+    ///
     /// # Crash Safety
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `size..size`.
@@ -1548,6 +1553,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Discard all items and reposition the journal at `new_size`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end and
+    /// [Error::SizeOverflow] if it is `u64::MAX`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
@@ -1598,7 +1608,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
     ///
-    /// Close storage-backed snapshots before reopening these partitions for bounded initialization.
+    /// Close storage-backed snapshots before reopening these partitions.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
@@ -2251,6 +2261,13 @@ mod tests {
                 result.is_ok(),
                 "unbounded recovery must trim a hole after capacity: {result:?}"
             );
+
+            // The two items within capacity survive intact.
+            let journal = result.unwrap();
+            assert_eq!(journal.bounds(), 0..2);
+            let item = u64::from_be_bytes([1; 8]);
+            assert_eq!(journal.read(0).await.unwrap(), item);
+            assert_eq!(journal.read(1).await.unwrap(), item);
         });
     }
 
@@ -2715,6 +2732,48 @@ mod tests {
         });
     }
 
+    /// A bounded publication raises the watermark to the retained end, so bytes rebuilt into
+    /// the tail during recovery must be durable before that raise. Crash right after
+    /// publication, before any commit, and reopen.
+    #[test]
+    fn test_bounded_publish_syncs_rebuilt_tail_before_watermark_raise() {
+        let ((), checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let cfg = test_cfg(&context, NZU64!(5));
+                let checkpoint = Checkpoint::open(context.child("checkpoint"), &cfg.partition)
+                    .await
+                    .unwrap();
+                let mut recovery = Box::new(
+                    Recovery::<_, Digest>::open(
+                        context.child("rebuild"),
+                        cfg.clone(),
+                        checkpoint,
+                        Some(7),
+                    )
+                    .await
+                    .unwrap(),
+                );
+                recovery = recovery.truncate(0).await.unwrap();
+                for i in 0..7 {
+                    recovery = recovery.append(&test_digest(i)).await.unwrap();
+                }
+                let journal = recovery.publish(7).await.unwrap();
+                assert_eq!(journal.size(), 7);
+                assert_eq!(journal.recovery_watermark(), 7);
+                drop(journal);
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+            let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..7);
+            for i in 0..7 {
+                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
+            }
+        });
+    }
+
     #[test]
     fn test_bounded_initialization_retries_after_storage_faults() {
         for start in [0, 7] {
@@ -2872,11 +2931,25 @@ mod tests {
             blob.resize(1).await.unwrap();
             blob.sync().await.unwrap();
             drop(blob);
+            let (context, recordings) = RecordingContext::new(context);
             let journal = Journal::<_, u64>::init_at_most(context.child("storage"), cfg.clone(), 7)
                 .await
                 .unwrap();
             assert_eq!(journal.bounds(), 0..7);
             drop(journal);
+
+            // No discarded blob above the cap is opened.
+            let partition = blob_partition(&cfg);
+            for blob in 2..5u64 {
+                assert!(
+                    !recordings.storage_events().iter().any(|event| matches!(
+                        event,
+                        StorageEvent::Opened { partition: opened, name, .. }
+                            if *opened == partition && name.as_slice() == blob.to_be_bytes()
+                    )),
+                    "discarded blob {blob} was opened"
+                );
+            }
             let journal = Journal::<_, u64>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();

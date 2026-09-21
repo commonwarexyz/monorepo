@@ -126,14 +126,14 @@ pub struct Config<C> {
 enum RecoveryMode<'a> {
     /// Restore one checkpoint section and remove every later section unread.
     Restore { section: u64, index_size: u64 },
-    /// Prove committed floors, then repair suffixes. Index sections above `ceiling` are never
-    /// opened and must be removed before publication.
+    /// Prove committed floors, then repair suffixes. Index and value sections above `ceiling`
+    /// are never opened and must be removed before publication.
     Floors {
         floors: &'a BTreeMap<u64, u64>,
         ceiling: u64,
     },
-    /// Infer the durable state of every index section up to `ceiling`, leaving later sections
-    /// unopened for removal before publication.
+    /// Infer the durable state of every section up to `ceiling`, leaving later index and value
+    /// sections unopened for removal before publication.
     Infer { ceiling: u64 },
 }
 
@@ -324,13 +324,14 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
         let (index, values) = match recovery {
             RecoveryMode::Infer { ceiling } => {
                 let index = FixedJournal::init_bounded(index_context, index_cfg, ceiling).await?;
-                (index, GlobRecovery::init(value_context, value_cfg).await?)
+                let values = GlobRecovery::init_bounded(value_context, value_cfg, ceiling).await?;
+                (index, values)
             }
             RecoveryMode::Floors { floors, ceiling } => {
                 let preflight =
                     FixedJournal::preflight_floors(index_context, index_cfg, floors, ceiling)
                         .await?;
-                let values = GlobRecovery::init(value_context, value_cfg).await?;
+                let values = GlobRecovery::init_bounded(value_context, value_cfg, ceiling).await?;
                 Self::validate_value_floors(&values, &preflight)?;
                 (preflight.finish().await?, values)
             }
@@ -341,7 +342,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
                 let preflight =
                     FixedJournal::preflight_restore(index_context, index_cfg, section, index_size)
                         .await?;
-                let values = GlobRecovery::init(value_context, value_cfg).await?;
+                let values = GlobRecovery::init_bounded(value_context, value_cfg, section).await?;
                 let value_size = Self::validate_restore_values(&values, &preflight, section)?;
                 let index = preflight.finish().await?;
 
@@ -653,10 +654,10 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
 
     /// Truncate only the given section to a specific index size.
     ///
-    /// Other sections are unaffected.
-    /// The value size is derived from the last entry after truncating the index.
+    /// Other sections are unaffected. The value size is derived from the last entry after
+    /// truncating the index.
     ///
-    /// Both truncations are made durable before returning (see [Oversized::init_at_most]).
+    /// Both truncations are made durable before returning (see the module docs on crash recovery).
     async fn truncate_pending_section(
         mut self,
         section: u64,
@@ -700,8 +701,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Open with an upper bound on section and index-byte end.
     ///
     /// A partial index entry rounds down. Index sections above `section` and whole index pages
-    /// above `end` are removed before any recovery owner opens, so discarded storage is never
-    /// read or repaired. Recovery validates the selected paired prefix before publication.
+    /// above `end` are removed before any recovery owner opens, and value sections above
+    /// `section` stay unopened until recovery removes them, so discarded storage is never read
+    /// or repaired. Recovery validates the selected paired prefix before publication.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -788,11 +790,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Begin tracked initialization with an upper bound on the retained section/index-byte end.
     ///
     /// Required markers and the selected paired boundary are validated before lowering markers
-    /// and releasing suffix storage. Sections above `section` are removed without being read.
-    /// Unlike [Self::init_at_most], the bound section is opened before it is shortened: a
-    /// commit marker may still advertise its entries, and the marker must be lowered and synced
-    /// before the index bytes it covers are discarded. Drain the returned replay before
-    /// publication.
+    /// and releasing suffix storage. Index and value sections above `section` are never opened
+    /// and are removed before publication. Unlike [Self::init_at_most], the bound section is
+    /// opened before it is shortened: a commit marker may still advertise its entries, and the
+    /// marker must be lowered and synced before the index bytes it covers are discarded. Drain
+    /// the returned replay before publication.
     pub async fn init_with_metadata_at_most(
         context: &E,
         cfg: Config<V::Cfg>,
@@ -1327,8 +1329,8 @@ mod tests {
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
-            DeferredSync, DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs,
-            next_pending_sync,
+            DeferredSync, DelayedSyncContext, PendingSyncs, RecordingContext, Recordings,
+            StorageEvent, SyncFaultContext, drive_pending_syncs, next_pending_sync,
         },
     };
     use commonware_utils::{NZU16, NZUsize, probability};
@@ -1371,6 +1373,43 @@ mod tests {
             .expect("failed to open index blob");
         blob.resize(len - 1).await.expect("failed to tear tail");
         blob.sync().await.expect("failed to sync torn tail");
+    }
+
+    /// Assert which sections an initialization opened while `recordings` listened: every
+    /// `retained` section in both the index and the value partition, and no `discarded` one.
+    fn assert_opened_sections(
+        recordings: &Recordings,
+        cfg: &Config<()>,
+        retained: &[u64],
+        discarded: &[u64],
+    ) {
+        let mut opened = HashSet::new();
+        for event in recordings.storage_events() {
+            let StorageEvent::Opened {
+                partition, name, ..
+            } = event
+            else {
+                continue;
+            };
+            let Ok(name) = <[u8; 8]>::try_from(name.as_slice()) else {
+                continue;
+            };
+            opened.insert((partition, u64::from_be_bytes(name)));
+        }
+        for partition in [&cfg.index_partition, &cfg.value_partition] {
+            for section in retained {
+                assert!(
+                    opened.contains(&(partition.clone(), *section)),
+                    "retained section {section} was never opened in {partition}"
+                );
+            }
+            for section in discarded {
+                assert!(
+                    !opened.contains(&(partition.clone(), *section)),
+                    "discarded section {section} was opened in {partition}"
+                );
+            }
+        }
     }
 
     /// Test index entry that stores a u64 id and references a value.
@@ -2905,8 +2944,9 @@ mod tests {
 
             let pending = PendingSyncs::default();
             pending.arm();
+            let (recorded, recordings) = RecordingContext::new(context);
             let delayed = DelayedSyncContext {
-                inner: context,
+                inner: recorded,
                 pending: pending.clone(),
             };
             let chunk = TestEntry::SIZE as u64;
@@ -2917,8 +2957,10 @@ mod tests {
             .await
             .expect("checkpoint restore failed");
 
-            // The checkpoint is already exact, so neither side needs a truncation sync.
+            // The checkpoint is already exact, so neither side needs a truncation sync, and
+            // neither journal opens the sections it removes.
             assert_eq!(pending.calls(), 0);
+            assert_opened_sections(&recordings, &cfg, &[1], &[2, 3]);
             let retained = vec![1u64.to_be_bytes().to_vec()];
             assert_eq!(delayed.scan(&cfg.index_partition).await.unwrap(), retained);
             assert_eq!(delayed.scan(&cfg.value_partition).await.unwrap(), retained);
@@ -2947,8 +2989,9 @@ mod tests {
 
             let pending = PendingSyncs::default();
             pending.arm();
+            let (recorded, recordings) = RecordingContext::new(context);
             let delayed = DelayedSyncContext {
-                inner: context,
+                inner: recorded,
                 pending: pending.clone(),
             };
             let chunk = TestEntry::SIZE as u64;
@@ -2960,8 +3003,10 @@ mod tests {
             .expect("bounded init failed");
 
             // The retained prefix is already exact, so the only durability work possible would be
-            // repairing the section the bound discards. It must be removed without being opened.
+            // repairing the section the bound discards. Both its index and value blobs must be
+            // removed without being opened.
             assert_eq!(pending.calls(), 0);
+            assert_opened_sections(&recordings, &cfg, &[1], &[2]);
             assert_eq!(oversized.newest_section(), Some(1));
             let entry = oversized.last(1).await.expect("failed to read").unwrap();
             assert_eq!(entry.id, 1);
@@ -3103,8 +3148,9 @@ mod tests {
 
             let pending = PendingSyncs::default();
             pending.arm();
+            let (recorded, recordings) = RecordingContext::new(context);
             let delayed = DelayedSyncContext {
-                inner: context,
+                inner: recorded,
                 pending: pending.clone(),
             };
             let chunk = TestEntry::SIZE as u64;
@@ -3123,8 +3169,10 @@ mod tests {
             .expect("tracked bounded init failed");
 
             // Dropping section 2's marker is the only durable work: the retained prefix is
-            // already exact and section 2 must be removed without being opened.
+            // already exact and section 2's index and value blobs must be removed without being
+            // opened.
             assert_eq!(pending.calls(), 1);
+            assert_opened_sections(&recordings, &cfg, &[1], &[2]);
             let mut ids = Vec::new();
             while let Some(item) = drive_pending_syncs(&pending, replay.next()).await {
                 ids.push(item.expect("replay failed").2.id);

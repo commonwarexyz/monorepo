@@ -568,6 +568,11 @@ impl<T: Clone> Pruning<T> {
     /// plus the configured retained block windows. It then prunes only when the
     /// largest required window is populated and the current finalized height
     /// matches the selected phase of the configured maintenance interval.
+    ///
+    /// Marshal dispatches a block at height `C` only after its metadata durably
+    /// records a processed height of at least `C - max_pending_acks`, so the
+    /// QMDB prune target at `C - max_pending_acks - retained_qmdb_blocks` never
+    /// exceeds the processed height a restart recovers from.
     fn observe_finalized(&mut self, height: Height, targets: T) -> DeferredPrune<T> {
         self.retained_targets.push_back((height, targets));
         if self.retained_targets.len() > self.marshal_retention_window {
