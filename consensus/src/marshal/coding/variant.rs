@@ -1,22 +1,21 @@
 use crate::{
     CertifiableBlock,
     marshal::{
-        ancestry::BlockProvider,
         coding::{
             shards,
             types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
-        core::{Buffer, ExpectedCommitment, Mailbox, Retirement, Variant},
+        core::{Buffer, ExpectedCommitment, Retirement, Variant},
     },
     simplex::types::Context,
     types::{Round, coding::Commitment},
 };
 use commonware_codec::Read;
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey, certificate::Scheme};
+use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 /// The coding variant of Marshal, which uses erasure coding for block dissemination.
 ///
@@ -134,28 +133,6 @@ where
     fn send(&self, round: Round, block: Arc<CodedBlock<B, C, H>>, _recipients: Recipients<P>) {
         // Targeted forwarding is not supported by the coding variant.
         self.proposed_shared(round, block);
-    }
-}
-
-impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>
-where
-    S: Scheme,
-    B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
-    C: CodingScheme,
-    H: Hasher,
-    P: PublicKey,
-{
-    type Block = B;
-
-    fn subscribe_parent(
-        &self,
-        block: &Self::Block,
-    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
-        let receiver = block
-            .height()
-            .previous()
-            .map(|_| self.acquire(block.context().parent.1));
-        async move { receiver?.await.ok().map(|block| block.inner_shared()) }
     }
 }
 

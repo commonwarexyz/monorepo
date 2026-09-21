@@ -66,7 +66,7 @@ mod tests {
     use crate::{
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
         marshal::{
-            ancestry::{Ancestry, BlockProvider},
+            blocks::Blocks,
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
                 types::{
@@ -130,12 +130,6 @@ mod tests {
         extra_shards: NZU16!(1),
     };
 
-    #[test]
-    fn mailbox_provides_application_blocks() {
-        fn assert_provider<P: BlockProvider<Block = CodingB>>() {}
-        assert_provider::<core::Mailbox<S, TestCodingVariant>>();
-    }
-
     /// A coding buffer that records subscriptions and never resolves them.
     #[derive(Clone, Default)]
     struct RecordingCodingBuffer {
@@ -183,7 +177,7 @@ mod tests {
         }
     }
 
-    /// Records the ancestry consumed by verification, accepting only after reaching genesis.
+    /// Records the selected branch in forward order through the candidate.
     #[derive(Clone, Default)]
     struct WalkingVerifyingApp {
         blocks: Arc<Mutex<Vec<D>>>,
@@ -198,7 +192,8 @@ mod tests {
         async fn propose(
             &mut self,
             _context: (deterministic::Context, CodingCtx),
-            _ancestry: impl Ancestry<CodingB>,
+            _parent: Arc<CodingB>,
+            _blocks: Blocks<CodingB>,
             _input: (),
         ) -> Option<CodingB> {
             None
@@ -207,15 +202,21 @@ mod tests {
         async fn verify(
             &mut self,
             _context: (deterministic::Context, CodingCtx),
-            mut ancestry: impl Ancestry<CodingB>,
+            candidate: Arc<CodingB>,
+            parent: Arc<CodingB>,
+            blocks: Blocks<CodingB>,
         ) -> bool {
-            while let Some(block) = ancestry.next().await {
+            let mut range = blocks.range(Height::zero()..=parent.height());
+            let mut last = None;
+            while let Some(block) = range.next().await {
+                let Ok(block) = block else {
+                    return false;
+                };
                 self.blocks.lock().push(block.digest());
-                if block.height() == Height::zero() {
-                    return true;
-                }
+                last = Some(block.digest());
             }
-            false
+            self.blocks.lock().push(candidate.digest());
+            last == Some(parent.digest()) && candidate.parent() == parent.digest()
         }
     }
 
@@ -4162,7 +4163,7 @@ mod tests {
                 .await;
 
             // Neither the certified fork nor a cached untrusted child authenticates these fetches
-            for (index, ancestor) in [&chain[1], &chain[0]].into_iter().enumerate() {
+            for (index, ancestor) in [&chain[0], &chain[1]].into_iter().enumerate() {
                 while resolver.fetches().len() < index + 2 {
                     reschedule().await;
                 }
@@ -4172,7 +4173,7 @@ mod tests {
                 let mut subscription = mailbox.acquire(ancestor.commitment());
                 let _ = mailbox.get_processed_height().await;
 
-                if index == 0 {
+                if index == 1 {
                     assert!(
                         !resolver
                             .deliver(fetch.clone(), certified_ancestor.encode())
@@ -4203,11 +4204,8 @@ mod tests {
                     .await
                     .unwrap()
             );
-            let expected: Vec<_> = chain
-                .iter()
-                .rev()
-                .map(Digestible::digest)
-                .chain(std::iter::once(genesis_block().digest()))
+            let expected: Vec<_> = std::iter::once(genesis_block().digest())
+                .chain(chain.iter().map(Digestible::digest))
                 .collect();
             assert_eq!(*application.blocks.lock(), expected);
 

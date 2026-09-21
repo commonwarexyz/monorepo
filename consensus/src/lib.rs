@@ -294,7 +294,7 @@ stability_scope!(ALPHA {
     pub mod aggregation;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::Ancestry;
+    use crate::marshal::blocks::Blocks;
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;
@@ -320,9 +320,11 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// that need no input set this to `()`.
         type Input: Send;
 
-        /// Build a new block on top of the provided parent ancestry. If the build job fails,
+        /// Build a new block on top of `parent`. If the build job fails,
         /// or the proposer's slot should be skipped, the implementor should return [None].
         ///
+        /// `blocks` supplies forward ranges of the selected parent branch, including
+        /// finalized history. Select only the history needed to build the block.
         /// `input` is the per-proposal input for this build.
         ///
         /// This future may be cancelled before it completes. Implementations must be
@@ -330,11 +332,15 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn propose(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            parent: Arc<Self::Block>,
+            blocks: Blocks<Self::Block>,
             input: Self::Input,
         ) -> impl Future<Output = Option<Self::Block>> + Send;
 
-        /// Verify a block produced by the application's proposer, relative to its ancestry.
+        /// Verify `block` produced by the application's proposer against `parent`.
+        ///
+        /// `blocks` supplies forward ranges of the selected parent branch, including
+        /// finalized history. It excludes the candidate block.
         ///
         /// This future should not resolve until the implementation can produce a stable verdict.
         /// Return `false` only when the block is permanently invalid for the supplied context and
@@ -351,7 +357,9 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         fn verify(
             &mut self,
             context: (E, Self::Context),
-            ancestry: impl Ancestry<Self::Block>,
+            block: Arc<Self::Block>,
+            parent: Arc<Self::Block>,
+            blocks: Blocks<Self::Block>,
         ) -> impl Future<Output = bool> + Send;
     }
 });

@@ -143,7 +143,6 @@ where
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
-    ancestor_fetch_duration: Timed,
 }
 
 impl<E, S, A, B, ES> Clone for Inline<E, S, A, B, ES>
@@ -163,7 +162,6 @@ where
             gates: self.gates.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
-            ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
         }
     }
 }
@@ -198,12 +196,6 @@ where
             Buckets::LOCAL,
         );
         let proposal_parent_fetch_duration = Timed::new(parent_fetch_histogram);
-        let ancestor_fetch_histogram = context.histogram(
-            "ancestor_fetch_duration",
-            "Histogram of time taken to fetch a block via the ancestry stream, in seconds",
-            Buckets::LOCAL,
-        );
-        let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
             context: Arc::new(context),
@@ -213,7 +205,6 @@ where
             gates: Gates::new(),
             build_duration,
             proposal_parent_fetch_duration,
-            ancestor_fetch_duration,
         }
     }
 }
@@ -248,7 +239,7 @@ where
     async fn propose(
         &mut self,
         consensus_context: Context<Self::Digest, S::PublicKey>,
-        _ancestry: Arc<[Self::Digest]>,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -256,7 +247,6 @@ where
         let gates = self.gates.clone();
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -334,18 +324,15 @@ where
                     return;
                 }
 
-                let ancestor_stream = marshal.ancestor_stream(
-                    Arc::new(runtime_context.child("ancestor_stream")),
-                    [parent],
-                    ancestor_fetch_duration,
-                );
+                let blocks = marshal.blocks(parent.height(), ancestry);
                 let build_request = application
                     .propose(
                         (
                             runtime_context.child("app_propose"),
                             consensus_context.clone(),
                         ),
-                        ancestor_stream,
+                        parent,
+                        blocks,
                         (),
                     )
                     .instrument(info_span!(
@@ -397,7 +384,7 @@ where
     /// 1. Acquires the candidate block
     /// 2. Enforces epoch/re-proposal rules
     /// 3. Fetches and validates the parent relationship
-    /// 4. Runs application verification over ancestry
+    /// 4. Runs application verification with the candidate, parent, and block range
     ///
     /// The notarize vote is cast as soon as application verification completes. The block's
     /// durable sync is deferred (it runs concurrently with consensus voting) and its
@@ -409,7 +396,7 @@ where
         &mut self,
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
-        _ancestry: Arc<[Self::Digest]>,
+        ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         let round = context.round;
 
@@ -421,7 +408,6 @@ where
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
 
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
@@ -530,7 +516,7 @@ where
                         &mut application,
                         &marshal,
                         &mut tx,
-                        ancestor_fetch_duration,
+                        ancestry,
                     )
                     .await;
                     if let Some(valid) = valid {
@@ -610,7 +596,10 @@ where
                 }
 
                 // No local certification gate task (for example after an unclean restart):
-                // acquire and persist the notarized block.
+                // fetch the notarized block and persist it. A Byzantine leader can form a
+                // notarization after sending the proposal to only f+1 honest validators, so
+                // the validators left without the block must fetch it here to certify and
+                // avoid getting stuck.
                 let block_rx = marshal.acquire(digest);
                 let Some(block) =
                     await_block_subscription(&mut tx, block_rx, &digest, "certification").await

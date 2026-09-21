@@ -5,18 +5,15 @@
 
 use crate::{
     Block,
-    marshal::{
-        ancestry::BlockProvider,
-        core::{Buffer, ExpectedCommitment, Mailbox, Retirement, Variant},
-    },
+    marshal::core::{Buffer, ExpectedCommitment, Retirement, Variant},
     types::Round,
 };
 use commonware_broadcast::buffered;
 use commonware_codec::Read;
-use commonware_cryptography::{Digestible, PublicKey, certificate::Scheme};
+use commonware_cryptography::{Digestible, PublicKey};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 
 /// The standard variant of Marshal, which broadcasts complete blocks.
 ///
@@ -87,24 +84,5 @@ where
 
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
         self.broadcast_shared(recipients, block);
-    }
-}
-
-impl<S, B> BlockProvider for Mailbox<S, Standard<B>>
-where
-    S: Scheme,
-    B: Block,
-{
-    type Block = B;
-
-    fn subscribe_parent(
-        &self,
-        block: &Self::Block,
-    ) -> impl Future<Output = Option<Arc<Self::Block>>> + Send + 'static {
-        let receiver = block
-            .height()
-            .previous()
-            .map(|_| self.acquire(block.parent()));
-        async move { receiver?.await.ok() }
     }
 }
