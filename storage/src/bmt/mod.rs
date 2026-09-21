@@ -58,6 +58,9 @@ use thiserror::Error;
 /// which requires at most `u32::BITS` sibling hashes per proven item.
 pub const MAX_LEVELS: usize = u32::BITS as usize;
 
+// Cap eager reservations from iterator hints; larger batches grow as needed.
+const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
+
 /// Errors that can occur when working with a Binary Merkle Tree (BMT).
 #[derive(Error, Debug)]
 pub enum Error {
@@ -552,7 +555,7 @@ impl<D: Digest> Proof<D> {
         root: &D,
     ) -> Result<(), Error> {
         let elements = elements.into_iter();
-        let mut sorted = Vec::with_capacity(elements.size_hint().0);
+        let mut sorted = Vec::with_capacity(elements.size_hint().0.min(MAX_INITIAL_CAPACITY));
         for (leaf, position) in elements {
             if position >= self.leaf_count {
                 return Err(Error::InvalidPosition(position));
@@ -2279,6 +2282,13 @@ mod tests {
                 .verify_multi_inclusion::<Sha256>(invalid_elements, &root)
                 .is_err()
         );
+        for count in [1, usize::MAX] {
+            let elements = core::iter::repeat_n((digests[0], 100), count);
+            assert!(matches!(
+                multi_proof.verify_multi_inclusion::<Sha256>(elements, &root),
+                Err(Error::InvalidPosition(100)),
+            ));
+        }
     }
 
     #[test]

@@ -99,6 +99,9 @@ use std::{
 };
 use tracing::{trace, warn};
 
+// Cap eager reservations from iterator hints; larger batches grow as needed.
+const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
+
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config<C> {
@@ -252,7 +255,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 
         let compressed = self.compression.is_some();
         let cfg = &self.codec_config;
-        let mut items = Vec::with_capacity(offsets.size_hint().0);
+        let mut items = Vec::with_capacity(offsets.size_hint().0.min(MAX_INITIAL_CAPACITY));
         for offset in offsets {
             let (_, _, item) = Self::read(compressed, cfg, blob, offset).await?;
             items.push(item);
@@ -1321,6 +1324,14 @@ mod tests {
                 journal.get_many(99, core::iter::once(0)).await,
                 Err(Error::SectionOutOfRange(99)),
             ));
+            for count in [1, usize::MAX] {
+                assert!(
+                    journal
+                        .get_many(0, core::iter::repeat_n(u64::MAX, count))
+                        .await
+                        .is_err()
+                );
+            }
             journal.destroy().await.unwrap();
         });
     }
