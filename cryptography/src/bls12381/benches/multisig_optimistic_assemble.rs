@@ -1,4 +1,4 @@
-use super::optimistic_assemble::{BenchSubject, Case, bench_case};
+use super::utils::{BenchSubject, Case, bench_case};
 use commonware_cryptography::{
     Signer as _,
     bls12381::primitives::{

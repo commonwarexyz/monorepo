@@ -11,7 +11,6 @@ mod evaluate_point;
 mod hash_to_curve;
 mod msm;
 mod multisig_optimistic_assemble;
-mod optimistic_assemble;
 mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
 mod signature_generation;
@@ -23,6 +22,7 @@ mod threshold_optimistic_assemble;
 mod threshold_recover;
 mod tle_decrypt;
 mod tle_encrypt;
+mod utils;
 
 criterion_main!(
     batch_to_affine::benches,

@@ -1,3 +1,5 @@
+//! Shared fixtures and timing helpers for BLS certificate assembly benchmarks.
+
 use bytes::Bytes;
 use commonware_cryptography::{
     Digest,
@@ -103,7 +105,8 @@ fn fixture<S: Scheme>(
     (pending, vec![invalid])
 }
 
-fn optimistic<S, R, D>(
+/// Attempt optimistic assembly, then assemble any verified quorum retained on failure.
+fn assemble_with_fallback<S, R, D>(
     scheme: &S,
     rng: &mut R,
     subject: S::Subject<'static, D>,
@@ -259,7 +262,7 @@ pub fn bench_case<S, D>(
     }
 
     // Verify the final certificate or retained fallback evidence before timing.
-    let result = optimistic(
+    let result = assemble_with_fallback(
         scheme,
         &mut TestRng::new(RNG_SEED),
         subject.clone(),
@@ -285,7 +288,7 @@ pub fn bench_case<S, D>(
         b.iter_batched(
             || pending.clone(),
             |pending| {
-                black_box(optimistic(
+                black_box(assemble_with_fallback(
                     scheme,
                     &mut rng,
                     subject.clone(),
