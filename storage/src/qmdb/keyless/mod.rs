@@ -50,7 +50,10 @@ use crate::{
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
-    qmdb::{Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root},
+    qmdb::{
+        Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root,
+        sync::source,
+    },
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
@@ -593,16 +596,7 @@ where
     type Op = Operation<F, V>;
     type Error = Error<F>;
 
-    async fn serve(
-        &self,
-        request: crate::qmdb::sync::Request<F>,
-    ) -> Result<
-        (
-            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
-            crate::qmdb::sync::FeedbackTx,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: crate::qmdb::sync::Request<F>) -> source::Result<Self> {
         self.journal.serve(request).await
     }
 }
