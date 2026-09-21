@@ -2133,12 +2133,10 @@ impl<V: Variant, S: Signer> Player<V, S> {
             // A selected ack carries no share and requires the exact persisted
             // dealing. A validated reveal can replace missing or stale local state.
             let persisted = self.view.get(dealer);
-            let share = match persisted {
-                Some((pub_msg, priv_msg)) if pub_msg == &log.pub_msg => {
-                    priv_msg.share.clone().expose_unwrap()
-                }
+            let priv_msg = match persisted {
+                Some((pub_msg, priv_msg)) if pub_msg == &log.pub_msg => priv_msg,
                 _ => match log.get_reveal(&self.me_pub) {
-                    Some(priv_msg) => priv_msg.share.clone().expose_unwrap(),
+                    Some(priv_msg) => priv_msg,
                     None if persisted.is_some() => {
                         return Err(Error::InvalidPersistedDealing {
                             dealer: format!("{dealer:?}"),
@@ -2147,7 +2145,7 @@ impl<V: Variant, S: Signer> Player<V, S> {
                     None => return Err(Error::MissingPlayerDealing),
                 },
             };
-            Ok(share)
+            Ok(priv_msg.share.clone().expose_unwrap())
         })?;
         let Observe { output, weights } =
             Observe::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy);
