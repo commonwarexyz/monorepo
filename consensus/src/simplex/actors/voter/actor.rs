@@ -483,27 +483,24 @@ impl<
             epoch = context.round.epoch().traced(),
             view = context.view().traced()
         );
-        let receiver = match &request {
-            ProposalRequest::Handoff(_) => {
-                self.record_handoff_event(HandoffEventKind::Requested);
-                let receiver = async {
-                    debug!(round = ?context.round, "requested handoff proposal from automaton");
-                    self.automaton.propose_handoff(context).await
+        let receiver = async {
+            debug!(
+                round = ?context.round,
+                handoff = matches!(&request, ProposalRequest::Handoff(_)),
+                "requested proposal from automaton"
+            );
+            match &request {
+                ProposalRequest::Handoff(_) => {
+                    self.record_handoff_event(HandoffEventKind::Requested);
+                    ProposalReceiver::Handoff(self.automaton.propose_handoff(context).await)
                 }
-                .instrument(span.clone())
-                .await;
-                ProposalReceiver::Handoff(receiver)
-            }
-            ProposalRequest::Regular(_) => {
-                let receiver = async {
-                    debug!(round = ?context.round, "requested proposal from automaton");
-                    self.automaton.propose(context).await
+                ProposalRequest::Regular(_) => {
+                    ProposalReceiver::Regular(self.automaton.propose(context).await)
                 }
-                .instrument(span.clone())
-                .await;
-                ProposalReceiver::Regular(receiver)
             }
-        };
+        }
+        .instrument(span.clone())
+        .await;
         Request(request, span, ProposalState::Awaiting(receiver))
     }
 
@@ -1314,10 +1311,9 @@ impl<
                 // delaying them.
                 self = self.prune_views().await;
 
-                // The prior iteration's journal sync has completed at this checkpoint.
-                // Promote held results here because reconciliation also runs before the
-                // sync. Replace a deferred handoff with an ordinary request for the same
-                // context.
+                // The prior iteration's sync_journal has completed. Promote held results
+                // here because reconcile_application_requests also runs before the sync.
+                // Replace a deferred handoff with an ordinary request for the same context.
                 if let Some(Request(request, _, state)) = pending_propose.as_mut()
                     && matches!(state, ProposalState::Deferred | ProposalState::Held(_))
                     && self.state.proposal_parent_certified(request.context())
