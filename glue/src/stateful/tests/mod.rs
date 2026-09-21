@@ -1070,6 +1070,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("chain_builder"),
         qmdb_config("certify-chain-builder", page_cache),
+        None,
     )
     .await;
     let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
@@ -1125,6 +1126,7 @@ async fn build_multi_chain(
     let databases = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("multi_chain_builder"),
         multi_qmdb_config("certify-multi-chain-builder", page_cache),
+        None,
     )
     .await;
     let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<
