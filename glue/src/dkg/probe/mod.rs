@@ -301,43 +301,7 @@ mod tests {
     }
 
     impl Harness {
-        async fn start(context: &mut deterministic::Context) -> Self {
-            Self::start_with(context, true).await
-        }
-
-        async fn start_with(context: &mut deterministic::Context, source_serves: bool) -> Self {
-            let boundaries = if source_serves {
-                vec![Epoch::new(1)]
-            } else {
-                Vec::new()
-            };
-            Self::start_with_boundaries(context, boundaries).await
-        }
-
-        async fn start_with_boundaries(
-            context: &mut deterministic::Context,
-            source_boundaries: Vec<Epoch>,
-        ) -> Self {
-            Self::start_full(context, source_boundaries, Epoch::zero()).await
-        }
-
-        async fn start_full(
-            context: &mut deterministic::Context,
-            source_boundaries: Vec<Epoch>,
-            bootstrap_epoch: Epoch,
-        ) -> Self {
-            let fixture = mocks::scheme_fixture_n(context, 4);
-            Self::start_with_fixture(
-                context,
-                source_boundaries,
-                bootstrap_epoch,
-                Epoch::zero(),
-                &fixture,
-            )
-            .await
-        }
-
-        async fn start_with_fixture(
+        async fn start(
             context: &mut deterministic::Context,
             source_boundaries: Vec<Epoch>,
             bootstrap_epoch: Epoch,
@@ -810,7 +774,15 @@ mod tests {
     fn discovers_artifact_from_sample() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start(&mut context).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                vec![Epoch::new(1)],
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
             let target = harness.complete_target_sample();
 
@@ -830,7 +802,15 @@ mod tests {
     fn waits_for_full_sample() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             // One reply is below the sample threshold (f + 1 = 2 of 4).
@@ -852,7 +832,15 @@ mod tests {
     fn duplicate_latest_reply_is_ignored() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             // Two different valid replies from the same peer must count once.
@@ -882,8 +870,15 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             // The source can serve the epoch-2 boundary.
-            let mut harness =
-                Harness::start_with_boundaries(&mut context, vec![Epoch::new(2)]).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                vec![Epoch::new(2)],
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             let (newer_boundary, newer_sharing) = boundary_block(
@@ -912,7 +907,15 @@ mod tests {
     fn genesis_floor_resolves_locally() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             // The whole sample reports epoch-zero finalizations: the artifact
@@ -936,7 +939,15 @@ mod tests {
     fn resolicits_when_sample_incomplete() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let _subscription = harness.joiner.subscribe();
 
             // The first solicitation reaches the client, goes unanswered, and
@@ -950,8 +961,15 @@ mod tests {
     fn ignores_latest_reply_below_bootstrap_epoch() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness =
-                Harness::start_full(&mut context, vec![Epoch::new(1)], Epoch::new(1)).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                vec![Epoch::new(1)],
+                Epoch::new(1),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             // Valid replies below the bootstrap epoch are stale by definition
@@ -1001,7 +1019,7 @@ mod tests {
                     assert_eq!(plan.floor(), selected.as_ref());
                 }
                 let minimum_epoch = plan.floor().map_or(Epoch::zero(), |floor| floor.epoch());
-                let mut harness = Harness::start_with_fixture(
+                let mut harness = Harness::start(
                     &mut context,
                     vec![Epoch::new(1)],
                     Epoch::zero(),
@@ -1079,7 +1097,15 @@ mod tests {
     fn invalid_latest_reply_blocks_peer() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let _subscription = harness.joiner.subscribe();
 
             // A finalization signed by a foreign key set decodes cleanly but
@@ -1111,7 +1137,15 @@ mod tests {
     fn fetches_boundary_block_from_one_responder() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
@@ -1171,7 +1205,15 @@ mod tests {
     fn retries_boundary_block_with_another_responder() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
@@ -1240,7 +1282,15 @@ mod tests {
     fn invalid_boundary_block_tries_another_responder_immediately() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
@@ -1336,7 +1386,15 @@ mod tests {
         runner.start(|mut context| async move {
             // The source has no boundary block, so the joiner's request goes
             // unanswered and it must re-request rather than wedging.
-            let mut harness = Harness::start_with(&mut context, false).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
@@ -1362,7 +1420,15 @@ mod tests {
     fn terminal_epoch_boundary_response_does_not_panic() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start_with_boundaries(&mut context, Vec::new()).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                Vec::new(),
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
@@ -1419,7 +1485,15 @@ mod tests {
     fn does_not_solicit_without_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start(&mut context).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                vec![Epoch::new(1)],
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             select! {
                 _ = harness.client_boundary_receiver.recv() => {
                     panic!("solicitation sent before any subscriber");
@@ -1433,7 +1507,15 @@ mod tests {
     fn late_subscriber_receives_cached_artifact() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start(&mut context).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                vec![Epoch::new(1)],
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             let mut first = harness.joiner.subscribe();
             harness.complete_target_sample();
 
@@ -1462,7 +1544,15 @@ mod tests {
     fn serving_answers_latest_request_from_marshal() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start(&mut context).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                vec![Epoch::new(1)],
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             harness.client_boundary_sender.send(
                 Recipients::One(harness.participants[0].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::LatestRequest
@@ -1493,7 +1583,15 @@ mod tests {
     fn serving_answers_finalization_and_block_requests_from_marshal() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start(&mut context).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                vec![Epoch::new(1)],
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             harness.client_boundary_sender.send(
                 Recipients::One(harness.participants[0].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryRequest(
@@ -1557,7 +1655,15 @@ mod tests {
     fn serving_ignores_epoch_without_boundary() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness = Harness::start(&mut context).await;
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let mut harness = Harness::start(
+                &mut context,
+                vec![Epoch::new(1)],
+                Epoch::zero(),
+                Epoch::zero(),
+                &fixture,
+            )
+            .await;
             harness.client_boundary_sender.send(
                 Recipients::One(harness.participants[0].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryRequest(
