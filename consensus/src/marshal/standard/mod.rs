@@ -1653,6 +1653,108 @@ mod tests {
         })
     }
 
+    #[rstest::rstest]
+    #[case::digest(false)]
+    #[case::commitment(true)]
+    fn test_standard_cached_subscription_installs_floor(#[case] by_commitment: bool) {
+        let mut checkpoint = None;
+        let mut state = None;
+        for boot in 0..2 {
+            let runner = checkpoint.map_or_else(
+                || deterministic::Runner::timed(Duration::from_secs(30)),
+                deterministic::Runner::from,
+            );
+            let (next_state, recovered) = runner.start_and_recover(move |mut context| async move {
+                let (participants, schemes, anchor, finalization) = state.unwrap_or_else(|| {
+                    let Fixture {
+                        participants,
+                        schemes,
+                        ..
+                    } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+                    let anchor = make_raw_block(Sha256::hash(&[b"parent"]), Height::new(5), 5);
+                    let finalization = StandardHarness::make_finalization(
+                        Proposal::new(
+                            Round::new(Epoch::zero(), View::new(5)),
+                            View::new(4),
+                            anchor.digest(),
+                        ),
+                        &schemes,
+                        QUORUM,
+                    );
+                    (participants, schemes, anchor, finalization)
+                });
+                let mut oracle = setup_network_with_participants(
+                    context.child("network"),
+                    NZUsize!(1),
+                    participants.clone(),
+                )
+                .await;
+                let setup = StandardHarness::setup_validator_with(
+                    context.child("validator"),
+                    &mut oracle,
+                    participants[0].clone(),
+                    ConstantProvider::new(schemes[0].clone()),
+                    NZUsize!(1),
+                    Application::<B>::manual_ack(),
+                )
+                .await;
+                let mailbox = setup.mailbox;
+                if boot == 0 {
+                    mailbox.set_floor(finalization.clone());
+                    assert!(mailbox.get_block(anchor.height()).await.is_none());
+
+                    // This peer only serves broadcasts: the pending floor resolver cannot
+                    // supply the anchor, and no local subscription has registered a waiter.
+                    let (mut sender, _receiver) = oracle
+                        .control(participants[1].clone())
+                        .register(2, TEST_QUOTA)
+                        .await
+                        .unwrap();
+                    setup_network_links(&mut oracle, &participants, LINK).await;
+                    assert_eq!(
+                        sender.send(
+                            Recipients::Some(vec![participants[0].clone()]),
+                            anchor.encode(),
+                            false
+                        ),
+                        vec![participants[0].clone()],
+                    );
+                    while setup.extra.get(anchor.digest()).await.is_none() {
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                    let subscription = if by_commitment {
+                        mailbox.subscribe_by_commitment(anchor.digest(), CommitmentFallback::Wait)
+                    } else {
+                        mailbox.subscribe_by_digest(anchor.digest(), DigestFallback::Wait)
+                    };
+                    assert_eq!(subscription.await.unwrap().digest(), anchor.digest());
+                }
+
+                // The mailbox query fences the subscription's floor ingestion. The
+                // application retains the acknowledgement, so progress must stop at P.
+                assert_eq!(
+                    mailbox.get_processed_height().await,
+                    anchor.height().previous()
+                );
+                assert_eq!(
+                    mailbox.get_block(anchor.height()).await.unwrap().digest(),
+                    anchor.digest()
+                );
+                assert_eq!(
+                    mailbox.get_finalization(anchor.height()).await.unwrap(),
+                    finalization
+                );
+                (participants, schemes, anchor, finalization)
+            });
+            state = Some(next_state);
+            checkpoint = Some(recovered);
+        }
+    }
+
     #[test_traced("WARN")]
     fn test_standard_resolver_floor_anchor_install_wakes_subscriber() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
