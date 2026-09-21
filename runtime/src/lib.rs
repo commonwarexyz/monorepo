@@ -873,9 +873,11 @@ stability_scope!(BETA {
     /// not expected to coordinate, and writing through them concurrently is
     /// undefined.
     ///
-    /// When a blob is dropped, any unsynced changes may be discarded. Implementations
-    /// may attempt to sync during drop but errors will go unhandled. Call `sync`
-    /// before dropping to ensure all changes are durably persisted.
+    /// Dropping the final clone of an open whose writes or resizes are not
+    /// covered by a completed [Blob::sync] does not make them durable at a known
+    /// point. An implementation may discard them or continue durability work
+    /// after drop; a later operation may report that work's failure. Call
+    /// sync before dropping to make changes durable and observe errors.
     ///
     /// # Durability
     ///
