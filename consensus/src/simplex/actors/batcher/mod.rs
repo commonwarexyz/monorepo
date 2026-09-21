@@ -474,6 +474,8 @@ mod tests {
         assert!(round.try_construct(&mut rng, &strategy).await.is_none());
     }
 
+    /// Signs a test vote of `kind`, using `round` for nullifications and `proposal`
+    /// for notarizations and finalizations.
     fn sign_vote<S: Scheme<Sha256Digest>>(
         scheme: &S,
         kind: Kind,
