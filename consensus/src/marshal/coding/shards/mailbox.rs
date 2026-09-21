@@ -86,14 +86,6 @@ where
         /// The response channel.
         response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
     },
-    /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
-    /// by its digest.
-    SubscribeByDigest {
-        /// The block's digest.
-        digest: B::Digest,
-        /// The response channel.
-        response: oneshot::Sender<Arc<CodedBlock<B, C, H>>>,
-    },
     /// A request to retire cached blocks and reconstruction state after durable application
     /// progress.
     Retire {
@@ -115,8 +107,7 @@ where
                 response.is_closed()
             }
             Self::SubscribeAssignedShardVerified { response, .. } => response.is_closed(),
-            Self::SubscribeByCommitment { response, .. }
-            | Self::SubscribeByDigest { response, .. } => response.is_closed(),
+            Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::Proposed { .. }
             | Self::Discovered { .. }
             | Self::Notarized { .. }
@@ -324,19 +315,6 @@ where
         receiver
     }
 
-    /// Subscribe to the reconstruction of a [`CodedBlock`] by its digest.
-    pub fn subscribe_by_digest(
-        &self,
-        digest: B::Digest,
-    ) -> oneshot::Receiver<Arc<CodedBlock<B, C, H>>> {
-        let (responder, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::SubscribeByDigest {
-            digest,
-            response: responder,
-        });
-        receiver
-    }
-
     /// Retire cached blocks and reconstruction state after durable application progress.
     ///
     /// Entries last observed at or before [`Retirement::round_floor`] are eligible for
@@ -345,7 +323,7 @@ where
     ///
     /// Assigned-shard subscriptions for retired state are closed. Exact-commitment subscriptions
     /// close only for exact retirements. Other block subscriptions remain open for local ingress.
-    /// Digest subscriptions remain open, and later consensus notifications may recreate state.
+    /// Later consensus notifications may recreate state.
     pub fn retire(&self, update: Retirement<Commitment<B, C, H>>) {
         let _ = self.sender.enqueue(Message::Retire { update });
     }

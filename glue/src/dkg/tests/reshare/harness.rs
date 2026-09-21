@@ -37,7 +37,7 @@ use commonware_consensus::{
     marshal::{
         self,
         ancestry::Ancestry,
-        core::{Actor as MarshalActor, CommitmentFallback, Mailbox as MarshalMailbox},
+        core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -1210,13 +1210,7 @@ impl EngineDefinition for ReshareEngine {
             context
                 .child("sync_floor_recorder")
                 .spawn(move |_| async move {
-                    let Ok(block) = marshal
-                        .subscribe_by_commitment(
-                            finalization.proposal.payload,
-                            CommitmentFallback::Wait,
-                        )
-                        .await
-                    else {
+                    let Ok(block) = marshal.acquire(finalization.proposal.payload).await else {
                         return;
                     };
                     state_syncs.lock().insert(public_key, block.height().get());
