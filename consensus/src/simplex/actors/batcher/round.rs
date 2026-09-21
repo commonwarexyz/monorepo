@@ -373,12 +373,22 @@ impl<
         rng: &mut E,
         strategy: &impl Strategy,
     ) -> Option<Batch<Certificate<S, D>>> {
-        let result = if let Some(result) = self.verifier.try_verify_notarizes(rng, strategy).await {
+        let result = if let Some(result) = self
+            .verifier
+            .try_construct_notarization(rng, strategy)
+            .await
+        {
             result
-        } else if let Some(result) = self.verifier.try_verify_nullifies(rng, strategy).await {
+        } else if let Some(result) = self
+            .verifier
+            .try_construct_nullification(rng, strategy)
+            .await
+        {
             result
         } else {
-            self.verifier.try_verify_finalizes(rng, strategy).await?
+            self.verifier
+                .try_construct_finalization(rng, strategy)
+                .await?
         };
         if let Some(certificate) = &result.certificate {
             self.record_certificate(certificate);

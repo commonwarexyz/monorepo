@@ -41,11 +41,11 @@ pub struct Batch<C> {
     /// Signers identified as invalid by attestation verification.
     ///
     /// An empty result does not mean every input vote was individually verified:
-    /// successful optimistic recovery returns no per-vote results.
+    /// successful optimistic assembly returns no per-vote results.
     pub invalid: Vec<Participant>,
-    /// A certificate recovered and verified from the buffered votes.
+    /// A certificate constructed and verified from the buffered votes.
     pub certificate: Option<C>,
-    /// Whether optimistic recovery failed and required attestation verification.
+    /// Whether optimistic assembly failed and required attestation verification.
     pub fallback: bool,
 }
 
@@ -54,7 +54,7 @@ pub struct Batch<C> {
 /// Each kind certifies independently: a view can legitimately certify both
 /// a notarization and a nullification.
 struct Certification<C, S: CertificateScheme> {
-    /// Verified votes required to recover a certificate.
+    /// Votes required to construct a certificate.
     quorum: usize,
     /// Progress toward a certificate.
     state: State<C, S>,
@@ -66,7 +66,7 @@ enum State<C, S: CertificateScheme> {
     Incomplete {
         /// Votes awaiting signature verification.
         pending: Vec<(C, Attestation<S>)>,
-        /// Votes with verified signatures, held for certificate recovery.
+        /// Votes with verified signatures, held for certificate construction.
         verified: Vec<(C, Attestation<S>)>,
     },
     /// A certificate exists. Further votes are dropped.
@@ -86,7 +86,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
     }
 
     /// Buffers a vote for verification (or, if already verified, for
-    /// certificate recovery). The caller owns signer uniqueness. Votes that
+    /// certificate construction). The caller owns signer uniqueness. Votes that
     /// arrive after completion are dropped.
     fn add(&mut self, context: C, attestation: Attestation<S>, is_verified: bool) {
         let State::Incomplete { pending, verified } = &mut self.state else {
@@ -108,6 +108,8 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         votes.push((context, attestation));
     }
 
+    /// Whether an unfinished kind has a verified quorum, allowing construction
+    /// before proposal selection.
     const fn has_verified_quorum(&self) -> bool {
         matches!(&self.state, State::Incomplete { verified, .. } if verified.len() >= self.quorum)
     }
@@ -128,7 +130,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
     /// Pending verification requires one context, retained with every attestation so
     /// proposal changes can filter both buffers. An existing verified quorum skips
     /// pending votes and can complete before proposal selection.
-    async fn try_verify<R, D, F, G>(
+    async fn try_construct<R, D, F, G>(
         &mut self,
         scheme: &Arc<S>,
         rng: &mut R,
@@ -232,7 +234,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
             self.complete();
         } else {
             let State::Incomplete { verified, .. } = &mut self.state else {
-                unreachable!("certification completed mid-verification");
+                unreachable!("certification completed mid-construction");
             };
             *verified = votes;
         }
@@ -519,8 +521,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
         }
     }
 
-    /// Processes notarizes when ready and returns any completed certificate.
-    pub async fn try_verify_notarizes<R: CryptoRng>(
+    /// Attempts to construct a notarization from buffered votes.
+    pub async fn try_construct_notarization<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
@@ -529,13 +531,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             return None;
         }
         self.notarize
-            .try_verify(
+            .try_construct(
                 &self.scheme,
                 rng,
                 strategy,
                 || {
                     info_span!(
-                        "simplex.batcher.verify_notarizes",
+                        "simplex.batcher.construct.notarization",
                         epoch = self.round.epoch().traced(),
                         view = self.round.view().traced(),
                     )
@@ -551,20 +553,20 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             .await
     }
 
-    /// Processes nullifies when ready and returns any completed certificate.
-    pub async fn try_verify_nullifies<R: CryptoRng>(
+    /// Attempts to construct a nullification from buffered votes.
+    pub async fn try_construct_nullification<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
     ) -> Option<Batch<Certificate<S, D>>> {
         self.nullify
-            .try_verify(
+            .try_construct(
                 &self.scheme,
                 rng,
                 strategy,
                 || {
                     info_span!(
-                        "simplex.batcher.verify_nullifies",
+                        "simplex.batcher.construct.nullification",
                         epoch = self.round.epoch().traced(),
                         view = self.round.view().traced(),
                     )
@@ -577,8 +579,8 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             .await
     }
 
-    /// Processes finalizes when ready and returns any completed certificate.
-    pub async fn try_verify_finalizes<R: CryptoRng>(
+    /// Attempts to construct a finalization from buffered votes.
+    pub async fn try_construct_finalization<R: CryptoRng>(
         &mut self,
         rng: &mut R,
         strategy: &impl Strategy,
@@ -587,13 +589,13 @@ impl<S: Scheme<D>, D: Digest> Verifier<S, D> {
             return None;
         }
         self.finalize
-            .try_verify(
+            .try_construct(
                 &self.scheme,
                 rng,
                 strategy,
                 || {
                     info_span!(
-                        "simplex.batcher.verify_finalizes",
+                        "simplex.batcher.construct.finalization",
                         epoch = self.round.epoch().traced(),
                         view = self.round.view().traced(),
                     )
@@ -711,7 +713,7 @@ mod tests {
         let mut verifier = Verifier::<_, Sha256>::new(round, schemes[0].clone(), quorum);
         verifier.add(Vote::Nullify(create_nullify(&schemes[0], round)), false);
         let result = verifier
-            .try_verify_nullifies(&mut rng, &Sequential)
+            .try_construct_nullification(&mut rng, &Sequential)
             .await
             .unwrap();
         assert_eq!(result.batch, 1);
@@ -740,7 +742,7 @@ mod tests {
         invalid.round = round;
         verifier.add(Vote::Nullify(invalid), false);
         let result = verifier
-            .try_verify_nullifies(&mut rng, &Sequential)
+            .try_construct_nullification(&mut rng, &Sequential)
             .await
             .unwrap();
         assert_eq!(result.batch, quorum as usize);
@@ -957,7 +959,7 @@ mod tests {
         set_leader(secp256r1::fixture);
     }
 
-    async fn ready_and_verify_notarizes<S, F>(mut fixture: F)
+    async fn ready_and_construct_notarization<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -994,7 +996,7 @@ mod tests {
 
         assert_valid(
             verifier
-                .try_verify_notarizes(&mut rng, &Sequential)
+                .try_construct_notarization(&mut rng, &Sequential)
                 .await
                 .unwrap(),
             4,
@@ -1030,7 +1032,7 @@ mod tests {
             invalid: failed_second,
             ..
         } = verifier2
-            .try_verify_notarizes(&mut rng, &Sequential)
+            .try_construct_notarization(&mut rng, &Sequential)
             .await
             .unwrap();
         assert_eq!(batch, quorum as usize);
@@ -1046,15 +1048,15 @@ mod tests {
     }
 
     #[test_async]
-    async fn test_ready_and_verify_notarizes() {
-        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
-        ready_and_verify_notarizes(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
-        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinSig, _>).await;
-        ready_and_verify_notarizes(bls12381_threshold_std::fixture::<MinPk, _>).await;
-        ready_and_verify_notarizes(bls12381_multisig::fixture::<MinSig, _>).await;
-        ready_and_verify_notarizes(bls12381_multisig::fixture::<MinPk, _>).await;
-        ready_and_verify_notarizes(ed25519::fixture).await;
-        ready_and_verify_notarizes(secp256r1::fixture).await;
+    async fn test_ready_and_construct_notarization() {
+        ready_and_construct_notarization(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        ready_and_construct_notarization(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        ready_and_construct_notarization(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        ready_and_construct_notarization(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        ready_and_construct_notarization(bls12381_multisig::fixture::<MinSig, _>).await;
+        ready_and_construct_notarization(bls12381_multisig::fixture::<MinPk, _>).await;
+        ready_and_construct_notarization(ed25519::fixture).await;
+        ready_and_construct_notarization(secp256r1::fixture).await;
     }
 
     fn add_nullify<S, F>(mut fixture: F)
@@ -1095,7 +1097,7 @@ mod tests {
         add_nullify(secp256r1::fixture);
     }
 
-    async fn ready_and_verify_nullifies<S, F>(mut fixture: F)
+    async fn ready_and_construct_nullification<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -1128,7 +1130,7 @@ mod tests {
 
         assert_valid(
             verifier
-                .try_verify_nullifies(&mut rng, &Sequential)
+                .try_construct_nullification(&mut rng, &Sequential)
                 .await
                 .unwrap(),
             3,
@@ -1140,15 +1142,15 @@ mod tests {
     }
 
     #[test_async]
-    async fn test_ready_and_verify_nullifies() {
-        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
-        ready_and_verify_nullifies(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
-        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinSig, _>).await;
-        ready_and_verify_nullifies(bls12381_threshold_std::fixture::<MinPk, _>).await;
-        ready_and_verify_nullifies(bls12381_multisig::fixture::<MinSig, _>).await;
-        ready_and_verify_nullifies(bls12381_multisig::fixture::<MinPk, _>).await;
-        ready_and_verify_nullifies(ed25519::fixture).await;
-        ready_and_verify_nullifies(secp256r1::fixture).await;
+    async fn test_ready_and_construct_nullification() {
+        ready_and_construct_nullification(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        ready_and_construct_nullification(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        ready_and_construct_nullification(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        ready_and_construct_nullification(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        ready_and_construct_nullification(bls12381_multisig::fixture::<MinSig, _>).await;
+        ready_and_construct_nullification(bls12381_multisig::fixture::<MinPk, _>).await;
+        ready_and_construct_nullification(ed25519::fixture).await;
+        ready_and_construct_nullification(secp256r1::fixture).await;
     }
 
     fn add_finalize<S, F>(mut fixture: F)
@@ -1209,7 +1211,7 @@ mod tests {
         add_finalize(secp256r1::fixture);
     }
 
-    async fn ready_and_verify_finalizes<S, F>(mut fixture: F)
+    async fn ready_and_construct_finalization<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256, PublicKey = PublicKey>,
         F: FnMut(&mut TestRng, &[u8], u32) -> Fixture<S>,
@@ -1247,7 +1249,7 @@ mod tests {
 
         assert_valid(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .unwrap(),
             3,
@@ -1259,15 +1261,15 @@ mod tests {
     }
 
     #[test_async]
-    async fn test_ready_and_verify_finalizes() {
-        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
-        ready_and_verify_finalizes(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
-        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinSig, _>).await;
-        ready_and_verify_finalizes(bls12381_threshold_std::fixture::<MinPk, _>).await;
-        ready_and_verify_finalizes(bls12381_multisig::fixture::<MinSig, _>).await;
-        ready_and_verify_finalizes(bls12381_multisig::fixture::<MinPk, _>).await;
-        ready_and_verify_finalizes(ed25519::fixture).await;
-        ready_and_verify_finalizes(secp256r1::fixture).await;
+    async fn test_ready_and_construct_finalization() {
+        ready_and_construct_finalization(bls12381_threshold_vrf::fixture::<MinSig, _>).await;
+        ready_and_construct_finalization(bls12381_threshold_vrf::fixture::<MinPk, _>).await;
+        ready_and_construct_finalization(bls12381_threshold_std::fixture::<MinSig, _>).await;
+        ready_and_construct_finalization(bls12381_threshold_std::fixture::<MinPk, _>).await;
+        ready_and_construct_finalization(bls12381_multisig::fixture::<MinSig, _>).await;
+        ready_and_construct_finalization(bls12381_multisig::fixture::<MinPk, _>).await;
+        ready_and_construct_finalization(ed25519::fixture).await;
+        ready_and_construct_finalization(secp256r1::fixture).await;
     }
 
     fn leader_proposal_filters_messages<S, F>(mut fixture: F)
@@ -1422,7 +1424,7 @@ mod tests {
 
         assert_valid(
             verifier
-                .try_verify_notarizes(&mut rng, &Sequential)
+                .try_construct_notarization(&mut rng, &Sequential)
                 .await
                 .unwrap(),
             quorum as usize,
@@ -1471,7 +1473,7 @@ mod tests {
         // buffered votes are untouched
         assert!(
             verifier
-                .try_verify_notarizes(&mut rng, &Sequential)
+                .try_construct_notarization(&mut rng, &Sequential)
                 .await
                 .is_none(),
             "Should not verify without leader/proposal set"
@@ -1481,7 +1483,7 @@ mod tests {
         verifier.set_leader(notarizes[0].signer(), Some(&notarizes[0]));
         assert!(
             verifier
-                .try_verify_notarizes(&mut rng, &Sequential)
+                .try_construct_notarization(&mut rng, &Sequential)
                 .await
                 .is_some(),
             "Should verify once leader is set"
@@ -1532,7 +1534,7 @@ mod tests {
 
         assert!(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .is_none(),
             "Should not verify without leader/proposal set"
@@ -1541,7 +1543,7 @@ mod tests {
         verifier.set_leader(finalize.signer(), None);
         assert!(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .is_none(),
             "Should not verify with a leader but no proposal"
@@ -1554,7 +1556,7 @@ mod tests {
         assert!(verifier.leader.is_none());
         assert!(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .is_some(),
             "Should verify with a proposal and no leader"
@@ -1610,7 +1612,7 @@ mod tests {
         }
         assert_valid(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .expect("finalizes should verify against the certificate proposal"),
             quorum as usize,
@@ -1668,7 +1670,7 @@ mod tests {
         );
         assert_valid(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .expect("nonbatchable schemes verify eagerly"),
             1,
@@ -1686,7 +1688,7 @@ mod tests {
             );
             assert_valid(
                 verifier
-                    .try_verify_finalizes(&mut rng, &Sequential)
+                    .try_construct_finalization(&mut rng, &Sequential)
                     .await
                     .expect("nonbatchable schemes verify eagerly"),
                 1,
@@ -1700,7 +1702,7 @@ mod tests {
         );
         assert_valid(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .expect("nonbatchable schemes verify eagerly"),
             1,
@@ -1729,7 +1731,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_notarizes_empty_pending_when_forced() {
+    fn test_notarizes_empty_pending() {
         verify_notarizes_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
         verify_notarizes_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
         verify_notarizes_empty(bls12381_threshold_std::fixture::<MinSig, _>);
@@ -1757,7 +1759,7 @@ mod tests {
         assert!(!verifier.nullify.is_ready());
         assert!(
             verifier
-                .try_verify_nullifies(&mut rng, &Sequential)
+                .try_construct_nullification(&mut rng, &Sequential)
                 .await
                 .is_none()
         );
@@ -1794,7 +1796,7 @@ mod tests {
         assert!(!verifier.finalize.is_ready());
         assert!(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .is_none()
         );
@@ -1855,7 +1857,7 @@ mod tests {
 
         assert_valid(
             verifier
-                .try_verify_notarizes(&mut rng, &Sequential)
+                .try_construct_notarization(&mut rng, &Sequential)
                 .await
                 .unwrap(),
             quorum as usize - 1,
@@ -2150,7 +2152,7 @@ mod tests {
         assert!(verifier.nullify.is_ready());
 
         let result = verifier
-            .try_verify_nullifies(&mut rng, &Sequential)
+            .try_construct_nullification(&mut rng, &Sequential)
             .await
             .unwrap();
         assert_eq!(result.batch, 3);
@@ -2162,7 +2164,7 @@ mod tests {
 
         verifier.add(Vote::Nullify(create_nullify(&schemes[4], round)), true);
         let result = verifier
-            .try_verify_nullifies(&mut rng, &Sequential)
+            .try_construct_nullification(&mut rng, &Sequential)
             .await
             .unwrap();
         assert_eq!(result.batch, 0);
@@ -2181,7 +2183,7 @@ mod tests {
         assert!(verifier.nullify.pending().is_empty());
         assert!(
             verifier
-                .try_verify_nullifies(&mut rng, &Sequential)
+                .try_construct_nullification(&mut rng, &Sequential)
                 .await
                 .is_none()
         );
@@ -2254,7 +2256,9 @@ mod tests {
             );
         }
 
-        let _ = verifier.try_verify_notarizes(&mut rng, &Sequential).await;
+        let _ = verifier
+            .try_construct_notarization(&mut rng, &Sequential)
+            .await;
     }
 
     #[test_async]
@@ -2288,15 +2292,21 @@ mod tests {
         for (kind, result) in [
             (
                 Kind::Notarization,
-                verifier.try_verify_notarizes(&mut rng, &Sequential).await,
+                verifier
+                    .try_construct_notarization(&mut rng, &Sequential)
+                    .await,
             ),
             (
                 Kind::Nullification,
-                verifier.try_verify_nullifies(&mut rng, &Sequential).await,
+                verifier
+                    .try_construct_nullification(&mut rng, &Sequential)
+                    .await,
             ),
             (
                 Kind::Finalization,
-                verifier.try_verify_finalizes(&mut rng, &Sequential).await,
+                verifier
+                    .try_construct_finalization(&mut rng, &Sequential)
+                    .await,
             ),
         ] {
             let result = result.unwrap();
@@ -2309,19 +2319,19 @@ mod tests {
         }
         assert!(
             verifier
-                .try_verify_notarizes(&mut rng, &Sequential)
+                .try_construct_notarization(&mut rng, &Sequential)
                 .await
                 .is_none()
         );
         assert!(
             verifier
-                .try_verify_nullifies(&mut rng, &Sequential)
+                .try_construct_nullification(&mut rng, &Sequential)
                 .await
                 .is_none()
         );
         assert!(
             verifier
-                .try_verify_finalizes(&mut rng, &Sequential)
+                .try_construct_finalization(&mut rng, &Sequential)
                 .await
                 .is_none()
         );

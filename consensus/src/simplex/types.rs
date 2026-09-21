@@ -2306,8 +2306,7 @@ where
 ///
 /// # Verification
 ///
-/// Some activities issued by consensus are not guaranteed to have their individual partial signatures
-/// cryptographically verified. This includes partial votes used to recover a threshold certificate. Use
+/// Some activities issued by consensus are not guaranteed to be cryptographically verified. Use
 /// [`Activity::verified`] to check whether an activity may be unverified, and [`Activity::verify`] to
 /// perform verification.
 ///
