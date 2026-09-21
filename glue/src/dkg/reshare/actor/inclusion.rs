@@ -3,7 +3,7 @@ use crate::dkg::{
     network::{Directory, Manager},
     reshare::{
         Actor, EpochInfoResponse, Message,
-        actor::Mode,
+        actor::{FinalizedTip, Mode},
         mailbox::LogReservation,
         metrics::Phase,
         store::{Dealer, Player, Store},
@@ -403,13 +403,6 @@ where
     }
 }
 
-/// Latest finalized block whose reporter effects and digest are locally known.
-#[derive(Clone, Copy)]
-struct FinalizedTip<D> {
-    height: Height,
-    digest: D,
-}
-
 struct PendingLogScan<'a, V: BlsVariant, P, D> {
     epoch: Epoch,
     info: &'a Info<V, P>,
@@ -692,14 +685,16 @@ where
         // to blocks not yet reflected in storage. Queued ancestries remain lazy
         // until the sole verifier is free.
         let mut served_at: Option<Height> = None;
-        let mut finalized_tip = match self.marshal.get_processed_height().await {
-            Some(height) => self
-                .marshal
-                .get_info(height)
-                .await
-                .map(|(_, digest)| FinalizedTip { height, digest }),
-            None => None,
-        };
+        if self.finalized_tip.is_none() {
+            self.finalized_tip = match self.marshal.get_processed_height().await {
+                Some(height) => self
+                    .marshal
+                    .get_info(height)
+                    .await
+                    .map(|(_, digest)| FinalizedTip { height, digest }),
+                None => None,
+            };
+        }
         let mut work = ArtifactWork::default();
         let mut scan = ArtifactScan::default();
 
@@ -760,7 +755,7 @@ where
                             self.advance_artifact_requests(
                                 epoch,
                                 info,
-                                finalized_tip,
+                                self.finalized_tip,
                                 &mut scan,
                                 &mut work,
                             );
@@ -772,6 +767,10 @@ where
                     block,
                     response,
                 } => {
+                    if self.already_finalized(block.as_ref()) {
+                        response.acknowledge();
+                        continue;
+                    }
                     let process = info_span!(
                         parent: &span,
                         "dkg.reshare.actor.inclusion.finalized",
@@ -826,11 +825,6 @@ where
                             return ControlFlow::Break(());
                         }
 
-                        finalized_tip = Some(FinalizedTip {
-                            height: block.height(),
-                            digest: block.digest(),
-                        });
-
                         // Re-offer our dealer log if finalization reached the height we
                         // served it into without the log landing on-chain. When our log
                         // does finalize, observe_dealer_log above clears it via
@@ -844,7 +838,7 @@ where
                             served_at = None;
                         }
 
-                        response.acknowledge();
+                        self.acknowledge(block.as_ref(), response);
                         ControlFlow::Continue(done)
                     }
                     .instrument(process)
@@ -882,7 +876,7 @@ where
                 self.advance_artifact_requests(
                     epoch,
                     info,
-                    finalized_tip,
+                    self.finalized_tip,
                     &mut scan,
                     &mut work,
                 );
@@ -1859,6 +1853,71 @@ mod tests {
             signed_log,
             public_key,
         }
+    }
+
+    #[test]
+    fn completed_receipts_survive_phase_changes() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "completed-receipts", NZU64!(4)).await;
+            let genesis = Arc::new(mocks::genesis_block(public_key.clone()));
+            let early = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(1),
+                1,
+            ));
+            let midpoint = Arc::new(TestBlock::new::<Sha256>(
+                early.context().clone(),
+                early.digest(),
+                Height::new(2),
+                2,
+            ));
+            let mut report = |block| {
+                let (ack, waiter) = Exact::handle();
+                assert_eq!(
+                    mailbox.report(marshal::Update::Block(block, ack)),
+                    Feedback::Ok
+                );
+                waiter
+            };
+            let genesis_receipt = report(genesis);
+            let early_receipt = report(early.clone());
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        commonware_p2p::utils::mocks::inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            genesis_receipt.await.unwrap();
+            early_receipt.await.unwrap();
+
+            let inclusion = context.child("inclusion").spawn(|_| async move {
+                actor
+                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .await
+            });
+            for block in [early.clone(), midpoint.clone(), midpoint, early] {
+                report(block)
+                    .await
+                    .expect("each canonical receipt must be acknowledged");
+            }
+            drop(mailbox);
+            assert!(inclusion.await.unwrap().is_break());
+        });
     }
 
     #[test]

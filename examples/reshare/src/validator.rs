@@ -14,7 +14,7 @@ use crate::{
 use clap::Args;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
-    Reporters,
+    Epochable as _, Reporters,
     marshal::{
         self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
     },
@@ -171,6 +171,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
         genesis_info.clone(),
         genesis_target,
     );
+    let stateful_startup = context.child("stateful_startup");
+    let mut plan = SyncPlan::init(&stateful_startup, partition_prefix).await;
     let (probe_actor, probe_mailbox) = probe::Actor::new(probe::Config {
         context: context.child("dkg_probe"),
         manager: oracle.clone(),
@@ -179,6 +181,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             participants: genesis_info.participants(),
             directory: Unit,
         },
+        minimum_epoch: plan.floor().map_or(Epoch::zero(), |floor| floor.epoch()),
         verifier: Scheme::certificate_verifier(NAMESPACE, *genesis_info.output.public().public()),
         genesis: genesis_info.clone(),
         strategy: Sequential,
@@ -190,8 +193,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
     });
     let probe_handle = probe_actor.start(dkg_probe_network);
 
-    let stateful_startup = context.child("stateful_startup");
-    let mut plan = SyncPlan::init(&stateful_startup, partition_prefix).await;
     let should_state_sync = plan.should_state_sync(args.state_sync);
     let probe_artifact = if should_state_sync {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");

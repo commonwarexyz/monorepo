@@ -232,6 +232,7 @@ mod tests {
     use super::{Actor, Bootstrap, Config, wire};
     use crate::dkg::{
         probe::Artifact,
+        state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
         tests::mocks,
         types::{EpochInfo, EpochOutcome, Payload},
     };
@@ -254,7 +255,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_p2p::{
-        Receiver as _, Recipients, Sender as _,
+        Provider as _, Receiver as _, Recipients, Sender as _,
         simulated::{
             Config as NetworkConfig, Link, Network, Oracle, Receiver as SimReceiver,
             Sender as SimSender,
@@ -326,6 +327,23 @@ mod tests {
             bootstrap_epoch: Epoch,
         ) -> Self {
             let fixture = mocks::scheme_fixture_n(context, 4);
+            Self::start_with_fixture(
+                context,
+                source_boundaries,
+                bootstrap_epoch,
+                Epoch::zero(),
+                &fixture,
+            )
+            .await
+        }
+
+        async fn start_with_fixture(
+            context: &mut deterministic::Context,
+            source_boundaries: Vec<Epoch>,
+            bootstrap_epoch: Epoch,
+            minimum_epoch: Epoch,
+            fixture: &mocks::SchemeFixture,
+        ) -> Self {
             let participants = fixture.participants.clone();
 
             let (network, oracle) = Network::new_with_peers(
@@ -390,6 +408,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                minimum_epoch: Epoch::zero(),
                 verifier: fixture.schemes[0].clone(),
                 genesis: genesis.clone(),
                 strategy: Sequential,
@@ -415,6 +434,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                minimum_epoch,
                 verifier: fixture.schemes[1].clone(),
                 genesis,
                 strategy: Sequential,
@@ -438,7 +458,7 @@ mod tests {
 
             Self {
                 participants,
-                schemes: fixture.schemes,
+                schemes: fixture.schemes.clone(),
                 source_boundary_sender,
                 client_boundary_sender: client_boundaries.0,
                 client_boundary_receiver: client_boundaries.1,
@@ -956,6 +976,103 @@ mod tests {
             let artifact = subscription.try_recv().expect("artifact resolved");
             assert_eq!(artifact.floor, target);
         });
+    }
+
+    #[test]
+    fn restart_probe_respects_persisted_floor_epoch() {
+        let mut checkpoint = None;
+        let mut fixture = None;
+        let mut selected = None;
+        for boot in 0..2 {
+            let runner = checkpoint.map_or_else(
+                || deterministic::Runner::timed(Duration::from_secs(30)),
+                deterministic::Runner::from,
+            );
+            let (state, recovered) = runner.start_and_recover(move |mut context| async move {
+                let fixture = fixture.unwrap_or_else(|| mocks::scheme_fixture_n(&mut context, 4));
+                let plan = crate::stateful::SyncPlan::<
+                    _,
+                    mocks::TestScheme,
+                    mocks::TestMarshalVariant,
+                >::init(&context, "restart_probe_floor")
+                .await;
+                if boot == 1 {
+                    assert!(plan.should_state_sync(false));
+                    assert_eq!(plan.floor(), selected.as_ref());
+                }
+                let minimum_epoch = plan.floor().map_or(Epoch::zero(), |floor| floor.epoch());
+                let mut harness = Harness::start_with_fixture(
+                    &mut context,
+                    vec![Epoch::new(1)],
+                    Epoch::zero(),
+                    minimum_epoch,
+                    &fixture,
+                )
+                .await;
+                let mut subscription = harness.joiner.subscribe();
+                Harness::expect_latest_request(&mut harness.client_boundary_receiver).await;
+                if boot == 1 {
+                    let stale = harness.boundary_finalization.clone();
+                    harness.reply_latest_from_client(stale.clone());
+                    harness.reply_latest_from_backup(stale);
+                    context.sleep(Duration::from_millis(100)).await;
+                    assert!(
+                        matches!(
+                            subscription.try_recv(),
+                            Err(oneshot::error::TryRecvError::Empty)
+                        ),
+                        "a fresh probe must not pair older epoch information with the saved floor",
+                    );
+                    assert!(harness.oracle.blocked().await.unwrap().is_empty());
+                }
+                let parent = harness.boundary.digest();
+                let block = mocks::TestBlock::new::<Sha256>(
+                    mocks::TestContext {
+                        round: Round::new(Epoch::new(1), View::new(2)),
+                        leader: harness.participants[0].clone(),
+                        parent: (View::new(1), parent),
+                    },
+                    parent,
+                    Height::new(2),
+                    2,
+                );
+                let floor = harness.latest_finalization(Epoch::new(1), block.digest());
+                harness.reply_latest_from_client(floor.clone());
+                harness.reply_latest_from_backup(floor.clone());
+                let artifact = subscription.await.expect("eligible artifact");
+                assert_eq!(artifact.floor, floor);
+                let mut manager = harness.oracle.manager();
+                assert!(manager.peer_set(0).await.is_some());
+                assert!(manager.peer_set(1).await.is_none());
+                let plan = plan.with_floor(artifact.floor).await;
+                assert_eq!(plan.floor(), Some(&floor));
+                if boot == 1 {
+                    let provided = StateSync {
+                        info: artifact.info,
+                        floor: plan.floor().unwrap().clone(),
+                    };
+                    let dkg_plan = StateSyncPlan::init(
+                        context.child("dkg_startup"),
+                        StateSyncConfig {
+                            partition_prefix: "restart_probe_floor".into(),
+                            max_participants: NZU32!(16),
+                            max_supported_mode: crate::dkg::tests::max_supported_mode(),
+                        },
+                        Some(provided.clone()),
+                    )
+                    .await;
+                    assert_eq!(
+                        dkg_plan.resolve(context.child("dkg_resolve"), None).await,
+                        Some(provided)
+                    );
+                }
+                // The first boot stops after persisting the floor, before DKG startup material exists.
+                (fixture, floor)
+            });
+            fixture = Some(state.0);
+            selected = Some(state.1);
+            checkpoint = Some(recovered);
+        }
     }
 
     #[test]
@@ -1495,6 +1612,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                minimum_epoch: Epoch::zero(),
                 verifier: fixture.schemes[0].clone(),
                 genesis,
                 strategy: Sequential,
