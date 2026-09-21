@@ -114,13 +114,10 @@ impl<'a, V: Viewable, F: Future + Unpin> Future for Waiter<'a, V, F> {
 
 /// Unified response from a regular or handoff proposal request.
 enum ProposalResponse<D> {
-    Proposed {
-        payload: D,
-        /// Handoff publication permission. Ordinary proposals carry `None`
-        /// and do not wait for parent certification.
-        publication: Option<HandoffPublication>,
-    },
-    AwaitCertification,
+    /// An ordinary candidate or a held candidate released after parent certification.
+    Proposed(D),
+    /// A fresh response from a handoff request.
+    Handoff(HandoffProposal<D>),
 }
 
 /// Pending automaton response for a regular or handoff proposal request.
@@ -151,24 +148,12 @@ impl<D> Future for ProposalReceiver<D> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
-            Self::Regular(receiver) => Pin::new(receiver).poll(cx).map(|result| {
-                result.map(|payload| ProposalResponse::Proposed {
-                    payload,
-                    publication: None,
-                })
-            }),
-            Self::Handoff(receiver) => Pin::new(receiver).poll(cx).map(|result| {
-                result.map(|proposal| match proposal {
-                    HandoffProposal::Proposed {
-                        payload,
-                        publication,
-                    } => ProposalResponse::Proposed {
-                        payload,
-                        publication: Some(publication),
-                    },
-                    HandoffProposal::AwaitCertification => ProposalResponse::AwaitCertification,
-                })
-            }),
+            Self::Regular(receiver) => Pin::new(receiver)
+                .poll(cx)
+                .map(|result| result.map(ProposalResponse::Proposed)),
+            Self::Handoff(receiver) => Pin::new(receiver)
+                .poll(cx)
+                .map(|result| result.map(ProposalResponse::Handoff)),
         }
     }
 }
@@ -1332,10 +1317,7 @@ impl<
                     let proposed = match pending_propose.as_mut() {
                         Some(Request(_, _, ProposalState::Awaiting(receiver))) => receiver.await,
                         Some(Request(_, _, ProposalState::Ready(payload))) => {
-                            Ok(ProposalResponse::Proposed {
-                                payload: *payload,
-                                publication: None,
-                            })
+                            Ok(ProposalResponse::Proposed(*payload))
                         }
                         _ => core::future::pending().await,
                     };
@@ -1378,22 +1360,20 @@ impl<
                 // slot until the parent certifies. The captured request and build latch
                 // remain active until promotion.
                 let proposed = match proposed {
-                    Ok(ProposalResponse::AwaitCertification) => {
+                    Ok(ProposalResponse::Proposed(payload)) => Ok(payload),
+                    Ok(ProposalResponse::Handoff(HandoffProposal::AwaitCertification)) => {
                         self.record_handoff_event(HandoffEventKind::Deferred);
                         pending_propose = Some(Request(request, span, ProposalState::Deferred));
                         continue;
                     }
-                    Ok(ProposalResponse::Proposed { payload, publication }) => {
-                        // Released held results carry `None`, so each candidate counts once.
-                        if let Some(publication) = publication {
-                            self.record_handoff_event(HandoffEventKind::CandidateReturned);
-                            if publication == HandoffPublication::AfterCertification
-                                && !self.state.proposal_parent_certified(request.context())
-                            {
-                                self.record_handoff_event(HandoffEventKind::Held);
-                                pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
-                                continue;
-                            }
+                    Ok(ProposalResponse::Handoff(HandoffProposal::Proposed { payload, publication })) => {
+                        self.record_handoff_event(HandoffEventKind::CandidateReturned);
+                        if publication == HandoffPublication::AfterCertification
+                            && !self.state.proposal_parent_certified(request.context())
+                        {
+                            self.record_handoff_event(HandoffEventKind::Held);
+                            pending_propose = Some(Request(request, span, ProposalState::Held(payload)));
+                            continue;
                         }
                         Ok(payload)
                     }
