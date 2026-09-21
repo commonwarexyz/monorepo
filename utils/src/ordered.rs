@@ -431,6 +431,17 @@ impl<K, V> Map<K, V> {
     ///
     /// Returns the first error without calling the closure for subsequent entries.
     /// Clones the keys only on success.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::ordered::Map;
+    ///
+    /// let map = Map::try_from([(2, "invalid"), (1, "10")]).unwrap();
+    /// let result = map.try_map_values(|_, value| value.parse::<u32>());
+    /// assert!(result.is_err());
+    /// assert_eq!(map.values(), &["10", "invalid"]);
+    /// ```
     pub fn try_map_values<'a, U, E, F>(&'a self, mut f: F) -> Result<Map<K, U>, E>
     where
         K: Clone,
@@ -450,6 +461,17 @@ impl<K, V> Map<K, V> {
     ///
     /// The closure receives a reference to the key and the owned value. Keys are
     /// neither cloned, sorted, nor validated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::ordered::Map;
+    ///
+    /// let map = Map::try_from([(2, String::from("two")), (1, String::from("one"))]).unwrap();
+    /// let bytes = map.map_values_into(|_, value| value.into_bytes());
+    /// assert_eq!(bytes.keys().as_ref(), &[1, 2]);
+    /// assert_eq!(bytes.values(), &[b"one".to_vec(), b"two".to_vec()]);
+    /// ```
     pub fn map_values_into<U, F>(self, mut f: F) -> Map<K, U>
     where
         F: FnMut(&K, V) -> U,
