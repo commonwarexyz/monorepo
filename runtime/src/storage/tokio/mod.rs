@@ -50,21 +50,39 @@ struct Partitions {
 }
 
 impl Partitions {
+    /// Makes directory entry changes durable, with test hooks to pause or fail
+    /// before the filesystem sync.
     fn sync_dir(&mut self, path: &Path) -> Result<(), Error> {
         #[cfg(all(test, target_os = "macos"))]
         self.sync_hook.run()?;
         sync_dir(path)
     }
 
-    /// Make a partition's directory entries durable before recording completion.
-    #[cfg(target_os = "macos")]
-    fn sync_once(&mut self, path: &Path) -> Result<(), Error> {
-        if self.synced.contains(path) {
-            return Ok(());
-        }
+    /// Record a partition after its required directory syncs have succeeded.
+    fn mark_synced(&mut self, _path: impl Into<PathBuf>) {
+        #[cfg(target_os = "macos")]
+        self.synced.insert(_path.into());
+    }
 
-        self.sync_dir(path)?;
-        self.synced.insert(path.to_owned());
+    /// Retire a partition's durability record before changing its directory entries.
+    #[allow(clippy::missing_const_for_fn)]
+    fn invalidate(&mut self, _path: &Path) {
+        #[cfg(target_os = "macos")]
+        self.synced.remove(_path);
+    }
+
+    /// Make a partition's inherited directory entries durable on first access.
+    #[allow(clippy::missing_const_for_fn)]
+    fn sync_once(&mut self, _path: &Path) -> Result<(), Error> {
+        #[cfg(target_os = "macos")]
+        {
+            if self.synced.contains(_path) {
+                return Ok(());
+            }
+
+            self.sync_dir(_path)?;
+            self.mark_synced(_path);
+        }
         Ok(())
     }
 }
@@ -173,7 +191,6 @@ impl crate::Storage for Storage {
             )?;
             let (logical_size, blob_version, data_offset) = match existing {
                 Some(resolved) => {
-                    #[cfg(target_os = "macos")]
                     partitions.sync_once(parent)?;
                     resolved
                 }
@@ -182,8 +199,7 @@ impl crate::Storage for Storage {
                     // header. A visible partition directory does not establish its durability.
                     partitions.sync_dir(parent)?;
                     partitions.sync_dir(&storage_directory)?;
-                    #[cfg(target_os = "macos")]
-                    partitions.synced.insert(parent.to_owned());
+                    partitions.mark_synced(parent);
 
                     // Truncate to zero before writing, per the [Header::create] contract.
                     let (region, blob_version) = Header::create(&blob_layouts, &versions);
@@ -220,8 +236,9 @@ impl crate::Storage for Storage {
         // the sequence between an unlink and the directory sync that makes it
         // durable.
         self.dispatch(move |partitions| {
-            #[cfg(target_os = "macos")]
-            partitions.synced.remove(&path);
+            // Invalidate before unlinking so a failed removal cannot leave the
+            // partition marked durable.
+            partitions.invalidate(&path);
 
             // Remove all related files
             let sync_path = if let Some(name) = &name {
@@ -240,9 +257,8 @@ impl crate::Storage for Storage {
             };
 
             partitions.sync_dir(&sync_path)?;
-            #[cfg(target_os = "macos")]
             if name.is_some() {
-                partitions.synced.insert(sync_path);
+                partitions.mark_synced(sync_path);
             }
             Ok(())
         })
@@ -254,14 +270,13 @@ impl crate::Storage for Storage {
 
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
-        self.dispatch(move |_partitions| {
+        self.dispatch(move |partitions| {
             // Distinguish missing partitions from other filesystem failures.
             let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
                 ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
                 _ => Error::ReadFailed,
             })?;
-            #[cfg(target_os = "macos")]
-            _partitions.sync_once(&path)?;
+            partitions.sync_once(&path)?;
             let mut blobs = Vec::new();
             for entry in entries {
                 let entry = entry.map_err(|_| Error::ReadFailed)?;
