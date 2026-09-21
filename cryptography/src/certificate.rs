@@ -76,7 +76,9 @@ use commonware_codec::{
     types::lazy::Lazy,
 };
 use commonware_parallel::Strategy;
-use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
+use commonware_utils::{
+    Faults, Participant, bitmap::BitMap, iter::NonEmpty, non_empty, ordered::Set,
+};
 use core::{fmt::Debug, hash::Hash};
 use rand_core::CryptoRng;
 #[cfg(feature = "std")]
@@ -408,6 +410,62 @@ pub trait Scheme: Verifier {
         Verification::new(verified.collect(), invalid.into_iter().collect())
     }
 
+    /// Recovers a verified certificate or verifies pending attestations.
+    ///
+    /// Non-attributable schemes attempt recovery using `pending` and `additional`.
+    /// `Ok` authenticates only the certificate for `subject`. `Err` partitions
+    /// `pending` into individually verified attestations and invalid signers.
+    /// Attributable schemes always return this individual result.
+    ///
+    /// `additional` contributes only to recovery, need not be verified, and is
+    /// excluded from the individual results. Empty `pending` returns an empty
+    /// partition without consuming `additional`.
+    ///
+    /// As with [`Self::verify_attestations`], `pending` must contain at most one
+    /// attestation per signer.
+    fn recover_or_verify<R, D, I, J>(
+        &self,
+        rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        pending: I,
+        additional: J,
+        strategy: &impl Strategy,
+    ) -> Result<Self::Certificate, Verification<Self>>
+    where
+        R: CryptoRng,
+        D: Digest,
+        I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: ExactSizeIterator + Clone + Send,
+        J: IntoIterator<Item = Attestation<Self>>,
+        J::IntoIter: Send,
+    {
+        let mut pending = pending.into_iter();
+        if pending.len() == 0 {
+            return Err(Verification::new(Vec::new(), Vec::new()));
+        }
+        if Self::is_attributable() {
+            return Err(self.verify_attestations(rng, subject, pending, strategy));
+        }
+        if let Ok(certificate) =
+            self.assemble(non_empty![@pending.clone().chain(additional)], strategy)
+            && self.verify_certificate(rng, subject.clone(), &certificate, strategy)
+        {
+            return Ok(certificate);
+        }
+
+        // Each half needs ordinary verification, including every signed component
+        // of schemes with more than one signature per attestation.
+        let chunk = pending.len().div_ceil(2);
+        let mut result =
+            self.verify_attestations(rng, subject.clone(), pending.by_ref().take(chunk), strategy);
+        if pending.len() != 0 {
+            let rest = self.verify_attestations(rng, subject, pending, strategy);
+            result.verified.extend(rest.verified);
+            result.invalid.extend(rest.invalid);
+        }
+        Err(result)
+    }
+
     /// Assembles a non-empty stream of attestations into a candidate certificate.
     ///
     /// Inputs may be unverified. `Ok` does not authenticate them or the resulting certificate;
@@ -692,6 +750,9 @@ pub mod mocks;
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "bls12381")]
+    mod recovery;
+
     use super::*;
     use crate::{Signer as _, ed25519::PrivateKey, sha256::Digest as Sha256Digest};
     use commonware_codec::{Decode, Encode};
