@@ -1,6 +1,7 @@
 use crate::{Automaton as A, types::Height};
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_utils::channel::oneshot;
+use std::sync::Arc;
 use tracing::trace;
 
 #[derive(Clone, Debug)]
@@ -30,7 +31,11 @@ impl A for Application {
     type Context = Height;
     type Digest = <Sha256 as Hasher>::Digest;
 
-    async fn propose(&mut self, context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(
+        &mut self,
+        context: Self::Context,
+        _ancestry: Arc<[Self::Digest]>,
+    ) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
 
         let digest = match &self.strategy {
@@ -56,6 +61,7 @@ impl A for Application {
         &mut self,
         context: Self::Context,
         payload: Self::Digest,
+        _ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         trace!(%context, ?payload, "verify");
         let (sender, receiver) = oneshot::channel();
