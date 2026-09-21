@@ -305,7 +305,7 @@ where
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -401,7 +401,7 @@ where
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
     async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+        <Self>::init(context, config, None).await
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
