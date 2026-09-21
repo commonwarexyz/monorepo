@@ -1114,23 +1114,18 @@ mod test {
 
     #[test]
     fn test_map_values_borrowed() {
-        struct Value(String);
+        struct Value(u8);
 
-        let map = Map::try_from([
-            (3, Value("three".into())),
-            (1, Value("one".into())),
-            (2, Value("two".into())),
-        ])
-        .unwrap();
-        let mapped = map.map_values(|key, value| (key, value.0.as_str()));
+        let map = Map::try_from([(3, Value(30)), (1, Value(10)), (2, Value(20))]).unwrap();
+        let mapped = map.map_values(|key, value| (key, &value.0));
         let tried = map
-            .try_map_values(|key, value| Ok::<_, ()>((key, value.0.as_str())))
+            .try_map_values(|key, value| Ok::<_, ()>((key, &value.0)))
             .unwrap();
         for result in [mapped, tried] {
             assert_eq!(result.keys(), map.keys());
-            assert_eq!(result.values(), &[(&1, "one"), (&2, "two"), (&3, "three")]);
+            assert_eq!(result.values(), &[(&1, &10), (&2, &20), (&3, &30)]);
         }
-        assert_eq!(map.get_value(&2).unwrap().0, "two");
+        assert_eq!(map.get_value(&2).unwrap().0, 20);
     }
 
     #[rstest]
@@ -1139,19 +1134,19 @@ mod test {
     fn test_map_values_into_reuses_keys(#[case] fallible: bool) {
         #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
         struct Key(u8);
-        struct Value(String);
+        struct Value(u8);
 
         let map = Map::try_from([
-            (Key(3), Value("three".into())),
-            (Key(1), Value("one".into())),
-            (Key(2), Value("two".into())),
+            (Key(3), Value(30)),
+            (Key(1), Value(10)),
+            (Key(2), Value(20)),
         ])
         .unwrap();
         let keys_ptr = map.keys().as_ref().as_ptr();
         let mut visited = Vec::new();
         let mut transform = |key: &Key, value: Value| {
             visited.push(key.0);
-            value.0
+            key.0 + value.0
         };
         let mapped = if fallible {
             map.try_map_values_into(|key, value| Ok::<_, ()>(transform(key, value)))
@@ -1162,7 +1157,7 @@ mod test {
         assert_eq!(visited, [1, 2, 3]);
         assert_eq!(mapped.keys().as_ref().as_ptr(), keys_ptr);
         assert_eq!(mapped.keys().as_ref(), &[Key(1), Key(2), Key(3)]);
-        assert_eq!(mapped.values(), &["one", "two", "three"]);
+        assert_eq!(mapped.values(), &[11, 22, 33]);
     }
 
     #[test]
@@ -1181,33 +1176,7 @@ mod test {
     #[rstest]
     #[case::borrowed(false)]
     #[case::owned(true)]
-    fn test_try_map_values_short_circuits(#[case] owned: bool) {
-        let map = Map::try_from([(3, "three"), (1, "one"), (2, "two")]).unwrap();
-        for failed_key in 1..=3 {
-            let mut visited = Vec::new();
-            let mut transform = |key: &i32| {
-                visited.push(*key);
-                if *key == failed_key {
-                    Err(failed_key)
-                } else {
-                    Ok(())
-                }
-            };
-            let result = if owned {
-                map.clone().try_map_values_into(|key, _| transform(key))
-            } else {
-                map.try_map_values(|key, _| transform(key))
-            };
-            assert_eq!(result, Err(failed_key));
-            assert_eq!(visited, (1..=failed_key).collect::<Vec<_>>());
-            assert_eq!(map.values(), &["one", "two", "three"]);
-        }
-    }
-
-    #[rstest]
-    #[case::borrowed(false)]
-    #[case::owned(true)]
-    fn test_try_map_values_drops_on_error(#[case] owned: bool) {
+    fn test_try_map_values_error(#[case] owned: bool, #[values(1, 2, 3)] failed_key: usize) {
         struct Tracked<'a>(&'a Cell<usize>);
 
         impl Drop for Tracked<'_> {
@@ -1219,8 +1188,10 @@ mod test {
         let input_drops = Cell::new(0);
         let output_drops = Cell::new(0);
         let map = Map::try_from_iter((1..=3).map(|key| (key, Tracked(&input_drops)))).unwrap();
-        let transform = |key: &i32| {
-            if *key == 2 {
+        let mut visited = Vec::new();
+        let mut transform = |key: &usize| {
+            visited.push(*key);
+            if *key == failed_key {
                 Err(*key)
             } else {
                 Ok(Tracked(&output_drops))
@@ -1231,9 +1202,10 @@ mod test {
         } else {
             map.try_map_values(|key, _| transform(key))
         };
-        assert_eq!(result.err(), Some(2));
+        assert_eq!(result.err(), Some(failed_key));
+        assert_eq!(visited, (1..=failed_key).collect::<Vec<_>>());
         assert_eq!(input_drops.get(), if owned { 3 } else { 0 });
-        assert_eq!(output_drops.get(), 1);
+        assert_eq!(output_drops.get(), failed_key - 1);
     }
 
     #[test]
