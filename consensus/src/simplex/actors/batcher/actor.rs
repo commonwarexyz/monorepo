@@ -1,4 +1,4 @@
-use super::{Config, Mailbox, Message, Round, verifier::Verification};
+use super::{Config, Mailbox, Message, Round};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
@@ -92,7 +92,6 @@ where
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     batch_size: Histogram,
     verify_latency: histogram::Timed,
-    recover_latency: histogram::Timed,
     recover_fallback: Counter,
 }
 
@@ -119,17 +118,12 @@ where
         }
         let batch_size = context.histogram(
             "batch_size",
-            "number of messages in a verification or recovery batch",
+            "number of pending messages processed per batch",
             [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
         let verify_latency = context.histogram(
             "verify_latency",
-            "latency of signature verification",
-            Buckets::CRYPTOGRAPHY,
-        );
-        let recover_latency = context.histogram(
-            "recover_latency",
-            "certificate recover latency",
+            "latency of vote verification and certificate assembly",
             Buckets::CRYPTOGRAPHY,
         );
         let recover_fallback = context.counter(
@@ -173,7 +167,6 @@ where
                 latest_vote,
                 batch_size,
                 verify_latency: histogram::Timed::new(verify_latency),
-                recover_latency: histogram::Timed::new(recover_latency),
                 recover_fallback,
             },
             Mailbox::new(sender),
@@ -341,50 +334,25 @@ where
 
             timer.observe(self.context.as_ref());
 
-            let batch = match verification {
-                Verification::Individual {
-                    batch,
-                    invalid,
-                    fallback,
-                } => {
-                    if fallback {
-                        self.recover_fallback.inc();
-                    }
-                    for invalid in invalid {
-                        if let Some(signer) = self.scheme.participants().key(invalid) {
-                            commonware_p2p::block!(
-                                self.blocker,
-                                signer.clone(),
-                                "invalid signature"
-                            );
-                        }
-                    }
-                    batch
+            if verification.fallback {
+                self.recover_fallback.inc();
+            }
+            for invalid in verification.invalid {
+                if let Some(signer) = self.scheme.participants().key(invalid) {
+                    commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
                 }
-                Verification::Certificate { batch, certificate } => {
-                    let kind = certificate.kind();
-                    debug!(%view, %kind, "recovered certificate, forwarding to voter");
-                    voter.recovered(certificate);
-                    batch
-                }
-            };
-            trace!(%view, batch, "processed votes");
-            self.verified.inc_by(batch as u64);
-            self.batch_size.observe(batch as f64);
-        }
-
-        // Construct and forward every certificate with a verified quorum.
-        while let Some(certificate) = self
-            .recover_latency
-            .time_some(
-                self.context.as_ref(),
-                round.try_construct_certificate(&self.strategy),
-            )
-            .await
-        {
-            let kind = certificate.kind();
-            debug!(%view, %kind, "constructed certificate, forwarding to voter");
-            voter.recovered(certificate);
+            }
+            if let Some(certificate) = verification.certificate {
+                let kind = certificate.kind();
+                debug!(%view, %kind, "recovered certificate, forwarding to voter");
+                voter.recovered(certificate);
+            }
+            let batch = verification.batch;
+            if batch != 0 {
+                trace!(%view, batch, "processed votes");
+                self.verified.inc_by(batch as u64);
+                self.batch_size.observe(batch as f64);
+            }
         }
     }
 
