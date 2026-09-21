@@ -242,8 +242,7 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// handoffs. Certificate-derived electors such as [`RandomElector`] keep
     /// the default.
     ///
-    /// The voter may call this method several times per view. Electors should
-    /// return a precomputed result.
+    /// The voter may call this method several times per view. Keep it inexpensive.
     ///
     /// [Pipelined Handoff]: crate::simplex#pipelined-handoff
     fn elect_without_certificate(&self, _round: Round) -> Option<Participant> {

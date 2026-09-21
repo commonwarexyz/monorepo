@@ -248,8 +248,7 @@
 //! parent certifies. The application decides, per request, whether to prepare a candidate and
 //! whether consensus may publish it before the parent certifies.
 //!
-//! A **handoff request** asks the incoming leader for a term-start candidate before its parent
-//! certifies. **Preparation** builds or reuses a candidate in response to that request.
+//! **Preparation** builds or reuses a candidate.
 //!
 //! Handoff requests require an elector that can select the incoming leader without a certificate
 //! (see [`elector::Elector::elect_without_certificate`]) and an available outgoing tip. Otherwise,
