@@ -593,6 +593,28 @@ where
         None
     }
 
+    /// Checks cached block availability by digest without reading a body.
+    ///
+    /// Presence alone does not establish certification or a full commitment match.
+    pub(crate) async fn has_block(&self, digest: <V::Block as Digestible>::Digest) -> bool {
+        for cache in self.caches.values().rev() {
+            for archive in [
+                &cache.verified_blocks,
+                &cache.notarized_blocks,
+                &cache.certified_blocks,
+            ] {
+                if archive
+                    .has(Identifier::Key(&digest))
+                    .await
+                    .expect("failed to check cached block availability")
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Looks for a block in the verified, notarized, or certified archives that matches `predicate`.
     pub(crate) async fn find_block_matching(
         &self,
