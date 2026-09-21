@@ -889,16 +889,18 @@ where
                 fallback,
                 response,
             } => {
-                self.handle_subscribe(
-                    span,
-                    fallback.into(),
-                    SubscriptionKey::Digest(digest),
-                    response,
-                    resolver,
-                    waiters,
-                    buffer,
-                )
-                .await;
+                self = self
+                    .handle_subscribe(
+                        span,
+                        fallback.into(),
+                        SubscriptionKey::Digest(digest),
+                        response,
+                        resolver,
+                        waiters,
+                        buffer,
+                        application,
+                    )
+                    .await;
             }
             Message::SubscribeByCommitment {
                 span,
@@ -906,16 +908,18 @@ where
                 fallback,
                 response,
             } => {
-                self.handle_subscribe(
-                    span,
-                    fallback,
-                    SubscriptionKey::Commitment(commitment),
-                    response,
-                    resolver,
-                    waiters,
-                    buffer,
-                )
-                .await;
+                self = self
+                    .handle_subscribe(
+                        span,
+                        fallback,
+                        SubscriptionKey::Commitment(commitment),
+                        response,
+                        resolver,
+                        waiters,
+                        buffer,
+                        application,
+                    )
+                    .await;
             }
             Message::HintNotarized {
                 round, commitment, ..
@@ -1090,7 +1094,7 @@ where
     /// Handle a local subscription request for a block.
     #[allow(clippy::too_many_arguments)]
     async fn handle_subscribe<Buf: Buffer<V>>(
-        &mut self,
+        mut self: Box<Self>,
         span: Span,
         fallback: CommitmentFallback,
         key: SubscriptionKeyFor<V>,
@@ -1098,7 +1102,8 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
         waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
-    ) {
+        application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+    ) -> Box<Self> {
         let digest = match key {
             SubscriptionKey::Digest(digest) => digest,
             SubscriptionKey::Commitment(commitment) => V::commitment_to_inner(commitment),
@@ -1127,8 +1132,8 @@ where
             {
                 self.certified.insert(parent, V::parent_commitment(&block));
             }
-            response.send_lossy(block);
-            return;
+            response.send_lossy(block.clone());
+            return self.ingest(block, buffer, application, resolver).await.0;
         }
 
         // Resolver admission controls remote acquisition. Every caller remains
@@ -1181,6 +1186,7 @@ where
         }
         self.block_subscriptions
             .insert(span, key, response, waiters, buffer);
+        self
     }
 
     /// Verifies and installs a floor, fetching the anchor block if needed.
