@@ -1,6 +1,8 @@
 use crate::{Config, Scheme};
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, BufsMut, Encode, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write,
+};
 use commonware_cryptography::{
     Digest, Hasher,
     reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
@@ -245,16 +247,17 @@ where
 /// Returns a contiguous buffer of `k` padded shards and the shard length.
 /// The buffer layout is `[length_prefix | data | zero_padding]` split into
 /// `k` equal-sized shards of `shard_len` bytes each.
-fn prepare_data(mut data: impl bytes::Buf, k: usize) -> (Vec<u8>, usize) {
+fn prepare_data(data_len: usize, k: usize, write: impl FnOnce(&mut &mut [u8])) -> (Vec<u8>, usize) {
     // Compute shard length
-    let data_len = data.remaining();
     let shard_len = canonical_shard_len(data_len, k);
 
     // Prepare data
     let length_bytes = (data_len as u32).to_be_bytes();
     let mut padded = vec![0u8; k * shard_len];
     padded[..u32::SIZE].copy_from_slice(&length_bytes);
-    data.copy_to_slice(&mut padded[u32::SIZE..u32::SIZE + data_len]);
+    let mut payload = &mut padded[u32::SIZE..u32::SIZE + data_len];
+    write(&mut payload);
+    assert!(payload.is_empty(), "write() did not write expected bytes");
 
     (padded, shard_len)
 }
@@ -374,19 +377,39 @@ fn encode<H: Hasher, S: Strategy>(
     data: impl bytes::Buf,
     strategy: &S,
 ) -> Result<Encoding<H::Digest>, Error> {
+    encode_with::<H, S>(total, min, data.remaining(), |buf| buf.put(data), strategy)
+}
+
+/// Encode a payload written directly into its prefixed and padded buffer.
+fn encode_with<H: Hasher, S: Strategy>(
+    total: u16,
+    min: u16,
+    data_len: usize,
+    write: impl FnOnce(&mut &mut [u8]),
+    strategy: &S,
+) -> Result<Encoding<H::Digest>, Error> {
     // Validate parameters
     assert!(total > min);
     assert!(min > 0);
-    let n = total as usize;
     let k = min as usize;
-    let m = n - k;
-    let data_len = data.remaining();
     if data_len > u32::MAX as usize {
         return Err(Error::InvalidDataLength(data_len));
     }
 
     // Prepare data as a contiguous buffer of k shards
-    let (padded, shard_len) = prepare_data(data, k);
+    let (padded, shard_len) = prepare_data(data_len, k, write);
+    encode_shards::<H, S>(total as usize, k, padded, shard_len, strategy)
+}
+
+/// Generate parity, hashes, and proofs without specializing on the payload writer.
+fn encode_shards<H: Hasher, S: Strategy>(
+    n: usize,
+    k: usize,
+    padded: Vec<u8>,
+    shard_len: usize,
+    strategy: &S,
+) -> Result<Encoding<H::Digest>, Error> {
+    let m = n - k;
 
     // Compute recovery shards, striping large shard widths across the strategy
     let recovery_buf = strategy.try_run_batches(
@@ -1236,6 +1259,20 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
         )
     }
 
+    fn encode_value(
+        config: &Config,
+        value: &impl Encode,
+        strategy: &impl Strategy,
+    ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+        encode_with::<H, _>(
+            total_shards(config)?,
+            config.minimum_shards.get(),
+            value.encode_size(),
+            |buf| value.write(buf),
+            strategy,
+        )
+    }
+
     fn check(
         config: &Config,
         commitment: &Self::Commitment,
@@ -1301,13 +1338,13 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
 mod tests {
     use super::*;
     use bytes::Buf as _;
-    use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
     use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
-    use commonware_utils::{NZU16, NZUsize};
-    use std::cell::RefCell;
+    use commonware_utils::{NZU16, NZUsize, test_rng};
+    use rand::Rng as _;
+    use std::cell::{Cell, RefCell};
 
     type RS = ReedSolomon<Sha256>;
     type InstrumentedRS = ReedSolomon<InstrumentedSha256>;
@@ -1316,6 +1353,94 @@ mod tests {
     const FUZZ_MAX_EXTRA_SHARDS: u16 = 8;
     const FUZZ_MAX_DATA_LEN: usize = 256;
     const FUZZ_MAX_EXTRA_SHARD_WIDTH: usize = 16;
+
+    #[test]
+    fn test_encode_value_writes_into_shards() {
+        struct Value(Cell<*mut u8>);
+
+        impl FixedSize for Value {
+            const SIZE: usize = u64::SIZE;
+        }
+
+        impl Write for Value {
+            fn write(&self, buf: &mut impl BufMut) {
+                self.0.set(buf.chunk_mut().as_mut_ptr());
+                0x0123_4567_89AB_CDEFu64.write(buf);
+            }
+        }
+
+        let config = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let value = Value(Cell::default());
+        let (_, shards) = RS::encode_value(&config, &value, &Sequential).unwrap();
+        assert_eq!(
+            value.0.get().cast_const(),
+            shards[0].shard[u32::SIZE..].as_ptr()
+        );
+    }
+
+    #[test]
+    fn test_encode_value_striped() {
+        let config = Config {
+            minimum_shards: NZU16!(3),
+            extra_shards: NZU16!(5),
+        };
+        let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        let mut rng = test_rng();
+        for size in [MIN_STRIPE_BYTES - 1, MIN_STRIPE_BYTES, MIN_STRIPE_BYTES + 1] {
+            let mut data = vec![0u8; 12 * size];
+            rng.fill_bytes(&mut data);
+            let value = (42u64, data, config);
+            let expected = RS::encode(&config, value.encode(), &Sequential).unwrap();
+            assert_eq!(
+                RS::encode_value(&config, &value, &strategy).unwrap(),
+                expected
+            );
+            assert_eq!(
+                RS::encode_value(&config, &value, &strategy.manual()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_encode_value_invalid_parameters() {
+        struct Unwritable(usize);
+
+        impl EncodeSize for Unwritable {
+            fn encode_size(&self) -> usize {
+                self.0
+            }
+        }
+
+        impl Write for Unwritable {
+            fn write(&self, _: &mut impl BufMut) {
+                panic!("invalid parameters must be rejected before writing");
+            }
+        }
+
+        let config = Config {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(u16::MAX),
+        };
+        assert!(matches!(
+            RS::encode_value(&config, &Unwritable(0), &Sequential),
+            Err(Error::TooManyTotalShards(65536))
+        ));
+
+        if let Some(size) = (u32::MAX as usize).checked_add(1) {
+            let config = Config {
+                minimum_shards: NZU16!(1),
+                extra_shards: NZU16!(1),
+            };
+            assert!(matches!(
+                RS::encode_value(&config, &Unwritable(size), &Sequential),
+                Err(Error::InvalidDataLength(n)) if n == size
+            ));
+        }
+    }
 
     std::thread_local! {
         static HASH_MANY_CALLS: RefCell<Vec<Vec<Vec<u8>>>> = const { RefCell::new(Vec::new()) };
@@ -2417,7 +2542,8 @@ mod tests {
         let m = total - min;
 
         // Compute original data encoding
-        let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
+        let (padded, shard_size) =
+            prepare_data(data.len(), min as usize, |buf| buf.put_slice(data));
 
         // Re-encode the data
         let mut encoder = Encoder::new(min as usize, m as usize, shard_size).unwrap();
@@ -2478,7 +2604,7 @@ mod tests {
         let k = min as usize;
         let m = total as usize - k;
 
-        let (mut padded, shard_len) = prepare_data(data.as_slice(), k);
+        let (mut padded, shard_len) = prepare_data(data.len(), k, |buf| buf.put_slice(data));
         let payload_end = u32::SIZE + data.len();
         let total_original_len = k * shard_len;
         assert!(payload_end < total_original_len, "test requires padding");
@@ -2809,7 +2935,7 @@ mod tests {
         let m = 8usize;
         let width = 2 * MIN_STRIPE_BYTES + 2;
         let data = vec![0x5A; k * width - u32::SIZE - 1];
-        let (base, canonical_width) = prepare_data(data.as_slice(), k);
+        let (base, canonical_width) = prepare_data(data.len(), k, |buf| buf.put_slice(&data));
         assert_eq!(canonical_width, width);
         assert_eq!(base.last(), Some(&0));
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();

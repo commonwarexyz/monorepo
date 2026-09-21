@@ -155,24 +155,13 @@ pub struct CodedBlock<B: Block, C: Scheme, H: Hasher> {
 }
 
 impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
-    /// Erasure codes the block.
-    fn encode(
-        inner: &B,
-        config: CodingConfig,
-        strategy: &impl Strategy,
-    ) -> (C::Commitment, Vec<C::Shard>) {
-        let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
-        inner.write(&mut buf);
-        config.write(&mut buf);
-
-        C::encode(&config, buf.as_slice(), strategy).expect("must encode block successfully")
-    }
-
     /// Create a new [`CodedBlock`] from a [`Block`] and a configuration.
     pub fn new(inner: B, config: CodingConfig, strategy: &impl Strategy) -> Self {
-        let (commitment, shards) = Self::encode(&inner, config, strategy);
+        let payload = (inner, config);
+        let (commitment, shards) =
+            C::encode_value(&config, &payload, strategy).expect("must encode block successfully");
         Self {
-            inner: Arc::new(inner),
+            inner: Arc::new(payload.0),
             config,
             commitment,
             shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
@@ -205,10 +194,11 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 
     /// Returns a reference to the shards in this coded block.
     ///
-    /// If the shards have not yet been generated, they will be created via [`Scheme::encode`].
+    /// If the shards have not yet been generated, they will be created via [`Scheme::encode_value`].
     pub fn shards(&self, strategy: &impl Strategy) -> &[C::Shard] {
         self.shards.get_or_init(|| {
-            let (commitment, shards) = Self::encode(&self.inner, self.config, strategy);
+            let (commitment, shards) = C::encode_value(&self.config, self, strategy)
+                .expect("must encode block successfully");
 
             // A mismatch means a commitment trusted at construction does not
             // encode this block, which is a contract violation or a consensus
@@ -370,11 +360,9 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
         // The context digest is not checkable here because [`Block`] does not
         // expose a context, so callers that need the full commitment to match
         // must compare it after decoding.
-        let mut buf = Vec::with_capacity(inner.encode_size() + config.encode_size());
-        inner.write(&mut buf);
-        config.write(&mut buf);
+        let payload = (inner, config);
         let (commitment, shards) =
-            C::encode(&config, buf.as_slice(), &Sequential).map_err(|_| {
+            C::encode_value(&config, &payload, &Sequential).map_err(|_| {
                 commonware_codec::Error::Invalid("CodedBlock", "Failed to re-commit to block")
             })?;
         if commitment != expected.root() {
@@ -385,7 +373,7 @@ impl<B: Block, C: Scheme, H: Hasher> Read for CodedBlock<B, C, H> {
         }
 
         Ok(Self {
-            inner: Arc::new(inner),
+            inner: Arc::new(payload.0),
             config,
             commitment,
             shards: OnceLock::from(Arc::<[C::Shard]>::from(shards)),
@@ -616,6 +604,42 @@ mod test {
     type RS = ReedSolomon<H>;
     type TestBlock = EmptyBlock<H>;
     type RShard = Shard<TestBlock, RS, H>;
+
+    #[test]
+    fn test_coded_block_preserves_encoding() {
+        for minimum in [1, 2, 3, 8] {
+            let config = CodingConfig {
+                minimum_shards: NZU16!(minimum),
+                extra_shards: NZU16!(3),
+            };
+            let block = TestBlock::new(Sha256::hash(&[b"parent"]), Height::new(42), 1_234_567);
+            let mut bytes = Vec::new();
+            block.write(&mut bytes);
+            config.write(&mut bytes);
+            let (root, shards) = RS::encode(&config, bytes.as_slice(), &Sequential).unwrap();
+
+            let coded = CodedBlock::<TestBlock, RS, H>::new(block, config, &Sequential);
+            assert_eq!(coded.commitment, root);
+            assert_eq!(coded.shards(&Sequential), shards);
+
+            let decoded = CodedBlock::<TestBlock, RS, H>::decode_cfg(
+                bytes,
+                &CodedBlockCfg {
+                    inner: (),
+                    expected: ExpectedCommitment::Untrusted(coded.commitment()),
+                },
+            )
+            .unwrap();
+            assert_eq!(decoded.commitment, root);
+            assert_eq!(decoded.shards(&Sequential), shards);
+
+            let trusted = CodedBlock::<TestBlock, RS, H>::new_trusted(
+                coded.inner().clone(),
+                coded.commitment(),
+            );
+            assert_eq!(trusted.shards(&Sequential), shards);
+        }
+    }
 
     #[test]
     fn test_shard_wrapper_codec_roundtrip() {

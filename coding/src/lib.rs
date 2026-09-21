@@ -10,7 +10,7 @@
 )]
 
 commonware_macros::stability_scope!(ALPHA {
-    use commonware_codec::{Buf, Codec, FixedSize, Read, Write};
+    use commonware_codec::{Buf, Codec, Encode, FixedSize, Read, Write};
     use commonware_cryptography::Digest;
     use commonware_parallel::Strategy;
     use std::{fmt::Debug, num::NonZeroU16};
@@ -180,6 +180,17 @@ commonware_macros::stability_scope!(ALPHA {
             data: impl bytes::Buf,
             strategy: &impl Strategy,
         ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error>;
+
+        /// Encode a value, returning the same commitment, shards, and proofs as
+        /// [`Self::encode`] applied to its serialized bytes.
+        #[allow(clippy::type_complexity)]
+        fn encode_value(
+            config: &Config,
+            value: &impl Encode,
+            strategy: &impl Strategy,
+        ) -> Result<(Self::Commitment, Vec<Self::Shard>), Self::Error> {
+            Self::encode(config, value.encode(), strategy)
+        }
 
         /// Check the integrity of a shard, producing a checked shard.
         ///
@@ -548,8 +559,85 @@ mod test {
     mod scheme {
         use super::*;
         use crate::{PhasedAsScheme, Scheme, Zoda, reed_solomon::ReedSolomon};
-        use commonware_codec::Encode;
+        use commonware_codec::{Encode, EncodeSize};
         use commonware_parallel::Sequential;
+
+        struct TestValue {
+            declared: usize,
+            actual: usize,
+        }
+
+        impl EncodeSize for TestValue {
+            fn encode_size(&self) -> usize {
+                self.declared
+            }
+        }
+
+        impl Write for TestValue {
+            fn write(&self, buf: &mut impl bytes::BufMut) {
+                for i in 0..self.actual {
+                    buf.put_u8(i as u8);
+                }
+            }
+        }
+
+        fn encode_value_matches_bytes<S: Scheme>() {
+            for minimum in [1, 2, 3, 8] {
+                let config = Config {
+                    minimum_shards: NZU16!(minimum),
+                    extra_shards: NZU16!(3),
+                };
+                for size in [0, 1, 2, 3, 4, 5, 11, 12, 13, 63, 64, 65] {
+                    let value = TestValue {
+                        declared: size,
+                        actual: size,
+                    };
+                    let bytes = value.encode();
+                    let expected = S::encode(&config, bytes.clone(), &Sequential).unwrap();
+                    let actual = S::encode_value(&config, &value, &Sequential).unwrap();
+                    assert_eq!(actual, expected);
+
+                    let (commitment, shards) = actual;
+                    let checked = shards
+                        .iter()
+                        .enumerate()
+                        .skip(usize::from(config.extra_shards.get()))
+                        .map(|(i, shard)| S::check(&config, &commitment, i as u16, shard).unwrap())
+                        .collect::<Vec<_>>();
+                    let decoded =
+                        S::decode(&config, &commitment, checked.iter(), &Sequential).unwrap();
+                    assert_eq!(decoded, bytes);
+                }
+            }
+        }
+
+        fn encode_value_rejects_size_mismatch<S: Scheme>() {
+            let config = Config {
+                minimum_shards: NZU16!(3),
+                extra_shards: NZU16!(2),
+            };
+            for (declared, actual) in [(0, 1), (1, 0), (1, 2), (2, 1)] {
+                let value = TestValue { declared, actual };
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        let _ = S::encode_value(&config, &value, &Sequential);
+                    })
+                    .is_err()
+                );
+            }
+        }
+
+        #[test]
+        fn encode_value_reed_solomon() {
+            encode_value_matches_bytes::<ReedSolomon<Sha256>>();
+            encode_value_rejects_size_mismatch::<ReedSolomon<Sha256>>();
+        }
+
+        #[test]
+        fn encode_value_default() {
+            encode_value_matches_bytes::<PhasedAsScheme<Zoda<Sha256>>>();
+            encode_value_rejects_size_mismatch::<PhasedAsScheme<Zoda<Sha256>>>();
+        }
 
         fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
             let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
