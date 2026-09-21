@@ -508,8 +508,7 @@ async fn run_gets<D: DbAny<Mmr, Key = Digest> + Send + Sync + 'static>(
                                     Sha256::hash(&[&index.to_be_bytes()])
                                 })
                                 .collect();
-                            let refs: Vec<_> = keys.iter().collect();
-                            let values = db.get_many(&refs).await.unwrap();
+                            let values = db.get_many(&keys).await.unwrap();
                             found += values.iter().flatten().count() as u64;
                             remaining -= n;
                         }

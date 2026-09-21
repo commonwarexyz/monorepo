@@ -236,10 +236,7 @@ mod tests {
 
         // Introduce a new item and remove an existing one
         let key3 = "key3";
-        pq.reconcile(
-            [key1, key2, key3, key3].iter().filter(|&&key| key != key2),
-            Duration::from_secs(2),
-        );
+        pq.reconcile([&key1, &key3], Duration::from_secs(2));
 
         // Verify iteration over only the kept items
         let entries: Vec<_> = pq.iter().collect();

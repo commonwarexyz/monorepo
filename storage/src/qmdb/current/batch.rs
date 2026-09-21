@@ -35,7 +35,7 @@ use commonware_utils::{
     Widen,
     bitmap::{self, Readable as _},
 };
-use core::ops::Range;
+use core::{borrow::Borrow, ops::Range};
 use std::sync::Arc;
 
 /// Speculative chunk-level bitmap overlay.
@@ -397,7 +397,7 @@ where
     /// keys first, then [`stage`](Self::stage) only the writable keys.
     pub async fn get_many<E, C, I>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where
@@ -1145,7 +1145,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I, H>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where

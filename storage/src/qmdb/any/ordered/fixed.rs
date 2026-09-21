@@ -371,8 +371,7 @@ pub(crate) mod test {
                     .map(|i| key(i * 12))
                     .chain((0..5).map(|i| key(8000 + i)))
                     .collect();
-                let unwritten_refs: Vec<&Digest> = unwritten.iter().collect();
-                fb.get_many(&unwritten_refs, &db).await.unwrap();
+                fb.get_many(&unwritten, &db).await.unwrap();
                 let values = fb.get_many(&keys, &db).await.unwrap();
                 let plain = new_batch().get_many(&keys, &db).await.unwrap();
                 assert_eq!(values, plain, "value mismatch at depth={depth}");
@@ -448,8 +447,7 @@ pub(crate) mod test {
                 let b = p.new_batch::<Sha256>();
                 if read_first {
                     let keys: Vec<Digest> = (0..10u64).chain(20..30u64).map(key).collect();
-                    let key_refs: Vec<&Digest> = keys.iter().collect();
-                    let values = b.get_many(&key_refs, &db).await.unwrap();
+                    let values = b.get_many(&keys, &db).await.unwrap();
                     for (i, v) in values.into_iter().enumerate() {
                         let expected = if i < 10 {
                             val(i as u64 + 1000)

@@ -1288,11 +1288,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_get_many_iterator() {
+    fn test_get_many() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
-                partition: "iterator-reads".into(),
+                partition: "batch-reads".into(),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

@@ -1552,16 +1552,16 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         }
     }
 
-    fn check_dealers<B: BatchVerifier<PublicKey = P>>(
+    fn check_dealers<'a, B: BatchVerifier<PublicKey = P>>(
         rng: &mut impl CryptoRng,
         info: &Info<V, P>,
         strategy: &impl Strategy,
         transcript: &Transcript,
-        dealers: &[(&P, &DealerLog<V, P>)],
+        dealers: impl IntoIterator<Item = (&'a P, &'a DealerLog<V, P>)>,
     ) -> Vec<(P, Result<DealerLogOutcome, DealerLogError>)> {
         let checks: Vec<_> = dealers
-            .iter()
-            .map(|&(dealer, log)| {
+            .into_iter()
+            .map(|(dealer, log)| {
                 let seed = Summary::random(&mut *rng);
                 ((*dealer).clone(), log, seed)
             })
@@ -1632,7 +1632,7 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
 
         // Verify the batch and update the known usable dealers.
         let pending_results =
-            Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, &pending);
+            Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, pending);
         let mut all_pending_usable = true;
         for (dealer, result) in pending_results {
             let is_usable = matches!(result, Ok(DealerLogOutcome::Available));
@@ -1650,10 +1650,8 @@ impl<V: Variant, P: PublicKey, M: Faults> Logs<V, P, M> {
         // undue optimism. We instead adopt a pessimistic approach, assuming the
         // worst: that we might need to check all of the remaining dealers
         // to find the honest ones we need.
-        let remaining: Vec<_> = iter
-            .filter(|(dealer, _)| !self.known.contains_key(*dealer))
-            .collect();
-        let results = Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, &remaining);
+        let remaining = iter.filter(|(dealer, _)| !self.known.contains_key(*dealer));
+        let results = Self::check_dealers::<B>(rng, &self.info, strategy, &transcript, remaining);
         for (dealer, result) in results {
             self.known.insert(dealer, result);
         }
@@ -3324,7 +3322,7 @@ mod test {
             info,
             &Sequential,
             &transcript,
-            &[(dealer, log)],
+            [(dealer, log)],
         )
         .pop()
         .expect("one dealer should produce one check")

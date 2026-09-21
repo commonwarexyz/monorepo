@@ -18,6 +18,7 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::iter::zip_eq;
+use core::borrow::Borrow;
 use std::{
     collections::BTreeMap,
     sync::{Arc, Weak},
@@ -173,7 +174,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, T>(
         &self,
-        keys: &[&K],
+        keys: &[impl Borrow<K> + Sync],
         db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
@@ -191,8 +192,9 @@ where
         let mut db_keys = Vec::new();
 
         for (i, key) in keys.iter().enumerate() {
+            let key = key.borrow();
             // Check local mutations.
-            if let Some(value) = self.mutations.get(*key) {
+            if let Some(value) = self.mutations.get(key) {
                 results.push(Some(value.clone()));
                 continue;
             }
@@ -200,13 +202,13 @@ where
             // Check parent diff chain.
             let mut found = false;
             if let Some(parent) = self.parent.as_ref() {
-                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
+                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), key) {
                     results.push(Some(entry.value.clone()));
                     found = true;
                 }
                 if !found {
                     for batch in parent.ancestors() {
-                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
                             results.push(Some(entry.value.clone()));
                             found = true;
                             break;
@@ -221,7 +223,7 @@ where
 
             // Need DB fallthrough.
             db_indices.push(i);
-            db_keys.push(*key);
+            db_keys.push(key);
             results.push(None);
         }
 
@@ -435,7 +437,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, H, T>(
         &self,
-        keys: &[&K],
+        keys: &[impl Borrow<K> + Sync],
         db: &Immutable<F, E, K, V, C, H, T, S>,
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
@@ -454,8 +456,9 @@ where
         let mut db_keys = Vec::new();
 
         for (i, key) in keys.iter().enumerate() {
+            let key = key.borrow();
             // Check local diff.
-            if let Some(entry) = lookup_sorted(self.diff.as_slice(), *key) {
+            if let Some(entry) = lookup_sorted(self.diff.as_slice(), key) {
                 results.push(Some(entry.value.clone()));
                 continue;
             }
@@ -463,7 +466,7 @@ where
             // Walk parent chain.
             let mut found = false;
             for batch in self.ancestors() {
-                if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
                     results.push(Some(entry.value.clone()));
                     found = true;
                     break;
@@ -476,7 +479,7 @@ where
 
             // Need DB fallthrough.
             db_indices.push(i);
-            db_keys.push(*key);
+            db_keys.push(key);
             results.push(None);
         }
 

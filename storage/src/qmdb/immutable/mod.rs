@@ -90,7 +90,10 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions};
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::{
+    borrow::Borrow,
+    num::{NonZeroU64, NonZeroUsize},
+};
 use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
@@ -371,7 +374,10 @@ where
     /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<K> + Sync],
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -385,7 +391,7 @@ where
         let oldest = self.journal.bounds().start;
 
         for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key) {
+            for &loc in self.snapshot.get(key.borrow()) {
                 if loc < oldest {
                     continue;
                 }
@@ -418,7 +424,7 @@ where
             };
             let mut pending = None;
             for &(key_idx, _) in group {
-                if results[key_idx].is_some() || k != *keys[key_idx] {
+                if results[key_idx].is_some() || &k != keys[key_idx].borrow() {
                     continue;
                 }
                 if let Some(prev) = pending.replace(key_idx) {
@@ -3819,7 +3825,7 @@ pub(super) mod tests {
         let db = db.commit().await.unwrap();
 
         // DB-level get_many.
-        let results = db.get_many(&[&k1, &k2, &k_missing]).await.unwrap();
+        let results = db.get_many(&[k1, k2, k_missing]).await.unwrap();
         assert_eq!(results, vec![Some(v1), Some(v2), None]);
 
         // Empty input.
@@ -3828,7 +3834,7 @@ pub(super) mod tests {
 
         // Unmerkleized batch: mutations + DB fallthrough.
         let batch = db.new_batch().set(k3, v3);
-        let results = batch.get_many(&[&k3, &k1, &k_missing], &db).await.unwrap();
+        let results = batch.get_many(&[k3, k1, k_missing], &db).await.unwrap();
         assert_eq!(results, vec![Some(v3), Some(v1), None]);
 
         // Merkleized batch: diff + parent chain + DB fallthrough.
@@ -3837,7 +3843,7 @@ pub(super) mod tests {
             .set(k3, v3)
             .merkleize(&db, None, db.inactivity_floor_loc())
             .await;
-        let results = parent.get_many(&[&k1, &k3, &k_missing], &db).await.unwrap();
+        let results = parent.get_many(&[k1, k3, k_missing], &db).await.unwrap();
         assert_eq!(results, vec![Some(v1), Some(v3), None]);
 
         // Child of merkleized parent reads parent diff.

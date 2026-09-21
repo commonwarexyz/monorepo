@@ -28,6 +28,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
+    borrow::Borrow,
     cmp::Ordering,
     ops::{
         Bound::{Excluded, Included},
@@ -523,7 +524,7 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
 /// `on_diff_hit` is invoked with each slot resolved by a diff entry (see
 /// [`resolve_pending_from_diffs`]). Slots resolved by `local` do not report.
 fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
-    keys: &[&'a K],
+    keys: &'a [impl Borrow<K>],
     local: impl Fn(&K) -> Option<Option<V>>,
     diffs: &[&DiffSlice<K, F, V>],
     strategy: &S,
@@ -538,11 +539,12 @@ where
     let mut pending = Vec::new();
 
     for (i, key) in keys.iter().enumerate() {
+        let key = key.borrow();
         if let Some(value) = local(key) {
             results[i] = value;
             resolved[i] = true;
         } else {
-            pending.push((i, *key));
+            pending.push((i, key));
         }
     }
     resolve_pending_from_diffs(
@@ -1682,7 +1684,7 @@ where
     /// ancestor resolutions.
     fn resolve_uncommitted_reads<'a>(
         &self,
-        keys: &[&'a U::Key],
+        keys: &'a [impl Borrow<U::Key>],
         strategy: &S,
         on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
     ) -> UncommittedReadResolution<'a, U::Key, U::Value>
@@ -1758,7 +1760,7 @@ where
     /// [`stage`](Self::stage) only the writable keys.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
@@ -2767,7 +2769,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I, H, const N: usize>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where

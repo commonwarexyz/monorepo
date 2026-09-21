@@ -44,7 +44,7 @@ use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
 };
-use core::{num::NonZeroU64, ops::Range};
+use core::{borrow::Borrow, num::NonZeroU64, ops::Range};
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::{error, warn};
 
@@ -218,7 +218,10 @@ where
     }
 
     /// Batch read multiple keys, returning results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&U::Key]) -> Result<Vec<Option<U::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<U::Key> + Sync],
+    ) -> Result<Vec<Option<U::Value>>, Error<F>> {
         self.any.get_many(keys).await
     }
 
