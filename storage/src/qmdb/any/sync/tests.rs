@@ -12,9 +12,9 @@ use crate::{
         any::traits::DbAny,
         operation::Operation as OperationTrait,
         sync::{
-            self, Engine, Target,
+            self, Engine, Feedback, Target,
             engine::{Config, NextStep},
-            source::{self, Identity, Request, Response, Source, Verifier},
+            source::{self, Request, Response, Source},
         },
     },
 };
@@ -22,7 +22,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _, deterministic,
+    BufferPooler, Clock, Metrics as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
     NZU64,
@@ -1782,18 +1782,41 @@ where
     });
 }
 
+/// Returns feedback that fetches at most one later candidate after explicit rejection.
+fn one_retry_feedback<R: Send + 'static>(
+    context: deterministic::Context,
+    next: impl Future<Output = Option<R>> + Send + 'static,
+) -> Feedback<R> {
+    let (candidate_tx, candidate_rx) = mpsc::channel(1);
+    let (verdict_tx, verdict_rx) = oneshot::channel();
+    drop(context.spawn(move |_| async move {
+        if !matches!(verdict_rx.await, Ok(false)) {
+            return;
+        }
+        let Some(response) = next.await else {
+            return;
+        };
+        let (next_verdict_tx, next_verdict_rx) = oneshot::channel();
+        if candidate_tx.send((response, next_verdict_tx)).await.is_ok() {
+            let _ = next_verdict_rx.await;
+        }
+    }));
+    Feedback::new(verdict_tx, candidate_rx)
+}
+
 /// Corrupts the first pinned-node candidate, then offers a valid one in the same request.
 #[derive(Clone)]
 struct CorruptFirstPinnedNodesSource<R> {
+    context: Arc<deterministic::Context>,
     inner: R,
     corrupted: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl<R, F, Verify> Source<Verify> for CorruptFirstPinnedNodesSource<R>
+impl<R, F> Source for CorruptFirstPinnedNodesSource<R>
 where
     F: merkle::Family,
-    R: Source<Identity, Family = F, Digest = Digest>,
-    R::Op: Send,
+    R: Source<Family = F, Digest = Digest> + Clone + 'static,
+    R::Op: Send + 'static,
 {
     type Family = R::Family;
     type Digest = Digest;
@@ -1803,14 +1826,16 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-        verify: Verify,
-    ) -> Result<Option<Verify::Output>, Self::Error>
-    where
-        Verify: Verifier<Response<F, R::Op, Digest>>,
-    {
-        let Some(mut response) = self.inner.serve(request, Identity).await? else {
-            return Ok(None);
-        };
+    ) -> Result<
+        (
+            Response<F, R::Op, Digest>,
+            Option<Feedback<Response<F, R::Op, Digest>>>,
+        ),
+        Self::Error,
+    > {
+        let (mut response, feedback) = self.inner.serve(request).await?;
+        assert!(feedback.is_none(), "test wrapper requires a direct source");
+
         // Corrupt pinned nodes only on the first boundary response.
         if let Response::Boundary { pinned_nodes, .. } = &mut response
             && !self
@@ -1819,23 +1844,29 @@ where
             && !pinned_nodes.is_empty()
         {
             pinned_nodes[0] = Digest::from([0xFFu8; 32]);
-            if let Some(verified) = verify.verify(response) {
-                return Ok(Some(verified));
-            }
-            let Some(response) = self.inner.serve(request, Identity).await? else {
-                return Ok(None);
-            };
-            return Ok(verify.verify(response));
+            let inner = self.inner.clone();
+            let feedback = one_retry_feedback(
+                self.context.child("corrupt_first_pinned_nodes"),
+                async move {
+                    let Ok((response, feedback)) = inner.serve(request).await else {
+                        return None;
+                    };
+                    assert!(feedback.is_none(), "test wrapper requires a direct source");
+                    drop(inner);
+                    Some(response)
+                },
+            );
+            return Ok((response, Some(feedback)));
         }
-        Ok(verify.verify(response))
+        Ok((response, None))
     }
 }
 
 /// Sync rejects corrupted pinned nodes and accepts a valid candidate from the same request.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Identity, Family = H::Family, Op = OpOf<H>, Digest = Digest>
-        + sync::SourceFor<DbOf<H>>,
+    Arc<DbOf<H>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1855,6 +1886,7 @@ where
         let db_config = H::config(&context.next_u64().to_string(), &context);
 
         let source = CorruptFirstPinnedNodesSource {
+            context: Arc::new(context.child("source")),
             inner: Arc::new(target_db),
             corrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -1886,6 +1918,7 @@ where
 /// historical root, then blocks the next candidate in the same request until released.
 #[derive(Clone)]
 struct ReplayFreshBoundarySource<R, F: merkle::Family> {
+    context: Arc<deterministic::Context>,
     inner: R,
     historical_target_size: Location<F>,
     boundary_start: Location<F>,
@@ -1894,11 +1927,11 @@ struct ReplayFreshBoundarySource<R, F: merkle::Family> {
     boundary_attempts: Arc<AtomicUsize>,
 }
 
-impl<R, F, Verify> Source<Verify> for ReplayFreshBoundarySource<R, F>
+impl<R, F> Source for ReplayFreshBoundarySource<R, F>
 where
     F: merkle::Family,
-    R: Source<Identity, Family = F, Digest = Digest>,
-    R::Op: Send,
+    R: Source<Family = F, Digest = Digest> + Clone + 'static,
+    R::Op: Send + 'static,
 {
     type Family = R::Family;
     type Digest = Digest;
@@ -1908,11 +1941,13 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-        verify: Verify,
-    ) -> Result<Option<Verify::Output>, Self::Error>
-    where
-        Verify: Verifier<Response<F, R::Op, Digest>>,
-    {
+    ) -> Result<
+        (
+            Response<F, R::Op, Digest>,
+            Option<Feedback<Response<F, R::Op, Digest>>>,
+        ),
+        Self::Error,
+    > {
         if request.size() == self.historical_target_size {
             if matches!(request, Request::Boundary { .. }) {
                 // Simulate a source that has not answered the old target's pinned-nodes
@@ -1930,19 +1965,32 @@ where
         if matches!(request, Request::Boundary { .. }) && request.start() == self.boundary_start {
             let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
-                // Offer an operations response against the historical size, so the verifier
-                // rejects it before the source proceeds to the fresh boundary candidate.
+                // Offer an operations response against the historical size. The request keeps
+                // the same feedback channel while the engine rejects it and waits for the fresh
+                // boundary candidate.
                 let historical = Request::Operations {
                     size: self.historical_target_size,
                     start: request.start(),
                     max_ops: request.max_ops(),
                 };
-                let Some(response) = self.inner.serve(historical, Identity).await? else {
-                    return Ok(None);
-                };
-                if let Some(verified) = verify.verify(response) {
-                    return Ok(Some(verified));
-                }
+                let (response, feedback) = self.inner.serve(historical).await?;
+                assert!(feedback.is_none(), "test wrapper requires a direct source");
+                let inner = self.inner.clone();
+                let release_boundary_retry = Arc::clone(&self.release_boundary_retry);
+                let feedback =
+                    one_retry_feedback(self.context.child("replay_fresh_boundary"), async move {
+                        let release = release_boundary_retry.lock().take();
+                        if let Some(release) = release {
+                            let _ = release.await;
+                        }
+                        let Ok((response, feedback)) = inner.serve(request).await else {
+                            return None;
+                        };
+                        assert!(feedback.is_none(), "test wrapper requires a direct source");
+                        drop(inner);
+                        Some(response)
+                    });
+                return Ok((response, Some(feedback)));
             }
 
             let release = self.release_boundary_retry.lock().take();
@@ -1951,10 +1999,7 @@ where
             }
         }
 
-        let Some(response) = self.inner.serve(request, Identity).await? else {
-            return Ok(None);
-        };
-        Ok(verify.verify(response))
+        self.inner.serve(request).await
     }
 }
 
@@ -1962,8 +2007,8 @@ where
 /// boundary retry is still outstanding.
 pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Identity, Family = H::Family, Op = OpOf<H>, Digest = Digest>
-        + sync::SourceFor<DbOf<H>>,
+    Arc<DbOf<H>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -2010,6 +2055,7 @@ where
         let (release_boundary_retry_tx, release_boundary_retry_rx) = oneshot::channel();
         let target_db = Arc::new(target_db);
         let source = ReplayFreshBoundarySource {
+            context: Arc::new(context.child("source")),
             inner: target_db.clone(),
             historical_target_size: old_target.range.end(),
             boundary_start: new_target.range.start(),

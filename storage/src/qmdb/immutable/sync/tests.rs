@@ -1411,7 +1411,10 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -1456,7 +1459,10 @@ mod compact_variable_mmr {
             };
             *op = immutable::variable::Operation::Commit(metadata, Location::new(0));
 
-            let sequence = SequenceSource::new(vec![bad_state, good_state]);
+            let sequence = SequenceSource::new(
+                context.child("sequence_source"),
+                vec![bad_state, good_state],
+            );
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 sequence.clone(),
@@ -1466,7 +1472,7 @@ mod compact_variable_mmr {
             .await
             .unwrap();
 
-            assert_eq!(sequence.verdicts(), vec![false, true]);
+            assert_eq!(sequence.verdicts().await, vec![false, true]);
             assert_eq!(client.root(), target.root);
             client.destroy().await.unwrap();
 
@@ -1509,7 +1515,10 @@ mod compact_variable_mmr {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_cfg.clone(),
             ))
@@ -1561,7 +1570,10 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -2126,7 +2138,10 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -2171,7 +2186,10 @@ mod compact_variable_mmb {
             };
             *op = immutable::variable::Operation::Commit(metadata, Location::new(0));
 
-            let sequence = SequenceSource::new(vec![bad_state, good_state]);
+            let sequence = SequenceSource::new(
+                context.child("sequence_source"),
+                vec![bad_state, good_state],
+            );
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 sequence.clone(),
@@ -2181,7 +2199,7 @@ mod compact_variable_mmb {
             .await
             .unwrap();
 
-            assert_eq!(sequence.verdicts(), vec![false, true]);
+            assert_eq!(sequence.verdicts().await, vec![false, true]);
             assert_eq!(client.root(), target.root);
             client.destroy().await.unwrap();
 
@@ -2227,7 +2245,10 @@ mod compact_variable_mmb {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_cfg.clone(),
             ))
@@ -2282,7 +2303,10 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_config(&suffix, &context),
             ))

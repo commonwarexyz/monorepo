@@ -86,7 +86,7 @@ use crate::{
         metrics::Metrics,
         operation::Key,
         single_operation_root,
-        sync::{Response, Verifier},
+        sync::{Feedback, Response},
     },
     translator::Translator,
 };
@@ -845,8 +845,7 @@ where
     }
 }
 
-impl<F, E, K, V, C, H, T, S, Verify> crate::qmdb::sync::Source<Verify>
-    for Immutable<F, E, K, V, C, H, T, S>
+impl<F, E, K, V, C, H, T, S> crate::qmdb::sync::Source for Immutable<F, E, K, V, C, H, T, S>
 where
     F: Family,
     E: Context,
@@ -866,12 +865,14 @@ where
     async fn serve(
         &self,
         request: crate::qmdb::sync::Request<F>,
-        verify: Verify,
-    ) -> Result<Option<Verify::Output>, Self::Error>
-    where
-        Verify: Verifier<Response<F, Operation<F, K, V>, H::Digest>>,
-    {
-        self.journal.serve(request, verify).await
+    ) -> Result<
+        (
+            Response<F, Operation<F, K, V>, H::Digest>,
+            Option<Feedback<Response<F, Operation<F, K, V>, H::Digest>>>,
+        ),
+        Self::Error,
+    > {
+        self.journal.serve(request).await
     }
 }
 

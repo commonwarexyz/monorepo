@@ -83,7 +83,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{self, Request, Response, Source, Verifier};
+use commonware_storage::qmdb::sync::{self, Feedback, Request, Response, Source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -269,25 +269,29 @@ impl<'a, DB> BatchContext<'a, DB> {
     }
 }
 
-impl<DB, Verify> Source<Verify> for Shared<DB>
+impl<DB> Source for Shared<DB>
 where
     DB: Send + Sync + 'static,
-    Inner<DB>: Source<Verify>,
+    Inner<DB>: Source,
 {
-    type Family = <Inner<DB> as Source<Verify>>::Family;
-    type Digest = <Inner<DB> as Source<Verify>>::Digest;
-    type Op = <Inner<DB> as Source<Verify>>::Op;
-    type Error = <Inner<DB> as Source<Verify>>::Error;
+    type Family = <Inner<DB> as Source>::Family;
+    type Digest = <Inner<DB> as Source>::Digest;
+    type Op = <Inner<DB> as Source>::Op;
+    type Error = <Inner<DB> as Source>::Error;
 
     fn serve(
         &self,
         request: Request<Self::Family>,
-        verify: Verify,
-    ) -> impl Future<Output = Result<Option<Verify::Output>, Self::Error>> + Send
-    where
-        Verify: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
-    {
-        self.0.serve(request, verify)
+    ) -> impl Future<
+        Output = Result<
+            (
+                Response<Self::Family, Self::Op, Self::Digest>,
+                Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+            ),
+            Self::Error,
+        >,
+    > + Send {
+        self.0.serve(request)
     }
 }
 

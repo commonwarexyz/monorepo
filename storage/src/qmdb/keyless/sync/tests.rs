@@ -15,7 +15,7 @@ use crate::{
             self, Engine, Target,
             engine::{Config, NextStep},
             source::{
-                Identity, Source,
+                Source,
                 tests::{FailSource, SequenceSource},
             },
         },
@@ -124,7 +124,7 @@ where
 pub(crate) fn test_engine_rejects_invalid_responses<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Identity, Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>
         + sync::SourceFor<DbOf<H>>,
 {
     fn config_for<H: SyncTestHarness, S>(
@@ -166,17 +166,14 @@ where
         assert_eq!(*start, 0);
         let max_ops = NZU64!(*size - *start);
         let good = target_db
-            .serve(
-                sync::Request::Operations {
-                    size,
-                    start,
-                    max_ops,
-                },
-                Identity,
-            )
+            .serve(sync::Request::Operations {
+                size,
+                start,
+                max_ops,
+            })
             .await
             .unwrap()
-            .unwrap();
+            .0;
         let target = Target {
             root: target_root,
             range: non_empty_range!(start, size),
@@ -188,7 +185,7 @@ where
             unreachable!("operations request returns an operations response");
         };
         proof.digests.push(sha256::Digest::from([0xee; 32]));
-        let source = SequenceSource::new(vec![bad.clone()]);
+        let source = SequenceSource::new(context.child("sequence_source"), vec![bad.clone()]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
             &context,
             "verify_term",
@@ -203,7 +200,7 @@ where
         ));
 
         // A valid candidate lets the same source call complete after rejection.
-        let source = SequenceSource::new(vec![bad, good.clone()]);
+        let source = SequenceSource::new(context.child("sequence_source"), vec![bad, good.clone()]);
         let synced: DbOf<H> = sync::sync(config_for::<H, _>(
             &context,
             "verify_retry",
@@ -213,7 +210,7 @@ where
         ))
         .await
         .unwrap();
-        assert_eq!(source.verdicts(), vec![false, true]);
+        assert_eq!(source.verdicts().await, vec![false, true]);
         assert_eq!(H::db_root(&synced), target_root);
         H::destroy(synced).await;
 
@@ -229,7 +226,7 @@ where
             proof: good_proof.clone(),
             operations: vec![],
         };
-        let source = SequenceSource::new(vec![empty]);
+        let source = SequenceSource::new(context.child("sequence_source"), vec![empty]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
             &context, "empty", source, max_ops, &target,
         ))
@@ -240,7 +237,7 @@ where
         ));
 
         // A batch larger than the request's max_ops is invalid.
-        let source = SequenceSource::new(vec![good.clone()]);
+        let source = SequenceSource::new(context.child("sequence_source"), vec![good.clone()]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
             &context,
             "overflow",
@@ -261,7 +258,7 @@ where
             op: good_ops.into_iter().next().unwrap(),
             pinned_nodes: vec![],
         };
-        let source = SequenceSource::new(vec![boundary]);
+        let source = SequenceSource::new(context.child("sequence_source"), vec![boundary]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
             &context, "mismatch", source, max_ops, &target,
         ))
@@ -1501,7 +1498,10 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -1546,7 +1546,10 @@ mod compact_variable_mmr {
             };
             *op = variable::Operation::Commit(metadata, Location::new(0));
 
-            let sequence = SequenceSource::new(vec![bad_state, good_state]);
+            let sequence = SequenceSource::new(
+                context.child("sequence_source"),
+                vec![bad_state, good_state],
+            );
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 sequence.clone(),
@@ -1556,7 +1559,7 @@ mod compact_variable_mmr {
             .await
             .unwrap();
 
-            assert_eq!(sequence.verdicts(), vec![false, true]);
+            assert_eq!(sequence.verdicts().await, vec![false, true]);
             assert_eq!(client.root(), target.root);
             client.destroy().await.unwrap();
 
@@ -1595,7 +1598,10 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -1638,7 +1644,10 @@ mod compact_variable_mmr {
             };
             pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
-            let sequence = SequenceSource::new(vec![bad_state, good_state]);
+            let sequence = SequenceSource::new(
+                context.child("sequence_source"),
+                vec![bad_state, good_state],
+            );
 
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
@@ -1650,7 +1659,7 @@ mod compact_variable_mmr {
             .await
             .unwrap();
 
-            assert_eq!(sequence.verdicts(), vec![false, true]);
+            assert_eq!(sequence.verdicts().await, vec![false, true]);
             assert_eq!(synced.target(), target);
             assert_eq!(synced.get_metadata(), Some(vec![7]));
 
@@ -2003,11 +2012,14 @@ mod compact_variable_mmr {
             // The rejected reconstruction must remain provisional.
             let result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![sync::Response::Boundary {
-                    proof,
-                    op,
-                    pinned_nodes,
-                }]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![sync::Response::Boundary {
+                        proof,
+                        op,
+                        pinned_nodes,
+                    }],
+                ),
                 sync::CompactTarget {
                     root: noncanonical_root,
                     size,
@@ -2306,7 +2318,10 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -2351,7 +2366,10 @@ mod compact_variable_mmb {
             };
             *op = variable::Operation::Commit(metadata, Location::new(0));
 
-            let sequence = SequenceSource::new(vec![bad_state, good_state]);
+            let sequence = SequenceSource::new(
+                context.child("sequence_source"),
+                vec![bad_state, good_state],
+            );
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
                 sequence.clone(),
@@ -2361,7 +2379,7 @@ mod compact_variable_mmb {
             .await
             .unwrap();
 
-            assert_eq!(sequence.verdicts(), vec![false, true]);
+            assert_eq!(sequence.verdicts().await, vec![false, true]);
             assert_eq!(client.root(), target.root);
             client.destroy().await.unwrap();
 
@@ -2405,7 +2423,10 @@ mod compact_variable_mmb {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_cfg.clone(),
             ))
@@ -2456,7 +2477,10 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![bad_state, good_state]),
+                SequenceSource::new(
+                    context.child("sequence_source"),
+                    vec![bad_state, good_state],
+                ),
                 target.clone(),
                 client_config(&suffix, &context),
             ))

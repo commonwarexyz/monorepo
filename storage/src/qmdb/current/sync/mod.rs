@@ -43,7 +43,7 @@ use crate::{
         bitmap::Shared,
         current::{db, grafting},
         metrics::Metrics as AnyMetrics,
-        sync::{Database, DatabaseConfig as Config, Request, Response, Verifier},
+        sync::{Database, DatabaseConfig as Config, Feedback, Request, Response},
     },
     translator::Translator,
 };
@@ -297,7 +297,7 @@ where
 
 /// A `current` database serves proofs from the `any` database it wraps. The sync engine
 /// operates on the ops root, which is `any`'s root.
-impl<F, E, C, I, H, U, const N: usize, S, Verify> crate::qmdb::sync::Source<Verify>
+impl<F, E, C, I, H, U, const N: usize, S> crate::qmdb::sync::Source
     for db::Db<F, E, C, I, H, U, N, S>
 where
     F: Graftable,
@@ -317,11 +317,13 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-        verify: Verify,
-    ) -> Result<Option<Verify::Output>, qmdb::Error<F>>
-    where
-        Verify: Verifier<Response<F, Operation<F, U>, H::Digest>>,
-    {
-        self.any.serve(request, verify).await
+    ) -> Result<
+        (
+            Response<F, Operation<F, U>, H::Digest>,
+            Option<Feedback<Response<F, Operation<F, U>, H::Digest>>>,
+        ),
+        qmdb::Error<F>,
+    > {
+        self.any.serve(request).await
     }
 }

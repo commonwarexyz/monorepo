@@ -56,7 +56,7 @@ use crate::{
         chain,
         metrics::Metrics,
         single_operation_root,
-        sync::{Response, Verifier},
+        sync::{Feedback, Response},
     },
 };
 use commonware_codec::EncodeShared;
@@ -585,7 +585,7 @@ where
     }
 }
 
-impl<F, E, V, C, H, S, Verify> crate::qmdb::sync::Source<Verify> for Keyless<F, E, V, C, H, S>
+impl<F, E, V, C, H, S> crate::qmdb::sync::Source for Keyless<F, E, V, C, H, S>
 where
     F: Family,
     E: Context,
@@ -603,12 +603,14 @@ where
     async fn serve(
         &self,
         request: crate::qmdb::sync::Request<F>,
-        verify: Verify,
-    ) -> Result<Option<Verify::Output>, Self::Error>
-    where
-        Verify: Verifier<Response<F, Operation<F, V>, H::Digest>>,
-    {
-        self.journal.serve(request, verify).await
+    ) -> Result<
+        (
+            Response<F, Operation<F, V>, H::Digest>,
+            Option<Feedback<Response<F, Operation<F, V>, H::Digest>>>,
+        ),
+        Self::Error,
+    > {
+        self.journal.serve(request).await
     }
 }
 

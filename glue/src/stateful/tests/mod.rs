@@ -54,7 +54,7 @@ use commonware_storage::{
     qmdb::{
         any::unordered::fixed,
         immutable::fixed as immutable_fixed,
-        sync::{Request, Response, Source as QmdbSource, Verifier},
+        sync::{Feedback as QmdbFeedback, Request, Response, Source as QmdbSource},
     },
 };
 use commonware_utils::{
@@ -845,7 +845,7 @@ struct NoopQmdbResolver;
 
 type DelayedContext = DelayedSyncContext<deterministic::Context>;
 
-impl<Verify> QmdbSource<Verify> for NoopQmdbResolver {
+impl QmdbSource for NoopQmdbResolver {
     type Family = mmr::Family;
     type Digest = sha256::Digest;
     type Op = fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
@@ -854,11 +854,15 @@ impl<Verify> QmdbSource<Verify> for NoopQmdbResolver {
     fn serve(
         &self,
         _request: Request<Self::Family>,
-        _verify: Verify,
-    ) -> impl Future<Output = Result<Option<Verify::Output>, Self::Error>> + Send
-    where
-        Verify: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
-    {
+    ) -> impl Future<
+        Output = Result<
+            (
+                Response<Self::Family, Self::Op, Self::Digest>,
+                Option<QmdbFeedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+            ),
+            Self::Error,
+        >,
+    > + Send {
         std::future::pending()
     }
 }
@@ -874,7 +878,7 @@ impl AttachableResolver<Qmdb<DelayedContext>> for NoopQmdbResolver {
 #[derive(Clone)]
 struct NoopCompactQmdbResolver;
 
-impl<Verify> QmdbSource<Verify> for NoopCompactQmdbResolver {
+impl QmdbSource for NoopCompactQmdbResolver {
     type Family = mmr::Family;
     type Digest = sha256::Digest;
     type Op = immutable_fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
@@ -883,11 +887,15 @@ impl<Verify> QmdbSource<Verify> for NoopCompactQmdbResolver {
     fn serve(
         &self,
         _request: Request<Self::Family>,
-        _verify: Verify,
-    ) -> impl Future<Output = Result<Option<Verify::Output>, Self::Error>> + Send
-    where
-        Verify: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
-    {
+    ) -> impl Future<
+        Output = Result<
+            (
+                Response<Self::Family, Self::Op, Self::Digest>,
+                Option<QmdbFeedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+            ),
+            Self::Error,
+        >,
+    > + Send {
         std::future::pending()
     }
 }

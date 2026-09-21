@@ -23,7 +23,7 @@ use commonware_storage::{
             initial_root, variable,
         },
         operation::Key,
-        sync::{self},
+        sync,
     },
 };
 use commonware_utils::{Array, channel::mpsc};
@@ -445,6 +445,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
+        qmdb::sync::{Feedback, Response},
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -533,7 +534,7 @@ mod tests {
         stale_request_tx: mpsc::Sender<()>,
     }
 
-    impl<Verify> sync::Source<Verify> for SupersedingCompactSource {
+    impl sync::Source for SupersedingCompactSource {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = fixed::Operation<mmr::Family, Digest, Digest>;
@@ -542,17 +543,19 @@ mod tests {
         async fn serve(
             &self,
             request: sync::Request<Self::Family>,
-            verify: Verify,
-        ) -> Result<Option<Verify::Output>, Self::Error>
-        where
-            Verify: sync::Verifier<sync::Response<Self::Family, Self::Op, Self::Digest>>,
-        {
+        ) -> Result<
+            (
+                Response<Self::Family, Self::Op, Self::Digest>,
+                Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+            ),
+            Self::Error,
+        > {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
 
-            self.source.serve(request, verify).await
+            self.source.serve(request).await
         }
     }
 

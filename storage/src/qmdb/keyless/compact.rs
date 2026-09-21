@@ -38,7 +38,7 @@ use crate::{
             batch as compact_batch,
             witness::{self, VerifiedWitness},
         },
-        sync::{CompactTarget, Request, Response, Source, Verifier},
+        sync::{CompactTarget, Feedback, Request, Response, Source},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -666,7 +666,7 @@ where
     }
 }
 
-impl<F, E, V, H, C, S, Verify> Source<Verify> for Db<F, E, V, H, C, S>
+impl<F, E, V, H, C, S> Source for Db<F, E, V, H, C, S>
 where
     F: Family,
     E: Context,
@@ -684,15 +684,17 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-        verify: Verify,
-    ) -> Result<Option<Verify::Output>, Self::Error>
-    where
-        Verify: Verifier<Response<F, Operation<F, V>, H::Digest>>,
-    {
+    ) -> Result<
+        (
+            Response<F, Operation<F, V>, H::Digest>,
+            Option<Feedback<Response<F, Operation<F, V>, H::Digest>>>,
+        ),
+        Self::Error,
+    > {
         let response = self
             .witness
             .compact_state(&self.commit_codec_config, request)?;
-        Ok(verify.verify(response))
+        Ok((response, None))
     }
 }
 
@@ -971,46 +973,43 @@ mod tests {
 
             let beyond = n + 1;
             assert!(matches!(
-                db.serve(boundary(beyond, n), Some).await,
+                db.serve(boundary(beyond, n)).await,
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
             assert!(matches!(
-                db.serve(operations(Location::new(0), Location::new(0)), Some,)
+                db.serve(operations(Location::new(0), Location::new(0)))
                     .await,
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
             assert!(matches!(
-                db.serve(operations(n - 1, n - 2), Some).await,
+                db.serve(operations(n - 1, n - 2)).await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
             ));
             assert!(matches!(
-                db.serve(boundary(n, n), Some).await,
+                db.serve(boundary(n, n)).await,
                 Err(Error::Merkle(crate::merkle::Error::RangeOutOfBounds(_)))
             ));
             assert!(matches!(
-                db.serve(boundary(n, n - 2), Some).await,
+                db.serve(boundary(n, n - 2)).await,
                 Err(Error::Journal(crate::journal::Error::ItemPruned(_)))
             ));
 
             // Requests without pinned nodes are also served, even when they ask for more operations
             // than the witness holds.
             let response = db
-                .serve(
-                    Request::Operations {
-                        size: n,
-                        start: n - 1,
-                        max_ops: NZU64!(5),
-                    },
-                    Some,
-                )
+                .serve(Request::Operations {
+                    size: n,
+                    start: n - 1,
+                    max_ops: NZU64!(5),
+                })
                 .await
                 .unwrap()
-                .unwrap();
+                .0;
             let Response::Operations { operations, .. } = response else {
                 panic!("operations request should get an operations response");
             };
             assert_eq!(operations.len(), 1);
-            let response = db.serve(boundary(n, n - 1), Some).await.unwrap().unwrap();
+            let response = db.serve(boundary(n, n - 1)).await.unwrap().0;
             assert!(matches!(response, Response::Boundary { .. }));
         });
     }
@@ -2051,16 +2050,13 @@ mod tests {
                 let source = source.sync().await.unwrap();
                 let target = source.target();
                 let response = source
-                    .serve(
-                        Request::Boundary {
-                            size: target.size,
-                            start: target.size - 1,
-                        },
-                        Some,
-                    )
+                    .serve(Request::Boundary {
+                        size: target.size,
+                        start: target.size - 1,
+                    })
                     .await
                     .unwrap()
-                    .unwrap();
+                    .0;
                 let Response::Boundary { pinned_nodes, .. } = response else {
                     panic!("boundary request should get a boundary response");
                 };

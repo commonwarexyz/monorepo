@@ -39,7 +39,7 @@ use crate::{
             witness::{self, VerifiedWitness},
         },
         operation::Key,
-        sync::{CompactTarget, Request, Response, Source, Verifier},
+        sync::{CompactTarget, Feedback, Request, Response, Source},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -691,7 +691,7 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S, Verify> Source<Verify> for Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, C, S> Source for Db<F, E, K, V, H, C, S>
 where
     F: Family,
     E: Context,
@@ -710,15 +710,17 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-        verify: Verify,
-    ) -> Result<Option<Verify::Output>, Self::Error>
-    where
-        Verify: Verifier<Response<F, Operation<F, K, V>, H::Digest>>,
-    {
+    ) -> Result<
+        (
+            Response<F, Operation<F, K, V>, H::Digest>,
+            Option<Feedback<Response<F, Operation<F, K, V>, H::Digest>>>,
+        ),
+        Self::Error,
+    > {
         let response = self
             .witness
             .compact_state(&self.commit_codec_config, request)?;
-        Ok(verify.verify(response))
+        Ok((response, None))
     }
 }
 

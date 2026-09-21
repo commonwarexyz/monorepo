@@ -15,10 +15,7 @@ pub(super) struct Metrics {
     /// Total fetch requests dispatched to the P2P engine.
     pub fetch_requests: Registered<Counter>,
 
-    /// Total cancelled requests.
-    pub cancel_requests: Registered<Counter>,
-
-    /// Deliveries from peers by outcome.
+    /// Candidate deliveries by routing outcome.
     pub deliveries: status::Counter,
 
     /// Incoming serve requests by outcome.
@@ -41,12 +38,7 @@ impl Metrics {
             "Total fetch requests dispatched to the P2P engine",
             Counter::default(),
         );
-        let cancel_requests = context.register(
-            "cancel_requests",
-            "Total cancelled requests",
-            Counter::default(),
-        );
-        let deliveries = context.family("deliveries", "Deliveries from peers by outcome");
+        let deliveries = context.family("deliveries", "Candidate deliveries by routing outcome");
         let serve_requests = context.family("serve_requests", "Incoming serve requests by outcome");
         let has_database = context.register(
             "has_database",
@@ -57,7 +49,6 @@ impl Metrics {
         Self {
             pending_requests,
             fetch_requests,
-            cancel_requests,
             deliveries,
             serve_requests,
             has_database,

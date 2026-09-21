@@ -13,6 +13,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Span,
+    channel::{mpsc, oneshot},
     sync::{AsyncRwLock, TracedAsyncRwLock},
 };
 use std::{cmp::Ordering, future::Future, num::NonZeroU64, sync::Arc};
@@ -221,7 +222,7 @@ impl<F: Family> arbitrary::Arbitrary<'_> for Request<F> {
     }
 }
 
-/// One authenticated response, shaped like the [`Request`] it answers.
+/// One response, shaped like the [`Request`] it answers.
 ///
 /// In a [`Response::Boundary`], the proof, the operation, and the pinned nodes are verified as a
 /// unit. The pinned nodes are only believable because the proof folds them into digests it already
@@ -382,39 +383,43 @@ where
     }
 }
 
-/// Validates a response and produces a value.
-pub trait Verifier<R>: Send {
-    /// The value produced for an accepted response.
-    type Output: Send;
-
-    /// Return the accepted value, or `None` if the response is invalid.
-    fn verify(&self, response: R) -> Option<Self::Output>;
+/// Reports whether a response's proof is valid and retains the request for another candidate.
+///
+/// Feedback does not report whether the response was applied or persisted. Dropping it leaves the
+/// response unjudged and cancels the request.
+pub struct Feedback<R> {
+    sender: oneshot::Sender<bool>,
+    receiver: mpsc::Receiver<(R, oneshot::Sender<bool>)>,
 }
 
-impl<R, T: Send, V> Verifier<R> for V
-where
-    V: Fn(R) -> Option<T> + Send,
-{
-    type Output = T;
-
-    fn verify(&self, response: R) -> Option<T> {
-        self(response)
+impl<R> Feedback<R> {
+    /// Creates feedback for one response and its request's later candidates.
+    pub const fn new(
+        sender: oneshot::Sender<bool>,
+        receiver: mpsc::Receiver<(R, oneshot::Sender<bool>)>,
+    ) -> Self {
+        Self { sender, receiver }
     }
-}
 
-/// A verifier that accepts any response unchanged.
-pub struct Identity;
+    /// Reports that the response's proof is valid and closes the request.
+    pub fn accept(self) {
+        let _ = self.sender.send(true);
+    }
 
-impl<R: Send> Verifier<R> for Identity {
-    type Output = R;
-
-    fn verify(&self, response: R) -> Option<R> {
-        Some(response)
+    /// Reports that the response's proof is invalid and waits for the next candidate.
+    pub async fn reject(self) -> Option<(R, Self)> {
+        let Self {
+            sender,
+            mut receiver,
+        } = self;
+        sender.send(false).ok()?;
+        let (response, sender) = receiver.recv().await?;
+        Some((response, Self { sender, receiver }))
     }
 }
 
 /// A source for proofs and operations.
-pub trait Source<V = Identity>: Send + Sync {
+pub trait Source: Send + Sync {
     /// The merkle family backing this source's proofs.
     type Family: Family;
 
@@ -427,25 +432,27 @@ pub trait Source<V = Identity>: Send + Sync {
     /// Why this source could not answer.
     type Error: std::error::Error + Send + 'static;
 
-    /// Serve a request and pass responses to `verify`.
+    /// Serves a response with optional [`Feedback`] for reporting its validity.
     ///
-    /// - `Some(value)` accepts the response and returns `Ok(Some(value))` from this call.
-    /// - `None` rejects it as invalid. The source may try another response.
-    ///
-    /// Returns `Ok(None)` if the source stops without an accepted response.
-    /// Dropping the future cancels the request.
+    /// Dropping the future or feedback cancels the request without judging the response.
+    #[allow(clippy::type_complexity)]
     fn serve(
         &self,
         request: Request<Self::Family>,
-        verify: V,
-    ) -> impl Future<Output = Result<Option<V::Output>, Self::Error>> + Send
-    where
-        V: Verifier<Response<Self::Family, Self::Op, Self::Digest>>;
+    ) -> impl Future<
+        Output = Result<
+            (
+                Response<Self::Family, Self::Op, Self::Digest>,
+                Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+            ),
+            Self::Error,
+        >,
+    > + Send;
 }
 
-impl<T, V> Source<V> for Arc<T>
+impl<T> Source for Arc<T>
 where
-    T: Source<V> + ?Sized,
+    T: Source + ?Sized,
 {
     type Family = T::Family;
     type Digest = T::Digest;
@@ -455,18 +462,22 @@ where
     fn serve(
         &self,
         request: Request<Self::Family>,
-        verify: V,
-    ) -> impl Future<Output = Result<Option<V::Output>, Self::Error>> + Send
-    where
-        V: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
-    {
-        T::serve(self, request, verify)
+    ) -> impl Future<
+        Output = Result<
+            (
+                Response<Self::Family, Self::Op, Self::Digest>,
+                Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+            ),
+            Self::Error,
+        >,
+    > + Send {
+        T::serve(self, request)
     }
 }
 
-impl<T, V> Source<V> for Option<T>
+impl<T> Source for Option<T>
 where
-    T: Source<V>,
+    T: Source,
     ServeError<T::Family>: From<T::Error>,
 {
     type Family = T::Family;
@@ -477,21 +488,23 @@ where
     async fn serve(
         &self,
         request: Request<Self::Family>,
-        verify: V,
-    ) -> Result<Option<V::Output>, Self::Error>
-    where
-        V: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
-    {
+    ) -> Result<
+        (
+            Response<Self::Family, Self::Op, Self::Digest>,
+            Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+        ),
+        Self::Error,
+    > {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
-        Ok(source.serve(request, verify).await?)
+        Ok(source.serve(request).await?)
     }
 }
 
 macro_rules! impl_locked_source {
     ($lock:ident) => {
-        impl<T, V> Source<V> for $lock<T>
+        impl<T> Source for $lock<T>
         where
-            T: Source<V>,
+            T: Source,
         {
             type Family = T::Family;
             type Digest = T::Digest;
@@ -501,12 +514,14 @@ macro_rules! impl_locked_source {
             async fn serve(
                 &self,
                 request: Request<Self::Family>,
-                verify: V,
-            ) -> Result<Option<V::Output>, Self::Error>
-            where
-                V: Verifier<Response<Self::Family, Self::Op, Self::Digest>>,
-            {
-                self.read().await.serve(request, verify).await
+            ) -> Result<
+                (
+                    Response<Self::Family, Self::Op, Self::Digest>,
+                    Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+                ),
+                Self::Error,
+            > {
+                self.read().await.serve(request).await
             }
         }
     };
@@ -515,7 +530,7 @@ macro_rules! impl_locked_source {
 impl_locked_source!(AsyncRwLock);
 impl_locked_source!(TracedAsyncRwLock);
 
-impl<F, E, C, H, S, V> Source<V> for authenticated::Journal<F, E, C, H, S>
+impl<F, E, C, H, S> Source for authenticated::Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
@@ -528,6 +543,7 @@ where
     type Op = C::Item;
     type Error = qmdb::Error<F>;
 
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.sync.serve",
         level = "info",
@@ -541,11 +557,13 @@ where
     async fn serve(
         &self,
         request: Request<F>,
-        verify: V,
-    ) -> Result<Option<V::Output>, qmdb::Error<F>>
-    where
-        V: Verifier<Response<F, Self::Op, H::Digest>>,
-    {
+    ) -> Result<
+        (
+            Response<F, Self::Op, H::Digest>,
+            Option<Feedback<Response<F, Self::Op, H::Digest>>>,
+        ),
+        Self::Error,
+    > {
         // Reject before the floor lookup so the error carries the requested size and the
         // floor read never touches out-of-range locations.
         if request.size() > self.size() {
@@ -578,11 +596,11 @@ where
                 }
             }
         };
-        Ok(verify.verify(response))
+        Ok((response, None))
     }
 }
 
-impl<F, E, C, I, H, U, const N: usize, S, V> Source<V>
+impl<F, E, C, I, H, U, const N: usize, S> Source
     for crate::qmdb::any::db::Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
@@ -599,11 +617,17 @@ where
     type Op = crate::qmdb::any::operation::Operation<F, U>;
     type Error = qmdb::Error<F>;
 
-    async fn serve(&self, request: Request<F>, verify: V) -> Result<Option<V::Output>, Self::Error>
-    where
-        V: Verifier<Response<F, Self::Op, H::Digest>>,
-    {
-        self.log.serve(request, verify).await
+    async fn serve(
+        &self,
+        request: Request<F>,
+    ) -> Result<
+        (
+            Response<F, Self::Op, H::Digest>,
+            Option<Feedback<Response<F, Self::Op, H::Digest>>>,
+        ),
+        Self::Error,
+    > {
+        self.log.serve(request).await
     }
 }
 
@@ -617,12 +641,12 @@ pub(crate) mod tests {
     use commonware_codec::{Copying, Decode as _, DecodeExt as _, Encode as _};
     use commonware_cryptography::{Sha256, sha256::Digest as ShaDigest};
     use commonware_parallel::Rayon;
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
     use commonware_utils::{
         NZU64,
         sync::{AsyncRwLock, TracedAsyncRwLock},
     };
-    use std::{cell::Cell, collections::VecDeque, marker::PhantomData, sync::Arc};
+    use std::{collections::VecDeque, marker::PhantomData, sync::Arc};
 
     macro_rules! assert_source_variants {
         ($db:ty) => {
@@ -639,27 +663,35 @@ pub(crate) mod tests {
     /// A source that offers scripted responses until one is accepted.
     #[derive(Clone)]
     pub struct SequenceSource<F: Family, Op, D: Digest> {
+        context: Arc<deterministic::Context>,
         responses: Arc<commonware_utils::sync::Mutex<VecDeque<Response<F, Op, D>>>>,
         verdicts: Arc<commonware_utils::sync::Mutex<Vec<bool>>>,
+        completion: Arc<commonware_utils::sync::Mutex<Option<oneshot::Receiver<()>>>>,
     }
 
     impl<F: Family, Op, D: Digest> SequenceSource<F, Op, D> {
-        pub fn new(responses: Vec<Response<F, Op, D>>) -> Self {
+        pub fn new(context: deterministic::Context, responses: Vec<Response<F, Op, D>>) -> Self {
             Self {
+                context: Arc::new(context),
                 responses: Arc::new(commonware_utils::sync::Mutex::new(VecDeque::from(
                     responses,
                 ))),
                 verdicts: Arc::new(commonware_utils::sync::Mutex::new(Vec::new())),
+                completion: Arc::new(commonware_utils::sync::Mutex::new(None)),
             }
         }
 
         /// Whether each offered response was accepted.
-        pub fn verdicts(&self) -> Vec<bool> {
+        pub async fn verdicts(&self) -> Vec<bool> {
+            let completion = self.completion.lock().take();
+            if let Some(completion) = completion {
+                let _ = completion.await;
+            }
             self.verdicts.lock().clone()
         }
     }
 
-    impl<F, Op, D, V> Source<V> for SequenceSource<F, Op, D>
+    impl<F, Op, D> Source for SequenceSource<F, Op, D>
     where
         F: Family,
         D: Digest,
@@ -673,22 +705,163 @@ pub(crate) mod tests {
         async fn serve(
             &self,
             _request: Request<F>,
-            verify: V,
-        ) -> Result<Option<V::Output>, qmdb::Error<F>>
-        where
-            V: Verifier<Response<F, Op, D>>,
+        ) -> Result<(Response<F, Op, D>, Option<Feedback<Response<F, Op, D>>>), qmdb::Error<F>>
         {
-            loop {
-                let Some(response) = self.responses.lock().pop_front() else {
-                    return Ok(None);
-                };
-                let verified = verify.verify(response);
-                self.verdicts.lock().push(verified.is_some());
-                if verified.is_some() {
-                    return Ok(verified);
-                }
-            }
+            let response = self
+                .responses
+                .lock()
+                .pop_front()
+                .ok_or(qmdb::Error::KeyNotFound)?;
+            let responses = Arc::clone(&self.responses);
+            let verdicts = Arc::clone(&self.verdicts);
+            let (candidate_tx, candidate_rx) = mpsc::channel(1);
+            let (verdict_tx, mut verdict_rx) = oneshot::channel();
+            let (completion_tx, completion_rx) = oneshot::channel();
+            *self.completion.lock() = Some(completion_rx);
+
+            drop(
+                self.context
+                    .child("sequence_source")
+                    .spawn(move |_| async move {
+                        let _completion_tx = completion_tx;
+                        loop {
+                            let Ok(verdict) = verdict_rx.await else {
+                                return;
+                            };
+                            verdicts.lock().push(verdict);
+                            if verdict {
+                                return;
+                            }
+
+                            let Some(response) = responses.lock().pop_front() else {
+                                return;
+                            };
+                            let (next_verdict_tx, next_verdict_rx) = oneshot::channel();
+                            if candidate_tx
+                                .send((response, next_verdict_tx))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                            verdict_rx = next_verdict_rx;
+                        }
+                    }),
+            );
+
+            Ok((response, Some(Feedback::new(verdict_tx, candidate_rx))))
         }
+    }
+
+    async fn next_candidate<R>(
+        verdict_rx: oneshot::Receiver<bool>,
+        candidate_tx: mpsc::Sender<(R, oneshot::Sender<bool>)>,
+        response: R,
+    ) -> Option<bool> {
+        if verdict_rx.await.ok()? {
+            return Some(true);
+        }
+        let (verdict_tx, next_verdict_rx) = oneshot::channel();
+        candidate_tx.send((response, verdict_tx)).await.ok()?;
+        next_verdict_rx.await.ok()
+    }
+
+    #[test]
+    fn feedback_accepts_and_closes_request() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (candidate_tx, candidate_rx) = mpsc::channel::<(u8, _)>(1);
+            let (verdict_tx, verdict_rx) = oneshot::channel();
+
+            Feedback::new(verdict_tx, candidate_rx).accept();
+
+            assert!(verdict_rx.await.unwrap());
+            let (next_verdict_tx, _) = oneshot::channel();
+            assert!(candidate_tx.send((2, next_verdict_tx)).await.is_err());
+        });
+    }
+
+    #[test]
+    fn feedback_rejects_and_returns_next_candidate() {
+        deterministic::Runner::default().start(|context| async move {
+            let (candidate_tx, candidate_rx) = mpsc::channel(1);
+            let (verdict_tx, verdict_rx) = oneshot::channel();
+            let driver = context
+                .child("driver")
+                .spawn(move |_| async move { next_candidate(verdict_rx, candidate_tx, 2u8).await });
+
+            let (response, feedback) = Feedback::new(verdict_tx, candidate_rx)
+                .reject()
+                .await
+                .unwrap();
+            assert_eq!(response, 2);
+            feedback.accept();
+            assert_eq!(driver.await.unwrap(), Some(true));
+        });
+    }
+
+    #[test]
+    fn dropping_feedback_cancels_request() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (candidate_tx, candidate_rx) = mpsc::channel::<(u8, _)>(1);
+            let (verdict_tx, verdict_rx) = oneshot::channel();
+
+            drop(Feedback::new(verdict_tx, candidate_rx));
+
+            assert!(verdict_rx.await.is_err());
+            let (next_verdict_tx, _) = oneshot::channel();
+            assert!(candidate_tx.send((2, next_verdict_tx)).await.is_err());
+        });
+    }
+
+    #[test]
+    fn dropping_rejection_wait_cancels_request() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (candidate_tx, candidate_rx) = mpsc::channel::<(u8, _)>(1);
+            let (verdict_tx, verdict_rx) = oneshot::channel();
+            let mut reject = Box::pin(Feedback::new(verdict_tx, candidate_rx).reject());
+
+            commonware_macros::select! {
+                _ = reject.as_mut() => panic!("rejection completed without another candidate"),
+                verdict = verdict_rx => assert_eq!(verdict.unwrap(), false),
+            }
+            drop(reject);
+
+            let (next_verdict_tx, _) = oneshot::channel();
+            assert!(candidate_tx.send((2, next_verdict_tx)).await.is_err());
+        });
+    }
+
+    #[test]
+    fn feedback_stops_when_verdict_receiver_is_gone() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (_candidate_tx, candidate_rx) = mpsc::channel::<(u8, _)>(1);
+            let (verdict_tx, verdict_rx) = oneshot::channel();
+            drop(verdict_rx);
+
+            assert!(
+                Feedback::new(verdict_tx, candidate_rx)
+                    .reject()
+                    .await
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn feedback_stops_when_source_closes_candidate_stream() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (candidate_tx, candidate_rx) = mpsc::channel::<(u8, _)>(1);
+            let (verdict_tx, verdict_rx) = oneshot::channel();
+            drop(candidate_tx);
+
+            assert!(
+                Feedback::new(verdict_tx, candidate_rx)
+                    .reject()
+                    .await
+                    .is_none()
+            );
+            assert!(!verdict_rx.await.unwrap());
+        });
     }
 
     /// Fetch `target`'s final commit operation and pinned nodes from `source`.
@@ -699,16 +872,16 @@ pub(crate) mod tests {
     where
         R::Op: Send + 'static,
     {
-        Ok(source
-            .serve(
-                Request::Boundary {
-                    size: target.size,
-                    start: target.size - 1,
-                },
-                Identity,
-            )
-            .await?
-            .expect("identity transform accepts every response"))
+        let (response, feedback) = source
+            .serve(Request::Boundary {
+                size: target.size,
+                start: target.size - 1,
+            })
+            .await?;
+        if let Some(feedback) = feedback {
+            feedback.accept();
+        }
+        Ok(response)
     }
 
     /// A source that always fails. Not `Clone`, which the engine must not require.
@@ -716,7 +889,7 @@ pub(crate) mod tests {
         _phantom: PhantomData<(F, Op, D)>,
     }
 
-    impl<F, Op, D, V> Source<V> for FailSource<F, Op, D>
+    impl<F, Op, D> Source for FailSource<F, Op, D>
     where
         F: Family,
         D: Digest,
@@ -730,10 +903,7 @@ pub(crate) mod tests {
         async fn serve(
             &self,
             _request: Request<F>,
-            _verify: V,
-        ) -> Result<Option<V::Output>, qmdb::Error<F>>
-        where
-            V: Verifier<Response<F, Op, D>>,
+        ) -> Result<(Response<F, Op, D>, Option<Feedback<Response<F, Op, D>>>), qmdb::Error<F>>
         {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
@@ -1039,14 +1209,14 @@ pub(crate) mod tests {
                 start: Location::new(0),
                 max_ops: NZU64!(1),
             };
-            let result = lock.serve(request, Some).await;
+            let result = lock.serve(request).await;
             assert!(matches!(result, Err(crate::qmdb::Error::KeyNotFound)));
         });
     }
 
     #[test]
     fn sequence_source_offers_candidates_until_accepted() {
-        deterministic::Runner::default().start(|_context| async move {
+        deterministic::Runner::default().start(|context| async move {
             let response = |op| Response::Operations {
                 proof: Proof {
                     leaves: Location::new(1),
@@ -1055,8 +1225,10 @@ pub(crate) mod tests {
                 },
                 operations: vec![op],
             };
-            let source =
-                SequenceSource::<mmr::Family, _, ShaDigest>::new(vec![response(1), response(2)]);
+            let source = SequenceSource::<mmr::Family, _, ShaDigest>::new(
+                context.child("source"),
+                vec![response(1), response(2)],
+            );
             let request = Request::Operations {
                 size: Location::new(1),
                 start: Location::new(0),
@@ -1064,27 +1236,18 @@ pub(crate) mod tests {
             };
 
             let locked = Arc::new(AsyncRwLock::new(Some(source.clone())));
-            let value = String::from("accepted");
-            let borrowed = value.as_str();
-            let attempts = Cell::new(0);
-            let accepted = locked
-                .serve(
-                    request,
-                    move |response: Response<mmr::Family, _, ShaDigest>| {
-                        attempts.set(attempts.get() + 1);
-                        match response {
-                            Response::Operations { operations, .. } if operations == [2] => {
-                                Some((borrowed, attempts.get()))
-                            }
-                            _ => None,
-                        }
-                    },
-                )
-                .await
-                .unwrap();
-
-            assert_eq!(accepted, Some((value.as_str(), 2)));
-            assert_eq!(source.verdicts(), vec![false, true]);
+            let (first, feedback) = locked.serve(request).await.unwrap();
+            assert!(matches!(
+                first,
+                Response::Operations { operations, .. } if operations == [1]
+            ));
+            let (second, feedback) = feedback.unwrap().reject().await.unwrap();
+            assert!(matches!(
+                second,
+                Response::Operations { operations, .. } if operations == [2]
+            ));
+            feedback.accept();
+            assert_eq!(source.verdicts().await, vec![false, true]);
         });
     }
 }

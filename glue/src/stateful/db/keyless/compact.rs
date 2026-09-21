@@ -22,7 +22,7 @@ use commonware_storage::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
             initial_root, variable,
         },
-        sync::{self},
+        sync,
     },
 };
 use commonware_utils::channel::mpsc;
@@ -431,7 +431,10 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::keyless as storage_keyless,
+        qmdb::{
+            keyless as storage_keyless,
+            sync::{Feedback, Response},
+        },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
     use futures::pin_mut;
@@ -456,7 +459,7 @@ mod tests {
         stale_request_tx: mpsc::Sender<()>,
     }
 
-    impl<Verify> sync::Source<Verify> for SupersedingCompactSource {
+    impl sync::Source for SupersedingCompactSource {
         type Family = mmr::Family;
         type Digest = Digest;
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
@@ -465,17 +468,19 @@ mod tests {
         async fn serve(
             &self,
             request: sync::Request<Self::Family>,
-            verify: Verify,
-        ) -> Result<Option<Verify::Output>, Self::Error>
-        where
-            Verify: sync::Verifier<sync::Response<Self::Family, Self::Op, Self::Digest>>,
-        {
+        ) -> Result<
+            (
+                Response<Self::Family, Self::Op, Self::Digest>,
+                Option<Feedback<Response<Self::Family, Self::Op, Self::Digest>>>,
+            ),
+            Self::Error,
+        > {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;
             }
 
-            self.source.serve(request, verify).await
+            self.source.serve(request).await
         }
     }
 

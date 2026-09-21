@@ -608,7 +608,7 @@ impl EngineDefinition for MultiDbEngine {
 
         // QMDB state-sync resolvers (one per database).
         let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbA<_>, _>::new(
+            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbA<_>>::new(
                 context.child("qmdb_resolver_a"),
                 qmdb_resolver::Config {
                     peer_provider: oracle.manager(),
@@ -626,7 +626,7 @@ impl EngineDefinition for MultiDbEngine {
         qmdb_resolver_actor_a.start(qmdb_a_resolver_network);
 
         let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbB<_>, _>::new(
+            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbB<_>>::new(
                 context.child("qmdb_resolver_b"),
                 qmdb_resolver::Config {
                     peer_provider: oracle.manager(),
