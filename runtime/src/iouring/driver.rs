@@ -589,7 +589,7 @@ pub mod tests {
             },
             waker::tests::wait_until_eventfd_armed,
         },
-        storage::hold::{Held, Hold},
+        storage::{hold::Hold, iouring::Shared},
     };
     use commonware_utils::channel::oneshot;
     use std::{
@@ -1464,7 +1464,7 @@ pub mod tests {
                     .unwrap();
                 let id = harness.admit(
                     Request::ReadAt(ReadAtRequest {
-                        file: Held::new(file, hold),
+                        file: Shared::detached(file, hold),
                         offset: 0,
                         read: 0,
                         buf: IoBufMut::zeroed(5),
@@ -1603,7 +1603,7 @@ pub mod tests {
             .truncate(true)
             .open(directory.join("read"))
             .unwrap();
-        let held = Held::new(file, hold);
+        let held = Shared::detached(file, hold);
 
         for close in [false, true] {
             for result in [-libc::EAGAIN, 2] {
@@ -1999,7 +1999,7 @@ pub mod tests {
             .truncate(true)
             .open(&path)
             .unwrap();
-        let held = Held::new(file, hold);
+        let held = Shared::detached(file, hold);
 
         // More than one iovec batch forces a follow-up write before the sync.
         let bufs = IoBufs::from(
@@ -2021,7 +2021,7 @@ pub mod tests {
 
         let (sender, receiver) = oneshot::channel();
         harness.driver.admit(
-            Request::Sync(SyncRequest { file: held }),
+            Request::Sync(SyncRequest::new(held)),
             Observer::DetachedSync(sender),
             harness.start,
             &mut harness.deferred,
