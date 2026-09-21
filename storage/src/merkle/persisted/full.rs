@@ -450,6 +450,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             page_cache: cfg.config.page_cache.clone(),
         };
 
+        // Load metadata before deciding whether to open the journal. Boundary pins missing
+        // from metadata may still be recoverable from nodes before the sync range.
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
