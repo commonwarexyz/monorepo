@@ -153,9 +153,13 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         let State::Incomplete { pending, verified } = &mut self.state else {
             unreachable!("complete certification cannot be ready");
         };
+
+        // A verified quorum can construct the certificate without processing pending votes.
         if verified.len() >= self.quorum {
             pending.clear();
         }
+
+        // Move the inputs into one worker for assembly and any fallback verification.
         let batch = pending.len();
         let len = batch + verified.len();
         let quorum = self.quorum;
@@ -169,6 +173,10 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                 .expect("ready certification has votes")
                 .0
                 .clone();
+
+            // A candidate quorum can authenticate the certificate without establishing
+            // individual vote validity. Failure returns verification results for pending votes.
+            // Below quorum, non-batchable schemes verify pending votes directly.
             let (mut result, fallback) = if len >= quorum {
                 match scheme.optimistic_assemble::<_, D, _, _>(
                     &mut rng,
@@ -201,6 +209,9 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                     false,
                 )
             };
+
+            // A quorum of prior and newly verified votes must assemble. Otherwise retain
+            // them with their context so proposal changes can filter them.
             let certificate = if verified.len() + result.verified.len() >= quorum {
                 let prior = verified.drain(..).map(|(_, attestation)| attestation);
                 let certificate = scheme
@@ -230,6 +241,9 @@ impl<C, S: CertificateScheme> Certification<C, S> {
             )
         })
         .await;
+
+        // Only verified votes survive an incomplete attempt. A certificate completes
+        // this kind and releases its buffers.
         if result.certificate.is_some() {
             self.complete();
         } else {
@@ -317,11 +331,8 @@ impl<D: Digest> ProposalState<D> {
 /// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as [secp256r1]),
 /// signatures are verified eagerly as they arrive since there is no batching benefit.
 ///
-/// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
-/// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
-///
-/// Candidate quorums use [optimistic assembly](CertificateScheme::optimistic_assemble), retaining
-/// verified votes between attempts.
+/// Candidate quorums use [optimistic assembly](CertificateScheme::optimistic_assemble). Verified
+/// votes are retained between attempts, and a verified quorum skips pending vote verification.
 ///
 /// Once polled, async verification moves the pending batch and accumulated verified votes into
 /// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.
