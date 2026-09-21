@@ -2,12 +2,12 @@ use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 #[cfg(target_os = "macos")]
-use std::{collections::HashSet, path::Path};
+use std::collections::HashSet;
 use std::{
     fs,
     io::{ErrorKind, Seek as _, SeekFrom, Write as _},
     ops::RangeInclusive,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::sync::Mutex;
@@ -31,64 +31,40 @@ impl Config {
 
 #[derive(Clone)]
 pub struct Storage {
-    lock: Arc<Mutex<Namespace>>,
+    lock: Arc<Mutex<Partitions>>,
     cfg: Config,
     pool: BufferPool,
     hold: Arc<Hold>,
 }
 
-/// Directory durability recorded under the storage instance's namespace lock.
+/// Partition directory durability tracked by this storage instance.
 #[derive(Default)]
-struct Namespace {
+struct Partitions {
     /// Partitions whose inherited directory changes are durable. Creation and removal maintain
     /// this state under the same lock. Removal retires the entry before unlinking, and a blob
     /// removal restores it once the partition directory is synced.
     #[cfg(target_os = "macos")]
     synced: HashSet<PathBuf>,
     #[cfg(all(test, target_os = "macos"))]
-    test: NamespaceTestState,
+    sync_hook: tests::SyncHook,
 }
 
-/// Controls and records directory barriers in namespace tests.
-#[cfg(all(test, target_os = "macos"))]
-#[derive(Default)]
-struct NamespaceTestState {
-    /// Announces an uncached barrier and waits for release before issuing its sync.
-    before_sync: Option<(
-        tokio::sync::oneshot::Sender<()>,
-        std::sync::mpsc::Receiver<()>,
-    )>,
-    /// Fails the next `sync_once` barrier or removal's directory sync.
-    fail_sync: Option<Error>,
-    /// Successful directory syncs performed by `sync_once`.
-    syncs: usize,
-}
+impl Partitions {
+    fn sync_dir(&mut self, path: &Path) -> Result<(), Error> {
+        #[cfg(all(test, target_os = "macos"))]
+        self.sync_hook.run()?;
+        sync_dir(path)
+    }
 
-#[cfg(target_os = "macos")]
-impl Namespace {
     /// Make a partition's directory entries durable before recording completion.
+    #[cfg(target_os = "macos")]
     fn sync_once(&mut self, path: &Path) -> Result<(), Error> {
         if self.synced.contains(path) {
             return Ok(());
         }
 
-        // Let tests pause or fail an uncached directory barrier.
-        #[cfg(test)]
-        {
-            if let Some((entered, released)) = self.test.before_sync.take() {
-                let _ = entered.send(());
-                let _ = released.recv();
-            }
-            if let Some(error) = self.test.fail_sync.take() {
-                return Err(error);
-            }
-        }
-        sync_dir(path)?;
+        self.sync_dir(path)?;
         self.synced.insert(path.to_owned());
-        #[cfg(test)]
-        {
-            self.test.syncs += 1;
-        }
         Ok(())
     }
 }
@@ -109,7 +85,7 @@ impl Storage {
             )
         });
         Self {
-            lock: Arc::new(Mutex::new(Namespace::default())),
+            lock: Arc::new(Mutex::new(Partitions::default())),
             cfg,
             pool,
             hold,
@@ -123,7 +99,7 @@ impl Storage {
     /// runtime shutdown yields [Error::Closed].
     async fn dispatch<T: Send + 'static>(
         &self,
-        f: impl FnOnce(&mut Namespace) -> Result<T, Error> + Send + 'static,
+        f: impl FnOnce(&mut Partitions) -> Result<T, Error> + Send + 'static,
     ) -> Result<T, Error> {
         let guard = self.lock.clone().lock_owned().await;
         let hold = self.hold.clone();
@@ -165,7 +141,7 @@ impl crate::Storage for Storage {
         // must not abandon that sequence half-done (a straggling truncate could
         // clobber a successor's blob) or leave a later open trusting a header
         // whose syncs never ran.
-        self.dispatch(move |_namespace| {
+        self.dispatch(move |partitions| {
             let parent = match path.parent() {
                 Some(parent) => parent,
                 None => return Err(Error::PartitionCreationFailed(partition)),
@@ -198,16 +174,16 @@ impl crate::Storage for Storage {
             let (logical_size, blob_version, data_offset) = match existing {
                 Some(resolved) => {
                     #[cfg(target_os = "macos")]
-                    _namespace.sync_once(parent)?;
+                    partitions.sync_once(parent)?;
                     resolved
                 }
                 None => {
                     // Make the blob name and its partition durable before writing a parseable
                     // header. A visible partition directory does not establish its durability.
-                    sync_dir(parent)?;
-                    sync_dir(&storage_directory)?;
+                    partitions.sync_dir(parent)?;
+                    partitions.sync_dir(&storage_directory)?;
                     #[cfg(target_os = "macos")]
-                    _namespace.synced.insert(parent.to_owned());
+                    partitions.synced.insert(parent.to_owned());
 
                     // Truncate to zero before writing, per the [Header::create] contract.
                     let (region, blob_version) = Header::create(&blob_layouts, &versions);
@@ -243,9 +219,9 @@ impl crate::Storage for Storage {
         // Run the removal to completion: dropping this future must not abandon
         // the sequence between an unlink and the directory sync that makes it
         // durable.
-        self.dispatch(move |_namespace| {
+        self.dispatch(move |partitions| {
             #[cfg(target_os = "macos")]
-            _namespace.synced.remove(&path);
+            partitions.synced.remove(&path);
 
             // Remove all related files
             let sync_path = if let Some(name) = &name {
@@ -263,14 +239,10 @@ impl crate::Storage for Storage {
                 storage_directory
             };
 
-            #[cfg(all(test, target_os = "macos"))]
-            if let Some(error) = _namespace.test.fail_sync.take() {
-                return Err(error);
-            }
-            sync_dir(&sync_path)?;
+            partitions.sync_dir(&sync_path)?;
             #[cfg(target_os = "macos")]
             if name.is_some() {
-                _namespace.synced.insert(sync_path);
+                partitions.synced.insert(sync_path);
             }
             Ok(())
         })
@@ -282,14 +254,14 @@ impl crate::Storage for Storage {
 
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
-        self.dispatch(move |_namespace| {
+        self.dispatch(move |_partitions| {
             // Distinguish missing partitions from other filesystem failures.
             let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
                 ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
                 _ => Error::ReadFailed,
             })?;
             #[cfg(target_os = "macos")]
-            _namespace.sync_once(&path)?;
+            _partitions.sync_once(&path)?;
             let mut blobs = Vec::new();
             for entry in entries {
                 let entry = entry.map_err(|_| Error::ReadFailed)?;
@@ -332,6 +304,30 @@ mod tests {
     #[cfg(target_os = "macos")]
     use std::sync::mpsc;
     use std::{env, sync::mpsc::RecvTimeoutError};
+
+    /// One-shot pause and failure controls applied before a directory sync.
+    #[cfg(target_os = "macos")]
+    #[derive(Default)]
+    pub(super) struct SyncHook {
+        /// Announces entry and waits for release before the filesystem sync.
+        pause: Option<(tokio::sync::oneshot::Sender<()>, mpsc::Receiver<()>)>,
+        /// Error returned in place of the next filesystem sync.
+        fail: Option<Error>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl SyncHook {
+        pub(super) fn run(&mut self) -> Result<(), Error> {
+            if let Some((entered, released)) = self.pause.take() {
+                let _ = entered.send(());
+                let _ = released.recv();
+            }
+            if let Some(error) = self.fail.take() {
+                return Err(error);
+            }
+            Ok(())
+        }
+    }
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -993,16 +989,17 @@ mod tests {
             let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), test_pool());
             crate::storage::sync(&directory).unwrap();
 
+            // Pause the first directory barrier while it owns the namespace lock.
             let (entered, entering) = tokio::sync::oneshot::channel();
             let (release, gate) = mpsc::channel();
-            storage.lock.lock().await.test.before_sync = Some((entered, gate));
+            storage.lock.lock().await.sync_hook.pause = Some((entered, gate));
             {
                 let mut scan = Box::pin(storage.scan("partition"));
                 assert!((&mut scan).now_or_never().is_none());
                 entering.await.unwrap();
                 assert!((&mut scan).now_or_never().is_none());
 
-                // The result and subsequent namespace operations wait for the same barrier.
+                // A queued scan must wait even if the initiating future is dropped.
                 let mut next = Box::pin(storage.scan("partition"));
                 assert!((&mut next).now_or_never().is_none());
                 let scan = if cancel {
@@ -1017,11 +1014,16 @@ mod tests {
                 }
                 assert!(next.await.unwrap().is_empty());
             }
-            assert_eq!(storage.lock.lock().await.test.syncs, 1);
             assert!(storage.lock.lock().await.synced.contains(&partition));
 
+            // A cached scan leaves the failure armed for the other partition's first barrier.
+            storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+            assert!(storage.scan("partition").await.unwrap().is_empty());
+            assert!(matches!(
+                storage.scan("other").await,
+                Err(Error::WriteFailed)
+            ));
             assert!(storage.scan("other").await.unwrap().is_empty());
-            assert_eq!(storage.lock.lock().await.test.syncs, 2);
             assert!(matches!(
                 storage.scan("missing").await,
                 Err(Error::PartitionMissing(_))
@@ -1044,17 +1046,16 @@ mod tests {
         fs::create_dir_all(&partition).unwrap();
         let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), test_pool());
         crate::storage::sync(&directory).unwrap();
-        storage.lock.lock().await.test.fail_sync = Some(Error::WriteFailed);
+        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
 
         assert!(matches!(
             storage.scan("partition").await,
             Err(Error::WriteFailed)
         ));
         assert!(!storage.lock.lock().await.synced.contains(&partition));
-        assert_eq!(storage.lock.lock().await.test.syncs, 0);
 
         assert!(storage.scan("partition").await.unwrap().is_empty());
-        assert_eq!(storage.lock.lock().await.test.syncs, 1);
+        assert!(storage.lock.lock().await.synced.contains(&partition));
 
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
@@ -1065,7 +1066,10 @@ mod tests {
     async fn test_partition_open_syncs_once() {
         let directory =
             env::temp_dir().join(format!("storage_tokio_open_dir_sync_{}", random_suffix()));
+        let partition = directory.join("partition");
         let config = Config::new(directory.clone(), Layout::ALL);
+
+        // A fresh storage instance must synchronize the inherited blob's partition on first open.
         {
             let storage = Storage::new(config.clone(), test_pool());
             drop(storage.open("partition", b"blob").await.unwrap());
@@ -1075,10 +1079,13 @@ mod tests {
         crate::storage::sync(&directory).unwrap();
         let (blob, size) = storage.open("partition", b"blob").await.unwrap();
         assert_eq!(size, 0);
-        assert_eq!(storage.lock.lock().await.test.syncs, 1);
+        assert!(storage.lock.lock().await.synced.contains(&partition));
         drop(blob);
+
+        // A cached reopen must leave the sync failure armed.
+        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
         drop(storage.open("partition", b"blob").await.unwrap());
-        assert_eq!(storage.lock.lock().await.test.syncs, 1);
+        assert!(storage.lock.lock().await.sync_hook.fail.is_some());
 
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
@@ -1089,6 +1096,10 @@ mod tests {
     async fn test_partition_sync_creation_and_removal() {
         let directory =
             env::temp_dir().join(format!("storage_tokio_dir_lifecycle_{}", random_suffix()));
+        let created = directory.join("created");
+        let inherited = directory.join("inherited");
+        let retired = directory.join("retired");
+        let missing = directory.join("missing");
         let config = Config::new(directory.clone(), Layout::ALL);
         {
             let storage = Storage::new(config.clone(), test_pool());
@@ -1099,52 +1110,43 @@ mod tests {
 
         let storage = Storage::new(config, test_pool());
         crate::storage::sync(&directory).unwrap();
+
+        // Creation synchronizes the partition, so its first scan can use the cache.
         drop(storage.open("created", b"blob").await.unwrap());
+        assert!(storage.lock.lock().await.synced.contains(&created));
         assert_eq!(
             storage.scan("created").await.unwrap(),
             vec![b"blob".to_vec()]
         );
-        storage.remove("inherited", Some(b"blob")).await.unwrap();
-        assert!(storage.scan("inherited").await.unwrap().is_empty());
-        assert_eq!(storage.lock.lock().await.test.syncs, 0);
 
+        // Removing an inherited blob also synchronizes its partition before caching it.
+        storage.remove("inherited", Some(b"blob")).await.unwrap();
+        assert!(storage.lock.lock().await.synced.contains(&inherited));
+        assert!(storage.scan("inherited").await.unwrap().is_empty());
+
+        // Removing a partition retires its cache entry before the name is reused.
         assert_eq!(
             storage.scan("retired").await.unwrap(),
             vec![b"blob".to_vec()]
         );
-        assert_eq!(storage.lock.lock().await.test.syncs, 1);
         storage.remove("retired", None).await.unwrap();
         assert!(matches!(
             storage.scan("retired").await,
             Err(Error::PartitionMissing(_))
         ));
-        assert!(
-            !storage
-                .lock
-                .lock()
-                .await
-                .synced
-                .contains(&directory.join("retired"))
-        );
+        assert!(!storage.lock.lock().await.synced.contains(&retired));
         drop(storage.open("retired", b"new").await.unwrap());
+        assert!(storage.lock.lock().await.synced.contains(&retired));
         assert_eq!(
             storage.scan("retired").await.unwrap(),
             vec![b"new".to_vec()]
         );
-        assert_eq!(storage.lock.lock().await.test.syncs, 1);
 
         assert!(matches!(
             storage.remove("missing", Some(b"blob")).await,
             Err(Error::BlobMissing(_, _))
         ));
-        assert!(
-            !storage
-                .lock
-                .lock()
-                .await
-                .synced
-                .contains(&directory.join("missing"))
-        );
+        assert!(!storage.lock.lock().await.synced.contains(&missing));
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1169,11 +1171,10 @@ mod tests {
             storage.scan("partition").await.unwrap(),
             vec![b"blob".to_vec()]
         );
-        assert_eq!(storage.lock.lock().await.test.syncs, 1);
         assert!(storage.lock.lock().await.synced.contains(&partition));
 
         // The unlink lands, then the directory sync fails.
-        storage.lock.lock().await.test.fail_sync = Some(Error::WriteFailed);
+        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
         assert!(matches!(
             storage.remove("partition", Some(b"blob")).await,
             Err(Error::WriteFailed)
@@ -1181,8 +1182,8 @@ mod tests {
         assert!(!partition.join(hex(b"blob")).exists());
         assert!(!storage.lock.lock().await.synced.contains(&partition));
 
+        // A later scan must finish the missing barrier before caching the empty partition.
         assert!(storage.scan("partition").await.unwrap().is_empty());
-        assert_eq!(storage.lock.lock().await.test.syncs, 2);
         assert!(storage.lock.lock().await.synced.contains(&partition));
 
         drop(storage);
