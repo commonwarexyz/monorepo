@@ -281,7 +281,7 @@ where
             }
         };
 
-        // The native resolver already waits asynchronously for this verdict.
+        // The resolver waits asynchronously for this verdict.
         if let [(subscriber, _)] = subscribers.as_slice() {
             let status = if subscriber.reply.try_send((response, feedback_tx)).is_ok() {
                 status::Status::Success
@@ -954,7 +954,7 @@ mod tests {
             feedback.unwrap().accept();
             assert!(verdict.await.unwrap());
 
-            // Native completion retires the old subscription before a new caller arrives.
+            // The resolver retires the old subscription before a new caller arrives.
             resolver.0.lock().subscriptions.clear();
             let (response, receiver) = mpsc::channel(1);
             actor.handle_mailbox_message(
@@ -999,7 +999,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_before_native_admission_preserves_replacement() {
+    fn cancellation_before_resolver_admission_preserves_replacement() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let peer = ed25519::PrivateKey::from_seed(1).public_key();
             let (network, oracle) = Network::new_with_peers(
@@ -1040,7 +1040,7 @@ mod tests {
             let (mut actor, mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let request = test_request_at(Location::new(1));
 
-            // Queue the fetch and its exact cancellation before the native actor starts.
+            // Queue the fetch and its exact cancellation before the resolver starts.
             let mut canceled = Box::pin(mailbox.serve(request));
             assert!(futures::poll!(canceled.as_mut()).is_pending());
             let message = actor.mailbox_rx.recv().await.unwrap();
@@ -1054,7 +1054,7 @@ mod tests {
             actor.handle_mailbox_message(&mut resolver, message);
 
             // This ready-queue predicate runs after both registrations and the cancellation.
-            // Observing only the second ID proves the native subscription has no orphan.
+            // Observing only the second ID proves the canceled subscription was removed.
             let (observed, mut observations) = mpsc::unbounded_channel();
             resolver.retain(move |_, subscriber| {
                 observed.send(subscriber.id).unwrap();
@@ -1064,7 +1064,7 @@ mod tests {
             let retained = select! {
                 retained = observations.recv() => retained.unwrap(),
                 _ = context.sleep(Duration::from_secs(1)) => {
-                    panic!("native resolver did not process queued cancellation");
+                    panic!("resolver did not process queued cancellation");
                 },
             };
             assert_eq!(retained, 1);
@@ -1097,7 +1097,7 @@ mod tests {
             let live_id = subscribers[1].id;
             let delivery = test_delivery(request, subscribers);
 
-            // The native delivery still names a caller whose response receiver has closed.
+            // The delivery still names a caller whose response receiver has closed.
             drop(canceled_rx);
             actor.work.next_completed().await;
             assert_eq!(resolver.0.lock().subscriptions[&request][0].id, live_id);
@@ -1110,7 +1110,7 @@ mod tests {
             assert_eq!(response.encode(), payload);
             feedback.send(true).unwrap();
 
-            // A singleton verdict reaches the native receiver without polling glue work.
+            // A singleton verdict reaches the resolver without polling glue work.
             assert!(verdict.await.unwrap());
             drop(live_rx);
             actor.work.next_completed().await;
@@ -1624,7 +1624,7 @@ mod tests {
                 let mut late = Box::pin(pair.mailboxes[0].serve(request));
                 assert!(futures::poll!(late.as_mut()).is_pending());
 
-                // A later distinct request completes only after the native mailbox admits
+                // A later distinct request completes only after the resolver admits
                 // the late subscriber. Glue admission alone would not establish this order.
                 let (_, fence) = pair.mailboxes[0]
                     .serve(Request::Boundary {
@@ -1636,8 +1636,8 @@ mod tests {
                 fence.unwrap().accept();
                 assert!(late.as_mut().now_or_never().is_none());
 
-                // With the peer database locked, only native cached bytes can finish the
-                // late call. Restore the database before asserting the bounded result.
+                // With the peer database locked, only the resolver's cached bytes can finish
+                // the late call. Restore the database before asserting the bounded result.
                 let (slot, database) = pair.databases[1].write().await;
                 if accept {
                     first.unwrap().accept();
