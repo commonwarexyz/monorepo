@@ -682,7 +682,9 @@ stability_scope!(BETA {
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
     /// characters, dashes (`-`), or underscores (`_`). Names containing other
-    /// characters (e.g., `/`, `.`, spaces) will return an error.
+    /// characters (e.g., `/`, `.`, spaces) will return an error. On case-insensitive
+    /// filesystems, partition names that differ only by letter case must not both
+    /// be used.
     pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
@@ -713,7 +715,7 @@ stability_scope!(BETA {
         /// # Versions
         ///
         /// Blobs are versioned. If the blob's version is not in `versions`, returns
-        /// [Error::BlobVersionMismatch].
+        /// [Error::BlobVersionMismatch]. `versions` must be non-empty.
         ///
         /// # Layout
         ///

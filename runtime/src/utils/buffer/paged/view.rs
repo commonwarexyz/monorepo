@@ -8,6 +8,7 @@
 
 use super::CacheRef;
 use crate::{Blob, Error, IoBufMut, IoBufs};
+use commonware_utils::Widen;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
@@ -141,7 +142,7 @@ impl<B: Blob> View<'_, B> {
             bufs.truncate(0);
             return Ok((bufs, 0));
         }
-        let available = (self.size.saturating_sub(offset) as usize).min(len);
+        let available = self.size.saturating_sub(offset).min(Widen::widen(len)) as usize;
         if available == 0 {
             return Err(Error::BlobInsufficientLength);
         }

@@ -2,6 +2,7 @@ use super::Checksum;
 use crate::{Blob, Error, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{Buf, FixedSize};
+use commonware_utils::Widen;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
 
@@ -111,10 +112,10 @@ impl<B: Blob> PageReader<B> {
             return Ok(None); // No more data
         }
 
-        // Calculate how many pages to read
-        let remaining_physical = (self.physical_blob_size - start_offset) as usize;
-        let max_pages = remaining_physical / self.physical_page_size;
-        let pages_to_read = max_pages.min(self.prefetch_count);
+        // Keep the total page count in u64 and narrow only the bounded batch.
+        let max_pages =
+            (self.physical_blob_size - start_offset) / Widen::widen(self.physical_page_size);
+        let pages_to_read = max_pages.min(Widen::widen(self.prefetch_count)) as usize;
         if pages_to_read == 0 {
             return Ok(None);
         }
@@ -132,7 +133,7 @@ impl<B: Blob> PageReader<B> {
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
-        let is_final_batch = pages_to_read == max_pages;
+        let is_final_batch = Widen::widen(pages_to_read) == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
@@ -165,7 +166,7 @@ impl<B: Blob> PageReader<B> {
             total_logical += exposed_len;
             last_len = exposed_len;
         }
-        self.blob_page += pages_to_read as u64;
+        self.blob_page += Widen::widen(pages_to_read);
 
         let state = BufferState {
             buffer: physical_buf,

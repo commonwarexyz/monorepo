@@ -818,13 +818,19 @@ where
         let read = reader.read_many(&positions).await?;
 
         // Merge read results back in order.
-        for (idx, loc) in committed {
-            // `positions` is sorted and deduped, and `loc` came from it before deduping, so
-            // binary search must find the matching read_many result.
-            let result_idx = positions
-                .binary_search(&loc)
-                .expect("read result missing for requested location");
-            results[idx] = Some(read[result_idx].clone());
+        if presorted {
+            for ((idx, _), op) in zip_eq(committed, read) {
+                results[idx] = Some(op);
+            }
+        } else {
+            for (idx, loc) in committed {
+                // `positions` is sorted and deduped, and `loc` came from it before deduping, so
+                // binary search must find the matching read_many result.
+                let result_idx = positions
+                    .binary_search(&loc)
+                    .expect("read result missing for requested location");
+                results[idx] = Some(read[result_idx].clone());
+            }
         }
         Ok(results
             .into_iter()
@@ -4666,15 +4672,18 @@ mod tests {
 
             let key_db = colliding_digest(0x30, 0);
             let value_db = colliding_digest(0x30, 1);
+            let key_db_second = colliding_digest(0x33, 0);
+            let value_db_second = colliding_digest(0x33, 1);
             let key_parent = colliding_digest(0x31, 0);
             let value_parent = colliding_digest(0x31, 1);
             let key_current = colliding_digest(0x32, 0);
             let value_current = colliding_digest(0x32, 1);
 
-            // Commit one key to the DB so it's on disk.
+            // Commit two keys to the DB so they're on disk.
             let seed = db
                 .new_batch()
                 .write(key_db, Some(value_db))
+                .write(key_db_second, Some(value_db_second))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
@@ -4682,8 +4691,9 @@ mod tests {
             let db = db.commit().await.unwrap();
 
             let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
+            let committed_loc_second = db.snapshot.get(&key_db_second).next().copied().unwrap();
 
-            // Create a parent batch with a second key (in-memory ancestor).
+            // Create a parent batch with an in-memory ancestor key.
             let parent = db
                 .new_batch()
                 .write(key_parent, Some(value_parent))
@@ -4695,7 +4705,7 @@ mod tests {
                 .loc()
                 .unwrap();
 
-            // Create a child batch with a third key (current ops).
+            // Create a child batch with a current-ops key.
             let child = parent
                 .new_batch::<Sha256>()
                 .write(key_current, Some(value_current));
@@ -4706,6 +4716,39 @@ mod tests {
                 key_current,
                 value_current,
             ))];
+
+            // Interleave in-memory sources with a sorted or reversed committed subset.
+            for reverse in [false, true] {
+                let mut committed = [
+                    (committed_loc, key_db, value_db),
+                    (committed_loc_second, key_db_second, value_db_second),
+                ];
+                committed.sort_unstable_by_key(|&(loc, _, _)| loc);
+                if reverse {
+                    committed.reverse();
+                }
+                let [
+                    (first_loc, first_key, first_value),
+                    (second_loc, second_key, second_value),
+                ] = committed;
+                let ops = merkleizer
+                    .read_ops(
+                        &[current_loc, first_loc, parent_loc, second_loc],
+                        &batch_ops,
+                        &db.log,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    ops,
+                    vec![
+                        Operation::Update(update::Unordered(key_current, value_current)),
+                        Operation::Update(update::Unordered(first_key, first_value)),
+                        Operation::Update(update::Unordered(key_parent, value_parent)),
+                        Operation::Update(update::Unordered(second_key, second_value)),
+                    ]
+                );
+            }
 
             // read_ops should resolve all three sources correctly while preserving order and
             // duplicates across the disk-backed subset.

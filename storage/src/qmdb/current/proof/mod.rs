@@ -47,7 +47,6 @@ use commonware_codec::{Buf, Codec, EncodeSize, Read, ReadExt as _, Write, varint
 use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::bitmap::{Prunable as BitMap, Readable as BitmapReadable};
 use core::{num::NonZeroU64, ops::Range};
-use futures::future::try_join_all;
 use tracing::debug;
 
 pub mod operation;
@@ -340,10 +339,8 @@ impl<F: Graftable, D: Digest> RangeProof<F, D> {
         .await?;
 
         // Collect the operations necessary to verify the proof.
-        let futures = (*request.start_loc..*end_loc)
-            .map(|i| log.read(i))
-            .collect::<Vec<_>>();
-        let ops = try_join_all(futures).await?;
+        let positions: Vec<u64> = (*request.start_loc..*end_loc).collect();
+        let ops = log.read_many(&positions).await?;
 
         // Gather the chunks necessary to verify the proof.
         let end = (*end_loc - 1) / chunk_bits; // chunk that contains the last bit
