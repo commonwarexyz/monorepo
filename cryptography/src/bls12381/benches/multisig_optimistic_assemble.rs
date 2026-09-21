@@ -1,4 +1,4 @@
-use super::utils::{BenchSubject, Case, bench_case};
+use super::utils::{BenchSubject, OptimisticAssembleCase, bench_optimistic_assemble};
 use commonware_cryptography::{
     Signer as _,
     bls12381::primitives::{
@@ -60,8 +60,13 @@ fn bench_variant<V: Variant>(c: &mut Criterion, variant: &str) {
     for (n, quorum) in [(100, 67), (298, 199)] {
         assert_eq!(N3f1::quorum(n), quorum);
         let (scheme, attestations) = setup::<V>(n);
-        for case in [Case::Valid, Case::Bad, Case::Spare, Case::Split] {
-            bench_case::<_, Sha256Digest>(
+        for case in [
+            OptimisticAssembleCase::Valid,
+            OptimisticAssembleCase::Bad,
+            OptimisticAssembleCase::Spare,
+            OptimisticAssembleCase::Split,
+        ] {
+            bench_optimistic_assemble::<_, Sha256Digest>(
                 c,
                 &format!(
                     "{}/variant={} n={} case={}",

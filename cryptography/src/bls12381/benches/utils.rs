@@ -28,8 +28,9 @@ impl Subject for BenchSubject {
     }
 }
 
+/// Input cases for optimistic assembly and its fallback.
 #[derive(Clone, Copy)]
-pub enum Case {
+pub enum OptimisticAssembleCase {
     /// A quorum of valid attestations.
     Valid,
     /// A quorum with one invalid attestation, leaving too few to certify.
@@ -40,7 +41,7 @@ pub enum Case {
     Split,
 }
 
-impl Case {
+impl OptimisticAssembleCase {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Valid => "valid",
@@ -55,16 +56,16 @@ impl Case {
     }
 }
 
-fn fixture<S: Scheme>(
+fn optimistic_assemble_fixture<S: Scheme>(
     attestations: &[Attestation<S>],
     quorum: usize,
-    case: Case,
+    case: OptimisticAssembleCase,
 ) -> (Vec<Attestation<S>>, Vec<Participant>) {
     assert_eq!(attestations.len(), quorum + 1);
-    if matches!(case, Case::Valid) {
+    if matches!(case, OptimisticAssembleCase::Valid) {
         return (attestations[..quorum].to_vec(), Vec::new());
     }
-    if matches!(case, Case::Split) {
+    if matches!(case, OptimisticAssembleCase::Split) {
         let mut pending = attestations[..quorum].to_vec();
         let chunk = pending.len().div_ceil(2);
 
@@ -94,7 +95,7 @@ fn fixture<S: Scheme>(
         .clone();
     pending[invalid_position].signature = replacement;
 
-    if matches!(case, Case::Bad) {
+    if matches!(case, OptimisticAssembleCase::Bad) {
         let removed = pending
             .iter()
             .rposition(|attestation| attestation.signer != invalid)
@@ -159,28 +160,29 @@ fn assert_invalid(invalid: &[Participant], expected: &[Participant]) {
     assert_eq!(invalid, expected);
 }
 
-pub fn bench_case<S, D>(
+/// Benchmark optimistic assembly, including any fallback and subsequent certificate construction.
+pub fn bench_optimistic_assemble<S, D>(
     c: &mut Criterion,
     name: &str,
     scheme: &S,
     subject: S::Subject<'static, D>,
     attestations: &[Attestation<S>],
     quorum: usize,
-    case: Case,
+    case: OptimisticAssembleCase,
 ) where
     S: Scheme,
     D: Digest,
 {
-    let (pending, expected_invalid) = fixture(attestations, quorum, case);
-    let expected_pending = if matches!(case, Case::Spare) {
+    let (pending, expected_invalid) = optimistic_assemble_fixture(attestations, quorum, case);
+    let expected_pending = if matches!(case, OptimisticAssembleCase::Spare) {
         quorum + 1
     } else {
         quorum
     };
     let expected_failures = match case {
-        Case::Valid => 0,
-        Case::Bad | Case::Spare => 1,
-        Case::Split => 2,
+        OptimisticAssembleCase::Valid => 0,
+        OptimisticAssembleCase::Bad | OptimisticAssembleCase::Spare => 1,
+        OptimisticAssembleCase::Split => 2,
     };
     assert_eq!(pending.len(), expected_pending);
     assert_eq!(expected_invalid.len(), expected_failures);
@@ -235,7 +237,7 @@ pub fn bench_case<S, D>(
     }
 
     // Establish that both recursive halves independently require invalid isolation.
-    if matches!(case, Case::Split) {
+    if matches!(case, OptimisticAssembleCase::Split) {
         let chunk = pending.len().div_ceil(2);
         for half in [pending[..chunk].to_vec(), pending[chunk..].to_vec()] {
             let half_invalid = expected_invalid
