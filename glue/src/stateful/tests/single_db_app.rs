@@ -471,7 +471,7 @@ impl EngineDefinition for SingleDbEngine {
         probe.start(probe_network);
         let mut state_sync_height = if should_state_sync {
             let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
-            plan = plan.with_floor(finalization);
+            plan = plan.with_floor(finalization).await;
             None
         } else {
             self.sync_heights.lock().get(public_key).copied()

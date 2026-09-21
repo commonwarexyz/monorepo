@@ -975,7 +975,7 @@ impl EngineDefinition for ReshareEngine {
                     .floor
                     .clone(),
             };
-            plan = plan.with_floor(finalization);
+            plan = plan.with_floor(finalization).await;
         }
         let (marshal_actor, marshal, floor) = MarshalActor::init(
             context.child("marshal"),
