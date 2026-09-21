@@ -7250,6 +7250,58 @@ mod tests {
     }
 
     #[test]
+    fn pipelined_handoff_child_replay_prevents_rebuild() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes,
+                    participants,
+                    verifier,
+                    ..
+                },
+                mut state,
+            ) = setup_state_with_handoff(&mut context, 4, 3, 9, handoff_terms());
+
+            let certified = certify_view_4(&mut state, &verifier, &schemes);
+            let tip = fetch_proposal(5, 4, 65);
+            let tip_vote = Notarize::sign(&schemes[3], tip).expect("tip vote");
+            state.replay(&Artifact::Notarize(tip_vote));
+
+            let child = fetch_proposal(6, 5, 66);
+            let child_vote = Notarize::sign(&schemes[3], child.clone()).expect("child vote");
+            state.replay(&Artifact::Notarize(child_vote));
+
+            assert!(state.try_propose().is_none());
+            assert!(state.construct_notarize(View::new(6)).is_none());
+
+            // The other participants nullify the old tip, making the certified
+            // view-4 ancestry independently admissible for the term start.
+            let nullification = build_nullification(
+                &verifier,
+                &schemes[..3],
+                Rnd::new(Epoch::new(9), View::new(5)),
+            );
+            assert!(state.add_nullification(nullification));
+            assert_eq!(
+                state.parent_payload_for(View::new(6), View::new(4)),
+                Ok(certified.payload)
+            );
+
+            let alternate = Context {
+                round: Rnd::new(Epoch::new(9), View::new(6)),
+                leader: participants[3].clone(),
+                parent: (View::new(4), certified.payload),
+            };
+            assert!(state.proposed(&alternate, Sha256Digest::from([67u8; 32])));
+            assert_eq!(
+                state.views.get(&View::new(6)).and_then(Round::proposal),
+                Some(&child)
+            );
+        });
+    }
+
+    #[test]
     fn pipelined_handoff_does_not_require_recovered_parent_leader() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
