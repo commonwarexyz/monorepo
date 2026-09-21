@@ -10,11 +10,11 @@ use crate::{
 };
 use commonware_cryptography::{
     Digest,
-    certificate::{Attestation, Scheme as CertificateScheme, Verification},
+    certificate::{Attestation, Scheme as CertificateScheme},
 };
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::{non_empty, ordered::Set};
+use commonware_utils::ordered::Set;
 use rand::rngs::StdRng;
 use rand_core::{CryptoRng, SeedableRng};
 use std::{future::Future, mem, sync::Arc};
@@ -43,25 +43,34 @@ pub struct Batch<C> {
     pub fallback: bool,
 }
 
-/// Certification progress for one kind of vote under a fixed scheme.
+/// Certification progress for one kind of vote.
 ///
-/// Each attestation retains its proposal or round so proposal changes can filter both
-/// buffers. Each kind certifies independently and gets one optimistic attempt per view.
+/// Each kind certifies independently: a view can legitimately certify both
+/// a notarization and a nullification.
 struct Certification<C, S: CertificateScheme> {
+    /// Verified votes required to recover a certificate.
     quorum: usize,
+    /// Whether this kind's optimistic attempt remains available for the view.
     optimistic: bool,
+    /// Progress toward a certificate.
     state: State<C, S>,
 }
 
+/// The state of a [Certification].
 enum State<C, S: CertificateScheme> {
+    /// No certificate yet. Votes accumulate toward a quorum.
     Incomplete {
+        /// Votes awaiting signature verification.
         pending: Vec<(C, Attestation<S>)>,
+        /// Votes with verified signatures, held for certificate recovery.
         verified: Vec<(C, Attestation<S>)>,
     },
+    /// A certificate exists. Further votes are dropped.
     Complete,
 }
 
 impl<C, S: CertificateScheme> Certification<C, S> {
+    /// Creates an empty [State::Incomplete] whose vote buffers allocate lazily.
     fn new(quorum: usize) -> Self {
         Self {
             quorum,
@@ -73,14 +82,17 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         }
     }
 
-    /// Buffers a vote, preserving whether its attestation was individually verified.
-    /// The caller owns signer uniqueness. Completed kinds drop subsequent votes.
+    /// Buffers a vote for verification (or, if already verified, for
+    /// certificate recovery). The caller owns signer uniqueness. Votes that
+    /// arrive after completion are dropped.
     fn add(&mut self, context: C, attestation: Attestation<S>, is_verified: bool) {
         let State::Incomplete { pending, verified } = &mut self.state else {
             return;
         };
 
-        // Batchable queues reserve the remaining quorum; eager queues hold one pending vote.
+        // Verified votes may accumulate to quorum. A batchable pending buffer
+        // only needs the remaining unverified slots, while a non-batchable
+        // pending buffer is consumed after each vote.
         let initial_capacity = if is_verified || S::is_batchable() {
             self.quorum.saturating_sub(verified.len()).max(1)
         } else {
@@ -110,7 +122,8 @@ impl<C, S: CertificateScheme> Certification<C, S> {
     }
 
     /// Verifies pending votes and assembles any resulting quorum in one worker.
-    /// Pending verification requires one context; an existing verified quorum skips
+    /// Pending verification requires one context, retained with every attestation so
+    /// proposal changes can filter both buffers. An existing verified quorum skips
     /// pending votes and can complete before proposal selection.
     async fn try_verify<R, D, F, G>(
         &mut self,
@@ -146,7 +159,6 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         }
         let (pending, mut verified) = (mem::take(pending), mem::take(verified));
         let scheme = Arc::clone(scheme);
-        let quorum = self.quorum;
         let mut rng = StdRng::from_rng(rng);
         let (votes, result) = offload(len, span(), strategy, move |strategy| {
             let context = verified
@@ -155,59 +167,41 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                 .expect("ready certification has votes")
                 .0
                 .clone();
-            let mut certificate = None;
-            let mut invalid = Vec::new();
-            let mut fallback = false;
-            if !pending.is_empty() {
-                let result = if optimistic {
-                    scheme.verify_certificate_or_attestations::<_, D, _, _>(
-                        &mut rng,
-                        subject(&context),
-                        pending.iter().map(|(_, attestation)| attestation.clone()),
-                        verified.iter().map(|(_, attestation)| attestation.clone()),
-                        &strategy,
-                    )
-                } else {
-                    Err(scheme.verify_attestations::<_, D, _>(
-                        &mut rng,
-                        subject(&context),
-                        pending.into_iter().map(|(_, attestation)| attestation),
-                        &strategy,
-                    ))
-                };
-                match result {
-                    Ok(recovered) => certificate = Some(recovered),
-                    Err(Verification {
-                        verified: accepted,
-                        invalid: rejected,
-                    }) => {
-                        verified.extend(
-                            accepted
-                                .into_iter()
-                                .map(|attestation| (context.clone(), attestation)),
-                        );
-                        invalid = rejected;
-                        fallback = optimistic;
-                    }
-                }
-            }
-            if certificate.is_none() && verified.len() >= quorum {
-                certificate = Some(
-                    scheme
-                        .assemble(
-                            non_empty![@verified.drain(..).map(|(_, attestation)| attestation)],
-                            &strategy,
-                        )
-                        .expect("verified quorum must assemble"),
-                );
-            }
+            let prior = verified.iter().map(|(_, attestation)| attestation);
+            let result = if optimistic {
+                scheme.try_assemble::<_, D, _, _>(
+                    &mut rng,
+                    subject(&context),
+                    pending.iter().map(|(_, attestation)| attestation.clone()),
+                    prior,
+                    true,
+                    &strategy,
+                )
+            } else {
+                scheme.try_assemble::<_, D, _, _>(
+                    &mut rng,
+                    subject(&context),
+                    pending.into_iter().map(|(_, attestation)| attestation),
+                    prior,
+                    false,
+                    &strategy,
+                )
+            };
+            verified.extend(
+                result
+                    .verified
+                    .into_iter()
+                    .map(|attestation| (context.clone(), attestation)),
+            );
             (
                 verified,
                 Batch {
                     batch,
-                    invalid,
-                    certificate: certificate.map(|certificate| wrap(context, certificate)),
-                    fallback,
+                    invalid: result.invalid,
+                    certificate: result
+                        .certificate
+                        .map(|certificate| wrap(context, certificate)),
+                    fallback: result.fallback,
                 },
             )
         })
@@ -223,14 +217,17 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         Some(result)
     }
 
+    /// Completes, dropping all buffered votes.
     fn complete(&mut self) {
         self.state = State::Complete;
     }
 
+    /// Returns true if a certificate exists.
     const fn is_complete(&self) -> bool {
         matches!(self.state, State::Complete)
     }
 
+    /// Retains only the votes matching `f`.
     fn retain(&mut self, f: impl Fn(&C) -> bool) {
         if let State::Incomplete { pending, verified } = &mut self.state {
             pending.retain(|(context, _)| f(context));
@@ -296,13 +293,11 @@ impl<D: Digest> ProposalState<D> {
 /// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as [secp256r1]),
 /// signatures are verified eagerly as they arrive since there is no batching benefit.
 ///
-/// To avoid unnecessary verification, it tracks already verified votes and stops processing a vote kind
-/// once it has a verified quorum or certificate.
+/// To avoid unnecessary verification, it also tracks the number of already verified messages (ensuring
+/// we no longer attempt to verify messages after a quorum of valid messages have already been verified).
 ///
-/// For a non-attributable scheme, each vote kind gets at most one optimistic recovery attempt per view:
-/// the verifier assembles a certificate from unverified votes and verifies that certificate. Success does
-/// not individually verify the votes; failure bisects the pending batch for attestation verification
-/// and identifies invalid signers for blocking.
+/// For non-attributable schemes, each vote kind gets at most one optimistic
+/// [assembly attempt](CertificateScheme::try_assemble) per view.
 ///
 /// Once polled, async verification moves the pending batch and accumulated verified votes into
 /// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.

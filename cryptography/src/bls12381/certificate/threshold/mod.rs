@@ -5,7 +5,7 @@
 //!
 //! Unlike multi-signature schemes, threshold signatures:
 //! - Use partial signatures that can be combined to form a threshold signature
-//! - Authenticate a quorum with a single group signature
+//! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
 //!
 //! Certificate verification does not validate the partials supplied to assembly. Invalid partials
