@@ -149,7 +149,7 @@ use commonware_consensus::{
     Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
-    types::{EpochPhase, FixedEpocher},
+    types::{EpochPhase, FixedEpocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
@@ -172,6 +172,13 @@ use std::{
 };
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
+
+/// Latest canonical block whose reporter effects this actor has completed.
+#[derive(Clone, Copy)]
+struct FinalizedTip<D> {
+    height: Height,
+    digest: D,
+}
 
 mod dealing;
 mod dkg;
@@ -325,6 +332,9 @@ where
     epocher: FixedEpocher,
     metrics: ReshareMetrics<C::PublicKey>,
     mode: Mode<V, C::PublicKey, B::Directory>,
+    // Other reporters can hold Marshal behind our completed effects. Preserve this
+    // prefix across phases and epochs so a fresh receipt only renews its acknowledgement.
+    finalized_tip: Option<FinalizedTip<B::Digest>>,
     batch_verifier: PhantomData<BV>,
 }
 
@@ -375,10 +385,28 @@ where
                 epocher,
                 metrics,
                 mode: Mode::Reshare,
+                finalized_tip: None,
                 batch_verifier: config.batch_verifier,
             },
             Mailbox::new(sender),
         )
+    }
+
+    fn already_finalized(&self, block: &B) -> bool {
+        self.finalized_tip.is_some_and(|tip| {
+            if block.height() == tip.height {
+                assert_eq!(block.digest(), tip.digest, "conflicting finalized block");
+            }
+            block.height() <= tip.height
+        })
+    }
+
+    fn acknowledge(&mut self, block: &B, response: A) {
+        self.finalized_tip = Some(FinalizedTip {
+            height: block.height(),
+            digest: block.digest(),
+        });
+        response.acknowledge();
     }
 
     pub(crate) fn new_dkg(

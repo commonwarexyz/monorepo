@@ -33,7 +33,7 @@ use commonware_codec::{
     Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
-    Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
+    Block as ConsensusBlock, CertifiableBlock, Epochable as _, Heightable, Reporters,
     marshal::{
         self,
         ancestry::Ancestry,
@@ -878,6 +878,8 @@ impl EngineDefinition for ReshareEngine {
         .expect("blocks archive");
 
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
+        let stateful_startup_context = context.child("stateful_startup");
+        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
         let (probe_actor, probe_mailbox) = dkg_probe::Actor::new(dkg_probe::Config {
             context: context.child("dkg_probe"),
             manager: dkg_manager.clone(),
@@ -886,6 +888,7 @@ impl EngineDefinition for ReshareEngine {
                 participants: self.initial.info.participants(),
                 directory: self.initial.info.directory.clone(),
             },
+            minimum_epoch: plan.floor().map_or(Epoch::zero(), |floor| floor.epoch()),
             verifier: Scheme::certificate_verifier(
                 NAMESPACE,
                 *self.initial.info.output.public().public(),
@@ -900,8 +903,6 @@ impl EngineDefinition for ReshareEngine {
         });
         let probe_handle = probe_actor.start(probe_boundary_network);
 
-        let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
         let should_state_sync = plan.should_state_sync(delayed);
         if should_state_sync {
             *self
