@@ -229,8 +229,8 @@ where
 
     /// Marks state sync as in progress for the selected floor.
     ///
-    /// This must be persisted before any state sync database mutation begins so the database
-    /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
+    /// This must be persisted before Marshal installs the floor or any state sync database
+    /// mutation begins, so recovery resumes the selected sync after a crash.
     /// The storage target may still advance to marshal's durable processed height during startup.
     ///
     /// If an interrupted state sync already stored a floor, the newly selected

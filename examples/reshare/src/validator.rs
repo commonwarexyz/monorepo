@@ -203,7 +203,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 artifact.info.output.public().clone(),
             ),
         );
-        plan = plan.with_floor(artifact.floor.clone());
+        plan = plan.with_floor(artifact.floor.clone()).await;
         Some(artifact)
     } else {
         None

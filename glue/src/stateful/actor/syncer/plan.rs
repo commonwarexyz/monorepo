@@ -15,7 +15,7 @@ use tracing::warn;
 ///
 /// 1. [`SyncPlan::init`] reads the durable state sync state.
 /// 2. If [`SyncPlan::may_state_sync`] returns `true`, the caller may fetch a
-///    finalized floor and attach it via [`SyncPlan::with_floor`]. An interrupted
+///    finalized floor and persist it via [`SyncPlan::with_floor`]. An interrupted
 ///    sync already has a persisted floor, while a fresh sync needs one from the
 ///    caller. Otherwise the caller skips floor selection entirely.
 ///
@@ -33,7 +33,6 @@ where
     V: Variant,
 {
     sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
-    floor: Option<Finalization<S, V::Commitment>>,
 }
 
 impl<E, S, V> SyncPlan<E, S, V>
@@ -52,11 +51,7 @@ where
     pub async fn init(context: &E, partition_prefix: impl AsRef<str>) -> Self {
         let sync_metadata =
             StateSyncMetadata::<E, S, V::Commitment>::init(context, partition_prefix).await;
-        let floor = sync_metadata.in_progress_floor().cloned();
-        Self {
-            sync_metadata,
-            floor,
-        }
+        Self { sync_metadata }
     }
 
     /// Returns whether state sync can still run on this node.
@@ -84,23 +79,27 @@ where
         self.sync_metadata.partition_prefix()
     }
 
-    /// Returns the selected or persisted in-progress state sync floor.
-    pub const fn floor(&self) -> Option<&Finalization<S, V::Commitment>> {
-        self.floor.as_ref()
+    /// Returns the durable in-progress state sync floor.
+    pub fn floor(&self) -> Option<&Finalization<S, V::Commitment>> {
+        self.sync_metadata.in_progress_floor()
     }
 
-    /// Attach a finalized floor to state sync from.
+    /// Persist a finalized floor before Marshal or Stateful uses it for state sync.
     ///
     /// Has no effect if state sync has already completed. When resuming an
     /// interrupted sync, a lagging selection is ignored in favor of the
     /// persisted floor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the selected floor cannot be persisted.
     #[must_use]
-    pub fn with_floor(mut self, floor: Finalization<S, V::Commitment>) -> Self {
+    pub async fn with_floor(mut self, floor: Finalization<S, V::Commitment>) -> Self {
         if !self.may_state_sync() {
             return self;
         }
 
-        if let Some(selected) = &self.floor
+        if let Some(selected) = self.floor()
             && floor.round() <= selected.round()
         {
             warn!(
@@ -111,7 +110,7 @@ where
             return self;
         }
 
-        self.floor = Some(floor);
+        self.sync_metadata = self.sync_metadata.begin_sync(floor).await;
         self
     }
 
@@ -122,27 +121,25 @@ where
     /// and relies on its own durable progress to override that anchor when
     /// available.
     pub fn marshal_start<B>(&self, genesis: B) -> Start<S, V::Commitment, B> {
-        self.floor
-            .as_ref()
+        self.floor()
             .cloned()
             .map_or_else(|| Start::Genesis(genesis), Start::Floor)
     }
 
-    /// Returns whether startup must resume an interrupted state sync.
+    /// Returns whether startup must run peer state sync for a persisted floor.
     ///
-    /// This is `true` after a previous process crashed while state sync was
-    /// in progress. In that case [`Self::may_state_sync`] is also `true`, and
-    /// the persisted floor keeps partially synced database state on the same
-    /// recovery path.
+    /// This is `true` after selecting a floor or resuming an interrupted sync.
+    /// In either case [`Self::may_state_sync`] is also `true`, and the persisted
+    /// floor keeps partially synced database state on the same recovery path.
     pub fn requires_state_sync_floor(&self) -> bool {
         self.sync_metadata.in_progress()
     }
 
     /// Returns whether this startup should run peer state sync.
     ///
-    /// A caller can request peer state sync for a fresh node. An interrupted
-    /// state sync always requires peer state sync, even if the caller did not
-    /// explicitly request it.
+    /// A caller can request peer state sync for a fresh node. A persisted floor
+    /// always requires peer state sync, even if the caller did not explicitly
+    /// request it on this startup.
     pub fn should_state_sync(&self, requested: bool) -> bool {
         self.may_state_sync() && (requested || self.requires_state_sync_floor())
     }
@@ -189,6 +186,44 @@ mod tests {
             .collect::<Vec<_>>();
         Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
             .expect("recover finalization")
+    }
+
+    #[test]
+    fn selected_floor_survives_restart_before_actor_start() {
+        let mut checkpoint = None;
+        let mut state = None;
+        for boot in 0..3 {
+            let runner =
+                checkpoint.map_or_else(deterministic::Runner::default, deterministic::Runner::from);
+            let (next_state, recovered) = runner.start_and_recover(move |mut context| async move {
+                let (schemes, previous) = state.unwrap_or_else(|| {
+                    let fixture =
+                        scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
+                    (fixture.schemes, None)
+                });
+                let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                    &context,
+                    "selected_floor_before_actor_start",
+                )
+                .await;
+                if let Some(previous) = previous {
+                    assert!(plan.should_state_sync(false));
+                    assert_eq!(plan.floor(), Some(&previous));
+                }
+                let selected = finalization(&schemes, 7 + boot, 7 + boot as u8);
+                let plan = plan.with_floor(selected.clone()).await;
+                assert!(matches!(
+                    plan.marshal_start(()),
+                    Start::Floor(ref floor) if floor == &selected
+                ));
+
+                // Marshal may use this anchor before Stateful is scheduled. Recovery must
+                // retain that decision even when neither actor has started yet.
+                (schemes, Some(selected))
+            });
+            state = Some(next_state);
+            checkpoint = Some(recovered);
+        }
     }
 
     #[test]
@@ -297,7 +332,7 @@ mod tests {
             drop(plan);
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
-            let plan = plan.with_floor(finalization(&fixture.schemes, 6, 6));
+            let plan = plan.with_floor(finalization(&fixture.schemes, 6, 6)).await;
             assert_eq!(
                 plan.floor().expect("interrupted sync must have a floor"),
                 &stored,
@@ -308,7 +343,7 @@ mod tests {
             drop(plan);
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
-            let plan = plan.with_floor(newer.clone());
+            let plan = plan.with_floor(newer.clone()).await;
             assert_eq!(plan.floor(), Some(&newer));
         });
     }
@@ -324,9 +359,11 @@ mod tests {
                 "with_floor_does_not_replace_newer_selection",
             )
             .await;
-            let plan =
-                plan.with_floor(newer.clone())
-                    .with_floor(finalization(&fixture.schemes, 8, 8));
+            let plan = plan
+                .with_floor(newer.clone())
+                .await
+                .with_floor(finalization(&fixture.schemes, 8, 8))
+                .await;
 
             assert_eq!(plan.floor(), Some(&newer));
         });
