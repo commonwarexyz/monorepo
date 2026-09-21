@@ -1943,7 +1943,7 @@ fn test_fresh_sync_avoids_reset_writes() {
         );
         let (sync, sync_io) = RecordingContext::new(context.child("fixed_sync"));
         let journal = crate::journal::authenticated::init_sync::<_, fixed::Journal<_, u64>>(
-            || sync.child("journal"),
+            sync.child("journal"),
             fixed_cfg("fixed-sync"),
             0..10,
         )
@@ -1971,7 +1971,7 @@ fn test_fresh_sync_avoids_reset_writes() {
         );
         let (sync, sync_io) = RecordingContext::new(context.child("variable_sync"));
         let journal = crate::journal::authenticated::init_sync::<_, variable::Journal<_, u64>>(
-            || sync.child("journal"),
+            sync.child("journal"),
             variable_cfg("variable-sync"),
             0..10,
         )
