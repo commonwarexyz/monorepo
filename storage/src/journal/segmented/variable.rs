@@ -1790,6 +1790,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Attempt to initialize the journal
+            drop(blob);
             let result = Journal::<_, u64>::init(context, cfg).await;
 
             // Expect an error
@@ -1830,6 +1831,7 @@ mod tests {
                 .expect("Failed to write incomplete data");
 
             // Initialize the journal
+            drop(blob);
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
@@ -2151,6 +2153,7 @@ mod tests {
                 .expect("Failed to write incomplete item");
 
             // Initialize the journal
+            drop(blob);
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
@@ -2208,6 +2211,7 @@ mod tests {
                 .expect("Failed to write item without checksum");
 
             // Initialize the journal
+            drop(blob);
             let journal = Journal::init(context, cfg)
                 .await
                 .expect("Failed to initialize journal");
@@ -2269,6 +2273,7 @@ mod tests {
                 .expect("Failed to write item with bad checksum");
 
             // Initialize the journal
+            drop(blob);
             let mut journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("Failed to initialize journal");
@@ -2317,19 +2322,19 @@ mod tests {
             // lifecycle boundary: replay setup and consumption of an earlier section must not
             // read or repair this later section.
             let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
-            let (_, original_size) = context
-                .open(PARTITION, &TORN_SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let original_size = context
+                .durable(PARTITION, &TORN_SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             let mut replay = journal
                 .replay(FIRST_SECTION, 0, NZUsize!(1024), ReadOptions::default())
                 .await
                 .unwrap();
 
-            let (_, size) = context
-                .open(PARTITION, &TORN_SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let size = context
+                .durable(PARTITION, &TORN_SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size, original_size,
                 "replay setup must not repair a later section"
@@ -2337,10 +2342,10 @@ mod tests {
 
             let (section, offset, _, value) = replay.next().await.unwrap().unwrap();
             assert_eq!((section, offset, value), (FIRST_SECTION, 0, u64::MAX));
-            let (_, size) = context
-                .open(PARTITION, &TORN_SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let size = context
+                .durable(PARTITION, &TORN_SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size, original_size,
                 "consuming an earlier section must not repair a later section"
@@ -2372,10 +2377,10 @@ mod tests {
             const START_OFFSET: u64 = 72;
 
             let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
-            let (_, original_size) = context
-                .open(PARTITION, &SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let original_size = context
+                .durable(PARTITION, &SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             let mut replay = journal
                 .replay(
                     SECTION,
@@ -2390,10 +2395,10 @@ mod tests {
                 replay.next().await,
                 Some(Err(Error::ItemOutOfRange(START_OFFSET)))
             ));
-            let (_, size) = context
-                .open(PARTITION, &SECTION.to_be_bytes())
-                .await
-                .unwrap();
+            let size = context
+                .durable(PARTITION, &SECTION.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size, original_size,
                 "an unvalidated start offset must not become a repair boundary"
@@ -2519,6 +2524,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync blob");
 
             // Re-initialize the journal to simulate a restart
+            drop(blob);
             let mut journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("Failed to re-initialize journal");
@@ -2666,6 +2672,7 @@ mod tests {
                 .expect("Failed to add extra data");
 
             // Re-initialize the journal to simulate a restart
+            drop(blob);
             let journal = Journal::init(context.child("second"), cfg)
                 .await
                 .expect("Failed to re-initialize journal");
@@ -3202,6 +3209,7 @@ mod tests {
             // The first thing encountered will be the trailing corrupt bytes
             let start_offset = valid_logical_size;
             {
+                drop(blob);
                 let journal = Journal::<_, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
@@ -3216,10 +3224,10 @@ mod tests {
             }
 
             // Verify that valid data before start_offset was NOT lost
-            let (_, physical_size_after) = context
-                .open(&cfg.partition, &1u64.to_be_bytes())
-                .await
-                .unwrap();
+            let physical_size_after = context
+                .durable(&cfg.partition, &1u64.to_be_bytes())
+                .unwrap()
+                .len() as u64;
 
             // The blob should have been truncated back to the valid physical size
             // (removing the trailing corrupt bytes) but NOT to 0

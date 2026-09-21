@@ -153,6 +153,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("cannot write corrupted byte");
         blob.sync().await.expect("cannot sync corruption");
+        drop(blob);
 
         // Determine which logical page was corrupted.
         let corrupted_page = corrupt_offset / physical_page_size;
