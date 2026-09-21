@@ -308,8 +308,7 @@ pub mod test {
                 .await
                 .unwrap();
 
-            let read_keys = [key(0), key(100)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let keys = [key(0), key(100)];
             let (values, staged) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)

@@ -415,7 +415,7 @@ where
     /// appends another index range.
     pub async fn stage<E, C, I>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<(Vec<Option<U::Value>>, Staged<F, H, U, N, S>), Error<F>>
     where
@@ -457,7 +457,7 @@ where
     /// [`merkleize`](Staged::merkleize).
     pub async fn expand<E, C, I>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), Error<F>>
     where

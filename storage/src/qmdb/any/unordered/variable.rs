@@ -286,8 +286,7 @@ pub(crate) mod test {
 
             // Read set: key(5) duplicated at slots 0/3, read-only key(6), missing key(9000),
             // key(20) deleted via index at slot 4.
-            let read_keys = [key(5), key(6), key(9000), key(5), key(20)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let keys = [key(5), key(6), key(9000), key(5), key(20)];
             let indexed_updates = vec![
                 (0, Some(to_bytes(5_000))),
                 (2, Some(to_bytes(5_001))),
@@ -303,7 +302,7 @@ pub(crate) mod test {
             let mut explicit = db.new_batch();
             let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
             for (slot, value) in &indexed_updates {
-                explicit = explicit.write(read_keys[*slot], value.clone());
+                explicit = explicit.write(keys[*slot], value.clone());
             }
             for (k, v) in &upserts {
                 explicit = explicit.write(*k, v.clone());
@@ -366,8 +365,7 @@ pub(crate) mod test {
                 .await
                 .unwrap();
 
-            let read_keys = [key(0), key(100)];
-            let keys: Vec<&Digest> = read_keys.iter().collect();
+            let keys = [key(0), key(100)];
             let (values, staged) = parent
                 .new_batch::<Sha256>()
                 .stage(&keys, &db)
@@ -456,8 +454,7 @@ pub(crate) mod test {
 
                 // key(3) is untouched by the ancestors (their floor raises move other
                 // keys), so its staged read stays committed-resolved.
-                let read_keys = [key(0), key(100), key(1), key(3)];
-                let keys: Vec<&Digest> = read_keys.iter().collect();
+                let keys = [key(0), key(100), key(1), key(3)];
                 let (values, staged) = parent
                     .new_batch::<Sha256>()
                     .stage(&keys, &db)
