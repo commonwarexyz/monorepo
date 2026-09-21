@@ -256,6 +256,8 @@ impl crate::Storage for Storage {
                 storage_directory
             };
 
+            // Make the removal durable before restoring the surviving partition's
+            // cache entry. Removed partitions stay uncached.
             partitions.sync_dir(&sync_path)?;
             if name.is_some() {
                 partitions.mark_synced(sync_path);
