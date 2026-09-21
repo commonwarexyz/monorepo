@@ -7287,13 +7287,15 @@ mod tests {
                 state.parent_payload_for(View::new(6), View::new(4)),
                 Ok(certified.payload)
             );
+            assert!(state.try_propose().is_none());
 
             let alternate = Context {
                 round: Rnd::new(Epoch::new(9), View::new(6)),
                 leader: participants[3].clone(),
                 parent: (View::new(4), certified.payload),
             };
-            assert!(state.proposed(&alternate, Sha256Digest::from([67u8; 32])));
+            // The occupied slot ignores the conflicting proposal.
+            state.proposed(&alternate, Sha256Digest::from([67u8; 32]));
             assert_eq!(
                 state.views.get(&View::new(6)).and_then(Round::proposal),
                 Some(&child)
