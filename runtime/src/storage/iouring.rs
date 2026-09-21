@@ -198,8 +198,7 @@ impl crate::Storage for Storage {
             // Sync the partition directory to ensure the removal is durable.
             sync_dir(&path)?;
         } else {
-            // Only absence is a missing partition: consumers treat PartitionMissing as
-            // already removed, never as a failed removal.
+            // Distinguish missing partitions from other filesystem failures.
             fs::remove_dir_all(&path).map_err(|error| match error.kind() {
                 ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
                 _ => Error::Io(error.into()),
@@ -219,8 +218,7 @@ impl crate::Storage for Storage {
 
         let path = self.storage_directory.join(partition);
 
-        // Only absence is a missing partition: consumers initialize an empty journal over
-        // PartitionMissing, never over a read failure.
+        // Distinguish missing partitions from other filesystem failures.
         let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
             ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
             _ => Error::ReadFailed,
@@ -1522,8 +1520,7 @@ mod tests {
         });
     }
 
-    /// A partition path that exists but cannot be enumerated or removed is not a missing
-    /// partition: only absence may let a consumer treat it as empty or already removed.
+    /// Scan and removal distinguish missing partitions from existing non-directory paths.
     #[test]
     fn test_partition_failures_are_not_absence() {
         iouring::Runner::default().start(|_| async {
