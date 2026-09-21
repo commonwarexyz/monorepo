@@ -17,6 +17,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
+use commonware_runtime::telemetry::metrics::histogram;
 use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::sync::Arc;
@@ -45,6 +46,8 @@ pub struct Round<
 
     /// Whether we've already sent the selected proposal to the voter.
     proposal_sent: bool,
+
+    pub(super) verify_latency: histogram::Accumulator,
 
     /// Root span of the view, shared with the voter's round.
     ///
@@ -76,6 +79,8 @@ impl<
             votes: VoteTracker::new(len, track_historical_votes),
 
             proposal_sent: false,
+
+            verify_latency: histogram::Accumulator::default(),
 
             span: ViewSpan::new(),
         }

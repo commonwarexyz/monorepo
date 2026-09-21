@@ -2,7 +2,11 @@
 
 use super::{Histogram, MetricsExt as _, raw};
 use crate::{Clock, Metrics};
-use std::{future::Future, sync::Arc, time::SystemTime};
+use std::{
+    future::Future,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 /// Convenience methods for Prometheus histograms.
 pub trait HistogramExt {
@@ -145,6 +149,34 @@ impl<C: Clock> Drop for ScopedTimer<C> {
     }
 }
 
+/// Accumulates separate work intervals into a single duration sample.
+///
+/// Time between intervals is excluded. Call [`Self::observe`] to record the total.
+#[derive(Default)]
+pub struct Accumulator {
+    duration: Option<Duration>,
+}
+
+impl Accumulator {
+    /// Add an interval, treating a backwards clock as a zero duration.
+    ///
+    /// The total saturates at [`Duration::MAX`].
+    pub fn add_between(&mut self, start: SystemTime, end: SystemTime) {
+        let duration = end.duration_since(start).unwrap_or_default();
+        let total = self.duration.get_or_insert(Duration::ZERO);
+        *total = total.saturating_add(duration);
+    }
+
+    /// Record the total in seconds and reset the accumulator.
+    ///
+    /// Does nothing if no intervals have been added since the last observation.
+    pub fn observe(&mut self, histogram: &raw::Histogram) {
+        if let Some(duration) = self.duration.take() {
+            histogram.observe(duration.as_secs_f64());
+        }
+    }
+}
+
 /// Register a duration histogram using [`Buckets::LOCAL`] (storage-style work).
 pub fn duration_histogram<M: Metrics>(
     context: &M,
@@ -158,7 +190,85 @@ pub fn duration_histogram<M: Metrics>(
 mod tests {
     use super::*;
     use crate::{Runner as _, Supervisor as _, deterministic};
-    use std::time::Duration;
+
+    #[test]
+    fn accumulated_duration_records_one_sum() {
+        deterministic::Runner::default().start(|context| async move {
+            let histogram = context.histogram("duration", "work duration", [1.0, 4.0, 6.0]);
+            let mut accumulated = Accumulator::default();
+            let start = context.current();
+
+            accumulated.observe(&histogram);
+            assert!(context.encode().contains("duration_count 0\n"));
+
+            accumulated.add_between(start, start + Duration::from_secs(2));
+            accumulated.add_between(
+                start + Duration::from_secs(20),
+                start + Duration::from_secs(23),
+            );
+            assert!(context.encode().contains("duration_count 0\n"));
+            accumulated.observe(&histogram);
+            let metrics = context.encode();
+            assert!(metrics.contains("duration_count 1\n"), "{metrics}");
+            assert!(metrics.contains("duration_sum 5.0\n"), "{metrics}");
+            assert!(
+                metrics.contains("duration_bucket{le=\"4.0\"} 0\n"),
+                "{metrics}"
+            );
+            assert!(
+                metrics.contains("duration_bucket{le=\"6.0\"} 1\n"),
+                "{metrics}"
+            );
+
+            accumulated.observe(&histogram);
+            assert_eq!(context.encode(), metrics);
+
+            accumulated.add_between(start, start + Duration::from_secs(1));
+            accumulated.observe(&histogram);
+            let metrics = context.encode();
+            assert!(metrics.contains("duration_count 2\n"), "{metrics}");
+            assert!(metrics.contains("duration_sum 6.0\n"), "{metrics}");
+        });
+    }
+
+    #[test]
+    fn accumulated_duration_records_zero_and_backwards_intervals() {
+        deterministic::Runner::default().start(|context| async move {
+            let histogram = raw::Histogram::new(Buckets::LOCAL);
+            let _registered = context.register("duration", "work duration", histogram.clone());
+            let start = context.current();
+            for end in [start, start - Duration::from_secs(1)] {
+                let mut accumulated = Accumulator::default();
+                accumulated.add_between(start, end);
+                accumulated.observe(&histogram);
+            }
+            let metrics = context.encode();
+            assert!(metrics.contains("duration_count 2\n"), "{metrics}");
+            assert!(metrics.contains("duration_sum 0.0\n"), "{metrics}");
+        });
+    }
+
+    #[test]
+    fn accumulated_duration_saturates() {
+        deterministic::Runner::default().start(|context| async move {
+            let histogram = duration_histogram(&context, "duration", "work duration");
+            let mut accumulated = Accumulator {
+                duration: Some(Duration::MAX - Duration::from_millis(1)),
+            };
+            let start = context.current();
+            accumulated.add_between(start, start + Duration::from_secs(1));
+            accumulated.observe(&histogram);
+            let metrics = context.encode();
+            assert!(metrics.contains("duration_count 1\n"), "{metrics}");
+            let sum: f64 = metrics
+                .lines()
+                .find_map(|line| line.strip_prefix("duration_sum "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(sum, Duration::MAX.as_secs_f64());
+        });
+    }
 
     #[test]
     fn duration_records_all_calls() {

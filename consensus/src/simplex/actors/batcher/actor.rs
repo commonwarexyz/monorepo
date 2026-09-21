@@ -21,7 +21,7 @@ use commonware_runtime::{
     telemetry::{
         metrics::{
             Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
-            histogram::{self, Buckets},
+            histogram::Buckets,
         },
         traces::TracedExt as _,
     },
@@ -91,8 +91,8 @@ where
     inbound_messages: CounterFamily<Inbound>,
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     batch_size: Histogram,
-    verify_latency: histogram::Timed,
-    recover_fallback: Counter,
+    verify_latency: Histogram,
+    verify_fallback: Counter,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
@@ -123,12 +123,12 @@ where
         );
         let verify_latency = context.histogram(
             "verify_latency",
-            "latency of vote verification and certificate assembly",
+            "total vote verification and certificate assembly time per view",
             Buckets::CRYPTOGRAPHY,
         );
-        let recover_fallback = context.counter(
-            "recover_fallback",
-            "number of failed optimistic certificate recoveries",
+        let verify_fallback = context.counter(
+            "verify_fallback",
+            "number of fallbacks to vote verification after failed optimistic assembly",
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;
@@ -166,8 +166,8 @@ where
                 inbound_messages,
                 latest_vote,
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency),
-                recover_fallback,
+                verify_latency,
+                verify_fallback,
             },
             Mailbox::new(sender),
         )
@@ -323,7 +323,7 @@ where
         round: &mut Round<S, B, D, Re>,
     ) {
         loop {
-            let timer = self.verify_latency.timer(self.context.as_ref());
+            let start = self.context.current();
             let Some(verification) = round
                 .try_verify(self.context.as_mut(), &self.strategy)
                 .await
@@ -332,10 +332,12 @@ where
                 break;
             };
 
-            timer.observe(self.context.as_ref());
+            round
+                .verify_latency
+                .add_between(start, self.context.current());
 
             if verification.fallback {
-                self.recover_fallback.inc();
+                self.verify_fallback.inc();
             }
             for invalid in verification.invalid {
                 if let Some(signer) = self.scheme.participants().key(invalid) {
@@ -432,9 +434,10 @@ where
                         };
                         finalized = new_finalized;
 
-                        // Close the root span of any view the chain has now decided
+                        // Finalized views no longer run verification, even while retained for reporting.
                         for (_, round) in work.range_mut(..=finalized) {
                             round.close_span();
+                            round.verify_latency.observe(&self.verify_latency);
                         }
 
                         // Track the new current view, adopting the voter's view

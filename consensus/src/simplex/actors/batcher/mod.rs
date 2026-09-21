@@ -1751,6 +1751,19 @@ mod tests {
             assert!(received_proposal);
             assert!(received_notarization);
             assert!(received_finalization);
+
+            let metrics = context.encode();
+            assert!(metrics.contains("actor_verify_latency_count 0\n"), "{metrics}");
+            batcher_mailbox.update(
+                Span::none(),
+                view.next(),
+                Participant::from_usize(leader),
+                view,
+                None,
+            );
+            while !context.encode().contains("actor_verify_latency_count 1\n") {
+                context.sleep(Duration::from_millis(1)).await;
+            }
         });
     }
 
@@ -3116,7 +3129,7 @@ mod tests {
             let batcher_cfg = test_config(
                 schemes[0].clone(),
                 blocker,
-                reporter,
+                reporter.clone(),
                 MockRelay::new(),
                 epoch,
                 options,
@@ -3208,8 +3221,12 @@ mod tests {
             assert_eq!(blocked.lock().as_slice(), &[participants[1].clone()]);
             let metrics = context.encode();
             assert!(
-                metrics.contains("recover_fallback_total 1"),
+                metrics.contains("verify_fallback_total 1\n"),
                 "optimistic recovery failure must increment the fallback counter: {metrics}"
+            );
+            assert!(
+                metrics.contains("actor_verify_latency_count 0\n"),
+                "{metrics}"
             );
 
             // Three valid votes are insufficient, so no certificate may have
@@ -3230,7 +3247,7 @@ mod tests {
 
             let replacement = Notarize::sign(&schemes[quorum], proposal.clone()).unwrap();
             participant_senders[quorum].as_mut().unwrap().send(
-                Recipients::One(me),
+                Recipients::One(me.clone()),
                 Vote::Notarize(replacement).encode(),
                 true,
             );
@@ -3253,7 +3270,55 @@ mod tests {
                 }
             }
             assert_eq!(blocked.lock().as_slice(), &[participants[1].clone()]);
-            assert!(context.encode().contains("recover_fallback_total 1"));
+            let metrics = context.encode();
+            assert!(metrics.contains("verify_fallback_total 1\n"), "{metrics}");
+            assert!(
+                metrics.contains("actor_verify_latency_count 0\n"),
+                "{metrics}"
+            );
+
+            // Both attempts belong to one view; finalization retires its verification work.
+            batcher_mailbox.update(Span::none(), view.next(), leader, view, None);
+            while !context.encode().contains("actor_verify_latency_count 1\n") {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            let late = Nullify::sign::<Sha256Digest>(&schemes[2], round).unwrap();
+            participant_senders[2].as_mut().unwrap().send(
+                Recipients::One(me.clone()),
+                Vote::<_, Sha256Digest>::Nullify(late).encode(),
+                true,
+            );
+            while reporter
+                .nullifies
+                .lock()
+                .get(&view)
+                .is_none_or(|votes| !votes.contains(&participants[2]))
+            {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            // Repeated finalization, retained traffic, and pruning cannot emit another sample.
+            for (current, finalized) in [(view.next(), view), (View::new(13), View::new(12))] {
+                batcher_mailbox.update(Span::none(), current, leader, finalized, None);
+                batcher_mailbox.constructed(Vote::Nullify(
+                    Nullify::sign::<Sha256Digest>(&schemes[0], Round::new(epoch, current)).unwrap(),
+                ));
+                while reporter
+                    .nullifies
+                    .lock()
+                    .get(&current)
+                    .is_none_or(|votes| !votes.contains(&me))
+                {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                let metrics = context.encode();
+                assert!(
+                    metrics.contains("actor_verify_latency_count 1\n"),
+                    "{metrics}"
+                );
+                assert!(metrics.contains("verify_fallback_total 1\n"), "{metrics}");
+            }
         });
     }
 
