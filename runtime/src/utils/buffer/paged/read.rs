@@ -133,7 +133,7 @@ impl<B: Blob> PageReader<B> {
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
-        let is_final_batch = pages_to_read as u64 == max_pages;
+        let is_final_batch = Widen::widen(pages_to_read) == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
@@ -166,7 +166,7 @@ impl<B: Blob> PageReader<B> {
             total_logical += exposed_len;
             last_len = exposed_len;
         }
-        self.blob_page += pages_to_read as u64;
+        self.blob_page += Widen::widen(pages_to_read);
 
         let state = BufferState {
             buffer: physical_buf,
