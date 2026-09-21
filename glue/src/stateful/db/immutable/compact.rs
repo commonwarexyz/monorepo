@@ -445,7 +445,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::sync::ServeResult,
+        qmdb::sync::source,
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
@@ -540,7 +540,7 @@ mod tests {
         type Op = fixed::Operation<mmr::Family, Digest, Digest>;
         type Error = <Arc<FullFixedDb> as sync::Source>::Error;
 
-        async fn serve(&self, request: sync::Request<Self::Family>) -> ServeResult<Self> {
+        async fn serve(&self, request: sync::Request<Self::Family>) -> source::Result<Self> {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;

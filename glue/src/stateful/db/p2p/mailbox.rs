@@ -6,7 +6,7 @@ use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{Feedback, Request, Response, ServeResult, Source},
+    qmdb::sync::{Feedback, Request, Response, Source, source},
 };
 use commonware_utils::channel::{mpsc, oneshot};
 use std::{collections::VecDeque, future::Future};
@@ -178,7 +178,7 @@ where
     type Op = Op;
     type Error = ResponseDropped;
 
-    async fn serve(&self, request: Request<F>) -> ServeResult<Self> {
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         let (response_tx, mut response_rx) = mpsc::channel(1);
         let _ = self.sender.enqueue(Message::GetOperations {
             request,

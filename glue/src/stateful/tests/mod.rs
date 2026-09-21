@@ -54,7 +54,7 @@ use commonware_storage::{
     qmdb::{
         any::unordered::fixed,
         immutable::fixed as immutable_fixed,
-        sync::{Request, ServeResult, Source as QmdbSource},
+        sync::{Request, Source as QmdbSource, source},
     },
 };
 use commonware_utils::{
@@ -854,7 +854,7 @@ impl QmdbSource for NoopQmdbResolver {
     fn serve(
         &self,
         _request: Request<Self::Family>,
-    ) -> impl Future<Output = ServeResult<Self>> + Send {
+    ) -> impl Future<Output = source::Result<Self>> + Send {
         std::future::pending()
     }
 }
@@ -879,7 +879,7 @@ impl QmdbSource for NoopCompactQmdbResolver {
     fn serve(
         &self,
         _request: Request<Self::Family>,
-    ) -> impl Future<Output = ServeResult<Self>> + Send {
+    ) -> impl Future<Output = source::Result<Self>> + Send {
         std::future::pending()
     }
 }

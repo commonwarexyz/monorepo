@@ -52,7 +52,7 @@ use crate::{
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
         Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root,
-        sync::ServeResult,
+        sync::source,
     },
 };
 use commonware_codec::EncodeShared;
@@ -596,7 +596,7 @@ where
     type Op = Operation<F, V>;
     type Error = Error<F>;
 
-    async fn serve(&self, request: crate::qmdb::sync::Request<F>) -> ServeResult<Self> {
+    async fn serve(&self, request: crate::qmdb::sync::Request<F>) -> source::Result<Self> {
         self.journal.serve(request).await
     }
 }

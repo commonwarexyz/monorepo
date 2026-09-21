@@ -181,7 +181,7 @@ impl<F: Family> EncodeSize for Request<F> {
 impl<F: Family> Read for Request<F> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> std::result::Result<Self, CodecError> {
         let request = match u8::read(buf)? {
             0 => Self::Operations {
                 size: Location::<F>::read(buf)?,
@@ -338,7 +338,10 @@ impl<F: Family, Op: Read, D: Digest> Read for Response<F, Op, D> {
     /// The `max_ops` the request asked for, and the configuration for decoding one operation.
     type Cfg = (usize, Op::Cfg);
 
-    fn read_cfg(buf: &mut impl Buf, (max_ops, op_cfg): &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(
+        buf: &mut impl Buf,
+        (max_ops, op_cfg): &Self::Cfg,
+    ) -> std::result::Result<Self, CodecError> {
         match u8::read(buf)? {
             0 => {
                 let max_proof_digests = max_ops.saturating_mul(MAX_PROOF_DIGESTS_PER_ELEMENT);
@@ -422,8 +425,8 @@ impl<R> Feedback<R> {
 pub type ResponseOf<S> = Response<<S as Source>::Family, <S as Source>::Op, <S as Source>::Digest>;
 
 /// The result of [`Source::serve`].
-pub type ServeResult<S> =
-    Result<(ResponseOf<S>, Option<Feedback<ResponseOf<S>>>), <S as Source>::Error>;
+pub type Result<S> =
+    std::result::Result<(ResponseOf<S>, Option<Feedback<ResponseOf<S>>>), <S as Source>::Error>;
 
 /// A source for proofs and operations.
 pub trait Source: Send + Sync {
@@ -442,10 +445,7 @@ pub trait Source: Send + Sync {
     /// Serves a response with optional [`Feedback`] for reporting its validity.
     ///
     /// Dropping the future or feedback cancels the request without judging the response.
-    fn serve(
-        &self,
-        request: Request<Self::Family>,
-    ) -> impl Future<Output = ServeResult<Self>> + Send;
+    fn serve(&self, request: Request<Self::Family>) -> impl Future<Output = Result<Self>> + Send;
 }
 
 impl<T> Source for Arc<T>
@@ -457,10 +457,7 @@ where
     type Op = T::Op;
     type Error = T::Error;
 
-    fn serve(
-        &self,
-        request: Request<Self::Family>,
-    ) -> impl Future<Output = ServeResult<Self>> + Send {
+    fn serve(&self, request: Request<Self::Family>) -> impl Future<Output = Result<Self>> + Send {
         T::serve(self, request)
     }
 }
@@ -475,7 +472,7 @@ where
     type Op = T::Op;
     type Error = ServeError<T::Family>;
 
-    async fn serve(&self, request: Request<Self::Family>) -> ServeResult<Self> {
+    async fn serve(&self, request: Request<Self::Family>) -> Result<Self> {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
         Ok(source.serve(request).await?)
     }
@@ -492,7 +489,7 @@ macro_rules! impl_locked_source {
             type Op = T::Op;
             type Error = T::Error;
 
-            async fn serve(&self, request: Request<Self::Family>) -> ServeResult<Self> {
+            async fn serve(&self, request: Request<Self::Family>) -> Result<Self> {
                 self.read().await.serve(request).await
             }
         }
@@ -525,7 +522,7 @@ where
             max_ops = request.max_ops().get(),
         ),
     )]
-    async fn serve(&self, request: Request<F>) -> ServeResult<Self> {
+    async fn serve(&self, request: Request<F>) -> Result<Self> {
         // Reject before the floor lookup so the error carries the requested size and the
         // floor read never touches out-of-range locations.
         if request.size() > self.size() {
@@ -579,7 +576,7 @@ where
     type Op = crate::qmdb::any::operation::Operation<F, U>;
     type Error = qmdb::Error<F>;
 
-    async fn serve(&self, request: Request<F>) -> ServeResult<Self> {
+    async fn serve(&self, request: Request<F>) -> Result<Self> {
         self.log.serve(request).await
     }
 }
@@ -655,7 +652,7 @@ pub(crate) mod tests {
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn serve(&self, _request: Request<F>) -> ServeResult<Self> {
+        async fn serve(&self, _request: Request<F>) -> Result<Self> {
             let response = self
                 .responses
                 .lock()
@@ -817,7 +814,7 @@ pub(crate) mod tests {
     pub async fn fetch_compact_state<R: Source>(
         source: &R,
         target: crate::qmdb::sync::CompactTarget<R::Family, R::Digest>,
-    ) -> Result<Response<R::Family, R::Op, R::Digest>, R::Error>
+    ) -> std::result::Result<Response<R::Family, R::Op, R::Digest>, R::Error>
     where
         R::Op: Send + 'static,
     {
@@ -849,7 +846,7 @@ pub(crate) mod tests {
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn serve(&self, _request: Request<F>) -> ServeResult<Self> {
+        async fn serve(&self, _request: Request<F>) -> Result<Self> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }

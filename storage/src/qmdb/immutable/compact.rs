@@ -39,7 +39,7 @@ use crate::{
             witness::{self, VerifiedWitness},
         },
         operation::Key,
-        sync::{CompactTarget, Request, ServeResult, Source},
+        sync::{CompactTarget, Request, Source, source},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -707,7 +707,7 @@ where
     type Op = Operation<F, K, V>;
     type Error = qmdb::Error<F>;
 
-    async fn serve(&self, request: Request<F>) -> ServeResult<Self> {
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         let response = self
             .witness
             .compact_state(&self.commit_codec_config, request)?;

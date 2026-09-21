@@ -785,7 +785,7 @@ mod tests {
     use super::*;
     use crate::{
         merkle::mmr::{Family as MmrFamily, Proof},
-        qmdb::sync::ServeResult,
+        qmdb::sync::source,
     };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
@@ -899,7 +899,7 @@ mod tests {
         type Family = MmrFamily;
         type Op = i32;
 
-        async fn serve(&self, _request: Request<MmrFamily>) -> ServeResult<Self> {
+        async fn serve(&self, _request: Request<MmrFamily>) -> source::Result<Self> {
             Ok((
                 Response::Operations {
                     proof: Proof {
