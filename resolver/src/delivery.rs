@@ -7,22 +7,23 @@
 //! making assumptions about how data is fetched.
 
 use crate::{Consumer, Delivery, Outcome};
-use commonware_utils::futures::{AbortablePool, Aborter};
+use commonware_utils::{
+    channel::mpsc,
+    futures::{AbortablePool, Aborter},
+};
 use futures::future::Aborted;
 use std::collections::{HashMap, hash_map::Entry as HashMapEntry};
-use tracing::debug;
 
 /// Completed consumer validation for a delivery.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Completion<K, S, Context = ()> {
+pub struct Completion<K, S, R, Context = ()> {
     /// Resolver-specific context associated with the delivery attempt.
     pub context: Context,
 
     /// Key and subscribers that were passed to the consumer.
-    pub delivery: Delivery<K, S>,
+    pub delivery: Delivery<K, S, R>,
 
     /// Consumer disposition for the delivered response, or `None` if the
-    /// consumer dropped the sender without reporting one.
+    /// consumer abstained.
     pub outcome: Option<Outcome>,
 }
 
@@ -34,25 +35,26 @@ struct Response<Context, V> {
 }
 
 // Active validation attempt for a key.
-struct ActiveDelivery {
+struct ActiveDelivery<R> {
+    responses: Vec<mpsc::Sender<R>>,
     generation: u64,
     _aborter: Aborter,
 }
 
 // Pooled validation result tagged with the attempt that produced it.
-struct PooledCompletion<K, S, Context> {
+struct PooledCompletion<Con: Consumer, Context> {
     generation: u64,
-    completion: Completion<K, S, Context>,
+    completion: Completion<Con::Key, Con::Subscriber, Con::Response, Context>,
 }
 
 // Per-key delivery state retained while a resolver fetch is active.
-struct Entry<Context, V, State> {
-    delivery: Option<ActiveDelivery>,
-    response: Option<Response<Context, V>>,
+struct Entry<Con: Consumer, Context, State> {
+    delivery: Option<ActiveDelivery<Con::Response>>,
+    response: Option<Response<Context, Con::Value>>,
     state: Option<State>,
 }
 
-impl<Context, V, State> Entry<Context, V, State> {
+impl<Con: Consumer, Context, State> Entry<Con, Context, State> {
     const fn new(state: State) -> Self {
         Self {
             delivery: None,
@@ -75,8 +77,8 @@ where
     Con::Value: Clone + Send + 'static,
     Context: Clone + Send + 'static,
 {
-    entries: HashMap<Con::Key, Entry<Context, Con::Value, State>>,
-    deliveries: AbortablePool<'static, PooledCompletion<Con::Key, Con::Subscriber, Context>>,
+    entries: HashMap<Con::Key, Entry<Con, Context, State>>,
+    deliveries: AbortablePool<'static, PooledCompletion<Con, Context>>,
     next_generation: u64,
     consumer: Con,
 }
@@ -141,12 +143,21 @@ where
             .and_then(|entry| entry.state.take())
     }
 
-    /// Retain only entries for which the predicate returns true.
-    ///
-    /// Dropped entries abort in-progress deliveries. Returns the number of
-    /// removed entries.
-    pub fn retain<F: FnMut(&Con::Key) -> bool>(&mut self, mut predicate: F) -> usize {
-        self.entries.extract_if(|key, _| !predicate(key)).count()
+    /// Abort an abandoned delivery snapshot while keeping its cached response.
+    /// Later live routes can receive that response under a fresh generation.
+    pub fn cancel_closed_delivery(&mut self, key: &Con::Key) -> bool {
+        let Some(entry) = self.entries.get_mut(key) else {
+            return false;
+        };
+        if entry
+            .delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.responses.iter().all(mpsc::Sender::is_closed))
+        {
+            entry.delivery = None;
+            return true;
+        }
+        false
     }
 
     /// Remove all entries and abort all in-progress deliveries.
@@ -165,7 +176,7 @@ where
     /// consumer accepts it or drops its verdict. Panics if the key is not tracked.
     pub fn deliver(
         &mut self,
-        delivery: Delivery<Con::Key, Con::Subscriber>,
+        delivery: Delivery<Con::Key, Con::Subscriber, Con::Response>,
         context: Context,
         value: Con::Value,
     ) {
@@ -185,7 +196,7 @@ where
     /// still pending. The cached response is either accepted or still unjudged
     /// because the consumer dropped the earlier verdict. Panics if the key is not
     /// tracked or no response is cached.
-    pub fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
+    pub fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber, Con::Response>) {
         let key = delivery.key.clone();
         let (context, value) = {
             let entry = self.entries.get(&key).expect("delivery entry");
@@ -225,13 +236,13 @@ where
     /// Wait for the next consumer validation result.
     ///
     /// Returns [`Aborted`] when the delivery was canceled before completion. A
-    /// verdict sender dropped by the consumer completes with no outcome.
+    /// consumer that abstains completes with no outcome.
     /// Successful completions clear the active delivery slot for that key so it
     /// can be retried or redelivered. Completions for an older same-key delivery
     /// are treated as aborted.
     pub async fn next_completion(
         &mut self,
-    ) -> Result<Completion<Con::Key, Con::Subscriber, Context>, Aborted> {
+    ) -> Result<Completion<Con::Key, Con::Subscriber, Con::Response, Context>, Aborted> {
         let completed = self.deliveries.next_completed().await?;
         let Some(entry) = self.entries.get_mut(&completed.completion.delivery.key) else {
             return Err(Aborted);
@@ -250,7 +261,7 @@ where
     // Start a consumer validation attempt and record its abort handle.
     fn push_delivery(
         &mut self,
-        delivery: Delivery<Con::Key, Con::Subscriber>,
+        delivery: Delivery<Con::Key, Con::Subscriber, Con::Response>,
         context: Context,
         value: Con::Value,
     ) {
@@ -260,17 +271,16 @@ where
             .checked_add(1)
             .expect("delivery generation overflow");
         let key = delivery.key.clone();
+        let responses = delivery
+            .subscribers
+            .iter()
+            .map(|subscriber| subscriber.response.clone())
+            .collect();
         let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
         let aborter = self.deliveries.push(async move {
-            let outcome = match receiver.await {
-                Ok(outcome) => Some(outcome.into()),
-                Err(_) => {
-                    debug!(key = ?completed.key, "consumer dropped delivery without a verdict");
-                    None
-                }
-            };
+            let outcome = receiver.await.map(Into::into);
             PooledCompletion {
                 generation,
                 completion: Completion {
@@ -285,6 +295,7 @@ where
             entry
                 .delivery
                 .replace(ActiveDelivery {
+                    responses,
                     generation,
                     _aborter: aborter,
                 })
@@ -318,13 +329,23 @@ mod tests {
         channel::{fallible::FallibleExt, mpsc, oneshot},
         non_empty_vec,
     };
+    use std::future::Future;
 
     type TestTracker = Tracker<MockConsumer<MockKey, Bytes>, u8>;
 
-    fn delivery(key: MockKey) -> Delivery<MockKey, ()> {
+    fn delivery(
+        key: MockKey,
+        responses: &mut Vec<mpsc::Receiver<()>>,
+    ) -> Delivery<MockKey, (), ()> {
+        let (response, receiver) = mpsc::channel(1);
+        responses.push(receiver);
         Delivery {
             key,
-            subscribers: non_empty_vec![((), tracing::Span::none())],
+            subscribers: non_empty_vec![crate::Subscriber {
+                subscriber: (),
+                response,
+                span: tracing::Span::none(),
+            }],
         }
     }
 
@@ -344,16 +365,17 @@ mod tests {
         type Key = MockKey;
         type Value = Bytes;
         type Subscriber = ();
+        type Response = ();
         type Outcome = bool;
 
         fn deliver(
             &mut self,
-            _delivery: Delivery<Self::Key, Self::Subscriber>,
+            _delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             _value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
+        ) -> impl Future<Output = Option<bool>> + Send + 'static {
             let (sender, receiver) = oneshot::channel();
             self.sender.send_lossy(sender);
-            receiver
+            async move { receiver.await.ok() }
         }
     }
 
@@ -382,9 +404,10 @@ mod tests {
             let mut tracker = TestTracker::new(consumer);
             let key = MockKey(7);
             let value = Bytes::from("data");
+            let mut responses = Vec::new();
 
             tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 9, value.clone());
+            tracker.deliver(delivery(key.clone(), &mut responses), 9, value.clone());
 
             let completed = tracker
                 .next_completion()
@@ -407,9 +430,10 @@ mod tests {
             let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
             let mut tracker = TestTracker::new(consumer);
             let key = MockKey(1);
+            let mut responses = Vec::new();
 
             tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 2, Bytes::from("v"));
+            tracker.deliver(delivery(key.clone(), &mut responses), 2, Bytes::from("v"));
             assert!(tracker.remove(&key));
 
             assert!(matches!(tracker.next_completion().await, Err(Aborted)));
@@ -423,16 +447,17 @@ mod tests {
             let (consumer, mut senders) = PendingConsumer::new();
             let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
             let key = MockKey(1);
+            let mut responses = Vec::new();
 
             tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 1, Bytes::from("old"));
+            tracker.deliver(delivery(key.clone(), &mut responses), 1, Bytes::from("old"));
             let old_sender = senders.recv().await.unwrap();
             old_sender.send(true).unwrap();
             let stale = tracker.deliveries.next_completed().await.unwrap();
 
             assert!(tracker.remove(&key));
             tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 2, Bytes::from("new"));
+            tracker.deliver(delivery(key.clone(), &mut responses), 2, Bytes::from("new"));
             let new_sender = senders.recv().await.unwrap();
 
             let _stale_aborter = tracker.deliveries.push(async move { stale });
@@ -450,15 +475,105 @@ mod tests {
     }
 
     #[test]
+    fn test_cancel_closed_delivery_preserves_cache_and_rejects_stale_completion() {
+        let runner = Runner::default();
+        runner.start(|_| async move {
+            let (consumer, mut verdicts) = PendingConsumer::new();
+            let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
+            let key = MockKey(2);
+            let mut old_responses = Vec::new();
+
+            tracker.insert(key.clone());
+            tracker.deliver(
+                delivery(key.clone(), &mut old_responses),
+                1,
+                Bytes::from("cached"),
+            );
+            let old_verdict = verdicts.recv().await.unwrap();
+            drop(old_responses);
+            old_verdict.send(true).unwrap();
+            let stale = tracker.deliveries.next_completed().await.unwrap();
+
+            assert!(tracker.cancel_closed_delivery(&key));
+            let mut live_responses = Vec::new();
+            tracker.redeliver(delivery(key.clone(), &mut live_responses));
+            let new_verdict = verdicts.recv().await.unwrap();
+
+            let _stale_aborter = tracker.deliveries.push(async move { stale });
+            assert!(matches!(tracker.next_completion().await, Err(Aborted)));
+
+            new_verdict.send(true).unwrap();
+            let completed = tracker
+                .next_completion()
+                .await
+                .expect("new cached delivery should complete");
+            assert_eq!(completed.context, 1);
+            assert_eq!(completed.delivery.key, key);
+            assert_eq!(completed.outcome, Some(Outcome::Complete));
+            drop(live_responses);
+        });
+    }
+
+    #[test]
+    fn test_cancel_closed_delivery_keeps_partially_live_snapshot() {
+        let runner = Runner::default();
+        runner.start(|_| async move {
+            let (consumer, mut verdicts) = PendingConsumer::new();
+            let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
+            let key = MockKey(4);
+            let (first_response, first_receiver) = mpsc::channel(1);
+            let (second_response, second_receiver) = mpsc::channel(1);
+
+            tracker.insert(key.clone());
+            tracker.deliver(
+                Delivery {
+                    key: key.clone(),
+                    subscribers: non_empty_vec![
+                        crate::Subscriber {
+                            subscriber: (),
+                            response: first_response,
+                            span: tracing::Span::none(),
+                        },
+                        crate::Subscriber {
+                            subscriber: (),
+                            response: second_response,
+                            span: tracing::Span::none(),
+                        }
+                    ],
+                },
+                5,
+                Bytes::from("value"),
+            );
+            let verdict = verdicts.recv().await.unwrap();
+            drop(first_receiver);
+
+            assert!(!tracker.cancel_closed_delivery(&key));
+            verdict.send(true).unwrap();
+            let completed = tracker
+                .next_completion()
+                .await
+                .expect("partially live delivery should complete");
+            assert_eq!(completed.context, 5);
+            assert_eq!(completed.outcome, Some(Outcome::Complete));
+            drop(second_receiver);
+        });
+    }
+
+    #[test]
     fn test_dropped_verdict_completes_without_outcome_and_redelivers() {
         let runner = Runner::default();
         runner.start(|_| async move {
             let (consumer, mut senders) = PendingConsumer::new();
             let mut tracker = Tracker::<PendingConsumer, u8>::new(consumer);
             let key = MockKey(3);
+            let mut responses = Vec::new();
 
             tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 4, Bytes::from("unjudged"));
+            tracker.deliver(
+                delivery(key.clone(), &mut responses),
+                4,
+                Bytes::from("unjudged"),
+            );
             drop(senders.recv().await.unwrap());
 
             let completed = tracker
@@ -471,7 +586,7 @@ mod tests {
             assert!(!tracker.response_accepted(&key));
 
             // The unjudged response can still be handed to other subscribers.
-            tracker.redeliver(delivery(key.clone()));
+            tracker.redeliver(delivery(key.clone(), &mut responses));
             senders.recv().await.unwrap().send(true).unwrap();
             let judged = tracker
                 .next_completion()
@@ -490,9 +605,10 @@ mod tests {
             let mut tracker = TestTracker::new(consumer);
             let key = MockKey(5);
             let value = Bytes::from("first");
+            let mut responses = Vec::new();
 
             tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 3, value.clone());
+            tracker.deliver(delivery(key.clone(), &mut responses), 3, value.clone());
 
             let completed = tracker
                 .next_completion()
@@ -502,7 +618,7 @@ mod tests {
             tracker.accept_response(&key);
             assert!(tracker.response_accepted(&key));
 
-            tracker.redeliver(delivery(key.clone()));
+            tracker.redeliver(delivery(key.clone(), &mut responses));
             let redelivered = tracker
                 .next_completion()
                 .await
@@ -526,9 +642,14 @@ mod tests {
             let (consumer, _events) = MockConsumer::<MockKey, Bytes>::new();
             let mut tracker = TestTracker::new(consumer);
             let key = MockKey(7);
+            let mut responses = Vec::new();
 
             tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 3, Bytes::from("first"));
+            tracker.deliver(
+                delivery(key.clone(), &mut responses),
+                3,
+                Bytes::from("first"),
+            );
             let completed = tracker
                 .next_completion()
                 .await
@@ -536,7 +657,7 @@ mod tests {
             assert_eq!(completed.outcome, Some(Outcome::Complete));
 
             tracker.discard_response(&key);
-            tracker.redeliver(delivery(key));
+            tracker.redeliver(delivery(key, &mut responses));
         });
     }
 
@@ -548,9 +669,10 @@ mod tests {
             let key = MockKey(8);
             consumer.add_expected(key.clone(), Bytes::from("good"));
             let mut tracker = TestTracker::new(consumer);
+            let mut responses = Vec::new();
 
             tracker.insert(key.clone());
-            tracker.deliver(delivery(key.clone()), 1, Bytes::from("bad"));
+            tracker.deliver(delivery(key.clone(), &mut responses), 1, Bytes::from("bad"));
             let rejected = tracker
                 .next_completion()
                 .await
@@ -559,7 +681,11 @@ mod tests {
 
             tracker.discard_response(&key);
             assert!(!tracker.response_accepted(&key));
-            tracker.deliver(delivery(key.clone()), 2, Bytes::from("good"));
+            tracker.deliver(
+                delivery(key.clone(), &mut responses),
+                2,
+                Bytes::from("good"),
+            );
 
             let accepted = tracker
                 .next_completion()

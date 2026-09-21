@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{
     Epochable, Viewable,
+    responses::Responses,
     simplex::{
         actors::{resolver::state::State, voter},
         scheme::Scheme,
@@ -20,7 +21,9 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Sender, utils::StaticProvider};
 use commonware_parallel::Strategy;
-use commonware_resolver::{Fetch, Outcome, Resolver, TargetedResolver, p2p};
+use commonware_resolver::{
+    ChannelConsumer, Fetch, Outcome, Resolver, Response, TargetedResolver, p2p,
+};
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::traces::TracedExt as _,
@@ -35,6 +38,8 @@ use std::{
     time::Duration,
 };
 use tracing::{debug, info_span};
+
+type ResolverResponse = Response<U64, Ask, Bytes>;
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -77,6 +82,9 @@ pub struct Actor<
     /// verdict for delayed exact-parent asks.
     uncertifiable_notarizations: BTreeSet<View>,
 
+    /// Candidate receivers whose closure retires their semantic demand.
+    responses: Responses<U64, Ask, ResolverResponse>,
+
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
 
@@ -106,6 +114,7 @@ impl<
                 pending_notarizations: BTreeMap::new(),
                 certified_notarizations: BTreeMap::new(),
                 uncertifiable_notarizations: BTreeSet::new(),
+                responses: Responses::new(),
 
                 mailbox_receiver: receiver,
             },
@@ -144,7 +153,7 @@ impl<
             p2p::Config {
                 peer_provider: StaticProvider::new(self.epoch.get(), participants),
                 blocker: self.blocker.take().expect("blocker must be set"),
-                consumer: handler.clone(),
+                consumer: ChannelConsumer::<U64, Ask, Bytes>::default(),
                 producer: handler,
                 mailbox_size: self.mailbox_size,
                 me,
@@ -195,11 +204,14 @@ impl<
                     }
                 }
             },
+            response = self.responses.recv() => {
+                self.handle_response(response, &mut voter, &mut resolver);
+            },
             Some(message) = handler_rx.recv() else break => {
                 if message.response_closed() {
                     continue;
                 }
-                self.handle_resolver(message, &mut voter, &mut resolver);
+                self.handle_producer(message);
             },
         }
     }
@@ -212,7 +224,7 @@ impl<
     }
 
     /// Records a certificate and applies its resolver lifecycle effects.
-    fn updated<R: Resolver<Key = U64, Subscriber = Ask>>(
+    fn updated<R: Resolver<Key = U64, Subscriber = Ask, Response = ResolverResponse>>(
         &mut self,
         resolver: &mut R,
         certificate: Certificate<S, D>,
@@ -229,7 +241,7 @@ impl<
                 if view.term_end(term_length) > last_finalized {
                     self.nullifications.insert(view, certificate.encode());
                     let covered = view..=view.term_end(term_length);
-                    Self::retire(resolver, move |view, ask| {
+                    self.retire(move |view, ask| {
                         ask.kind == Kind::Nullification && covered.contains(&view)
                     });
                 }
@@ -241,9 +253,7 @@ impl<
                         self.pending_notarizations
                             .insert(view, certificate.encode());
                     }
-                    Self::retire(resolver, move |asked, ask| {
-                        ask.kind == Kind::Notarization && asked == view
-                    });
+                    self.retire(move |asked, ask| ask.kind == Kind::Notarization && asked == view);
                 }
             }
             Certificate::Finalization(finalization) => {
@@ -259,7 +269,7 @@ impl<
                     .retain(|view, _| *view > finalized);
                 self.uncertifiable_notarizations
                     .retain(|view| *view > finalized);
-                Self::retire(resolver, move |view, _| view <= finalized);
+                self.retire(move |view, _| view <= finalized);
             }
         }
 
@@ -269,7 +279,7 @@ impl<
     }
 
     /// Handles a certification outcome from the voter.
-    fn certified<R: Resolver<Key = U64, Subscriber = Ask>>(
+    fn certified<R: Resolver<Key = U64, Subscriber = Ask, Response = ResolverResponse>>(
         &mut self,
         resolver: &mut R,
         view: View,
@@ -292,9 +302,7 @@ impl<
             if view > last_finalized {
                 self.uncertifiable_notarizations.insert(view);
             }
-            Self::retire(resolver, move |asked, ask| {
-                ask.kind == Kind::Notarization && asked == view
-            });
+            self.retire(move |asked, ask| ask.kind == Kind::Notarization && asked == view);
         }
 
         let effects = self.state.handle_certified(view, success);
@@ -302,7 +310,7 @@ impl<
     }
 
     /// Applies the side effects requested by [super::state::State] to the resolver.
-    fn apply_effects<R: Resolver<Key = U64, Subscriber = Ask>>(
+    fn apply_effects<R: Resolver<Key = U64, Subscriber = Ask, Response = ResolverResponse>>(
         &mut self,
         resolver: &mut R,
         effects: Vec<Effect>,
@@ -320,9 +328,7 @@ impl<
                     // background asks retire here, because a proposal may name
                     // ancestry below the floor and only finalization rules that
                     // out.
-                    Self::retire(resolver, move |view, ask| {
-                        ask.until == Until::Floor && view <= floor
-                    });
+                    self.retire(move |view, ask| ask.until == Until::Floor && view <= floor);
                 }
             }
         }
@@ -330,19 +336,11 @@ impl<
 
     /// Retires the asks that new evidence settles.
     ///
-    /// `settled` reports whether the evidence answers an ask. [Resolver::retain]
-    /// takes an owned predicate, so it cannot call [Self::settled]. Every
-    /// retirement here names a span of views and a kind, which the caller captures
-    /// by value instead.
-    ///
-    /// Settlement is monotonic: no later evidence unsettles an ask. A retirement
-    /// therefore stays true however the resolver orders it against fetches, which
-    /// it reorders under backpressure.
-    fn retire<R: Resolver<Key = U64, Subscriber = Ask>>(
-        resolver: &mut R,
-        settled: impl Fn(View, Ask) -> bool + Send + 'static,
-    ) {
-        let _ = resolver.retain(move |key, ask| !settled(View::new(u64::from(key)), *ask));
+    /// Settlement is monotonic, so dropping the matching receivers permanently
+    /// retires their demand even when resolver admission is still queued.
+    fn retire(&mut self, mut settled: impl FnMut(View, Ask) -> bool) {
+        self.responses
+            .retain(|key, ask| !settled(View::new(u64::from(key)), *ask));
     }
 
     /// Issues a background fetch for the nullification covering `view`.
@@ -350,8 +348,8 @@ impl<
     /// Both [FetchReason]s want the same certificate: [State] only reports
     /// a view whose covering nullification is missing, whether the gap was found
     /// by scanning below the current view or opened by a failed certification.
-    fn fetch<R: Resolver<Key = U64, Subscriber = Ask>>(
-        &self,
+    fn fetch<R: Resolver<Key = U64, Subscriber = Ask, Response = ResolverResponse>>(
+        &mut self,
         resolver: &mut R,
         view: View,
         cause: View,
@@ -370,9 +368,12 @@ impl<
             reason = reason.as_str(),
             kind = ask.kind.as_str()
         );
+        let key = U64::from(view);
+        let response = self.responses.register(key.clone(), ask);
         let _ = resolver.fetch(Fetch {
-            key: U64::from(view),
+            key,
             subscriber: ask,
+            response,
             span,
         });
     }
@@ -380,14 +381,19 @@ impl<
     /// Fetches missing proposal ancestry. If `target` is provided, the resolver
     /// queries only that peer.
     fn resolve<R>(
-        &self,
+        &mut self,
         resolver: &mut R,
         proposal: View,
         view: View,
         kind: Kind,
         target: Option<S::PublicKey>,
     ) where
-        R: TargetedResolver<Key = U64, Subscriber = Ask, PublicKey = S::PublicKey>,
+        R: TargetedResolver<
+                Key = U64,
+                Subscriber = Ask,
+                Response = ResolverResponse,
+                PublicKey = S::PublicKey,
+            >,
     {
         if view >= proposal || self.settled(view, kind) {
             return;
@@ -401,9 +407,12 @@ impl<
             reason = "proposal_ancestry",
             kind = ask.kind.as_str()
         );
+        let key = U64::from(view);
+        let response = self.responses.register(key.clone(), ask);
         let fetch = Fetch {
-            key: U64::from(view),
+            key,
             subscriber: ask,
+            response,
             span,
         };
         let _ = match target {
@@ -534,82 +543,94 @@ impl<
         Some(incoming)
     }
 
-    /// Handles a message from the [p2p::Engine].
-    fn handle_resolver<R: Resolver<Key = U64, Subscriber = Ask>>(
+    /// Handles one complete response batch from the [p2p::Engine].
+    fn handle_response<R: Resolver<Key = U64, Subscriber = Ask, Response = ResolverResponse>>(
         &mut self,
-        message: HandlerMessage,
+        response: ResolverResponse,
         voter: &mut voter::Mailbox<S, D>,
         resolver: &mut R,
     ) {
-        match message {
-            HandlerMessage::Deliver {
-                span,
-                view,
-                data,
-                asks,
-                response,
-            } => {
-                let span = info_span!(
-                    parent: span,
-                    "simplex.resolver.deliver",
-                    epoch = self.epoch.traced(),
-                    view = view.traced()
+        let Response {
+            delivery,
+            value: data,
+            verdict,
+        } = response;
+        let view = View::new(u64::from(&delivery.key));
+        let span = delivery.subscribers.first().span.clone();
+        let span = info_span!(
+            parent: span,
+            "simplex.resolver.deliver",
+            epoch = self.epoch.traced(),
+            view = view.traced()
+        );
+        let _guard = span.entered();
+
+        // Ignoring is key-wide, so only skip validation after every
+        // certificate kind that can share this view is settled.
+        if self.key_settled(view) {
+            self.responses.retain(|key, _| key != &delivery.key);
+            verdict.send_lossy(Outcome::Ignored);
+            return;
+        }
+
+        let validate = info_span!(
+            "simplex.resolver.validate",
+            epoch = self.epoch.traced(),
+            view = view.traced()
+        );
+        let Some(parsed) = validate.in_scope(|| self.validate(view, data)) else {
+            verdict.send_lossy(Outcome::Invalid);
+            return;
+        };
+
+        // A failed notarization remains valid protocol evidence, but replaying
+        // it cannot satisfy any outstanding repair ask.
+        let obsolete = matches!(
+            &parsed,
+            Certificate::Notarization(notarization)
+                if self
+                    .uncertifiable_notarizations
+                    .contains(&notarization.view())
+        );
+        if !obsolete {
+            let resolved = info_span!(
+                "simplex.resolver.resolved",
+                epoch = self.epoch.traced(),
+                view = view.traced(),
+                certificate_view = parsed.view().traced()
+            );
+            resolved.in_scope(|| voter.resolved(parsed.clone()));
+
+            // Possession settles the asks answered by this certificate.
+            self.updated(resolver, parsed);
+        }
+
+        // The peer answered the view it was asked about, so it is never faulted
+        // here. An unsettled ask makes the valid response ambiguous.
+        let outcome = if delivery
+            .subscribers
+            .iter()
+            .all(|subscriber| self.settled(view, subscriber.subscriber.kind))
+        {
+            Outcome::Complete
+        } else {
+            Outcome::Ambiguous
+        };
+        if outcome == Outcome::Complete {
+            for subscriber in delivery.subscribers.iter() {
+                self.responses.remove_matching(
+                    &delivery.key,
+                    &subscriber.subscriber,
+                    &subscriber.response,
                 );
-                let _guard = span.entered();
-
-                // Ignoring is key-wide, so only skip validation after every
-                // certificate kind that can share this view is settled.
-                if self.key_settled(view) {
-                    response.send_lossy(Outcome::Ignored);
-                    return;
-                }
-
-                // Validate incoming message
-                let validate = info_span!(
-                    "simplex.resolver.validate",
-                    epoch = self.epoch.traced(),
-                    view = view.traced()
-                );
-                let Some(parsed) = validate.in_scope(|| self.validate(view, data)) else {
-                    response.send_lossy(Outcome::Invalid);
-                    return;
-                };
-
-                // A failed notarization remains valid protocol evidence, but
-                // replaying it cannot satisfy any outstanding repair ask.
-                let obsolete = matches!(
-                    &parsed,
-                    Certificate::Notarization(notarization)
-                        if self
-                            .uncertifiable_notarizations
-                            .contains(&notarization.view())
-                );
-                if !obsolete {
-                    // Notify voter as soon as possible.
-                    let resolved = info_span!(
-                        "simplex.resolver.resolved",
-                        epoch = self.epoch.traced(),
-                        view = view.traced(),
-                        certificate_view = parsed.view().traced()
-                    );
-                    resolved.in_scope(|| voter.resolved(parsed.clone()));
-
-                    // Record the certificate, which settles whichever asks it
-                    // answered and retires their fetches.
-                    self.updated(resolver, parsed);
-                }
-
-                // The peer answered the view it was asked about, so it is never
-                // faulted here. If an ask for this view is still open, the
-                // response was valid but ambiguous, and the resolver retries
-                // without penalizing the peer.
-                let outcome = if asks.iter().all(|ask| self.settled(view, ask.kind)) {
-                    Outcome::Complete
-                } else {
-                    Outcome::Ambiguous
-                };
-                response.send_lossy(outcome);
             }
+        }
+        verdict.send_lossy(outcome);
+    }
+
+    /// Serves one peer request from the [p2p::Engine].
+    fn handle_producer(&self, message: HandlerMessage) {
+        match message {
             HandlerMessage::Produce { view, response } => {
                 let span = info_span!(
                     "simplex.resolver.produce",
@@ -652,10 +673,15 @@ mod tests {
     use commonware_macros::{select, test_async};
     use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
     use commonware_parallel::Sequential;
+    use commonware_resolver::{Consumer as _, Delivery, Subscriber};
     use commonware_runtime::{Quota, Runner, Supervisor, deterministic};
     use commonware_utils::{
-        NZU32, NZUsize, channel::oneshot, non_empty, non_empty_vec, probability, sync::Mutex,
+        NZU32, NZUsize,
+        channel::{mpsc, oneshot},
+        non_empty, non_empty_vec, probability,
+        sync::Mutex,
     };
+    use futures::FutureExt as _;
     use std::{collections::BTreeSet, sync::Arc};
 
     const NAMESPACE: &[u8] = b"resolver-actor";
@@ -665,6 +691,7 @@ mod tests {
     type TestScheme = ed25519::Scheme;
     type TestActor =
         Actor<deterministic::Context, TestScheme, NoopBlocker, Sha256Digest, Sequential>;
+    type RecordedFetch = (U64, Ask, mpsc::Sender<ResolverResponse>);
 
     #[derive(Clone, Default)]
     struct NoopBlocker;
@@ -686,7 +713,7 @@ mod tests {
     /// Tracks the set of pending requests the way the resolver engine would.
     #[derive(Clone, Default)]
     struct RecordingResolver {
-        outstanding: Arc<Mutex<BTreeSet<(U64, Ask)>>>,
+        outstanding: Arc<Mutex<Vec<RecordedFetch>>>,
         targeted: Arc<Mutex<Vec<(U64, Ask, PublicKey)>>>,
     }
 
@@ -695,7 +722,8 @@ mod tests {
             self.outstanding
                 .lock()
                 .iter()
-                .map(|(key, _)| u64::from(key))
+                .filter(|(_, _, response)| !response.is_closed())
+                .map(|(key, _, _)| u64::from(key))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect()
@@ -713,40 +741,54 @@ mod tests {
             self.outstanding
                 .lock()
                 .iter()
-                .filter_map(|(key, subscription)| (u64::from(key) == view).then_some(*subscription))
+                .filter_map(|(key, subscription, response)| {
+                    (u64::from(key) == view && !response.is_closed()).then_some(*subscription)
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect()
+        }
+
+        fn response(&self, view: u64, ask: Ask) -> mpsc::Sender<ResolverResponse> {
+            self.outstanding
+                .lock()
+                .iter()
+                .find_map(|(key, subscriber, response)| {
+                    (u64::from(key) == view && subscriber == &ask && !response.is_closed())
+                        .then(|| response.clone())
+                })
+                .expect("response route")
         }
     }
 
     impl Resolver for RecordingResolver {
         type Key = U64;
         type Subscriber = Ask;
+        type Response = ResolverResponse;
 
         fn fetch<F>(&mut self, key: F) -> Feedback
         where
-            F: Into<Fetch<U64, Ask>> + Send,
+            F: Into<Fetch<U64, Ask, ResolverResponse>> + Send,
         {
             let fetch = key.into();
-            self.outstanding
-                .lock()
-                .insert((fetch.key, fetch.subscriber));
+            let mut outstanding = self.outstanding.lock();
+            if !outstanding.iter().any(|(key, subscriber, response)| {
+                key == &fetch.key
+                    && subscriber == &fetch.subscriber
+                    && response.same_channel(&fetch.response)
+            }) {
+                outstanding.push((fetch.key, fetch.subscriber, fetch.response));
+            }
             Feedback::Ok
         }
 
         fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
         where
-            F: Into<Fetch<U64, Ask>> + Send,
+            F: Into<Fetch<U64, Ask, ResolverResponse>> + Send,
         {
             for key in keys {
                 self.fetch(key);
             }
-            Feedback::Ok
-        }
-
-        fn retain(&mut self, predicate: impl Fn(&U64, &Ask) -> bool + Send + 'static) -> Feedback {
-            self.outstanding
-                .lock()
-                .retain(|(key, subscription)| predicate(key, subscription));
             Feedback::Ok
         }
     }
@@ -756,7 +798,7 @@ mod tests {
 
         fn fetch_targeted(
             &mut self,
-            fetch: impl Into<Fetch<U64, Ask>> + Send,
+            fetch: impl Into<Fetch<U64, Ask, ResolverResponse>> + Send,
             targets: NonEmptyVec<PublicKey>,
         ) -> Feedback {
             let fetch = fetch.into();
@@ -765,15 +807,12 @@ mod tests {
                 fetch.subscriber,
                 targets.first().clone(),
             ));
-            self.outstanding
-                .lock()
-                .insert((fetch.key, fetch.subscriber));
-            Feedback::Ok
+            self.fetch(fetch)
         }
 
         fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<PublicKey>)>) -> Feedback
         where
-            F: Into<Fetch<U64, Ask>> + Send,
+            F: Into<Fetch<U64, Ask, ResolverResponse>> + Send,
         {
             for (fetch, targets) in fetches {
                 self.fetch_targeted(fetch, targets);
@@ -800,6 +839,28 @@ mod tests {
             },
         );
         actor
+    }
+
+    fn resolver_response(
+        view: View,
+        data: Bytes,
+        asks: NonEmptyVec<Ask>,
+        verdict: oneshot::Sender<Outcome>,
+    ) -> ResolverResponse {
+        let (response, _receiver) = mpsc::channel(1);
+        let subscribers = asks.map_into(|subscriber| Subscriber {
+            subscriber,
+            response: response.clone(),
+            span: tracing::Span::none(),
+        });
+        Response {
+            delivery: Delivery {
+                key: U64::from(view),
+                subscribers,
+            },
+            value: data,
+            verdict,
+        }
     }
 
     fn assert_targeted_fetch_does_not_restrict_existing_backfill(target_index: usize) {
@@ -1343,7 +1404,7 @@ mod tests {
             actor.updated(&mut resolver, Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![1, 6, 11, 16]);
 
-            // A covering nullification retains out only its own term's requests
+            // A covering nullification retires only its own term's requests
             // (here, the request at its own view): views below its start and
             // above its term end stay pending.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
@@ -1384,7 +1445,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let Fixture { verifier, .. } = ed25519::fixture(&mut context, NAMESPACE, 4);
-            let actor = build_actor(context, verifier, TERM_LENGTH);
+            let mut actor = build_actor(context, verifier, TERM_LENGTH);
             let mut resolver = RecordingResolver::default();
             let requested = View::new(9);
 
@@ -1432,11 +1493,12 @@ mod tests {
                 Kind::Notarization,
                 Some(participants[1].clone()),
             );
-            resolver.fetch(Fetch {
-                key: U64::from(requested),
-                subscriber: Ask::backfill(),
-                span: tracing::Span::none(),
-            });
+            actor.fetch(
+                &mut resolver,
+                requested,
+                View::new(10),
+                FetchReason::MissingNullification,
+            );
             assert_eq!(
                 resolver.targeted(),
                 vec![
@@ -1509,11 +1571,12 @@ mod tests {
                 Kind::Notarization,
                 Some(participants[3].clone()),
             );
-            resolver.fetch(Fetch {
-                key: U64::from(second_requested),
-                subscriber: Ask::backfill(),
-                span: tracing::Span::none(),
-            });
+            actor.fetch(
+                &mut resolver,
+                second_requested,
+                View::new(13),
+                FetchReason::MissingNullification,
+            );
             actor.updated(
                 &mut resolver,
                 Certificate::Notarization(build_notarization(
@@ -1571,6 +1634,98 @@ mod tests {
             );
             assert!(resolver.outstanding().is_empty());
             assert_eq!(resolver.targeted().len(), 4);
+        });
+    }
+
+    #[test_async]
+    async fn closed_selected_route_reroutes_one_complete_batch() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context.child("actor"), verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+            let view = View::new(3);
+            let nullification = Ask::ancestry(Kind::Nullification);
+            let notarization = Ask::ancestry(Kind::Notarization);
+
+            actor.resolve(
+                &mut resolver,
+                View::new(10),
+                view,
+                nullification.kind,
+                Some(participants[0].clone()),
+            );
+            actor.resolve(
+                &mut resolver,
+                View::new(10),
+                view,
+                notarization.kind,
+                Some(participants[1].clone()),
+            );
+            let nullification_response = resolver.response(view.get(), nullification);
+            let notarization_response = resolver.response(view.get(), notarization);
+            actor.resolve(
+                &mut resolver,
+                View::new(11),
+                view,
+                notarization.kind,
+                Some(participants[2].clone()),
+            );
+            let repeated_notarization = resolver.response(view.get(), notarization);
+            assert!(repeated_notarization.same_channel(&notarization_response));
+            assert_eq!(resolver.targeted().len(), 3);
+            let subscribers = non_empty_vec![
+                Subscriber {
+                    subscriber: nullification,
+                    response: nullification_response.clone(),
+                    span: tracing::Span::none(),
+                },
+                Subscriber {
+                    subscriber: notarization,
+                    response: notarization_response.clone(),
+                    span: tracing::Span::none(),
+                },
+            ];
+            let data = Certificate::<TestScheme, Sha256Digest>::Notarization(build_notarization(
+                &schemes, &verifier, EPOCH, view,
+            ))
+            .encode();
+            let mut consumer = ChannelConsumer::default();
+            let mut delivery = Box::pin(consumer.deliver(
+                Delivery {
+                    key: U64::from(view),
+                    subscribers,
+                },
+                data,
+            ));
+
+            // The first poll queues the batch on the selected route and waits
+            // for its verdict.
+            assert!(delivery.as_mut().now_or_never().is_none());
+            assert!(actor.responses.remove(&U64::from(view), &nullification));
+            assert!(nullification_response.is_closed());
+
+            let (voter_tx, _voter_rx) = mailbox::new(context.child("voter"), NZUsize!(8));
+            let mut voter = voter::Mailbox::new(voter_tx);
+            let process = async {
+                let response = actor.responses.recv().await;
+                assert_eq!(response.delivery.subscribers.len().get(), 1);
+                assert_eq!(
+                    response.delivery.subscribers.first().subscriber,
+                    notarization
+                );
+                actor.handle_response(response, &mut voter, &mut resolver);
+            };
+            let (outcome, ()) = futures::future::join(delivery, process).await;
+
+            assert_eq!(outcome, Some(Outcome::Complete));
+            assert!(notarization_response.is_closed());
+            assert!(resolver.subscriptions(view.get()).is_empty());
         });
     }
 
@@ -1656,14 +1811,13 @@ mod tests {
             let mut requester = build_actor(context.child("requester"), verifier, TERM_LENGTH);
             let mut requester_resolver = RecordingResolver::default();
             let (response, receiver) = oneshot::channel();
-            requester.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
+            requester.handle_response(
+                resolver_response(
+                    requested,
                     data,
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut requester_resolver,
             );
@@ -1687,14 +1841,13 @@ mod tests {
             let encoded = Certificate::Notarization(notarization.clone()).encode();
 
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
+            actor.handle_response(
+                resolver_response(
                     view,
-                    data: encoded.clone(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    encoded.clone(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -1908,17 +2061,16 @@ mod tests {
             // application verdict on evidence already in hand, so the fetch has
             // nothing left to retrieve and must not stay open waiting for it.
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
+            actor.handle_response(
+                resolver_response(
                     view,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(
-                        build_notarization(&schemes, &verifier, EPOCH, view),
-                    )
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(build_notarization(
+                        &schemes, &verifier, EPOCH, view,
+                    ))
                     .encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -1996,15 +2148,13 @@ mod tests {
             // is not re-notified and the payload is not re-cached. The failed
             // verdict settles the ask, so the fetch still completes.
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
+            actor.handle_response(
+                resolver_response(
                     view,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
-                        .encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(notarization).encode(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2045,15 +2195,13 @@ mod tests {
             // if the triggering proposal wanted a certified parent.
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(3));
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: View::new(4),
-                    data: Certificate::<TestScheme, Sha256Digest>::Nullification(nullification)
-                        .encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+            actor.handle_response(
+                resolver_response(
+                    View::new(4),
+                    Certificate::<TestScheme, Sha256Digest>::Nullification(nullification).encode(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2082,15 +2230,13 @@ mod tests {
             );
             actor.certified(&mut resolver, View::new(6), true);
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(notarization)
-                        .encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+            actor.handle_response(
+                resolver_response(
+                    requested,
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(notarization).encode(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2135,14 +2281,13 @@ mod tests {
             // duplicate will not produce a second certification callback, so
             // the resolver response must be completed immediately.
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
+            actor.handle_response(
+                resolver_response(
                     view,
-                    data: Certificate::<TestScheme, Sha256Digest>::Notarization(alternate).encode(),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+                    Certificate::<TestScheme, Sha256Digest>::Notarization(alternate).encode(),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2168,21 +2313,23 @@ mod tests {
 
             let requested = View::new(4);
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Certificate::<TestScheme, Sha256Digest>::Finalization(
-                        build_finalization(&schemes, &verifier, EPOCH, View::new(6)),
-                    )
+            actor.handle_response(
+                resolver_response(
+                    requested,
+                    Certificate::<TestScheme, Sha256Digest>::Finalization(build_finalization(
+                        &schemes,
+                        &verifier,
+                        EPOCH,
+                        View::new(6),
+                    ))
                     .encode(),
-                    asks: non_empty_vec![
+                    non_empty_vec![
                         Ask::backfill(),
                         Ask::ancestry(Kind::Nullification),
                         Ask::ancestry(Kind::Notarization),
                     ],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2218,18 +2365,17 @@ mod tests {
             // Garbage queued before local settlement is ignored without
             // decoding, verification, or peer penalty.
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Bytes::from_static(b"unverifiable"),
-                    asks: non_empty_vec![
+            actor.handle_response(
+                resolver_response(
+                    requested,
+                    Bytes::from_static(b"unverifiable"),
+                    non_empty_vec![
                         Ask::backfill(),
                         Ask::ancestry(Kind::Nullification),
                         Ask::ancestry(Kind::Notarization),
                     ],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2269,14 +2415,13 @@ mod tests {
             assert!(!actor.settled(requested, Kind::Notarization));
 
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Bytes::from_static(b"unverifiable"),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Nullification)],
+            actor.handle_response(
+                resolver_response(
+                    requested,
+                    Bytes::from_static(b"unverifiable"),
+                    non_empty_vec![Ask::ancestry(Kind::Nullification)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );
@@ -2308,14 +2453,13 @@ mod tests {
             assert!(actor.settled(requested, Kind::Notarization));
 
             let (response, receiver) = oneshot::channel();
-            actor.handle_resolver(
-                HandlerMessage::Deliver {
-                    span: tracing::Span::none(),
-                    view: requested,
-                    data: Bytes::from_static(b"unverifiable"),
-                    asks: non_empty_vec![Ask::ancestry(Kind::Notarization)],
+            actor.handle_response(
+                resolver_response(
+                    requested,
+                    Bytes::from_static(b"unverifiable"),
+                    non_empty_vec![Ask::ancestry(Kind::Notarization)],
                     response,
-                },
+                ),
                 &mut voter,
                 &mut resolver,
             );

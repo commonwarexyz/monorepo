@@ -91,7 +91,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Manager as _, Receiver as _, Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
+    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, Subscriber, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Quota, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef,
         deterministic, utils::reschedule,
@@ -3989,7 +3989,7 @@ mod tests {
     type TargetedFetch = (handler::Key<D>, NonEmptyVec<PublicKey>);
 
     /// Recorded `fetch` call on the [`RecordingResolver`].
-    type FetchRecord = Fetch<handler::Key<D>, handler::Annotation>;
+    type FetchRecord = Fetch<handler::Key<D>, handler::Annotation, handler::Response<D>>;
 
     /// A resolver that records each fetch invocation; other methods are no-ops.
     ///
@@ -4000,7 +4000,6 @@ mod tests {
         fetches: Arc<Mutex<Vec<FetchRecord>>>,
         active_fetches: Arc<Mutex<Vec<FetchRecord>>>,
         targeted: Arc<Mutex<Vec<TargetedFetch>>>,
-        retains: Arc<Mutex<usize>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
         delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
         sender: Option<mailbox::Sender<handler::Message<D>>>,
@@ -4015,7 +4014,6 @@ mod tests {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     active_fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
-                    retains: Arc::new(Mutex::new(0)),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
                     sender: Some(sender),
@@ -4025,23 +4023,31 @@ mod tests {
 
         fn record_fetch(&self, fetch: FetchRecord) {
             self.fetches.lock().push(fetch.clone());
+            self.record_route(fetch);
+        }
+
+        fn record_route(&self, fetch: FetchRecord) {
             self.active_fetches.lock().push(fetch.clone());
             let Some(value) = self.auto_delivery.lock().take() else {
                 return;
             };
-            let Some(sender) = &self.sender else {
-                return;
-            };
-            let (response, response_rx) = oneshot::channel();
+            let (verdict, response_rx) = oneshot::channel();
             self.delivery_responses.lock().push(response_rx);
-            let _ = sender.enqueue(handler::Message::Deliver {
-                delivery: Delivery {
-                    key: fetch.key,
-                    subscribers: NonEmptyVec::new((fetch.subscriber, tracing::Span::none())),
-                },
-                value,
-                response,
-            });
+            fetch
+                .response
+                .try_send(handler::Response {
+                    delivery: Delivery {
+                        key: fetch.key,
+                        subscribers: NonEmptyVec::new(Subscriber {
+                            subscriber: fetch.subscriber,
+                            response: fetch.response.clone(),
+                            span: fetch.span,
+                        }),
+                    },
+                    value,
+                    verdict,
+                })
+                .expect("recording resolver response route closed");
         }
 
         fn respond_to_next_fetch(&self, value: Bytes) {
@@ -4061,12 +4067,43 @@ mod tests {
             response.await.expect("delivery response sender dropped")
         }
 
+        fn send_delivery(&self, fetch: FetchRecord, value: Bytes) -> oneshot::Receiver<bool> {
+            let (verdict, receiver) = oneshot::channel();
+            fetch
+                .response
+                .try_send(handler::Response {
+                    delivery: Delivery {
+                        key: fetch.key,
+                        subscribers: NonEmptyVec::new(Subscriber {
+                            subscriber: fetch.subscriber,
+                            response: fetch.response.clone(),
+                            span: fetch.span,
+                        }),
+                    },
+                    value,
+                    verdict,
+                })
+                .expect("recording resolver response route closed");
+            receiver
+        }
+
+        async fn deliver(&self, fetch: FetchRecord, value: Bytes) -> bool {
+            self.send_delivery(fetch, value)
+                .await
+                .expect("delivery response missing")
+        }
+
         fn fetches(&self) -> Vec<FetchRecord> {
             self.fetches.lock().clone()
         }
 
         fn active_fetches(&self) -> Vec<FetchRecord> {
-            self.active_fetches.lock().clone()
+            self.active_fetches
+                .lock()
+                .iter()
+                .filter(|fetch| !fetch.response.is_closed())
+                .cloned()
+                .collect()
         }
 
         fn targeted(&self) -> Vec<TargetedFetch> {
@@ -4075,10 +4112,6 @@ mod tests {
 
         fn targeted_is_empty(&self) -> bool {
             self.targeted.lock().is_empty()
-        }
-
-        fn retain_count(&self) -> usize {
-            *self.retains.lock()
         }
 
         fn enqueue(&self, message: handler::Message<D>) -> Feedback {
@@ -4092,10 +4125,11 @@ mod tests {
     impl Resolver for RecordingResolver {
         type Key = handler::Key<D>;
         type Subscriber = handler::Annotation;
+        type Response = handler::Response<D>;
 
         fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             self.record_fetch(fetch.into());
             Feedback::Ok
@@ -4103,22 +4137,11 @@ mod tests {
 
         fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             for fetch in fetches {
                 self.record_fetch(fetch.into());
             }
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
-            self.active_fetches
-                .lock()
-                .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
-            *self.retains.lock() += 1;
             Feedback::Ok
         }
     }
@@ -4128,10 +4151,12 @@ mod tests {
 
         fn fetch_targeted(
             &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((fetch.into().key, targets));
+            let fetch = fetch.into();
+            self.targeted.lock().push((fetch.key, targets));
+            self.record_route(fetch);
             Feedback::Ok
         }
 
@@ -4140,11 +4165,13 @@ mod tests {
             fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             let mut targeted = self.targeted.lock();
             for (fetch, targets) in fetches {
-                targeted.push((fetch.into().key, targets));
+                let fetch = fetch.into();
+                targeted.push((fetch.key, targets));
+                self.record_route(fetch);
             }
             Feedback::Ok
         }
@@ -4157,16 +4184,15 @@ mod tests {
         type Key = handler::Key<D>;
         type Value = Bytes;
         type Subscriber = handler::Annotation;
+        type Response = handler::Response<D>;
         type Outcome = bool;
 
         fn deliver(
             &mut self,
-            _delivery: Delivery<Self::Key, Self::Subscriber>,
+            _delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             _value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
-            let (sender, receiver) = oneshot::channel();
-            sender.send_lossy(false);
-            receiver
+        ) -> impl Future<Output = Option<bool>> + Send + 'static {
+            std::future::ready(Some(false))
         }
     }
 
@@ -4208,6 +4234,66 @@ mod tests {
             }
             context.sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    async fn wait_for_fetch(
+        context: &deterministic::Context,
+        resolver: &RecordingResolver,
+        label: &str,
+        mut matches: impl FnMut(&FetchRecord) -> bool,
+    ) -> FetchRecord {
+        wait_until(context, Duration::from_secs(5), label, || {
+            resolver.active_fetches().iter().any(&mut matches)
+        })
+        .await;
+        resolver
+            .active_fetches()
+            .into_iter()
+            .find(matches)
+            .expect("matching resolver fetch missing")
+    }
+
+    async fn request_notarized(
+        context: &deterministic::Context,
+        mailbox: &Mailbox<S, Standard<B>>,
+        resolver: &RecordingResolver,
+        round: Round,
+        commitment: D,
+    ) -> FetchRecord {
+        mailbox.hint_notarized(round, commitment);
+        wait_for_fetch(context, resolver, "notarized fetch", |fetch| {
+            matches!(
+                (&fetch.key, &fetch.subscriber),
+                (
+                    handler::Key::Notarized { round: key_round },
+                    handler::Annotation::Notarization {
+                        round: subscriber_round,
+                    },
+                ) if *key_round == round && *subscriber_round == round
+            )
+        })
+        .await
+    }
+
+    async fn request_finalized(
+        context: &deterministic::Context,
+        mailbox: &Mailbox<S, Standard<B>>,
+        resolver: &RecordingResolver,
+        height: Height,
+    ) -> FetchRecord {
+        mailbox.hint_finalized(height, NonEmptyVec::new(default_leader()));
+        wait_for_fetch(context, resolver, "finalized fetch", |fetch| {
+            matches!(
+                (&fetch.key, &fetch.subscriber),
+                (
+                    handler::Key::Finalized { height: key_height },
+                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
+                        height: subscriber_height,
+                    }),
+                ) if *key_height == height && *subscriber_height == height
+            )
+        })
+        .await
     }
 
     /// A reporter that signals when application delivery starts and holds the
@@ -4722,20 +4808,13 @@ mod tests {
             .await;
             let mut mailbox = mailbox;
 
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "local floor anchor application",
-                || resolver.retain_count() >= 2,
-            )
-            .await;
-            assert!(
-                resolver.fetches().is_empty(),
-                "local startup floor anchor must not be fetched"
-            );
             assert_eq!(
                 mailbox.get_block(Height::new(5)).await.unwrap().digest(),
                 floor_block.digest()
+            );
+            assert!(
+                resolver.fetches().is_empty(),
+                "local startup floor anchor must not be fetched"
             );
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
@@ -4881,24 +4960,8 @@ mod tests {
                     )
                 })
                 .expect("floor fetch missing");
-            let (response, response_rx) = oneshot::channel();
             assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: floor_fetch.key,
-                            subscribers: NonEmptyVec::new((
-                                floor_fetch.subscriber,
-                                tracing::Span::none()
-                            )),
-                        },
-                        value: floor_block.encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
+                resolver.deliver(floor_fetch, floor_block.encode()).await,
                 "floor block delivery should validate"
             );
 
@@ -5404,26 +5467,10 @@ mod tests {
                     )
                 })
                 .expect("old floor fetch missing");
-            let (response, response_rx) = oneshot::channel();
             assert!(
                 resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: old_floor_fetch.key,
-                            subscribers: NonEmptyVec::new((
-                                old_floor_fetch.subscriber,
-                                tracing::Span::none()
-                            )),
-                        },
-                        value: old_floor_block.encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx
-                    .await
-                    .expect("old floor delivery response missing"),
+                    .deliver(old_floor_fetch, old_floor_block.encode())
+                    .await,
                 "old floor block delivery should validate"
             );
             context.sleep(Duration::from_millis(100)).await;
@@ -5440,26 +5487,10 @@ mod tests {
                     )
                 })
                 .expect("new floor fetch missing");
-            let (response, response_rx) = oneshot::channel();
             assert!(
                 resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: new_floor_fetch.key,
-                            subscribers: NonEmptyVec::new((
-                                new_floor_fetch.subscriber,
-                                tracing::Span::none()
-                            )),
-                        },
-                        value: new_floor_block.encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx
-                    .await
-                    .expect("new floor delivery response missing"),
+                    .deliver(new_floor_fetch, new_floor_block.encode())
+                    .await,
                 "new floor block delivery should validate"
             );
             assert_eq!(started_rx.await.unwrap(), Height::new(7));
@@ -5656,7 +5687,7 @@ mod tests {
 
             let application = Application::<B>::manual_ack();
             let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "local-floor-below-in-flight-keeps-pending-ack",
                 ConstantProvider::new(schemes[0].clone()),
@@ -5711,15 +5742,8 @@ mod tests {
                 "local floor below the in-flight block must not clear or duplicate its ack"
             );
 
-            let retain_before_ack = resolver.retain_count();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "first ack processed",
-                || resolver.retain_count() > retain_before_ack,
-            )
-            .await;
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(1)));
             assert!(application.pending_ack_heights().is_empty());
         });
     }
@@ -5766,15 +5790,8 @@ mod tests {
             )
             .await;
 
-            let retain_before_block1_ack = resolver.retain_count();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "first ack processed",
-                || resolver.retain_count() > retain_before_block1_ack,
-            )
-            .await;
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(1)));
 
             let block2_round = Round::new(Epoch::zero(), View::new(2));
             let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
@@ -5867,7 +5884,7 @@ mod tests {
                 bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
 
             let application = Application::<B>::manual_ack();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "same-height-floor-keeps-pending-ack",
                 ConstantProvider::new(schemes[0].clone()),
@@ -5900,15 +5917,8 @@ mod tests {
             )
             .await;
 
-            let retain_before_ack = resolver.retain_count();
             assert_eq!(application.acknowledge_next(), Some(Height::new(1)));
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "first ack processed",
-                || resolver.retain_count() > retain_before_ack,
-            )
-            .await;
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(1)));
 
             let block2_round = Round::new(Epoch::zero(), View::new(2));
             let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
@@ -6177,24 +6187,25 @@ mod tests {
             )
             .await;
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(|fetch| {
+                    matches!(
+                        (&fetch.key, &fetch.subscriber),
+                        (
+                            handler::Key::Notarized { round: key_round },
+                            handler::Annotation::Notarization {
+                                round: subscriber_round,
+                            },
+                        ) if *key_round == round && *subscriber_round == round
+                    )
+                })
+                .expect("notarized fetch missing");
             assert!(
                 resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized { round },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (notarization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
+                    .deliver(fetch, (notarization, block.clone()).encode())
+                    .await,
                 "notarized delivery should validate"
             );
 
@@ -6227,7 +6238,7 @@ mod tests {
             );
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "notarized-delivery-wrong-round",
                 ConstantProvider::new(schemes[0].clone()),
@@ -6237,28 +6248,18 @@ mod tests {
             )
             .await;
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = request_notarized(
+                &context,
+                &mailbox,
+                &resolver,
+                requested_round,
+                notarization.proposal.payload,
+            )
+            .await;
             assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized {
-                                round: requested_round,
-                            },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization {
-                                    round: requested_round,
-                                },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (notarization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
+                !resolver
+                    .deliver(fetch, (notarization, block).encode())
+                    .await,
                 "wrong-round notarized delivery must not satisfy the request"
             );
         });
@@ -6276,7 +6277,7 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
 
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "notarized-delivery-stale-certificate-only",
                 VerifierProvider::new(schemes[0].clone()),
@@ -6286,24 +6287,18 @@ mod tests {
             )
             .await;
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = request_notarized(
+                &context,
+                &mailbox,
+                &resolver,
+                round,
+                notarization.proposal.payload,
+            )
+            .await;
             assert!(
                 resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized { round },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (notarization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
+                    .deliver(fetch, (notarization, block).encode())
+                    .await,
                 "stale notarized delivery should acknowledge without blaming the peer"
             );
         });
@@ -6336,26 +6331,11 @@ mod tests {
             )
             .await;
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = request_finalized(&context, &mailbox, &resolver, height).await;
             assert!(
                 resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization.clone(), block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
+                    .deliver(fetch, (finalization.clone(), block.clone()).encode())
+                    .await,
                 "finalization verified through a verify-only scope should be accepted"
             );
             assert_eq!(application.acknowledged().await, Height::zero());
@@ -6411,7 +6391,7 @@ mod tests {
             let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
             let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
 
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "finalized-delivery-epoch-mismatch",
                 VerifierProvider::new(schemes[0].clone()),
@@ -6421,26 +6401,11 @@ mod tests {
             )
             .await;
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = request_finalized(&context, &mailbox, &resolver, height).await;
             assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
+                !resolver
+                    .deliver(fetch, (finalization, block).encode())
+                    .await,
                 "finalization whose epoch mismatches the height's epoch must blame the peer"
             );
         });
@@ -6463,7 +6428,7 @@ mod tests {
             // The scope survives exactly the admission lookup, so it is gone by
             // the time the batched verification runs.
             let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "finalized-delivery-scope-retires",
                 provider.clone(),
@@ -6477,26 +6442,11 @@ mod tests {
                 "no lookup may consume the scope before admission"
             );
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = request_finalized(&context, &mailbox, &resolver, height).await;
             assert!(
                 resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
+                    .deliver(fetch, (finalization, block.clone()).encode())
+                    .await,
                 "finalization admitted under a live scope must not blame the peer"
             );
             assert!(
@@ -6541,24 +6491,18 @@ mod tests {
                 "no lookup may consume the scope before admission"
             );
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = request_notarized(
+                &context,
+                &mailbox,
+                &resolver,
+                round,
+                notarization.proposal.payload,
+            )
+            .await;
             assert!(
                 resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized { round },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (notarization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
+                    .deliver(fetch, (notarization, block.clone()).encode())
+                    .await,
                 "notarization admitted under a live scope must not blame the peer"
             );
             assert!(
@@ -6597,7 +6541,7 @@ mod tests {
             // Retiring the scope after admission must not turn the rejection into
             // an acceptance: the retained scope still verifies the certificate.
             let provider = RetiringProvider::default().with(Epoch::zero(), schemes[0].clone(), 1);
-            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "finalized-delivery-foreign-certificate-scope-retires",
                 provider.clone(),
@@ -6611,26 +6555,11 @@ mod tests {
                 "no lookup may consume the scope before admission"
             );
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = request_finalized(&context, &mailbox, &resolver, height).await;
             assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized { height },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (finalization, block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                !response_rx.await.expect("delivery response missing"),
+                !resolver
+                    .deliver(fetch, (finalization, block).encode())
+                    .await,
                 "certificate from a foreign committee must be rejected"
             );
             assert!(
@@ -6696,31 +6625,16 @@ mod tests {
                 "no lookup may consume the scope before admission"
             );
 
-            let mut responses = Vec::new();
-            for (height, finalization, block) in [
-                (early_height, early_finalization, early_block.clone()),
-                (late_height, late_finalization, late_block.clone()),
-            ] {
-                let (response, response_rx) = oneshot::channel();
-                assert!(
-                    resolver
-                        .enqueue(handler::Message::Deliver {
-                            delivery: Delivery {
-                                key: handler::Key::Finalized { height },
-                                subscribers: NonEmptyVec::new((
-                                    handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                        height
-                                    }),
-                                    tracing::Span::none(),
-                                )),
-                            },
-                            value: (finalization, block).encode(),
-                            response,
-                        })
-                        .accepted()
-                );
-                responses.push(response_rx);
-            }
+            let early_fetch = request_finalized(&context, &mailbox, &resolver, early_height).await;
+            let late_fetch = request_finalized(&context, &mailbox, &resolver, late_height).await;
+            let responses = vec![
+                resolver.send_delivery(
+                    early_fetch,
+                    (early_finalization, early_block.clone()).encode(),
+                ),
+                resolver
+                    .send_delivery(late_fetch, (late_finalization, late_block.clone()).encode()),
+            ];
             for response_rx in responses {
                 assert!(
                     response_rx.await.expect("delivery response missing"),
@@ -6775,19 +6689,12 @@ mod tests {
             );
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            let retain_floor = resolver.retain_count() + 2;
             assert_eq!(
                 application.acknowledged().await,
                 Height::new(1),
                 "application should receive the finalized block"
             );
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "processed-round pruning",
-                || resolver.retain_count() >= retain_floor,
-            )
-            .await;
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(1)));
 
             let fetches_before = resolver.fetches().len();
             mailbox.hint_notarized(round, Sha256::hash(&[b"missing-at-processed-round"]));
@@ -6853,15 +6760,8 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            let retain_floor = resolver.retain_count() + 2;
             assert_eq!(application.acknowledged().await, Height::new(1));
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "processed-round pruning",
-                || resolver.retain_count() >= retain_floor,
-            )
-            .await;
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(1)));
 
             let fetches_before = resolver.fetches().len();
             let stale_finalization = StandardHarness::make_finalization(
@@ -6957,7 +6857,7 @@ mod tests {
                 QUORUM,
             );
             let application = Application::<B>::manual_ack();
-            let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, _resolver, actor_handle) = start_standard_actor(
                 context.child("validator").with_attribute("index", 0),
                 &partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
@@ -6972,15 +6872,8 @@ mod tests {
             assert!(mailbox.verified(round, block.clone()).await);
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
-            let retain_floor = resolver.retain_count() + 2;
             assert_eq!(application.acknowledged().await, Height::new(1));
-            wait_until(
-                &context,
-                Duration::from_secs(5),
-                "processed-round pruning",
-                || resolver.retain_count() >= retain_floor,
-            )
-            .await;
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(1)));
             assert_eq!(
                 mailbox.get_info(Identifier::Latest).await,
                 Some((Height::new(1), block.digest()))
@@ -7100,24 +6993,25 @@ mod tests {
             )
             .await;
 
-            let (response, response_rx) = oneshot::channel();
+            let fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(|fetch| {
+                    matches!(
+                        (&fetch.key, &fetch.subscriber),
+                        (
+                            handler::Key::Notarized { round: key_round },
+                            handler::Annotation::Notarization {
+                                round: subscriber_round,
+                            },
+                        ) if *key_round == round && *subscriber_round == round
+                    )
+                })
+                .expect("notarized fetch missing");
             assert!(
                 resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized { round },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: (notarization, block.clone()).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(
-                response_rx.await.expect("delivery response missing"),
+                    .deliver(fetch, (notarization, block.clone()).encode())
+                    .await,
                 "notarized delivery should validate"
             );
             select! {
@@ -7296,9 +7190,8 @@ mod tests {
         });
     }
 
-    /// A round-floor advance that supersedes the pending floor anchor must
-    /// release the floor transition rather than strand it once its anchor
-    /// fetch is pruned.
+    /// Round and height floors retire only their matching demand for one block.
+    /// Application subscriptions outlive both resolver routes.
     #[test_traced("WARN")]
     fn test_standard_round_floor_advance_releases_superseded_pending_floor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -7313,7 +7206,11 @@ mod tests {
             // finalization, so the recovered round floor lags every finalization
             // on the chain.
             let anchor_round = Round::new(Epoch::zero(), View::new(2));
-            let anchor = make_raw_block(Sha256::hash(&[b"anchor-parent"]), Height::new(2), 200);
+            let anchor = make_raw_block(
+                Sha256::hash(&[b"anchor-parent"]),
+                Height::new(2),
+                200,
+            );
             let anchor_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     anchor_round,
@@ -7375,6 +7272,37 @@ mod tests {
                 || resolver.active_fetches().iter().any(is_anchor_fetch),
             )
             .await;
+            let anchor_round_fetch = resolver
+                .active_fetches()
+                .into_iter()
+                .find(is_anchor_fetch)
+                .expect("floor anchor fetch missing");
+
+            // Height 4 is a validated retention bound for this independent
+            // untrusted demand, not a claim about the block's encoded height.
+            let mut anchor_subscription = mailbox.subscribe_by_commitment(
+                StandardHarness::commitment(&anchor),
+                CommitmentFallback::FetchByCommitment {
+                    height: Height::new(4),
+                },
+            );
+            let is_height_fetch = |fetch: &FetchRecord| {
+                matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Block(commitment),
+                        handler::Annotation::Untrusted { height },
+                    ) if *commitment == StandardHarness::commitment(&anchor)
+                        && *height == Height::new(4)
+                )
+            };
+            let anchor_height_fetch = wait_for_fetch(
+                &context,
+                &resolver,
+                "height-bound anchor fetch",
+                is_height_fetch,
+            )
+            .await;
             context.sleep(Duration::from_millis(100)).await;
             assert!(
                 application.pending_ack_heights().is_empty(),
@@ -7384,42 +7312,23 @@ mod tests {
             // A finalization for the retained height 3 block (for example,
             // re-reported by consensus on restart) advances the round floor
             // past the pending anchor round.
-            let retains_before = resolver.retain_count();
             StandardHarness::report_finalization(&mut mailbox, processed_finalization).await;
             wait_until(
                 &context,
                 Duration::from_secs(5),
                 "round floor advance",
-                || resolver.retain_count() > retains_before,
+                || anchor_round_fetch.response.is_closed(),
             )
             .await;
+            assert!(
+                !anchor_height_fetch.response.is_closed(),
+                "round floor closed height-bound demand for the same block"
+            );
+            assert!(matches!(
+                anchor_subscription.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
 
-            // The anchor is now provably at or below the processed height. If
-            // marshal still wants it, serve it. Either way the superseded
-            // floor must release application dispatch.
-            if let Some(fetch) = resolver
-                .active_fetches()
-                .into_iter()
-                .find(is_anchor_fetch)
-            {
-                let (response, response_rx) = oneshot::channel();
-                assert!(
-                    resolver
-                        .enqueue(handler::Message::Deliver {
-                            delivery: Delivery {
-                                key: fetch.key,
-                                subscribers: NonEmptyVec::new((
-                                    fetch.subscriber,
-                                    tracing::Span::none()
-                                )),
-                            },
-                            value: anchor.encode(),
-                            response,
-                        })
-                        .accepted()
-                );
-                assert!(response_rx.await.expect("delivery response missing"));
-            }
             select! {
                 height = application.acknowledged() => {
                     assert_eq!(height, Height::new(4));
@@ -7430,6 +7339,17 @@ mod tests {
                     );
                 },
             }
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "height floor advance",
+                || anchor_height_fetch.response.is_closed(),
+            )
+            .await;
+            assert!(matches!(
+                anchor_subscription.try_recv(),
+                Err(TryRecvError::Empty)
+            ));
         });
     }
 
@@ -7521,71 +7441,47 @@ mod tests {
                 buffered::Engine::new(context.child("broadcast"), broadcast_config);
             broadcast_engine.start(network_channel);
 
-            let (resolver_tx, resolver_rx) = mailbox::new(context.child("mailbox"), NZUsize!(100));
+            let (_resolver_tx, resolver_rx) = mailbox::new(context.child("mailbox"), NZUsize!(100));
 
-            let (actor, _mailbox, _) = Actor::init(
+            let (actor, mailbox, _) = Actor::init(
                 context.child("actor"),
                 finalizations_by_height,
                 finalized_blocks,
                 config,
             )
             .await;
+            let resolver = RecordingResolver::default();
             actor.start(
                 Application::<B>::default(),
                 buffer,
-                (
-                    handler::Receiver::new(resolver_rx),
-                    RecordingResolver::default(),
-                ),
+                (handler::Receiver::new(resolver_rx), resolver.clone()),
             );
 
             // Inject a Finalized delivery with garbage payload. The
             // provider has no verifier, so the marshal cannot decode it and
             // must ack (true) rather than blame the peer (false).
-            let (response, response_rx) = oneshot::channel();
+            let fetch = request_finalized(&context, &mailbox, &resolver, Height::new(5)).await;
             assert!(
-                resolver_tx
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Finalized {
-                                height: Height::new(5),
-                            },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height: Height::new(5),
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: Bytes::from_static(b"unverifiable"),
-                        response,
-                    })
-                    .accepted()
+                resolver
+                    .deliver(fetch, Bytes::from_static(b"unverifiable"))
+                    .await
             );
-            assert!(response_rx.await.unwrap());
 
             // Same for a Notarized delivery.
-            let (response, response_rx) = oneshot::channel();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let fetch = request_notarized(
+                &context,
+                &mailbox,
+                &resolver,
+                round,
+                Sha256::hash(&[b"unverifiable"]),
+            )
+            .await;
             assert!(
-                resolver_tx
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized {
-                                round: Round::new(Epoch::zero(), View::new(1)),
-                            },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization {
-                                    round: Round::new(Epoch::zero(), View::new(1)),
-                                },
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: Bytes::from_static(b"unverifiable"),
-                        response,
-                    })
-                    .accepted()
+                resolver
+                    .deliver(fetch, Bytes::from_static(b"unverifiable"))
+                    .await
             );
-            assert!(response_rx.await.unwrap());
         });
     }
 
@@ -8189,6 +8085,50 @@ mod tests {
             )
             .await;
 
+            let next_round = Round::new(Epoch::zero(), View::new(2));
+            let next = make_raw_block(block.digest(), Height::new(2), 200);
+            let next_finalization = StandardHarness::make_finalization(
+                Proposal::new(next_round, round.view(), StandardHarness::commitment(&next)),
+                &schemes,
+                QUORUM,
+            );
+            let above_round = Round::new(Epoch::zero(), View::new(3));
+            let above = make_raw_block(next.digest(), Height::new(3), 300);
+            let above_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    above_round,
+                    next_round.view(),
+                    StandardHarness::commitment(&above),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, next_finalization).await;
+            let next_fetch = wait_for_fetch(&context, &resolver, "height 2 block fetch", |fetch| {
+                matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Block(commitment),
+                        handler::Annotation::Finalized(handler::Finalized::ByRound { round }),
+                    ) if *commitment == StandardHarness::commitment(&next)
+                        && *round == next_round
+                )
+            })
+            .await;
+            StandardHarness::report_finalization(&mut mailbox, above_finalization).await;
+            let above_fetch =
+                wait_for_fetch(&context, &resolver, "height 3 block fetch", |fetch| {
+                    matches!(
+                        (&fetch.key, &fetch.subscriber),
+                        (
+                            handler::Key::Block(commitment),
+                            handler::Annotation::Finalized(handler::Finalized::ByRound { round }),
+                        ) if *commitment == StandardHarness::commitment(&above)
+                            && *round == above_round
+                    )
+                })
+                .await;
+
             // Install a pending floor anchor for a forked block at height 1:
             // a valid certificate at a round above the round floor whose block
             // is unknown locally, so marshal fetches it. Its height (at or
@@ -8227,65 +8167,12 @@ mod tests {
                 })
                 .expect("anchor fetch missing");
 
-            // Enqueue all deliveries back-to-back (no intervening await) so
-            // the actor drains them in a single resolver batch: two repair
-            // blocks at and above the dispatch frontier (buffered
-            // finalized-archive writes, ascending), then the stale floor
-            // anchor.
-            let next = make_raw_block(block.digest(), Height::new(2), 200);
-            let (next_response, next_response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Block(StandardHarness::commitment(&next)),
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height: Height::new(2),
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: next.encode(),
-                        response: next_response,
-                    })
-                    .accepted()
-            );
-            let above = make_raw_block(next.digest(), Height::new(3), 300);
-            let (above_response, above_response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Block(StandardHarness::commitment(&above)),
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Finalized(handler::Finalized::ByHeight {
-                                    height: Height::new(3),
-                                }),
-                                tracing::Span::none(),
-                            )),
-                        },
-                        value: above.encode(),
-                        response: above_response,
-                    })
-                    .accepted()
-            );
-            let (anchor_response, anchor_response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: anchor_fetch.key,
-                            subscribers: NonEmptyVec::new((
-                                anchor_fetch.subscriber,
-                                tracing::Span::none()
-                            )),
-                        },
-                        value: fork.encode(),
-                        response: anchor_response,
-                    })
-                    .accepted()
-            );
+            // Queue block-only repairs before the stale anchor without yielding.
+            // The actor writes both repairs during the drain, then the anchor
+            // attempts dispatch before the batch-end sync starts.
+            let next_response_rx = resolver.send_delivery(next_fetch, next.encode());
+            let above_response_rx = resolver.send_delivery(above_fetch, above.encode());
+            let anchor_response_rx = resolver.send_delivery(anchor_fetch, fork.encode());
             let delivered_at = context.current();
             assert!(
                 next_response_rx.await.expect("repair response missing"),

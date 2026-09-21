@@ -21,9 +21,9 @@
 //! nullification@4 for request 6: rejected (wrong term)
 //! ```
 //!
-//! Requests stay pending in the resolver until answered or retained out, so the cursor never
-//! revisits scanned views on its own (a rescan re-issues fetches for requests that are still
-//! pending, which the resolver engine deduplicates).
+//! Requests stay pending until the actor retires their response receivers, so the cursor never
+//! revisits scanned views on its own. A rescan re-issues pending fetches through the same channel,
+//! which the resolver engine deduplicates.
 //!
 //! # Proposal Ancestry
 //!
@@ -48,7 +48,7 @@
 //! # Mid-Term Floor Raises
 //!
 //! A floor raise landing inside a term (a certified notarization or a finalization at a mid-term
-//! view) strands the term's tail: the anchor request is retained out with the floor, requests in
+//! view) strands the term's tail: the anchor request retires with the floor, requests in
 //! later terms reject this term's nullifications, and the cursor is already past it. Nothing
 //! would ever re-request the tail, so a validator whose parent chain rests at the floor could
 //! never validate proposals that skip it:
@@ -59,7 +59,7 @@
 //! term:      [1  2  3 |  4  5] [6 . . . 10] [11 . . . 15]
 //!                     ^floor
 //! request:    x          ??    [6]          [11]
-//!            (retained out)    (reject term-1 evidence)
+//!            (retired)         (reject term-1 evidence)
 //! ```
 //!
 //! Pruning repairs this by pulling the cursor back to just above the floor, so a later scan

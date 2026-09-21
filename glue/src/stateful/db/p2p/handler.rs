@@ -1,47 +1,12 @@
 //! Internal handler types for resolver actor coordination.
 
-use super::mailbox::Reply;
+use super::mailbox::Candidate;
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_resolver::{self as resolver, Delivery, p2p::Producer};
 use commonware_storage::{merkle::Family, qmdb::sync::Request};
 use commonware_utils::channel::oneshot;
-use std::{cmp::Ordering, collections::VecDeque};
-
-/// A caller's reply route, identified independently of the peer-visible request.
-pub(super) struct Subscriber<R> {
-    pub id: u64,
-    pub reply: Reply<R>,
-}
-
-impl<R> Clone for Subscriber<R> {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id,
-            reply: self.reply.clone(),
-        }
-    }
-}
-
-impl<R> PartialEq for Subscriber<R> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-    }
-}
-
-impl<R> Eq for Subscriber<R> {}
-
-impl<R> PartialOrd for Subscriber<R> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl<R> Ord for Subscriber<R> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.id.cmp(&other.id)
-    }
-}
+use std::{collections::VecDeque, future::Future};
 
 /// Messages sent from [`Handler`] to the resolver [`Actor`](super::Actor).
 ///
@@ -51,7 +16,7 @@ pub(super) enum EngineMessage<F: Family, R> {
     /// A peer response for the subscribers in `delivery`. Send its validity through `response`,
     /// or drop `response` to leave the delivery unjudged.
     Deliver {
-        delivery: Delivery<Request<F>, Subscriber<R>>,
+        delivery: Delivery<Request<F>, (), Candidate<R>>,
         value: Bytes,
         response: oneshot::Sender<bool>,
     },
@@ -150,21 +115,22 @@ impl<F: Family, R> Handler<F, R> {
 impl<F: Family, R: Send + 'static> resolver::Consumer for Handler<F, R> {
     type Key = Request<F>;
     type Value = Bytes;
-    type Subscriber = Subscriber<R>;
+    type Subscriber = ();
+    type Response = Candidate<R>;
     type Outcome = bool;
 
     fn deliver(
         &mut self,
-        delivery: Delivery<Self::Key, Self::Subscriber>,
+        delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
         value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
+    ) -> impl Future<Output = Option<bool>> + Send + 'static {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(EngineMessage::Deliver {
             delivery,
             value,
             response,
         });
-        receiver
+        async move { receiver.await.ok() }
     }
 }
 
@@ -183,6 +149,7 @@ impl<F: Family, R: Send + 'static> Producer for Handler<F, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_resolver::Subscriber;
     use commonware_storage::mmr::{self, Location};
     use commonware_utils::{NZU64, channel::mpsc, non_empty_vec};
 
@@ -213,13 +180,11 @@ mod tests {
             EngineMessage::Deliver {
                 delivery: Delivery {
                     key,
-                    subscribers: non_empty_vec![(
-                        Subscriber {
-                            id: 0,
-                            reply: reply.clone()
-                        },
-                        tracing::Span::none()
-                    )],
+                    subscribers: non_empty_vec![Subscriber {
+                        subscriber: (),
+                        response: reply.clone(),
+                        span: tracing::Span::none(),
+                    }],
                 },
                 value: Bytes::new(),
                 response,
@@ -231,10 +196,11 @@ mod tests {
             EngineMessage::Deliver {
                 delivery: Delivery {
                     key,
-                    subscribers: non_empty_vec![(
-                        Subscriber { id: 0, reply },
-                        tracing::Span::none()
-                    )],
+                    subscribers: non_empty_vec![Subscriber {
+                        subscriber: (),
+                        response: reply,
+                        span: tracing::Span::none(),
+                    }],
                 },
                 value: Bytes::from_static(b"open"),
                 response,

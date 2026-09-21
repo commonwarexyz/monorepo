@@ -1,5 +1,6 @@
 use crate::{
-    marshal::resolver::handler::{Annotation, Key, Request},
+    marshal::resolver::handler::{Annotation, Key, Request, Response},
+    responses::Responses,
     simplex::types::Finalization,
     types::{Height, Round},
 };
@@ -138,42 +139,49 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     pub(super) fn fetch_if_permitted<R>(
         &self,
+        responses: &mut Responses<Key<C>, Annotation, Response<C>>,
         resolver: &mut R,
         fetch: Request<C>,
     ) -> FetchAdmission
     where
-        R: Resolver<Key = Key<C>, Subscriber = Annotation>,
+        R: Resolver<Key = Key<C>, Subscriber = Annotation, Response = Response<C>>,
     {
         if !self.permits(&fetch) {
             return FetchAdmission::Denied;
         }
-        resolver.fetch(fetch);
+        let (key, subscriber) = fetch.parts();
+        let response = responses.register(key, subscriber);
+        resolver.fetch(fetch.into_inner(response));
         FetchAdmission::Issued
     }
 
     pub(super) fn fetch_targeted_if_permitted<R>(
         &self,
+        responses: &mut Responses<Key<C>, Annotation, Response<C>>,
         resolver: &mut R,
         fetch: Request<C>,
         targets: NonEmptyVec<R::PublicKey>,
     ) -> FetchAdmission
     where
-        R: TargetedResolver<Key = Key<C>, Subscriber = Annotation>,
+        R: TargetedResolver<Key = Key<C>, Subscriber = Annotation, Response = Response<C>>,
     {
         if !self.permits(&fetch) {
             return FetchAdmission::Denied;
         }
-        resolver.fetch_targeted(fetch, targets);
+        let (key, subscriber) = fetch.parts();
+        let response = responses.register(key, subscriber);
+        resolver.fetch_targeted(fetch.into_inner(response), targets);
         FetchAdmission::Issued
     }
 
     pub(super) fn fetch_all_if_permitted<R>(
         &self,
+        responses: &mut Responses<Key<C>, Annotation, Response<C>>,
         resolver: &mut R,
         fetches: Vec<Request<C>>,
     ) -> FetchAdmission
     where
-        R: Resolver<Key = Key<C>, Subscriber = Annotation>,
+        R: Resolver<Key = Key<C>, Subscriber = Annotation, Response = Response<C>>,
     {
         let fetches = fetches
             .into_iter()
@@ -182,6 +190,14 @@ impl<S: Scheme, C: Digest> State<S, C> {
         if fetches.is_empty() {
             return FetchAdmission::Denied;
         }
+        let fetches = fetches
+            .into_iter()
+            .map(|fetch| {
+                let (key, subscriber) = fetch.parts();
+                let response = responses.register(key, subscriber);
+                fetch.into_inner(response)
+            })
+            .collect();
         resolver.fetch_all(fetches);
         FetchAdmission::Issued
     }
@@ -215,7 +231,7 @@ mod tests {
 
     type TestDigest = <Sha256 as commonware_cryptography::Hasher>::Digest;
     type TestScheme = simplex_ed25519::Scheme;
-    type FetchRecord = Fetch<Key<TestDigest>, Annotation>;
+    type FetchRecord = Fetch<Key<TestDigest>, Annotation, Response<TestDigest>>;
     type RecordedFetches = Arc<Mutex<Vec<FetchRecord>>>;
     type RecordedTargets = Arc<Mutex<Vec<Key<TestDigest>>>>;
 
@@ -238,10 +254,11 @@ mod tests {
     impl Resolver for TestResolver {
         type Key = Key<TestDigest>;
         type Subscriber = Annotation;
+        type Response = Response<TestDigest>;
 
         fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             self.fetches.lock().push(fetch.into());
             Feedback::Ok
@@ -249,18 +266,11 @@ mod tests {
 
         fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             self.fetches
                 .lock()
                 .extend(fetches.into_iter().map(Into::into));
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
             Feedback::Ok
         }
     }
@@ -270,7 +280,7 @@ mod tests {
 
         fn fetch_targeted(
             &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
             _targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
             self.targeted.lock().push(fetch.into().key);
@@ -282,7 +292,7 @@ mod tests {
             fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             self.targeted
                 .lock()
@@ -307,30 +317,40 @@ mod tests {
     fn fetch_if_permitted_applies_height_and_round_floors() {
         let floor = floor();
         let mut resolver = TestResolver::default();
+        let mut responses = Responses::new();
 
         assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::new(5))),
+            floor.fetch_if_permitted(
+                &mut responses,
+                &mut resolver,
+                Request::finalized(Height::new(5)),
+            ),
             FetchAdmission::Denied
         ));
         assert!(matches!(
             floor.fetch_if_permitted(
+                &mut responses,
                 &mut resolver,
                 Request::finalized_by_height(digest(1), Height::new(4)),
             ),
             FetchAdmission::Denied
         ));
         assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(5))),
+            floor.fetch_if_permitted(&mut responses, &mut resolver, Request::notarized(round(5)),),
             FetchAdmission::Denied
         ));
         assert!(resolver.fetches().is_empty());
 
         assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::new(6))),
+            floor.fetch_if_permitted(
+                &mut responses,
+                &mut resolver,
+                Request::finalized(Height::new(6)),
+            ),
             FetchAdmission::Issued
         ));
         assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::notarized(round(6))),
+            floor.fetch_if_permitted(&mut responses, &mut resolver, Request::notarized(round(6)),),
             FetchAdmission::Issued
         ));
 
@@ -366,11 +386,13 @@ mod tests {
     fn fetch_targeted_if_permitted_returns_denied_without_fetching() {
         let floor = floor();
         let mut resolver = TestResolver::default();
+        let mut responses = Responses::new();
         let mut rng = commonware_utils::test_rng();
         let target = crypto_ed25519::PrivateKey::random(&mut rng).public_key();
 
         assert!(matches!(
             floor.fetch_targeted_if_permitted(
+                &mut responses,
                 &mut resolver,
                 Request::finalized(Height::new(5)),
                 NonEmptyVec::new(target.clone()),
@@ -381,6 +403,7 @@ mod tests {
 
         assert!(matches!(
             floor.fetch_targeted_if_permitted(
+                &mut responses,
                 &mut resolver,
                 Request::finalized(Height::new(6)),
                 NonEmptyVec::new(target),
@@ -399,9 +422,11 @@ mod tests {
     fn fetch_all_if_permitted_filters_denied_requests() {
         let floor = floor();
         let mut resolver = TestResolver::default();
+        let mut responses = Responses::new();
 
         assert!(matches!(
             floor.fetch_all_if_permitted(
+                &mut responses,
                 &mut resolver,
                 vec![
                     Request::finalized(Height::new(5)),
@@ -421,8 +446,10 @@ mod tests {
         );
 
         let mut resolver = TestResolver::default();
+        let mut responses = Responses::new();
         assert!(matches!(
             floor.fetch_all_if_permitted(
+                &mut responses,
                 &mut resolver,
                 vec![
                     Request::finalized(Height::new(5)),
@@ -438,9 +465,14 @@ mod tests {
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
         let floor = State::<TestScheme, TestDigest>::resolved(None, round(5));
         let mut resolver = TestResolver::default();
+        let mut responses = Responses::new();
 
         assert!(matches!(
-            floor.fetch_if_permitted(&mut resolver, Request::finalized(Height::zero())),
+            floor.fetch_if_permitted(
+                &mut responses,
+                &mut resolver,
+                Request::finalized(Height::zero()),
+            ),
             FetchAdmission::Issued
         ));
 

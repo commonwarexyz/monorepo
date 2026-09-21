@@ -3,7 +3,7 @@
 //! This module owns the generic resolver actor used when fetching data only
 //! requires asking an application-provided source for raw bytes or objects.
 //! Implementations provide [`Fetcher::fetch`]; this module handles request
-//! coalescing, retain pruning, retry scheduling, consumer delivery, and
+//! coalescing, canceled-response pruning, retry scheduling, consumer delivery, and
 //! cached-response redelivery. An ignored consumer outcome retires the key
 //! without accepting the value or retrying the source. A verdict the consumer
 //! drops without answering hands the response to the remaining subscribers, or
@@ -14,9 +14,9 @@
 //! fetchers do not have peer-specific routing.
 
 use crate::{
-    Consumer, Delivery, Fetch, Outcome, TargetedResolver,
+    Consumer, Delivery, Fetch, Outcome, Subscriber, TargetedResolver,
     delivery::{Completion as DeliveryCompletion, Tracker as DeliveryTracker},
-    ingress::{self, FetchKey, Message},
+    ingress::{FetchKey, Message},
     subscribers,
 };
 use commonware_actor::{Feedback, mailbox};
@@ -52,55 +52,59 @@ pub trait Fetcher {
     /// Fetch the value for `key`.
     ///
     /// Return `None` for transient failures, missing data, or unexpected source
-    /// responses. The resolver will retry while the key still has retained
-    /// subscribers.
+    /// responses. The resolver will retry while the key still has open response
+    /// receivers.
     fn fetch(&self, key: Self::Key) -> impl Future<Output = Option<Self::Value>> + Send;
 }
 
 /// Handle to an opaque-fetcher resolver actor.
-pub struct Resolver<K, S, P>
+pub struct Resolver<K, S, R, P>
 where
     K: Span,
     S: Clone + Eq + Send + 'static,
+    R: Send + 'static,
     P: PublicKey,
 {
-    mailbox: mailbox::Sender<Message<K, S>>,
-    _peer: PhantomData<P>,
+    mailbox: mailbox::Sender<Message<K, S, R>>,
+    _marker: PhantomData<P>,
 }
 
-impl<K, S, P> Clone for Resolver<K, S, P>
+impl<K, S, R, P> Clone for Resolver<K, S, R, P>
 where
     K: Span,
     S: Clone + Eq + Send + 'static,
+    R: Send + 'static,
     P: PublicKey,
 {
     fn clone(&self) -> Self {
         Self {
             mailbox: self.mailbox.clone(),
-            _peer: PhantomData,
+            _marker: PhantomData,
         }
     }
 }
 
-impl<K, S, P> crate::Resolver for Resolver<K, S, P>
+impl<K, S, R, P> crate::Resolver for Resolver<K, S, R, P>
 where
     K: Span,
     S: Clone + Eq + Send + 'static,
+    R: Send + 'static,
     P: PublicKey,
 {
     type Key = K;
     type Subscriber = S;
+    type Response = R;
 
     fn fetch<F>(&mut self, fetch: F) -> Feedback
     where
-        F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
         self.send(Message::Fetch(vec![FetchKey::from(fetch.into())]))
     }
 
     fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
     where
-        F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
         self.send(Message::Fetch(
             fetches
@@ -109,28 +113,20 @@ where
                 .collect(),
         ))
     }
-
-    fn retain(
-        &mut self,
-        predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-    ) -> Feedback {
-        self.send(Message::Retain {
-            predicate: Box::new(predicate),
-        })
-    }
 }
 
-impl<K, S, P> TargetedResolver for Resolver<K, S, P>
+impl<K, S, R, P> TargetedResolver for Resolver<K, S, R, P>
 where
     K: Span,
     S: Clone + Eq + Send + 'static,
+    R: Send + 'static,
     P: PublicKey,
 {
     type PublicKey = P;
 
     fn fetch_targeted(
         &mut self,
-        fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        fetch: impl Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         _targets: NonEmptyVec<Self::PublicKey>,
     ) -> Feedback {
         <Self as crate::Resolver>::fetch(self, fetch)
@@ -138,7 +134,7 @@ where
 
     fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
     where
-        F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
         <Self as crate::Resolver>::fetch_all(
             self,
@@ -147,20 +143,21 @@ where
     }
 }
 
-impl<K, S, P> Resolver<K, S, P>
+impl<K, S, R, P> Resolver<K, S, R, P>
 where
     K: Span,
     S: Clone + Eq + Send + 'static,
+    R: Send + 'static,
     P: PublicKey,
 {
-    const fn new(mailbox: mailbox::Sender<Message<K, S>>) -> Self {
+    const fn new(mailbox: mailbox::Sender<Message<K, S, R>>) -> Self {
         Self {
             mailbox,
-            _peer: PhantomData,
+            _marker: PhantomData,
         }
     }
 
-    fn send(&self, message: Message<K, S>) -> Feedback {
+    fn send(&self, message: Message<K, S, R>) -> Feedback {
         self.mailbox.enqueue(message)
     }
 }
@@ -172,13 +169,12 @@ pub fn init<E, F, Con, P>(
     consumer: Con,
     mailbox_size: NonZeroUsize,
     fetch_retry_timeout: Duration,
-) -> Resolver<F::Key, Con::Subscriber, P>
+) -> Resolver<F::Key, Con::Subscriber, Con::Response, P>
 where
     E: Clock + Spawner + Metrics,
     F: Fetcher + Clone + Send + 'static,
     F::Value: Clone + Send + 'static,
     Con: Consumer<Key = F::Key, Value = F::Value>,
-    Con::Subscriber: Ord,
     P: PublicKey,
 {
     let (mailbox_tx, mailbox_rx) = mailbox::new(context.child("mailbox"), mailbox_size);
@@ -200,18 +196,18 @@ where
     F: Fetcher,
     F::Value: Clone + Send + 'static,
     Con: Consumer<Key = F::Key, Value = F::Value>,
-    Con::Subscriber: Ord,
 {
     context: ContextCell<E>,
     fetcher: F,
-    mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
+    mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber, Con::Response>>,
     fetches: AbortablePool<'static, FetchCompletion<F::Key, F::Value>>,
     deliveries: DeliveryTracker<Con, u64>,
     requests: BTreeMap<F::Key, Attempt>,
-    subscribers: subscribers::Tracker<F::Key, Con::Subscriber>,
+    subscribers: subscribers::Tracker<F::Key, Con::Subscriber, Con::Response>,
     fetch: status::Counter,
     retry_schedule: BTreeSet<(SystemTime, F::Key)>,
     fetch_retry_timeout: Duration,
+    reclaim_deadline: Option<SystemTime>,
     next_id: u64,
 }
 
@@ -238,12 +234,11 @@ where
     F: Fetcher + Clone + Send + 'static,
     F::Value: Clone + Send + 'static,
     Con: Consumer<Key = F::Key, Value = F::Value>,
-    Con::Subscriber: Ord,
 {
     fn new(
         context: E,
         fetcher: F,
-        mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber>>,
+        mailbox: mailbox::Receiver<Message<F::Key, Con::Subscriber, Con::Response>>,
         consumer: Con,
         fetch_retry_timeout: Duration,
     ) -> Self {
@@ -259,6 +254,7 @@ where
             fetch,
             retry_schedule: BTreeSet::new(),
             fetch_retry_timeout,
+            reclaim_deadline: None,
             next_id: 0,
         }
     }
@@ -270,6 +266,13 @@ where
     async fn run(mut self) {
         select_loop! {
             self.context,
+            on_start => {
+                self.reclaim_if_due();
+                let reclaim_deadline = match self.reclaim_deadline {
+                    Some(deadline) => Either::Left(self.context.sleep_until(deadline)),
+                    None => Either::Right(future::pending()),
+                };
+            },
             on_stopped => {},
             Ok(result) = self.fetches.next_completed() else continue => {
                 self.handle_fetch_completed(result);
@@ -287,6 +290,9 @@ where
             } => {
                 self.process_retries();
             },
+            _ = reclaim_deadline => {
+                self.reclaim_if_due();
+            },
             Some(message) = self.mailbox.recv() else break => {
                 self.handle_message(message);
             },
@@ -294,52 +300,97 @@ where
     }
 
     /// Apply a mailbox message to active resolver state.
-    fn handle_message(&mut self, message: Message<F::Key, Con::Subscriber>) {
+    fn handle_message(&mut self, message: Message<F::Key, Con::Subscriber, Con::Response>) {
         match message {
             Message::Fetch(fetches) => {
                 for fetch in fetches {
                     self.add_fetch(fetch);
                 }
             }
-            Message::Retain { predicate } => self.retain(predicate),
         }
     }
 
     /// Add subscribers for a key and start the first fetch if needed.
-    fn add_fetch(&mut self, fetch: FetchKey<F::Key, Con::Subscriber>) {
+    fn add_fetch(&mut self, fetch: FetchKey<F::Key, Con::Subscriber, Con::Response>) {
         let FetchKey {
             key, subscribers, ..
         } = fetch;
+        let subscribers = subscribers.map_into(|(subscriber, ())| subscriber);
         let is_new = self.subscribers.insert(key.clone(), subscribers);
+        if !self.subscribers.prune(&key) {
+            self.remove_key(key);
+            return;
+        }
+        self.arm_reclaim();
 
         if is_new {
             assert!(self.deliveries.insert(key.clone()), "delivery entry");
             self.requests
                 .insert(key.clone(), Attempt::Scheduled(self.context.current()));
             self.start_fetch(key);
+        } else if matches!(self.requests.get(&key), Some(Attempt::Delivering { .. }))
+            && self.deliveries.cancel_closed_delivery(&key)
+        {
+            if let Some(pending) = self.subscribers.pending(&key) {
+                self.redeliver(key, pending);
+            } else {
+                self.remove_key(key);
+            }
         }
     }
 
-    /// Prune subscribers, deliveries, active fetches, and scheduled retries.
-    fn retain(&mut self, predicate: ingress::Predicate<F::Key, Con::Subscriber>) {
-        for key in self
-            .subscribers
-            .retain(|key, subscriber| predicate(key, subscriber))
+    /// Arm periodic reclamation without postponing an existing deadline.
+    fn arm_reclaim(&mut self) {
+        if self.reclaim_deadline.is_none() {
+            self.reclaim_deadline = Some(self.context.current() + crate::RECLAIM_INTERVAL);
+        }
+    }
+
+    /// Reclaim closed demand when the fixed actor-local deadline is due.
+    fn reclaim_if_due(&mut self) {
+        if self
+            .reclaim_deadline
+            .is_none_or(|deadline| deadline > self.context.current())
         {
-            self.deliveries.remove(&key);
-            if let Some(attempt) = self.requests.remove(&key) {
-                match attempt {
-                    Attempt::Fetching { .. } | Attempt::Delivering { .. } => {}
-                    Attempt::Scheduled(deadline) => {
-                        self.retry_schedule.remove(&(deadline, key));
-                    }
-                }
+            return;
+        }
+
+        for key in self.subscribers.prune_closed() {
+            self.remove_key(key);
+        }
+
+        for key in self.subscribers.keys() {
+            if !matches!(self.requests.get(&key), Some(Attempt::Delivering { .. }))
+                || !self.deliveries.cancel_closed_delivery(&key)
+            {
+                continue;
             }
+            if let Some(pending) = self.subscribers.pending(&key) {
+                self.redeliver(key, pending);
+            } else {
+                self.remove_key(key);
+            }
+        }
+
+        self.reclaim_deadline = (!self.subscribers.is_empty())
+            .then(|| self.context.current() + crate::RECLAIM_INTERVAL);
+    }
+
+    /// Remove every opaque-resolver state owner for one key.
+    fn remove_key(&mut self, key: F::Key) {
+        self.subscribers.remove(&key);
+        self.deliveries.remove(&key);
+        if let Some(Attempt::Scheduled(deadline)) = self.requests.remove(&key) {
+            self.retry_schedule.remove(&(deadline, key));
         }
     }
 
     /// Spawn one fetch attempt for `key`.
     fn start_fetch(&mut self, key: F::Key) {
+        if !self.subscribers.prune(&key) {
+            self.remove_key(key);
+            return;
+        }
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         let future = Self::fetch(key.clone(), id, self.fetcher.clone());
@@ -353,12 +404,12 @@ where
         );
     }
 
-    /// Deliver a fetched value to currently retained subscribers.
+    /// Deliver a fetched value to the current open response routes.
     fn start_delivery(
         &mut self,
         key: F::Key,
         value: F::Value,
-        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
+        delivered: NonEmptyVec<Subscriber<Con::Subscriber, Con::Response>>,
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -374,7 +425,11 @@ where
     }
 
     /// Deliver the cached response to subscribers that arrived later.
-    fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>) {
+    fn redeliver(
+        &mut self,
+        key: F::Key,
+        delivered: NonEmptyVec<Subscriber<Con::Subscriber, Con::Response>>,
+    ) {
         self.deliveries.redeliver(Delivery {
             key,
             subscribers: delivered,
@@ -393,7 +448,7 @@ where
     /// Handle a completed consumer delivery if it is still the active attempt.
     fn handle_delivery_completed(
         &mut self,
-        completion: DeliveryCompletion<F::Key, Con::Subscriber, u64>,
+        completion: DeliveryCompletion<F::Key, Con::Subscriber, Con::Response, u64>,
     ) {
         let DeliveryCompletion {
             context: id,
@@ -486,15 +541,10 @@ where
     fn handle_fetched(&mut self, key: F::Key, value: Option<F::Value>) {
         match value {
             None => self.schedule_retry(key),
-            Some(value) => {
-                if let Some(subscribers) = self.subscribers.pending(&key) {
-                    self.start_delivery(key, value, subscribers);
-                } else {
-                    self.requests.remove(&key);
-                    self.subscribers.remove(&key);
-                    self.deliveries.remove(&key);
-                }
-            }
+            Some(value) => match self.subscribers.pending(&key) {
+                Some(subscribers) => self.start_delivery(key, value, subscribers),
+                None => self.remove_key(key),
+            },
         }
     }
 
@@ -502,7 +552,7 @@ where
     fn handle_delivered(
         &mut self,
         key: F::Key,
-        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
+        delivered: NonEmptyVec<Subscriber<Con::Subscriber, Con::Response>>,
         outcome: Option<Outcome>,
     ) {
         let accepted = self.deliveries.response_accepted(&key);
@@ -511,9 +561,7 @@ where
         // did not judge it for these subscribers. Hand the response to the
         // remaining subscribers, or retire the key when none remain.
         let Some(outcome) = outcome else {
-            let remaining = self
-                .subscribers
-                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+            let remaining = self.subscribers.remove_delivered(&key, delivered);
             if let Some(subscribers) = remaining {
                 self.redeliver(key, subscribers);
                 return;
@@ -521,16 +569,13 @@ where
             if !accepted {
                 self.fetch.inc(Status::Dropped);
             }
-            self.requests.remove(&key);
-            self.deliveries.remove(&key);
+            self.remove_key(key);
             return;
         };
 
         match outcome {
             Outcome::Complete => {
-                let remaining = self
-                    .subscribers
-                    .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+                let remaining = self.subscribers.remove_delivered(&key, delivered);
 
                 // The first accepted response is reused for subscribers that joined
                 // while validation was pending, avoiding a duplicate source fetch
@@ -541,15 +586,13 @@ where
                     }
                     self.redeliver(key, subscribers);
                 } else {
-                    self.requests.remove(&key);
-                    self.subscribers.remove(&key);
-                    self.deliveries.remove(&key);
+                    self.remove_key(key);
                 }
             }
             Outcome::Ambiguous => {
                 // The fetcher returned one of multiple valid responses, but this response did not
-                // satisfy every subscriber. Discard it and retain the fetch so another response
-                // can be tried.
+                // satisfy every subscriber. Discard it and keep the demand active so another
+                // response can be tried.
                 self.fetch.inc(Status::Ambiguous);
                 self.deliveries.discard_response(&key);
                 self.schedule_retry(key);
@@ -563,9 +606,7 @@ where
                         ?key,
                         "previously accepted resolver response rejected during opaque redelivery"
                     );
-                    self.requests.remove(&key);
-                    self.subscribers.remove(&key);
-                    self.deliveries.remove(&key);
+                    self.remove_key(key);
                     return;
                 }
 
@@ -577,15 +618,17 @@ where
                 // The consumer no longer needs this key. Retire it without accepting the
                 // response or scheduling another source fetch.
                 self.fetch.inc(Status::Dropped);
-                self.requests.remove(&key);
-                self.subscribers.remove(&key);
-                self.deliveries.remove(&key);
+                self.remove_key(key);
             }
         }
     }
 
     /// Schedule the next fetch attempt for `key`.
     fn schedule_retry(&mut self, key: F::Key) {
+        if !self.subscribers.prune(&key) {
+            self.remove_key(key);
+            return;
+        }
         let deadline = self.context.current() + self.fetch_retry_timeout;
         let Some(attempt) = self.requests.get_mut(&key) else {
             return;
@@ -634,7 +677,11 @@ mod tests {
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic, deterministic::Runner};
-    use commonware_utils::{channel::oneshot, non_empty_vec, sync::Mutex};
+    use commonware_utils::{
+        channel::{mpsc, oneshot},
+        non_empty_vec,
+        sync::Mutex,
+    };
     use std::{
         collections::{HashMap, VecDeque},
         sync::{
@@ -649,6 +696,7 @@ mod tests {
     struct MockFetcher {
         responses: Arc<Mutex<HashMap<u8, VecDeque<Option<Bytes>>>>>,
         calls: Arc<AtomicU32>,
+        calls_by_key: Arc<Mutex<HashMap<u8, u32>>>,
     }
 
     impl MockFetcher {
@@ -663,6 +711,10 @@ mod tests {
         fn calls(&self) -> u32 {
             self.calls.load(Ordering::Relaxed)
         }
+
+        fn calls_for(&self, key: u8) -> u32 {
+            self.calls_by_key.lock().get(&key).copied().unwrap_or(0)
+        }
     }
 
     impl Fetcher for MockFetcher {
@@ -672,8 +724,10 @@ mod tests {
         fn fetch(&self, key: Self::Key) -> impl Future<Output = Option<Self::Value>> + Send {
             let responses = self.responses.clone();
             let calls = self.calls.clone();
+            let calls_by_key = self.calls_by_key.clone();
             async move {
                 calls.fetch_add(1, Ordering::Relaxed);
+                *calls_by_key.lock().entry(key).or_default() += 1;
                 responses
                     .lock()
                     .get_mut(&key)
@@ -722,7 +776,7 @@ mod tests {
     }
 
     struct CapturedDelivery {
-        delivery: Delivery<u8, u16>,
+        delivery: Delivery<u8, u16, ()>,
         value: Bytes,
         response: oneshot::Sender<Outcome>,
     }
@@ -746,20 +800,21 @@ mod tests {
         type Key = u8;
         type Value = Bytes;
         type Subscriber = u16;
+        type Response = ();
         type Outcome = Outcome;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             value: Self::Value,
-        ) -> oneshot::Receiver<Self::Outcome> {
+        ) -> impl Future<Output = Option<Self::Outcome>> + Send + 'static {
             let (response, receiver) = oneshot::channel();
             self.deliveries.lock().push_back(CapturedDelivery {
                 delivery,
                 value,
                 response,
             });
-            receiver
+            async move { receiver.await.ok() }
         }
     }
 
@@ -767,7 +822,7 @@ mod tests {
         context: deterministic::Context,
         fetcher: F,
         consumer: MockConsumer,
-    ) -> Resolver<u8, u16, PublicKey>
+    ) -> Resolver<u8, u16, (), PublicKey>
     where
         F: Fetcher<Key = u8, Value = Bytes> + Clone + Send + 'static,
     {
@@ -777,6 +832,19 @@ mod tests {
             consumer,
             NonZeroUsize::new(16).unwrap(),
             RETRY_TIMEOUT,
+        )
+    }
+
+    fn fetch(key: u8, subscriber: u16) -> (Fetch<u8, u16, ()>, mpsc::Receiver<()>) {
+        let (response, receiver) = mpsc::channel(1);
+        (
+            Fetch {
+                key,
+                subscriber,
+                response,
+                span: tracing::Span::none(),
+            },
+            receiver,
         )
     }
 
@@ -801,28 +869,14 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let (first_request, _first_demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(first_request).accepted());
             let first = wait_for_delivery(&context, &consumer).await;
             assert_eq!(first.value, Bytes::from_static(b"value"));
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 11,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            let (second_request, _second_demand) = fetch(1, 11);
+            assert!(resolver.fetch(second_request).accepted());
             context.sleep(Duration::from_millis(10)).await;
             first
                 .response
@@ -836,7 +890,7 @@ mod tests {
                     .delivery
                     .subscribers
                     .iter()
-                    .map(|(subscriber, _)| *subscriber)
+                    .map(|subscriber| subscriber.subscriber)
                     .collect::<Vec<_>>(),
                 vec![11]
             );
@@ -859,16 +913,9 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let (request, _demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(request).accepted());
             context
                 .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
                 .await;
@@ -892,16 +939,9 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let (request, _demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(request).accepted());
 
             let first = wait_for_delivery(&context, &consumer).await;
             assert_eq!(first.value, Bytes::from_static(b"ambiguous"));
@@ -910,7 +950,7 @@ mod tests {
                     .delivery
                     .subscribers
                     .iter()
-                    .map(|(subscriber, _)| *subscriber)
+                    .map(|subscriber| subscriber.subscriber)
                     .collect::<Vec<_>>(),
                 vec![10]
             );
@@ -929,7 +969,7 @@ mod tests {
                     .delivery
                     .subscribers
                     .iter()
-                    .map(|(subscriber, _)| *subscriber)
+                    .map(|subscriber| subscriber.subscriber)
                     .collect::<Vec<_>>(),
                 vec![10]
             );
@@ -959,16 +999,9 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let (request, _demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(request).accepted());
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"obsolete"));
             delivery
@@ -988,15 +1021,8 @@ mod tests {
             );
 
             // Ignoring retires the old fetch rather than leaving a tombstone.
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            let (fresh_request, _fresh_demand) = fetch(1, 10);
+            assert!(resolver.fetch(fresh_request).accepted());
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
             delivery
@@ -1016,22 +1042,13 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let (request, _demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(request).accepted());
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"unjudged"));
 
-            // Drop the verdict, as a consumer does when it stops with the delivery
-            // still queued. No one is waiting on the key, so the fetch is retired
-            // rather than retried.
+            // Dropping the verdict retires only this delivery snapshot.
             drop(delivery);
 
             context
@@ -1046,15 +1063,8 @@ mod tests {
             );
 
             // The retired key is not deduplicated against, so a fresh fetch runs.
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            let (fresh_request, _fresh_demand) = fetch(1, 10);
+            assert!(resolver.fetch(fresh_request).accepted());
             let delivery = wait_for_delivery(&context, &consumer).await;
             assert_eq!(delivery.value, Bytes::from_static(b"fresh"));
             delivery
@@ -1073,31 +1083,17 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let (first_request, _first_demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(first_request).accepted());
             let first = wait_for_delivery(&context, &consumer).await;
             assert_eq!(first.value, Bytes::from_static(b"unjudged"));
 
             // A late subscriber joins while the first delivery is unjudged, then
             // that delivery's verdict is dropped. The late subscriber is handed
             // the same response without another source fetch.
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 11,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            let (second_request, _second_demand) = fetch(1, 11);
+            assert!(resolver.fetch(second_request).accepted());
             context.sleep(Duration::from_millis(10)).await;
             drop(first);
             let second = wait_for_delivery(&context, &consumer).await;
@@ -1106,7 +1102,7 @@ mod tests {
                     .delivery
                     .subscribers
                     .iter()
-                    .map(|(subscriber, _)| *subscriber)
+                    .map(|subscriber| subscriber.subscriber)
                     .collect::<Vec<_>>(),
                 vec![11]
             );
@@ -1132,27 +1128,13 @@ mod tests {
             let consumer = MockConsumer::default();
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let (first_request, _first_demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(first_request).accepted());
             let first = wait_for_delivery(&context, &consumer).await;
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 11,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            let (second_request, _second_demand) = fetch(1, 11);
+            assert!(resolver.fetch(second_request).accepted());
             context.sleep(Duration::from_millis(10)).await;
             first
                 .response
@@ -1174,36 +1156,19 @@ mod tests {
     }
 
     #[test]
-    fn retain_prunes_active_fetch_subscribers() {
+    fn closed_response_prunes_only_its_active_fetch_endpoint() {
         Runner::default().start(|context| async move {
             let (fetcher, started, response) = BlockingFetcher::new();
             let consumer = MockConsumer::default();
             let mut resolver = start_resolver(context.child("resolver"), fetcher, consumer.clone());
+            let (first_request, first_demand) = fetch(1, 10);
+            let (second_request, _second_demand) = fetch(1, 10);
+            let second_response = second_request.response.clone();
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 11,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(first_request).accepted());
+            assert!(resolver.fetch(second_request).accepted());
             started.await.expect("fetch did not start");
-            assert!(
-                resolver
-                    .retain(|_, subscriber| *subscriber == 11)
-                    .accepted()
-            );
+            drop(first_demand);
             context.sleep(Duration::from_millis(10)).await;
             response
                 .send(Some(Bytes::from_static(b"value")))
@@ -1215,9 +1180,17 @@ mod tests {
                     .delivery
                     .subscribers
                     .iter()
-                    .map(|(subscriber, _)| *subscriber)
+                    .map(|subscriber| subscriber.subscriber)
                     .collect::<Vec<_>>(),
-                vec![11]
+                vec![10]
+            );
+            assert!(
+                delivery
+                    .delivery
+                    .subscribers
+                    .first()
+                    .response
+                    .same_channel(&second_response)
             );
             delivery
                 .response
@@ -1227,28 +1200,29 @@ mod tests {
     }
 
     #[test]
-    fn retain_drops_last_subscriber_aborts_active_fetch() {
+    fn closed_last_response_aborts_never_returning_fetch() {
         Runner::default().start(|context| async move {
             let (fetcher, started, response) = BlockingFetcher::new();
             let consumer = MockConsumer::default();
             let mut resolver = start_resolver(context.child("resolver"), fetcher, consumer.clone());
+            let (request, demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
+            assert!(resolver.fetch(request).accepted());
             started.await.expect("fetch did not start");
-            assert!(resolver.retain(|_, _| false).accepted());
-            context.sleep(Duration::from_millis(10)).await;
+            drop(demand);
+
+            // Closed unrelated admissions keep the actor busy but cannot postpone
+            // the fixed reclamation deadline.
+            for subscriber in 20..32 {
+                let (request, demand) = fetch(2, subscriber);
+                drop(demand);
+                assert!(resolver.fetch(request).accepted());
+                context.sleep(Duration::from_millis(100)).await;
+            }
 
             assert!(
                 response.send(Some(Bytes::from_static(b"value"))).is_err(),
-                "fetch future should be aborted after its last subscriber is pruned"
+                "fetch future should be aborted after its last response closes"
             );
             context
                 .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
@@ -1258,35 +1232,51 @@ mod tests {
     }
 
     #[test]
-    fn retain_drops_last_subscriber_aborts_active_delivery() {
+    fn all_closed_delivery_is_replaced_from_cache_for_late_demand() {
         Runner::default().start(|context| async move {
             let fetcher = MockFetcher::default();
             fetcher.push(1, Some(Bytes::from_static(b"value")));
+            fetcher.push(2, Some(Bytes::from_static(b"barrier")));
             let consumer = MockConsumer::default();
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
+            let (first_request, first_demand) = fetch(1, 10);
 
-            assert!(
-                resolver
-                    .fetch(Fetch {
-                        key: 1,
-                        subscriber: 10,
-                        span: tracing::Span::none(),
-                    })
-                    .accepted()
-            );
-            let delivery = wait_for_delivery(&context, &consumer).await;
-            assert!(resolver.retain(|_, _| false).accepted());
-            context.sleep(Duration::from_millis(10)).await;
+            assert!(resolver.fetch(first_request).accepted());
+            let first = wait_for_delivery(&context, &consumer).await;
 
-            assert!(
-                delivery.response.send(Outcome::Invalid).is_err(),
-                "delivery future should be aborted after its last subscriber is pruned"
-            );
+            let (second_request, _second_demand) = fetch(1, 11);
+            assert!(resolver.fetch(second_request).accepted());
+
+            // A later key is a FIFO admission barrier: receiving it proves the
+            // late same-key endpoint was admitted while the old route was open.
+            let (barrier_request, _barrier_demand) = fetch(2, 20);
+            assert!(resolver.fetch(barrier_request).accepted());
+            let barrier = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(barrier.delivery.key, 2);
+            barrier
+                .response
+                .send(Outcome::Complete)
+                .expect("barrier response dropped");
+
+            drop(first_demand);
             context
-                .sleep(RETRY_TIMEOUT + Duration::from_millis(10))
+                .sleep(crate::RECLAIM_INTERVAL + Duration::from_millis(10))
                 .await;
-            assert_eq!(fetcher.calls(), 1);
+
+            assert!(
+                first.response.send(Outcome::Invalid).is_err(),
+                "the all-closed delivery generation should be aborted"
+            );
+            let second = wait_for_delivery(&context, &consumer).await;
+            assert_eq!(second.value, Bytes::from_static(b"value"));
+            assert_eq!(second.delivery.subscribers.first().subscriber, 11);
+            second
+                .response
+                .send(Outcome::Complete)
+                .expect("replacement response dropped");
+            assert_eq!(fetcher.calls_for(1), 1);
+            assert_eq!(fetcher.calls(), 2);
             assert_eq!(consumer.len(), 0);
         });
     }
@@ -1300,17 +1290,11 @@ mod tests {
             let mut resolver =
                 start_resolver(context.child("resolver"), fetcher.clone(), consumer.clone());
             let target = PrivateKey::from_seed(0).public_key();
+            let (request, _demand) = fetch(1, 10);
 
             assert!(
                 resolver
-                    .fetch_targeted(
-                        Fetch {
-                            key: 1,
-                            subscriber: 10,
-                            span: tracing::Span::none(),
-                        },
-                        non_empty_vec![target]
-                    )
+                    .fetch_targeted(request, non_empty_vec![target])
                     .accepted()
             );
             let delivery = wait_for_delivery(&context, &consumer).await;

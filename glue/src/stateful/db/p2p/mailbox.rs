@@ -16,7 +16,9 @@ use std::{collections::VecDeque, future::Future};
 pub struct ResponseDropped;
 
 /// Candidate responses and the channels through which callers judge them.
-pub(super) type Reply<R> = mpsc::Sender<(R, oneshot::Sender<bool>)>;
+pub(super) type Candidate<R> = (R, oneshot::Sender<bool>);
+
+pub(super) type Reply<R> = mpsc::Sender<Candidate<R>>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
 pub(super) enum Message<DB, F, Op, D>

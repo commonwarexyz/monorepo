@@ -1,6 +1,6 @@
 use crate::{Delivery, Span};
-use commonware_utils::channel::{fallible::FallibleExt, mpsc, oneshot};
-use std::{collections::HashMap, marker::PhantomData};
+use commonware_utils::channel::{fallible::FallibleExt, mpsc};
+use std::{collections::HashMap, future::Future, marker::PhantomData};
 
 /// A consumer that can be used for testing
 #[derive(Clone)]
@@ -64,6 +64,7 @@ where
     type Key = R;
     type Value = V;
     type Subscriber = S;
+    type Response = ();
     type Outcome = bool;
 
     /// Deliver data to the consumer.
@@ -71,16 +72,14 @@ where
     /// Returns `true` if the value is expected for the key or if there is no expected value.
     fn deliver(
         &mut self,
-        delivery: Delivery<Self::Key, Self::Subscriber>,
+        delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
         value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
+    ) -> impl Future<Output = Option<bool>> + Send + 'static {
         let key = delivery.key;
-        let (sender, receiver) = oneshot::channel();
         let valid = self.expected.get(&key).is_none_or(|v| v == &value);
         if valid {
             self.sender.send_lossy((key, value));
         }
-        let _ = sender.send(valid);
-        receiver
+        async move { Some(valid) }
     }
 }

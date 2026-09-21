@@ -9,9 +9,6 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge};
 /// Metrics for the QMDB P2P resolver actor.
 #[derive(Clone)]
 pub(super) struct Metrics {
-    /// Pending sync requests.
-    pub pending_requests: Registered<Gauge>,
-
     /// Total fetch requests dispatched to the P2P engine.
     pub fetch_requests: Registered<Counter>,
 
@@ -28,11 +25,6 @@ pub(super) struct Metrics {
 impl Metrics {
     /// Create and register all resolver metrics.
     pub fn new(context: &impl MetricsTrait) -> Self {
-        let pending_requests = context.register(
-            "pending_requests",
-            "Pending sync requests",
-            Gauge::default(),
-        );
         let fetch_requests = context.register(
             "fetch_requests",
             "Total fetch requests dispatched to the P2P engine",
@@ -47,7 +39,6 @@ impl Metrics {
         );
 
         Self {
-            pending_requests,
             fetch_requests,
             deliveries,
             serve_requests,

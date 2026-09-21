@@ -4,22 +4,23 @@
 //!
 //! The `p2p` module enables resolving data by fixed-length keys in a P2P network. Central to the
 //! module is the `peer` actor which manages the fetch lifecycle. Its mailbox allows
-//! initiation and pruning of fetches via the `Resolver` interface.
+//! initiation of fetches via the `Resolver` interface. Dropping a response receiver cancels that
+//! caller's demand.
 //!
 //! The peer handles an arbitrarily large number of concurrent fetches by sending requests
 //! to other peers and processing their responses. It selects peers based on performance, retrying
 //! with another peer if one fails or provides invalid data. Blocked peers are learned from the
 //! network through [`Blocker::blocked`](commonware_p2p::Blocker::blocked), so a peer becomes eligible
-//! again when its block expires. Fetches persist until pruned, fulfilled, or reported as no longer
-//! needed by the `Consumer`.
+//! again when its block expires. Fetches persist until every response receiver closes, they are
+//! fulfilled, or they are reported as no longer needed by the `Consumer`.
 //!
 //! The `Consumer` returns a [`crate::Outcome`], checking data integrity and authenticity unless it
 //! no longer needs the key. A complete response retires its delivered subscribers, an ambiguous
 //! response retries without penalizing the peer, an invalid response retries after blocking the
 //! peer, and an ignored response retires the key without scoring its peer. A verdict the consumer
 //! drops without answering hands the response to the remaining subscribers, or retires the key
-//! when none remain. Pruning a fetch with in-progress response validation aborts that validation;
-//! an invalid outcome produced after cancellation does not block the peer.
+//! when none remain. Closing every receiver during response validation aborts that validation.
+//! An invalid outcome produced after cancellation does not block the peer.
 //!
 //! The peer also serves data to other peers, forwarding network requests to the `Producer`. The
 //! `Producer` provides data asynchronously (e.g., from storage). If it fails, the peer sends an
@@ -40,7 +41,7 @@
 //!   (only if the fetch already has targets, an "all" fetch remains unrestricted)
 //! - [`Resolver::fetch`](crate::Resolver::fetch) clears all targets, allowing fallback to any peer
 //!
-//! These modifications only apply to in-progress fetches. Once a fetch succeeds, is pruned, or is
+//! These modifications only apply to in-progress fetches. Once a fetch succeeds, is canceled, or is
 //! ignored by the consumer, the targets for that key are cleared automatically. A blocked peer is
 //! skipped until the network unblocks it, so a fetch whose every target is blocked stays
 //! outstanding and resumes when one of them is unblocked, new targets are added, or targeting is
@@ -48,11 +49,10 @@
 //!
 //! # Subscribers
 //!
-//! [`Resolver::fetch`](crate::Resolver::fetch) accepts a peer-visible key and a
-//! subscriber. This is useful when several subscribers can share the same peer-visible
-//! fetch. A fetch remains active while at least one attached subscriber satisfies the latest
-//! [`Resolver::retain`](crate::Resolver::retain) predicate. When the fetch resolves, the
-//! key and currently retained subscribers are supplied to
+//! [`Resolver::fetch`](crate::Resolver::fetch) accepts a peer-visible key, subscriber, and response
+//! channel. This is useful when several subscribers can share the same peer-visible fetch. A fetch
+//! remains active while at least one attached response receiver is open. When the fetch resolves,
+//! the key and currently live subscribers are supplied to
 //! [`Consumer::deliver`](crate::Consumer::deliver). Subscribers added while response validation
 //! is in progress are delivered the same response locally, once it is accepted or when the
 //! consumer drops its verdict without judging it.
@@ -129,11 +129,11 @@ mod tests {
         simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
-        Clock, Metrics as _, Quota, Runner, Spawner as _, Supervisor as _, deterministic,
+        Clock, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        NZU32, NZUsize,
+        NZU32, NZUsize, Span,
         channel::{
             fallible::{FallibleExt, OneshotExt},
             mpsc, oneshot,
@@ -145,6 +145,7 @@ mod tests {
     };
     use std::{
         collections::{HashMap, VecDeque},
+        future::Future,
         num::{NonZeroU32, NonZeroUsize},
         sync::Arc,
         time::Duration,
@@ -177,6 +178,20 @@ mod tests {
                     .expect("metric line must have a value")
                     .parse::<u64>()
                     .expect("status metric value must be an integer")
+            })
+            .sum()
+    }
+
+    fn gauge_metric_total(metrics: &str, name: &str) -> i64 {
+        metrics
+            .lines()
+            .filter(|line| line.starts_with(name))
+            .map(|line| {
+                line.split_whitespace()
+                    .next_back()
+                    .expect("metric line must have a value")
+                    .parse::<i64>()
+                    .expect("gauge metric value must be an integer")
             })
             .sum()
     }
@@ -290,6 +305,84 @@ mod tests {
         }
     }
 
+    /// Owns the concrete response receivers that keep test requests live.
+    struct TestMailbox<K: Span, P: Eq, S: Eq, R> {
+        mailbox: Mailbox<K, P, S, R>,
+        responses: Vec<(K, S, mpsc::Receiver<R>)>,
+    }
+
+    impl<K, P, S, R> TestMailbox<K, P, S, R>
+    where
+        K: Span,
+        P: commonware_cryptography::PublicKey,
+        S: Clone + Eq + Send + 'static,
+        R: Send + 'static,
+    {
+        fn new(mailbox: Mailbox<K, P, S, R>) -> Self {
+            Self {
+                mailbox,
+                responses: Vec::new(),
+            }
+        }
+
+        fn fetch_with(&mut self, key: K, subscriber: S, span: tracing::Span) {
+            let (response, receiver) = mpsc::channel(1);
+            self.mailbox.fetch(Fetch {
+                key: key.clone(),
+                subscriber: subscriber.clone(),
+                response,
+                span,
+            });
+            self.responses.push((key, subscriber, receiver));
+        }
+
+        fn fetch_targeted_with(
+            &mut self,
+            key: K,
+            subscriber: S,
+            span: tracing::Span,
+            targets: commonware_utils::vec::NonEmptyVec<P>,
+        ) {
+            let (response, receiver) = mpsc::channel(1);
+            self.mailbox.fetch_targeted(
+                Fetch {
+                    key: key.clone(),
+                    subscriber: subscriber.clone(),
+                    response,
+                    span,
+                },
+                targets,
+            );
+            self.responses.push((key, subscriber, receiver));
+        }
+
+        fn drop_responses(&mut self, mut keep: impl FnMut(&K, &S) -> bool) {
+            self.responses
+                .retain(|(key, subscriber, _)| keep(key, subscriber));
+        }
+    }
+
+    impl<K, P, R> TestMailbox<K, P, (), R>
+    where
+        K: Span,
+        P: commonware_cryptography::PublicKey,
+        R: Send + 'static,
+    {
+        fn fetch(&mut self, key: K) {
+            self.fetch_with(key, (), tracing::Span::none());
+        }
+
+        fn fetch_targeted(&mut self, key: K, targets: commonware_utils::vec::NonEmptyVec<P>) {
+            self.fetch_targeted_with(key, (), tracing::Span::none(), targets);
+        }
+
+        fn fetch_all_targeted(&mut self, fetches: Vec<(K, commonware_utils::vec::NonEmptyVec<P>)>) {
+            for (key, targets) in fetches {
+                self.fetch_targeted(key, targets);
+            }
+        }
+    }
+
     fn setup_and_spawn_actor<C, R>(
         context: &deterministic::Context,
         provider: impl Provider<PublicKey = PublicKey>,
@@ -301,7 +394,7 @@ mod tests {
         ),
         consumer: C,
         producer: Producer<Key, Bytes>,
-    ) -> Mailbox<Key, PublicKey, R>
+    ) -> TestMailbox<Key, PublicKey, R, C::Response>
     where
         C: crate::Consumer<Key = Key, Subscriber = R, Value = Bytes>,
         R: Clone + Ord + Send + 'static,
@@ -322,7 +415,7 @@ mod tests {
         ),
         consumer: C,
         producer: Pro,
-    ) -> Mailbox<Key, PublicKey, R>
+    ) -> TestMailbox<Key, PublicKey, R, C::Response>
     where
         C: crate::Consumer<Key = Key, Subscriber = R, Value = Bytes>,
         Pro: crate::p2p::Producer<Key = Key>,
@@ -346,7 +439,7 @@ mod tests {
         );
         engine.start(connection);
 
-        mailbox
+        TestMailbox::new(mailbox)
     }
 
     type DeliveryGate = (oneshot::Receiver<()>, Outcome);
@@ -354,7 +447,6 @@ mod tests {
 
     #[derive(Clone)]
     struct BlockingConsumer {
-        context: Arc<deterministic::Context>,
         sender: mpsc::UnboundedSender<(Key, Bytes)>,
         started: mpsc::UnboundedSender<Key>,
         gates: DeliveryGates,
@@ -362,7 +454,7 @@ mod tests {
 
     impl BlockingConsumer {
         fn new(
-            context: deterministic::Context,
+            _context: deterministic::Context,
             gates: Vec<DeliveryGate>,
         ) -> (
             Self,
@@ -373,7 +465,6 @@ mod tests {
             let (started, started_receiver) = mpsc::unbounded_channel();
             (
                 Self {
-                    context: Arc::new(context),
                     sender,
                     started,
                     gates: Arc::new(Mutex::new(gates.into())),
@@ -388,13 +479,14 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = ();
+        type Response = ();
         type Outcome = Outcome;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             value: Self::Value,
-        ) -> oneshot::Receiver<Self::Outcome> {
+        ) -> impl Future<Output = Option<Self::Outcome>> + Send + 'static {
             let key = delivery.key;
             self.started.send_lossy(key.clone());
             let (gate, outcome) = self
@@ -404,56 +496,66 @@ mod tests {
                 .map_or((None, Outcome::Complete), |(gate, outcome)| {
                     (Some(gate), outcome)
                 });
-            let (mut response, receiver) = oneshot::channel();
             let sender = self.sender.clone();
-            self.context.child("delivery").spawn(move |_| async move {
-                if let Some(gate) = gate {
-                    select! {
-                        _ = response.closed() => return,
-                        result = gate => {
-                            if result.is_err() {
-                                let _ = response.send(Outcome::Invalid);
-                                return;
-                            }
-                        },
-                    }
+            async move {
+                if let Some(gate) = gate
+                    && gate.await.is_err()
+                {
+                    return Some(Outcome::Invalid);
                 }
                 if outcome == Outcome::Complete {
                     sender.send_lossy((key, value));
                 }
-                let _ = response.send(outcome);
-            });
-            receiver
+                Some(outcome)
+            }
         }
     }
 
     #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
     struct SubscriberTag(u16);
 
-    type RecordedDelivery = (Delivery<Key, SubscriberTag>, Bytes);
+    fn assert_delivery(
+        delivery: Delivery<Key, SubscriberTag, ()>,
+        key: Key,
+        expected: commonware_utils::vec::NonEmptyVec<(SubscriberTag, tracing::Span)>,
+    ) {
+        assert_eq!(delivery.key, key);
+        let mut actual = delivery
+            .subscribers
+            .iter()
+            .map(|subscriber| subscriber.subscriber.clone())
+            .collect::<Vec<_>>();
+        let mut expected = expected
+            .iter()
+            .map(|(subscriber, _)| subscriber.clone())
+            .collect::<Vec<_>>();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
+    }
+
+    type RecordedDelivery = (Delivery<Key, SubscriberTag, ()>, Bytes);
 
     #[derive(Clone)]
     struct BlockingSubscriberRecordingConsumer {
-        context: Arc<deterministic::Context>,
         sender: mpsc::UnboundedSender<RecordedDelivery>,
-        started: mpsc::UnboundedSender<Delivery<Key, SubscriberTag>>,
+        started: mpsc::UnboundedSender<Delivery<Key, SubscriberTag, ()>>,
         gates: DeliveryGates,
     }
 
     impl BlockingSubscriberRecordingConsumer {
         fn new(
-            context: deterministic::Context,
+            _context: deterministic::Context,
             gates: Vec<DeliveryGate>,
         ) -> (
             Self,
             mpsc::UnboundedReceiver<RecordedDelivery>,
-            mpsc::UnboundedReceiver<Delivery<Key, SubscriberTag>>,
+            mpsc::UnboundedReceiver<Delivery<Key, SubscriberTag, ()>>,
         ) {
             let (sender, receiver) = mpsc::unbounded_channel();
             let (started, started_receiver) = mpsc::unbounded_channel();
             (
                 Self {
-                    context: Arc::new(context),
                     sender,
                     started,
                     gates: Arc::new(Mutex::new(gates.into())),
@@ -468,13 +570,14 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = SubscriberTag;
+        type Response = ();
         type Outcome = Outcome;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             value: Self::Value,
-        ) -> oneshot::Receiver<Self::Outcome> {
+        ) -> impl Future<Output = Option<Self::Outcome>> + Send + 'static {
             self.started.send_lossy(delivery.clone());
             let (gate, outcome) = self
                 .gates
@@ -483,26 +586,18 @@ mod tests {
                 .map_or((None, Outcome::Complete), |(gate, outcome)| {
                     (Some(gate), outcome)
                 });
-            let (mut response, receiver) = oneshot::channel();
             let sender = self.sender.clone();
-            self.context.child("delivery").spawn(move |_| async move {
-                if let Some(gate) = gate {
-                    select! {
-                        _ = response.closed() => return,
-                        result = gate => {
-                            if result.is_err() {
-                                let _ = response.send(Outcome::Invalid);
-                                return;
-                            }
-                        },
-                    }
+            async move {
+                if let Some(gate) = gate
+                    && gate.await.is_err()
+                {
+                    return Some(Outcome::Invalid);
                 }
                 if outcome == Outcome::Complete {
                     sender.send_lossy((delivery, value));
                 }
-                let _ = response.send(outcome);
-            });
-            receiver
+                Some(outcome)
+            }
         }
     }
 
@@ -522,17 +617,16 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = SubscriberTag;
+        type Response = ();
         type Outcome = bool;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             value: Self::Value,
-        ) -> oneshot::Receiver<bool> {
-            let (sender, receiver) = oneshot::channel();
+        ) -> impl Future<Output = Option<bool>> + Send + 'static {
             self.sender.send_lossy((delivery, value));
-            let _ = sender.send(true);
-            receiver
+            async { Some(true) }
         }
     }
 
@@ -631,21 +725,22 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = ();
+        type Response = ();
         type Outcome = Outcome;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             _: Self::Value,
-        ) -> oneshot::Receiver<Outcome> {
+        ) -> impl Future<Output = Option<Outcome>> + Send + 'static {
             let (sender, receiver) = oneshot::channel();
             self.deliveries.send_lossy((delivery.key, sender));
-            receiver
+            async move { receiver.await.ok() }
         }
     }
 
     type HeldDelivery = (
-        Delivery<Key, SubscriberTag>,
+        Delivery<Key, SubscriberTag, ()>,
         Bytes,
         oneshot::Sender<Outcome>,
     );
@@ -668,16 +763,17 @@ mod tests {
         type Key = Key;
         type Value = Bytes;
         type Subscriber = SubscriberTag;
+        type Response = ();
         type Outcome = Outcome;
 
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             value: Self::Value,
-        ) -> oneshot::Receiver<Outcome> {
+        ) -> impl Future<Output = Option<Outcome>> + Send + 'static {
             let (sender, receiver) = oneshot::channel();
             self.deliveries.send_lossy((delivery, value, sender));
-            receiver
+            async move { receiver.await.ok() }
         }
     }
 
@@ -834,7 +930,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_retain_drops_pending_delivery() {
+    fn test_receiver_drop_cancels_pending_delivery() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -884,7 +980,7 @@ mod tests {
             assert_eq!(started_key, key);
 
             let canceled = key.clone();
-            mailbox1.retain(move |key, _| key != &canceled);
+            mailbox1.drop_responses(move |key, _| key != &canceled);
             mailbox1.fetch(key.clone());
 
             first_gate_sender.closed().await;
@@ -1185,39 +1281,23 @@ mod tests {
 
             let first = SubscriberTag(1);
             let late = SubscriberTag(2);
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: first.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(key.clone(), first.clone(), tracing::Span::none());
             let (delivery, value, verdict) = deliveries.recv().await.unwrap();
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(first, tracing::Span::none())],
-                }
+                key.clone(),
+                non_empty_vec![(first, tracing::Span::none())],
             );
             assert_eq!(value, data);
 
             // A late subscriber joins while the first delivery is unjudged, then
             // that delivery's verdict is dropped. The late subscriber is handed
             // the same response to judge instead of the key being retired.
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: late.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(key.clone(), late.clone(), tracing::Span::none());
             context.sleep(Duration::from_millis(100)).await;
             drop(verdict);
             let (delivery, value, verdict) = deliveries.recv().await.unwrap();
-            assert_eq!(
-                delivery,
-                Delivery {
-                    key,
-                    subscribers: non_empty_vec![(late, tracing::Span::none())],
-                }
-            );
+            assert_delivery(delivery, key, non_empty_vec![(late, tracing::Span::none())]);
             assert_eq!(value, data);
             verdict.send_lossy(Outcome::Complete);
 
@@ -1232,6 +1312,79 @@ mod tests {
                 status_metric_total(&metrics, "actor_fetch_total", "Dropped"),
                 0
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_closed_snapshot_reroutes_cached_response_without_stale_penalty() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            let key = Key(1);
+            let value = Bytes::from("cached response");
+            let unexpected_refetch = Bytes::from("unexpected refetch");
+            let mut producer = SequencedProducer::default();
+            producer.insert(key.clone(), [value.clone(), unexpected_refetch.clone()]);
+            let producer_observer = producer.clone();
+            let (consumer, mut deliveries) = HoldingSubscriberConsumer::new();
+
+            let scheme = schemes.remove(0);
+            let mut mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                consumer,
+                Producer::default(),
+            );
+            let scheme = schemes.remove(0);
+            let _responder = setup_and_spawn_actor_with_producer(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                producer,
+            );
+
+            let old = SubscriberTag(1);
+            let late = SubscriberTag(2);
+            mailbox.fetch_with(key.clone(), old.clone(), tracing::Span::none());
+            let (delivery, delivered_value, old_verdict) =
+                deliveries.recv().await.expect("old delivery did not start");
+            assert_delivery(
+                delivery,
+                key.clone(),
+                non_empty_vec![(old.clone(), tracing::Span::none())],
+            );
+            assert_eq!(delivered_value, value);
+
+            mailbox.fetch_with(key.clone(), late.clone(), tracing::Span::none());
+            context.sleep(Duration::from_millis(100)).await;
+            mailbox.drop_responses(move |_, subscriber| subscriber != &old);
+
+            let (delivery, delivered_value, late_verdict) = select! {
+                delivery = deliveries.recv() => delivery.expect("cached response was not rerouted"),
+                _ = context.sleep(crate::RECLAIM_INTERVAL * 3) => {
+                    panic!("closed delivery generation was not reclaimed");
+                },
+            };
+            assert_delivery(
+                delivery,
+                key.clone(),
+                non_empty_vec![(late, tracing::Span::none())],
+            );
+            assert_eq!(delivered_value, value);
+            assert!(old_verdict.send(Outcome::Invalid).is_err());
+            late_verdict.send_lossy(Outcome::Complete);
+
+            assert_eq!(producer_observer.remaining(&key), vec![unexpected_refetch]);
+            assert!(oracle.blocked().await.unwrap().is_empty());
         });
     }
 
@@ -1282,26 +1435,16 @@ mod tests {
             let first_subscriber = SubscriberTag(1);
             let late_subscriber = SubscriberTag(2);
             let fresh_subscriber = SubscriberTag(3);
-            mailbox.fetch(Fetch {
-                key: key.clone(),
-                subscriber: first_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
-            assert_eq!(
+            mailbox.fetch_with(key.clone(), first_subscriber.clone(), tracing::Span::none());
+            assert_delivery(
                 started.recv().await.expect("delivery did not start"),
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
-                }
+                key.clone(),
+                non_empty_vec![(first_subscriber, tracing::Span::none())],
             );
 
             // A subscriber attached after the delivery snapshot is still retired by
             // the key-global ignored outcome.
-            mailbox.fetch(Fetch {
-                key: key.clone(),
-                subscriber: late_subscriber,
-                span: tracing::Span::none(),
-            });
+            mailbox.fetch_with(key.clone(), late_subscriber, tracing::Span::none());
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(producer_observer.remaining(&key), vec![second.clone()]);
             gate_sender.send(()).expect("consumer gate dropped");
@@ -1326,28 +1469,19 @@ mod tests {
             );
 
             // A new request for the same key starts cleanly after the ignored fetch is retired.
-            mailbox.fetch(Fetch {
-                key: key.clone(),
-                subscriber: fresh_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
-            assert_eq!(
+            mailbox.fetch_with(key.clone(), fresh_subscriber.clone(), tracing::Span::none());
+            assert_delivery(
                 started.recv().await.expect("fresh delivery did not start"),
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(fresh_subscriber.clone(), tracing::Span::none())],
-                }
+                key.clone(),
+                non_empty_vec![(fresh_subscriber.clone(), tracing::Span::none())],
             );
-            assert_eq!(
-                deliveries.recv().await.expect("consumer channel closed"),
-                (
-                    Delivery {
-                        key: key.clone(),
-                        subscribers: non_empty_vec![(fresh_subscriber, tracing::Span::none())],
-                    },
-                    second
-                )
+            let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
+            assert_delivery(
+                delivery,
+                key.clone(),
+                non_empty_vec![(fresh_subscriber, tracing::Span::none())],
             );
+            assert_eq!(value, second);
             assert!(producer_observer.remaining(&key).is_empty());
         });
     }
@@ -1400,13 +1534,13 @@ mod tests {
         if validation_first {
             gate_sender.send(()).unwrap();
             wait_for_blocked(context, &oracle, &peers[0], &peers[1]).await;
-            mailbox1.retain(|_, _| false);
+            mailbox1.drop_responses(|_, _| false);
             let blocked = oracle.blocked().await.unwrap();
             assert_eq!(blocked.len(), 1);
             assert_eq!(blocked[0].0, peers[0]);
             assert_eq!(blocked[0].1, peers[1]);
         } else {
-            mailbox1.retain(|_, _| false);
+            mailbox1.drop_responses(|_, _| false);
             gate_sender.closed().await;
             assert!(oracle.blocked().await.unwrap().is_empty());
         }
@@ -1418,7 +1552,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_retain_pending_invalid_delivery_race() {
+    fn test_receiver_drop_pending_invalid_delivery_race() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             run_pending_invalid_delivery_race(&context, false).await;
@@ -1426,11 +1560,11 @@ mod tests {
         });
     }
 
-    /// Tests that pruning a fetch leaves the consumer untouched.
-    /// This test initiates a fetch and immediately prunes it, verifying
+    /// Tests that dropping a fetch receiver leaves the consumer untouched.
+    /// This test initiates a fetch and immediately drops its receiver, verifying
     /// that the consumer does not receive any event.
     #[test_traced]
-    fn test_retain_drops_fetch() {
+    fn test_receiver_drop_cancels_fetch() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (oracle, mut schemes, _peers, mut connections) =
@@ -1453,12 +1587,48 @@ mod tests {
             let key = Key(3);
             mailbox1.fetch(key.clone());
             let canceled = key.clone();
-            mailbox1.retain(move |key, _| key != &canceled);
+            mailbox1.drop_responses(move |key, _| key != &canceled);
 
             select! {
                 _ = cons_out1.recv() => panic!("unexpected event"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
+        });
+    }
+
+    #[test_traced]
+    fn test_busy_mailbox_does_not_starve_idle_demand_cleanup() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (oracle, mut schemes, _peers, mut connections) =
+                setup_network_and_peers(&context, &[1]).await;
+            let scheme = schemes.remove(0);
+            let mut mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                Producer::default(),
+            );
+
+            mailbox.fetch(Key(1));
+            context.sleep(Duration::from_millis(100)).await;
+            let metrics = context.encode();
+            assert_eq!(gauge_metric_total(&metrics, "actor_fetch_pending"), 1);
+            mailbox.drop_responses(|_, _| false);
+
+            let step = crate::RECLAIM_INTERVAL / 10;
+            for index in 0u8..15 {
+                mailbox.fetch(Key(10 + index));
+                mailbox.drop_responses(|_, _| false);
+                context.sleep(step).await;
+            }
+
+            let metrics = context.encode();
+            assert_eq!(gauge_metric_total(&metrics, "actor_fetch_pending"), 0);
+            assert_eq!(gauge_metric_total(&metrics, "actor_fetch_active"), 0);
         });
     }
 
@@ -1527,7 +1697,7 @@ mod tests {
 
     /// Tests fetching when no peers are available.
     /// This test sets up a single peer with an empty peer provider (no peers).
-    /// It initiates a fetch, waits beyond the retry timeout, prunes the fetch,
+    /// It initiates a fetch, waits beyond the retry timeout, drops its receiver,
     /// and verifies that the consumer receives a failure notification.
     #[test_traced]
     fn test_no_peers_available() {
@@ -1730,10 +1900,10 @@ mod tests {
         });
     }
 
-    /// Tests that pruning an inactive fetch has no effect.
+    /// Tests that dropping an inactive fetch receiver has no effect.
     /// Prunes a key before, after, and during the fetch process.
     #[test_traced]
-    fn test_retain_drops_key() {
+    fn test_receiver_drop_cancels_key() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1771,7 +1941,7 @@ mod tests {
 
             // Prune before sending the fetch, expecting no effect.
             let canceled = key.clone();
-            mailbox1.retain(move |key, _| key != &canceled);
+            mailbox1.drop_responses(move |key, _| key != &canceled);
             select! {
                 _ = cons_out1.recv() => {
                     panic!("unexpected event");
@@ -1785,9 +1955,9 @@ mod tests {
             assert_eq!(key_actual, key);
             assert_eq!(value, Bytes::from("data for key 6"));
 
-            // Attempt to prune after data has been delivered, expecting no effect
+            // Dropping the old receiver after delivery has no effect.
             let canceled = key.clone();
-            mailbox1.retain(move |key, _| key != &canceled);
+            mailbox1.drop_responses(move |key, _| key != &canceled);
             select! {
                 _ = cons_out1.recv() => {
                     panic!("unexpected event");
@@ -1795,13 +1965,13 @@ mod tests {
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
 
-            // Initiate and prune another fetch.
+            // Initiate another fetch and drop its receiver.
             let key = Key(7);
             mailbox1.fetch(key.clone());
             let canceled = key.clone();
-            mailbox1.retain(move |key, _| key != &canceled);
+            mailbox1.drop_responses(move |key, _| key != &canceled);
 
-            // No event should arrive after pruning.
+            // No event should arrive after cancellation.
             select! {
                 _ = cons_out1.recv() => panic!("unexpected event"),
                 _ = context.sleep(Duration::from_millis(100)) => {},
@@ -1900,7 +2070,7 @@ mod tests {
 
             // Prune the fetch for keyB.
             let canceled = key_b.clone();
-            mailbox1.retain(move |key, _| key != &canceled);
+            mailbox1.drop_responses(move |key, _| key != &canceled);
 
             // Check oracle
             let blocked = oracle.blocked().await.unwrap();
@@ -1910,11 +2080,10 @@ mod tests {
         });
     }
 
-    /// Tests that duplicate fetches for the same key are handled properly.
-    /// The test verifies that when the same key is fetched multiple times,
-    /// the data is correctly delivered once without errors.
+    /// Independent response channels with the same key and metadata share one network fetch and
+    /// remain distinct members of its delivery snapshot.
     #[test_traced]
-    fn test_duplicate_fetch_key() {
+    fn test_independent_same_key_demands_share_delivery() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -1926,7 +2095,7 @@ mod tests {
             let mut prod2 = Producer::default();
             prod2.insert(key.clone(), Bytes::from("data for key 5"));
 
-            let (cons1, mut cons_out1) = consumer();
+            let (cons1, mut cons_out1) = SubscriberRecordingConsumer::new();
 
             let scheme = schemes.remove(0);
             let mut mailbox1 = setup_and_spawn_actor(
@@ -1950,16 +2119,22 @@ mod tests {
                 prod2,
             );
 
-            // Send duplicate fetches for the same key.
-            mailbox1.fetch(key.clone());
-            mailbox1.fetch(key.clone());
+            let subscriber = SubscriberTag(7);
+            mailbox1.fetch_with(key.clone(), subscriber.clone(), tracing::Span::none());
+            mailbox1.fetch_with(key.clone(), subscriber.clone(), tracing::Span::none());
 
-            // Should receive the data only once
-            let (key_actual, value) = cons_out1.recv().await.unwrap();
-            assert_eq!(key_actual, key);
+            let (delivery, value) = cons_out1.recv().await.unwrap();
+            assert_delivery(
+                delivery,
+                key,
+                non_empty_vec![
+                    (subscriber.clone(), tracing::Span::none()),
+                    (subscriber, tracing::Span::none())
+                ],
+            );
             assert_eq!(value, Bytes::from("data for key 5"));
 
-            // Make sure we don't receive a second event for the duplicate fetch
+            // The shared response is delivered as one aggregate callback.
             select! {
                 _ = cons_out1.recv() => {
                     panic!("Unexpected second event received for duplicate fetch");
@@ -2615,7 +2790,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_retain() {
+    fn test_receiver_lifetime() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2649,8 +2824,8 @@ mod tests {
                 prod2,
             );
 
-            // Retain before fetching should have no effect
-            mailbox1.retain(|_, _| true);
+            // With no owned receiver, there is nothing to drop.
+            mailbox1.drop_responses(|_, _| true);
             select! {
                 _ = cons_out1.recv() => {
                     panic!("unexpected event");
@@ -2661,10 +2836,9 @@ mod tests {
             // Start a fetch (no link, so fetch stays in-flight)
             mailbox1.fetch(key.clone());
 
-            // Retain with predicate that excludes the key. This must clean up
-            // the in-flight entry for the key.
+            // Dropping the key's receiver must clean up its in-flight entry.
             let key_clone = key.clone();
-            mailbox1.retain(move |key, _| key != &key_clone);
+            mailbox1.drop_responses(move |key, _| key != &key_clone);
 
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -2681,7 +2855,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_retain_uses_subscribers() {
+    fn test_partial_receiver_cancellation_preserves_live_subscriber() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -2717,19 +2891,11 @@ mod tests {
 
             let dropped_subscriber = SubscriberTag(50);
             let kept_subscriber = SubscriberTag(51);
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: dropped_subscriber,
-                span: tracing::Span::none(),
-            });
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: kept_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(key.clone(), dropped_subscriber, tracing::Span::none());
+            mailbox1.fetch_with(key.clone(), kept_subscriber.clone(), tracing::Span::none());
 
             context.sleep(Duration::from_millis(100)).await;
-            mailbox1.retain(move |_, subscriber| subscriber == &kept_subscriber);
+            mailbox1.drop_responses(move |_, subscriber| subscriber == &kept_subscriber);
             context.sleep(Duration::from_millis(100)).await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -2777,29 +2943,23 @@ mod tests {
 
             let first_subscriber = SubscriberTag(50);
             let second_subscriber = SubscriberTag(51);
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: second_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: first_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(
+                key.clone(),
+                second_subscriber.clone(),
+                tracing::Span::none(),
+            );
+            mailbox1.fetch_with(key.clone(), first_subscriber.clone(), tracing::Span::none());
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key,
-                    subscribers: non_empty_vec![
-                        (first_subscriber, tracing::Span::none()),
-                        (second_subscriber, tracing::Span::none())
-                    ],
-                }
+                key,
+                non_empty_vec![
+                    (first_subscriber, tracing::Span::none()),
+                    (second_subscriber, tracing::Span::none())
+                ],
             );
             assert_eq!(value, Bytes::from("data for key 5"));
         });
@@ -2842,29 +3002,23 @@ mod tests {
 
             let first_subscriber = SubscriberTag(49);
             let second_subscriber = SubscriberTag(50);
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: first_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: second_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(key.clone(), first_subscriber.clone(), tracing::Span::none());
+            mailbox1.fetch_with(
+                key.clone(),
+                second_subscriber.clone(),
+                tracing::Span::none(),
+            );
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![
-                        (first_subscriber, tracing::Span::none()),
-                        (second_subscriber, tracing::Span::none())
-                    ],
-                }
+                key.clone(),
+                non_empty_vec![
+                    (first_subscriber, tracing::Span::none()),
+                    (second_subscriber, tracing::Span::none())
+                ],
             );
             assert_eq!(value, Bytes::from("data for key 5"));
         });
@@ -2923,26 +3077,20 @@ mod tests {
 
             let first_subscriber = SubscriberTag(49);
             let second_subscriber = SubscriberTag(50);
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: first_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(key.clone(), first_subscriber.clone(), tracing::Span::none());
 
             let delivery = started.recv().await.expect("delivery did not start");
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
-                }
+                key.clone(),
+                non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
             );
 
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: second_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(
+                key.clone(),
+                second_subscriber.clone(),
+                tracing::Span::none(),
+            );
             context.sleep(Duration::from_millis(100)).await;
             assert_eq!(
                 prod2_observer.remaining(&key),
@@ -2951,12 +3099,10 @@ mod tests {
 
             first_gate_sender.send(()).unwrap();
             let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
-                }
+                key.clone(),
+                non_empty_vec![(first_subscriber, tracing::Span::none())],
             );
             assert_eq!(value, first_response);
 
@@ -2966,22 +3112,18 @@ mod tests {
                     panic!("late subscriber was not delivered");
                 },
             };
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(second_subscriber.clone(), tracing::Span::none())],
-                }
+                key.clone(),
+                non_empty_vec![(second_subscriber.clone(), tracing::Span::none())],
             );
 
             second_gate_sender.send(()).unwrap();
             let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(second_subscriber, tracing::Span::none())],
-                }
+                key.clone(),
+                non_empty_vec![(second_subscriber, tracing::Span::none())],
             );
             assert_eq!(value, first_response);
             assert_eq!(prod2_observer.remaining(&key), vec![second_response]);
@@ -3059,30 +3201,22 @@ mod tests {
             let second_subscriber = SubscriberTag(50);
 
             // Start unrestricted repair and park its first response in validation.
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: first_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(key.clone(), first_subscriber.clone(), tracing::Span::none());
 
             let delivery = started.recv().await.expect("delivery did not start");
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
-                }
+                key.clone(),
+                non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
             );
 
             // A targeted objection for the same key attaches to the parked fetch
             // without issuing another network request.
             add_link(&mut oracle, LINK.clone(), &peers, 0, 2).await;
-            mailbox1.fetch_targeted(
-                Fetch {
-                    key: key.clone(),
-                    subscriber: second_subscriber.clone(),
-                    span: tracing::Span::none(),
-                },
+            mailbox1.fetch_targeted_with(
+                key.clone(),
+                second_subscriber.clone(),
+                tracing::Span::none(),
                 non_empty_vec![peers[2].clone()],
             );
 
@@ -3116,28 +3250,24 @@ mod tests {
                     panic!("ambiguous response was not retried with the late subscriber");
                 },
             };
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![
-                        (first_subscriber.clone(), tracing::Span::none()),
-                        (second_subscriber.clone(), tracing::Span::none())
-                    ],
-                }
+                key.clone(),
+                non_empty_vec![
+                    (first_subscriber.clone(), tracing::Span::none()),
+                    (second_subscriber.clone(), tracing::Span::none())
+                ],
             );
 
             second_gate_sender.send(()).unwrap();
             let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: key.clone(),
-                    subscribers: non_empty_vec![
-                        (first_subscriber, tracing::Span::none()),
-                        (second_subscriber, tracing::Span::none())
-                    ],
-                }
+                key.clone(),
+                non_empty_vec![
+                    (first_subscriber, tracing::Span::none()),
+                    (second_subscriber, tracing::Span::none())
+                ],
             );
             assert_eq!(value, valid_response);
             assert_eq!(prod2_observer.remaining(&key), vec![unexpected_refetch]);
@@ -3165,7 +3295,7 @@ mod tests {
             let (requester_consumer, mut deliveries) = HoldingConsumer::new();
             let requester = schemes.remove(0);
             let requester_key = requester.public_key();
-            let (requester_engine, mut requester_mailbox) = Engine::new(
+            let (requester_engine, requester_mailbox) = Engine::new(
                 context.child("requester"),
                 Config {
                     peer_provider: oracle.manager(),
@@ -3180,6 +3310,7 @@ mod tests {
                     priority_responses: false,
                 },
             );
+            let mut requester_mailbox = TestMailbox::new(requester_mailbox);
 
             let mut producer = Producer::default();
             producer.insert(retry_key.clone(), Bytes::from("retry"));
@@ -3284,11 +3415,7 @@ mod tests {
                 prod3,
             );
 
-            mailbox1.fetch(Fetch {
-                key: blocked_key.clone(),
-                subscriber: SubscriberTag(1),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(blocked_key.clone(), SubscriberTag(1), tracing::Span::none());
             started
                 .recv()
                 .await
@@ -3296,48 +3423,42 @@ mod tests {
             first_gate_sender.send(()).unwrap();
             wait_for_blocked(&context, &oracle, &peers[0], &peers[1]).await;
 
-            mailbox1.fetch_targeted(
-                Fetch {
-                    key: waiting_key,
-                    subscriber: SubscriberTag(2),
-                    span: tracing::Span::none(),
-                },
+            mailbox1.fetch_targeted_with(
+                waiting_key,
+                SubscriberTag(2),
+                tracing::Span::none(),
                 non_empty_vec![peers[1].clone()],
             );
             context.sleep(Duration::from_millis(100)).await;
 
             let first_subscriber = SubscriberTag(3);
             let second_subscriber = SubscriberTag(4);
-            mailbox1.fetch(Fetch {
-                key: main_key.clone(),
-                subscriber: first_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
-
-            let delivery = started.recv().await.expect("delivery did not start");
-            assert_eq!(
-                delivery,
-                Delivery {
-                    key: main_key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
-                }
+            mailbox1.fetch_with(
+                main_key.clone(),
+                first_subscriber.clone(),
+                tracing::Span::none(),
             );
 
-            mailbox1.fetch(Fetch {
-                key: main_key.clone(),
-                subscriber: second_subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            let delivery = started.recv().await.expect("delivery did not start");
+            assert_delivery(
+                delivery,
+                main_key.clone(),
+                non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
+            );
+
+            mailbox1.fetch_with(
+                main_key.clone(),
+                second_subscriber.clone(),
+                tracing::Span::none(),
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             second_gate_sender.send(()).unwrap();
             let (delivery, value) = deliveries.recv().await.expect("consumer channel closed");
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: main_key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
-                }
+                main_key.clone(),
+                non_empty_vec![(first_subscriber, tracing::Span::none())],
             );
             assert_eq!(value, data);
 
@@ -3347,12 +3468,10 @@ mod tests {
                     panic!("late subscriber was not delivered while an unrelated waiter was armed");
                 },
             };
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key: main_key,
-                    subscribers: non_empty_vec![(second_subscriber, tracing::Span::none())],
-                }
+                main_key,
+                non_empty_vec![(second_subscriber, tracing::Span::none())],
             );
         });
     }
@@ -3394,25 +3513,19 @@ mod tests {
 
             let subscriber = SubscriberTag(50);
             let retained = subscriber.clone();
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(key.clone(), subscriber.clone(), tracing::Span::none());
 
             context.sleep(Duration::from_millis(100)).await;
-            mailbox1.retain(move |_, subscriber| subscriber == &retained);
+            mailbox1.drop_responses(move |_, subscriber| subscriber == &retained);
             context.sleep(Duration::from_millis(100)).await;
 
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key,
-                    subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
-                }
+                key,
+                non_empty_vec![(subscriber, tracing::Span::none())],
             );
             assert_eq!(value, Bytes::from("data for key 5"));
         });
@@ -3454,27 +3567,21 @@ mod tests {
             );
 
             let subscriber = SubscriberTag(50);
-            mailbox1.fetch(Fetch {
-                key: key.clone(),
-                subscriber: subscriber.clone(),
-                span: tracing::Span::none(),
-            });
+            mailbox1.fetch_with(key.clone(), subscriber.clone(), tracing::Span::none());
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
 
             let (delivery, value) = cons_out1.recv().await.unwrap();
-            assert_eq!(
+            assert_delivery(
                 delivery,
-                Delivery {
-                    key,
-                    subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
-                }
+                key,
+                non_empty_vec![(subscriber, tracing::Span::none())],
             );
             assert_eq!(value, Bytes::from("data for key 5"));
         });
     }
 
     #[test_traced]
-    fn test_retain_drops_all() {
+    fn test_receiver_drop_cancels_all() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let (mut oracle, mut schemes, peers, mut connections) =
@@ -3509,8 +3616,8 @@ mod tests {
                 prod2,
             );
 
-            // Pruning before fetching should have no effect.
-            mailbox1.retain(|_, _| false);
+            // With no owned receiver, there is nothing to drop.
+            mailbox1.drop_responses(|_, _| false);
             select! {
                 _ = cons_out1.recv() => {
                     panic!("unexpected event");
@@ -3521,8 +3628,8 @@ mod tests {
             // Start a fetch (no link, so fetch stays in-flight)
             mailbox1.fetch(key.clone());
 
-            // Prune all fetches.
-            mailbox1.retain(|_, _| false);
+            // Drop every response receiver.
+            mailbox1.drop_responses(|_, _| false);
 
             // Now add link so fetches can complete
             add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
@@ -4220,7 +4327,7 @@ mod tests {
 
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
-            let (engine, mut mailbox1): (_, Mailbox<Key, PublicKey>) = Engine::new(
+            let (engine, mailbox1): (_, Mailbox<Key, PublicKey, (), ()>) = Engine::new(
                 actor_context.child("peer").with_attribute("index", 0),
                 Config {
                     peer_provider: oracle.manager(),
@@ -4235,11 +4342,12 @@ mod tests {
                     priority_responses: false,
                 },
             );
+            let mut mailbox1 = TestMailbox::new(mailbox1);
             let handle1 = engine.start(connections.remove(0));
 
             let scheme = schemes.remove(0);
             let public_key = scheme.public_key();
-            let (engine, _mailbox2): (_, Mailbox<Key, PublicKey>) = Engine::new(
+            let (engine, _mailbox2): (_, Mailbox<Key, PublicKey, (), ()>) = Engine::new(
                 actor_context.child("peer").with_attribute("index", 1),
                 Config {
                     peer_provider: oracle.manager(),
@@ -4299,7 +4407,7 @@ mod tests {
         consumers: Vec<Consumer<Key, Bytes>>,
         producers: Vec<Producer<Key, Bytes>>,
     ) -> (
-        Vec<Mailbox<Key, PublicKey>>,
+        Vec<TestMailbox<Key, PublicKey, (), ()>>,
         Vec<commonware_runtime::Handle<()>>,
     ) {
         let actor_context = context.child("actor");
@@ -4330,7 +4438,7 @@ mod tests {
                 },
             );
             handles.push(engine.start(conn));
-            mailboxes.push(mailbox);
+            mailboxes.push(TestMailbox::new(mailbox));
         }
 
         (mailboxes, handles)
@@ -4377,12 +4485,12 @@ mod tests {
             let key2 = Key(2);
             mailboxes[0].fetch(key2.clone());
 
-            // Retain can prune a single key after shutdown without panicking.
+            // Dropping a response receiver after shutdown does not panic.
             let canceled = key2;
-            mailboxes[0].retain(move |key, _| key != &canceled);
+            mailboxes[0].drop_responses(move |key, _| key != &canceled);
 
-            // Retain should not panic
-            mailboxes[0].retain(|_, _| true);
+            // An empty receiver cleanup should not panic.
+            mailboxes[0].drop_responses(|_, _| true);
 
             // Fetch targeted should not panic
             mailboxes[0].fetch_targeted(Key(3), non_empty_vec![peers[1].clone()]);

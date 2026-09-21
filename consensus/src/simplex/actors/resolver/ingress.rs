@@ -1,17 +1,14 @@
 use crate::{
     Epochable, Viewable,
-    simplex::{
-        actors::{Ask, Kind},
-        types::Certificate,
-    },
+    simplex::{actors::Kind, types::Certificate},
     types::View,
 };
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, certificate::Scheme};
-use commonware_resolver::{Consumer, Delivery, Outcome, p2p::Producer};
+use commonware_resolver::p2p::Producer;
 use commonware_runtime::telemetry::traces::TracedExt as _;
-use commonware_utils::{channel::oneshot, sequence::U64, vec::NonEmptyVec};
+use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
 use tracing::{Span, info_span};
 
@@ -272,13 +269,6 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 
 #[derive(Debug)]
 pub(crate) enum HandlerMessage {
-    Deliver {
-        span: Span,
-        view: View,
-        data: Bytes,
-        asks: NonEmptyVec<Ask>,
-        response: oneshot::Sender<Outcome>,
-    },
     Produce {
         view: View,
         response: oneshot::Sender<Bytes>,
@@ -289,54 +279,17 @@ impl HandlerMessage {
     /// Returns true if the requester stopped waiting for this response.
     pub(crate) fn response_closed(&self) -> bool {
         match self {
-            Self::Deliver { response, .. } => response.is_closed(),
             Self::Produce { response, .. } => response.is_closed(),
         }
     }
 }
 
-/// Deliveries retained while the ready queue is full.
-#[derive(Default)]
-pub(crate) struct HandlerPending(VecDeque<HandlerMessage>);
-
-impl Overflow<HandlerMessage> for HandlerPending {
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    fn drain<F>(&mut self, mut push: F)
-    where
-        F: FnMut(HandlerMessage) -> Option<HandlerMessage>,
-    {
-        while let Some(message) = self.0.pop_front() {
-            if message.response_closed() {
-                continue;
-            }
-
-            if let Some(message) = push(message) {
-                self.0.push_front(message);
-                break;
-            }
-        }
-    }
-}
-
 impl Policy for HandlerMessage {
-    type Overflow = HandlerPending;
+    type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
-        // Drop produce requests so the serve backlog stays bounded by the ready
-        // queue. We prefer handling our own responses over serving peers, who can
-        // ask a less loaded peer instead.
-        if matches!(message, Self::Produce { .. }) {
-            return;
-        }
-
-        // Retain deliveries that still have a waiting requester.
-        if message.response_closed() {
-            return;
-        }
-        overflow.0.push_back(message);
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) {
+        // Peer serving is best effort once the ready queue fills because the
+        // requester can ask another peer.
     }
 }
 
@@ -348,31 +301,6 @@ pub(crate) struct Handler {
 impl Handler {
     pub(crate) const fn new(sender: Sender<HandlerMessage>) -> Self {
         Self { sender }
-    }
-}
-
-impl Consumer for Handler {
-    type Key = U64;
-    type Value = Bytes;
-    type Subscriber = Ask;
-    type Outcome = Outcome;
-
-    fn deliver(
-        &mut self,
-        delivery: Delivery<Self::Key, Self::Subscriber>,
-        value: Self::Value,
-    ) -> oneshot::Receiver<Self::Outcome> {
-        let (response, receiver) = oneshot::channel();
-        let (_, span) = delivery.subscribers.first().clone();
-        let asks = delivery.subscribers.map_into(|(ask, _)| ask);
-        let _ = self.sender.enqueue(HandlerMessage::Deliver {
-            span,
-            view: View::new(delivery.key.into()),
-            data: value,
-            asks,
-            response,
-        });
-        receiver
     }
 }
 
@@ -509,18 +437,8 @@ mod tests {
     }
 
     #[test]
-    fn handle_retains_open_deliveries_only() {
-        let mut overflow = HandlerPending::default();
-        let deliver = |view: u64, response| HandlerMessage::Deliver {
-            span: Span::none(),
-            view: View::new(view),
-            data: Bytes::new(),
-            asks: NonEmptyVec::new(Ask::backfill()),
-            response,
-        };
-
-        // An overflowed produce request is dropped and its requester sees the
-        // closed response.
+    fn handle_drops_overflowed_produce() {
+        let mut overflow = VecDeque::new();
         let (response, mut produce) = oneshot::channel();
         HandlerMessage::handle(
             &mut overflow,
@@ -533,24 +451,7 @@ mod tests {
             produce.try_recv(),
             Err(oneshot::error::TryRecvError::Closed)
         ));
-
-        // Deliveries are retained, and drain skips one whose requester left.
-        let (response, closed) = oneshot::channel();
-        HandlerMessage::handle(&mut overflow, deliver(2, response));
-        let (response, _open) = oneshot::channel();
-        HandlerMessage::handle(&mut overflow, deliver(3, response));
-        drop(closed);
-
-        let mut messages = Vec::new();
-        Overflow::drain(&mut overflow, |message| {
-            messages.push(message);
-            None
-        });
-        assert_eq!(messages.len(), 1);
-        assert!(matches!(
-            messages.pop(),
-            Some(HandlerMessage::Deliver { view, .. }) if view == View::new(3)
-        ));
+        assert!(overflow.is_empty());
     }
 
     #[test]

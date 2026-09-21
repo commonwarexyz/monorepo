@@ -61,9 +61,9 @@ where
         }
     }
 
-    /// Drop entries for which the predicate returns false. Returns the count of dropped entries.
-    pub(super) fn retain<F: FnMut(&Con::Key) -> bool>(&mut self, predicate: F) -> usize {
-        self.deliveries.retain(predicate)
+    /// Release an all-closed delivery snapshot, retaining its cached response.
+    pub(super) fn cancel_closed_delivery(&mut self, key: &Con::Key) -> bool {
+        self.deliveries.cancel_closed_delivery(key)
     }
 
     /// Drop all entries. Returns the count of dropped entries.
@@ -76,7 +76,7 @@ where
     /// the response so later subscribers can be delivered the same bytes.
     pub(super) fn deliver(
         &mut self,
-        delivery: Delivery<Con::Key, Con::Subscriber>,
+        delivery: Delivery<Con::Key, Con::Subscriber, Con::Response>,
         peer: P,
         elapsed: Duration,
         value: Con::Value,
@@ -86,7 +86,10 @@ where
     }
 
     /// Begin another consumer delivery for an already received response.
-    pub(super) fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
+    pub(super) fn redeliver(
+        &mut self,
+        delivery: Delivery<Con::Key, Con::Subscriber, Con::Response>,
+    ) {
         self.deliveries.redeliver(delivery);
     }
 
@@ -118,7 +121,7 @@ where
             P,
             Duration,
             usize,
-            Delivery<Con::Key, Con::Subscriber>,
+            Delivery<Con::Key, Con::Subscriber, Con::Response>,
             Option<Outcome>,
         ),
         Aborted,
@@ -146,7 +149,7 @@ mod tests {
         deterministic::{Context, Runner},
         telemetry::metrics::{MetricsExt, histogram::Buckets},
     };
-    use commonware_utils::non_empty_vec;
+    use commonware_utils::{channel::mpsc, non_empty_vec};
 
     type TestInflight = Inflight<MockConsumer<MockKey, Bytes>, PublicKey>;
 
@@ -163,10 +166,19 @@ mod tests {
         PrivateKey::from_seed(0).public_key()
     }
 
-    fn delivery(key: MockKey) -> Delivery<MockKey, ()> {
+    fn delivery(
+        key: MockKey,
+        responses: &mut Vec<mpsc::Receiver<()>>,
+    ) -> Delivery<MockKey, (), ()> {
+        let (response, receiver) = mpsc::channel(1);
+        responses.push(receiver);
         Delivery {
             key,
-            subscribers: non_empty_vec![((), tracing::Span::none())],
+            subscribers: non_empty_vec![crate::Subscriber {
+                subscriber: (),
+                response,
+                span: tracing::Span::none(),
+            }],
         }
     }
 
@@ -230,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retain_drops_non_matching_and_suppresses_metric() {
+    fn test_cancel_exact_key_suppresses_metric() {
         let runner = Runner::default();
         runner.start(|context| async move {
             let timed = make_timed(&context);
@@ -240,8 +252,7 @@ mod tests {
             inflight.insert(MockKey(2), timed.timer(&context));
             inflight.insert(MockKey(3), timed.timer(&context));
 
-            let dropped = inflight.retain(|k| k.0 % 2 == 1);
-            assert_eq!(dropped, 1);
+            assert!(inflight.cancel(&MockKey(2)));
             assert!(inflight.contains(&MockKey(1)));
             assert!(!inflight.contains(&MockKey(2)));
             assert!(inflight.contains(&MockKey(3)));
@@ -280,10 +291,11 @@ mod tests {
             let peer = pubkey();
             let key = MockKey(7);
             let value = Bytes::from("data");
+            let mut responses = Vec::new();
 
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
-                delivery(key.clone()),
+                delivery(key.clone(), &mut responses),
                 peer.clone(),
                 Duration::from_millis(17),
                 value.clone(),
@@ -313,10 +325,11 @@ mod tests {
             let mut inflight: TestInflight = Inflight::new(consumer);
             let peer = pubkey();
             let key = MockKey(1);
+            let mut responses = Vec::new();
 
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
-                delivery(key.clone()),
+                delivery(key.clone(), &mut responses),
                 peer,
                 Duration::ZERO,
                 Bytes::from("v"),
@@ -339,10 +352,11 @@ mod tests {
             let mut inflight: TestInflight = Inflight::new(consumer);
             let peer = pubkey();
             let key = MockKey(1);
+            let mut responses = Vec::new();
 
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
-                delivery(key.clone()),
+                delivery(key.clone(), &mut responses),
                 peer,
                 Duration::ZERO,
                 Bytes::from("v"),
@@ -368,10 +382,11 @@ mod tests {
             let mut inflight: TestInflight = Inflight::new(consumer);
             let peer = pubkey();
             let key = MockKey(1);
+            let mut responses = Vec::new();
 
             inflight.insert(key.clone(), timed.timer(&context));
             inflight.deliver(
-                delivery(key.clone()),
+                delivery(key.clone(), &mut responses),
                 peer,
                 Duration::ZERO,
                 Bytes::from("v"),
@@ -395,9 +410,15 @@ mod tests {
             let mut inflight: TestInflight = Inflight::new(consumer);
             let peer = pubkey();
             let key = MockKey(1);
+            let mut responses = Vec::new();
 
             inflight.insert(key.clone(), timed.timer(&context));
-            inflight.deliver(delivery(key), peer, Duration::ZERO, Bytes::from("v"));
+            inflight.deliver(
+                delivery(key, &mut responses),
+                peer,
+                Duration::ZERO,
+                Bytes::from("v"),
+            );
 
             assert_eq!(inflight.drain(), 1);
 

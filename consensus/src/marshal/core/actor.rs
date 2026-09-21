@@ -19,6 +19,7 @@ use crate::{
         resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
     },
+    responses::Responses,
     simplex::{
         scheme::Scheme,
         types::{Finalization, Notarization, Subject, verify_certificates},
@@ -63,12 +64,42 @@ use tracing::{Instrument as _, Span, debug, info_span, warn};
 // may differ from the block digest for coded variants.
 type ResolverRequestFor<V> = Key<<V as Variant>::Commitment>;
 
-// A resolver delivery plus the peer-validity response channel. Local
-// annotations on the delivery decide how accepted data is used.
-struct ResolverDelivery<V: Variant> {
-    delivery: Delivery<ResolverRequestFor<V>, Annotation>,
-    value: Bytes,
+type ResolverDelivery<V> = handler::Response<<V as Variant>::Commitment>;
+
+/// Resolver work ready for the actor's bounded response batch.
+enum ResolverMessage<V: Variant> {
+    Deliver(ResolverDelivery<V>),
+    Produce(handler::Message<V::Commitment>),
+}
+
+/// The exact routed snapshot awaiting a peer-validity verdict.
+pub(super) struct ResolverVerdict<V: Variant> {
+    delivery: Delivery<ResolverRequestFor<V>, Annotation, ResolverDelivery<V>>,
     response: oneshot::Sender<bool>,
+}
+
+impl<V: Variant> ResolverVerdict<V> {
+    pub(super) fn response_closed(&self) -> bool {
+        self.response.is_closed()
+    }
+
+    fn reject(self) {
+        self.response.send_lossy(false);
+    }
+
+    fn complete(
+        self,
+        responses: &mut Responses<ResolverRequestFor<V>, Annotation, ResolverDelivery<V>>,
+    ) {
+        for subscriber in self.delivery.subscribers.iter() {
+            responses.remove_matching(
+                &self.delivery.key,
+                &subscriber.subscriber,
+                &subscriber.response,
+            );
+        }
+        self.response.send_lossy(true);
+    }
 }
 
 /// Completion marker for entries in the actor's durability sync pool.
@@ -142,6 +173,8 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Response receivers for outstanding resolver requests
+    responses: Responses<ResolverRequestFor<V>, Annotation, ResolverDelivery<V>>,
     // Commitments known certified above the finalized tip
     certified: Certified<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
@@ -270,6 +303,7 @@ where
                 cleared_acks: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                responses: Responses::new(),
                 certified: Certified::new(),
                 dispatch_gate: DispatchGate::default(),
                 staged: Staged::new(config.max_pending_acks.get().saturating_mul(2)),
@@ -344,6 +378,7 @@ where
         R: TargetedResolver<
                 Key = ResolverRequestFor<V>,
                 Subscriber = Annotation,
+                Response = ResolverDelivery<V>,
                 PublicKey = <P::Scheme as Verifier>::PublicKey,
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -362,6 +397,7 @@ where
         R: TargetedResolver<
                 Key = ResolverRequestFor<V>,
                 Subscriber = Annotation,
+                Response = ResolverDelivery<V>,
                 PublicKey = <P::Scheme as Verifier>::PublicKey,
             >,
     {
@@ -382,6 +418,7 @@ where
         R: TargetedResolver<
                 Key = ResolverRequestFor<V>,
                 Subscriber = Annotation,
+                Response = ResolverDelivery<V>,
                 PublicKey = <P::Scheme as Verifier>::PublicKey,
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
@@ -508,7 +545,7 @@ where
                 };
                 self = next;
             },
-            // Handle consensus inputs before backfill or resolver traffic
+            // Handle consensus inputs before backfill or peer-serving traffic.
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down");
                 break;
@@ -530,14 +567,26 @@ where
                     .instrument(span)
                     .await;
             },
-            // Handle resolver messages last (batched up to max_repair, sync once)
+            response = self.responses.recv() => {
+                self = self
+                    .handle_resolver_message(
+                        ResolverMessage::Deliver(response),
+                        &mut resolver_rx,
+                        &mut resolver,
+                        &mut syncs,
+                        &mut buffer,
+                        &mut application,
+                    )
+                    .await;
+            },
+            // Handle peer produce requests last (batched up to max_repair, sync once).
             Some(message) = resolver_rx.recv() else {
                 debug!("handler closed, shutting down");
                 return;
             } => {
                 self = self
                     .handle_resolver_message(
-                        message,
+                        ResolverMessage::Produce(message),
                         &mut resolver_rx,
                         &mut resolver,
                         &mut syncs,
@@ -560,7 +609,11 @@ where
     ) -> Result<Box<Self>, (Height, A::Error)>
     where
         Buf: Buffer<V>,
-        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        R: Resolver<
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                Response = ResolverDelivery<V>,
+            >,
     {
         // Start with the ack that woke this `select_loop!` arm.
         let mut pending = Some(self.pending_acks.complete_current(result));
@@ -571,7 +624,7 @@ where
                 Ok(()) => {
                     // Apply in-memory progress updates for this acknowledged
                     // block. The metadata sync below makes drained updates durable.
-                    self.update_processed_height(height, resolver);
+                    self.update_processed_height(height);
                     self = self
                         .update_processed_round(height, buffer, application, resolver)
                         .await;
@@ -621,6 +674,7 @@ where
         R: TargetedResolver<
                 Key = ResolverRequestFor<V>,
                 Subscriber = Annotation,
+                Response = ResolverDelivery<V>,
                 PublicKey = <P::Scheme as Verifier>::PublicKey,
             >,
     {
@@ -835,6 +889,7 @@ where
                     debug!(?round, ?commitment, "finalized block missing");
                     self.floor
                         .fetch_if_permitted(
+                            &mut self.responses,
                             resolver,
                             Request::finalized_by_round(commitment, round),
                         )
@@ -880,7 +935,12 @@ where
                 }
 
                 self.floor
-                    .fetch_targeted_if_permitted(resolver, Request::finalized(height), targets)
+                    .fetch_targeted_if_permitted(
+                        &mut self.responses,
+                        resolver,
+                        Request::finalized(height),
+                        targets,
+                    )
                     .ignore();
             }
             Message::SubscribeByDigest {
@@ -926,7 +986,11 @@ where
                     .is_none()
                 {
                     self.floor
-                        .fetch_if_permitted(resolver, Request::notarized(round))
+                        .fetch_if_permitted(
+                            &mut self.responses,
+                            resolver,
+                            Request::notarized(round),
+                        )
                         .ignore();
                 }
             }
@@ -952,7 +1016,7 @@ where
     /// finalized-archive sync if any accepted delivery buffered a write.
     async fn handle_resolver_message<Buf, R>(
         mut self: Box<Self>,
-        message: handler::Message<V::Commitment>,
+        message: ResolverMessage<V>,
         resolver_rx: &mut handler::Receiver<V::Commitment>,
         resolver: &mut R,
         syncs: &mut Pool<'_, PooledSync>,
@@ -961,57 +1025,74 @@ where
     ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
-        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        R: Resolver<
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                Response = ResolverDelivery<V>,
+            >,
     {
         let mut handled = false;
         let mut produces = Vec::new();
         let mut delivers = Vec::new();
+        let mut message = message;
+        let mut drained = 0;
 
         // Drain up to max_repair resolver messages. Block deliveries are handled
         // immediately, certificate-bearing deliveries are batched for verification,
         // and produce responses wait until repair has had a chance to fill gaps.
-        for msg in std::iter::once(message)
-            .chain(std::iter::from_fn(|| resolver_rx.try_recv().ok()))
-            .take(self.max_repair.get())
-        {
-            if msg.response_closed() {
-                continue;
-            }
-            handled = true;
-
-            match msg {
-                handler::Message::Produce { key, response } => {
-                    produces.push((key, response));
+        loop {
+            match message {
+                ResolverMessage::Produce(handler::Message::Produce { key, response }) => {
+                    if !response.is_closed() {
+                        handled = true;
+                        produces.push((key, response));
+                    }
                 }
-                handler::Message::Deliver {
+                ResolverMessage::Deliver(commonware_resolver::Response {
                     delivery,
                     value,
-                    response,
-                } => {
-                    let span = info_span!(
-                        parent: &delivery.subscribers.first().1,
-                        "marshal.resolver.deliver",
-                        key = %delivery.key
-                    );
-                    for (_, subscriber_span) in delivery.subscribers.iter().skip(1) {
-                        span.follows_from(subscriber_span.id());
+                    verdict,
+                }) => {
+                    if !verdict.is_closed() {
+                        handled = true;
+                        let span = info_span!(
+                            parent: &delivery.subscribers.first().span,
+                            "marshal.resolver.deliver",
+                            key = %delivery.key
+                        );
+                        for subscriber in delivery.subscribers.iter().skip(1) {
+                            span.follows_from(subscriber.span.id());
+                        }
+                        self = self
+                            .handle_deliver(
+                                commonware_resolver::Response {
+                                    delivery,
+                                    value,
+                                    verdict,
+                                },
+                                &mut delivers,
+                                buffer,
+                                application,
+                                resolver,
+                            )
+                            .instrument(span)
+                            .await;
                     }
-                    self = self
-                        .handle_deliver(
-                            ResolverDelivery {
-                                delivery,
-                                value,
-                                response,
-                            },
-                            &mut delivers,
-                            buffer,
-                            application,
-                            resolver,
-                        )
-                        .instrument(span)
-                        .await;
                 }
             }
+
+            drained += 1;
+            if drained == self.max_repair.get() {
+                break;
+            }
+            if let Some(response) = self.responses.try_recv() {
+                message = ResolverMessage::Deliver(response);
+                continue;
+            }
+            let Ok(next) = resolver_rx.try_recv() else {
+                break;
+            };
+            message = ResolverMessage::Produce(next);
         }
         if !handled {
             return self;
@@ -1095,7 +1176,11 @@ where
         fallback: CommitmentFallback,
         key: SubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
         waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
     ) {
@@ -1145,7 +1230,7 @@ where
                 // that height is not known soon enough to key, coalesce, or prune
                 // the in-flight resolver request.
                 self.floor
-                    .fetch_if_permitted(resolver, Request::notarized(round))
+                    .fetch_if_permitted(&mut self.responses, resolver, Request::notarized(round))
                     .ignore();
                 debug!(?round, ?digest, "notarized block unavailable");
             }
@@ -1164,7 +1249,9 @@ where
                 } else {
                     Request::untrusted(commitment, height)
                 };
-                self.floor.fetch_if_permitted(resolver, request).ignore();
+                self.floor
+                    .fetch_if_permitted(&mut self.responses, resolver, request)
+                    .ignore();
                 debug!(%height, ?commitment, ?digest, "certified ancestry block unavailable");
             }
             CommitmentFallback::Wait => {}
@@ -1194,7 +1281,11 @@ where
     ) -> Box<Self>
     where
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
-        R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        R: Resolver<
+                Key = ResolverRequestFor<V>,
+                Subscriber = Annotation,
+                Response = ResolverDelivery<V>,
+            >,
     {
         let round = finalization.round();
         let processed_round = self.floor.round();
@@ -1244,7 +1335,11 @@ where
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor.await_anchor(finalization);
         self.floor
-            .fetch_if_permitted(resolver, Request::finalized_by_round(commitment, round))
+            .fetch_if_permitted(
+                &mut self.responses,
+                resolver,
+                Request::finalized_by_round(commitment, round),
+            )
             .ignore();
         self
     }
@@ -1263,7 +1358,11 @@ where
         ack: oneshot::Sender<Handle<()>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
     ) -> Box<Self> {
         (self, _) = self
             .ingest(block.clone(), buffer, application, resolver)
@@ -1293,7 +1392,11 @@ where
         block: V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(block.clone());
 
@@ -1317,7 +1420,11 @@ where
         block: V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
     ) -> Box<Self> {
         // Floor anchors can bypass the local proposal-verification path. Check
         // the parent relationship before using a non-genesis anchor for walkback.
@@ -1393,7 +1500,7 @@ where
         let dispatch_floor = height
             .previous()
             .expect("floor anchor above processed height must have predecessor");
-        self.update_processed_height(dispatch_floor, resolver);
+        self.update_processed_height(dispatch_floor);
 
         // Release staged blocks skipped by the floor transition
         self.staged.retain(height);
@@ -1455,22 +1562,31 @@ where
         delivers: &mut Vec<PendingVerification<P::Scheme, V>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
     ) -> Box<Self> {
-        let ResolverDelivery {
+        let commonware_resolver::Response {
             delivery,
             mut value,
-            response,
+            verdict,
         } = message;
-        let Delivery {
-            key, subscribers, ..
-        } = delivery;
+        let key = delivery.key;
+        let verdict = ResolverVerdict {
+            delivery,
+            response: verdict,
+        };
         match key {
             Key::Block(commitment) => {
                 // Local annotations determine commitment checks and block storage
-                let annotations = subscribers
-                    .map_into(|(annotation, _)| annotation)
-                    .into_vec();
+                let annotations = verdict
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|subscriber| subscriber.subscriber)
+                    .collect::<Vec<_>>();
 
                 // Any `Certified` or `Finalized` subscriber authenticates the shared commitment
                 let expected = if annotations.iter().any(|annotation| {
@@ -1485,11 +1601,11 @@ where
                 };
                 let block_cfg = V::block_cfg(&self.block_codec_config, expected);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 };
                 if V::commitment(&block) != commitment {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 }
 
@@ -1501,7 +1617,7 @@ where
                     .ingest(block.clone(), buffer, application, resolver)
                     .await;
                 if anchored {
-                    response.send_lossy(true);
+                    verdict.complete(&mut self.responses);
                     return self;
                 }
 
@@ -1556,7 +1672,7 @@ where
                         .await;
                 }
                 debug!(?digest, %height, "received block");
-                response.send_lossy(true);
+                verdict.complete(&mut self.responses);
             }
             Key::Finalized { height } => {
                 let Some((epoch, scoped)) = self.scoped_for_height(height) else {
@@ -1565,7 +1681,7 @@ where
                         floor = %self.floor.processed_height(),
                         "ignoring stale delivery"
                     );
-                    response.send_lossy(true);
+                    verdict.complete(&mut self.responses);
                     return self;
                 };
                 let certificate_codec_config = scoped.certificate_codec_config();
@@ -1573,7 +1689,7 @@ where
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
                 else {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 };
 
@@ -1581,7 +1697,7 @@ where
                 // finalization must claim that same epoch. A mismatch means the bytes were bounded
                 // against the wrong participant set, so reject before verification.
                 if finalization.epoch() != epoch {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 }
 
@@ -1590,7 +1706,7 @@ where
                 let Ok(block) =
                     V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
                 else {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 };
 
@@ -1600,14 +1716,14 @@ where
                 let commitment = finalization.proposal.payload;
                 if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 }
                 delivers.push(PendingVerification::Finalized {
                     scoped,
                     finalization,
                     block,
-                    response,
+                    verdict,
                 });
             }
             Key::Notarized { round } => {
@@ -1620,21 +1736,21 @@ where
                         floor = %self.floor.processed_height(),
                         "ignoring stale delivery"
                     );
-                    response.send_lossy(true);
+                    verdict.complete(&mut self.responses);
                     return self;
                 };
                 let certificate_codec_config = scheme.certificate_codec_config();
                 let Ok(notarization) =
                     Notarization::read_cfg(&mut value, &certificate_codec_config)
                 else {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 };
 
                 // The resolver key binds this response to `round`; a certificate for any other
                 // round is a bad response even if it decodes correctly.
                 if notarization.round() != round {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 }
 
@@ -1642,7 +1758,7 @@ where
                 // so decoding must recompute it
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 }
                 let block_cfg = V::block_cfg(
@@ -1650,19 +1766,19 @@ where
                     ExpectedCommitment::Untrusted(commitment),
                 );
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 };
 
                 if V::commitment(&block) != notarization.proposal.payload {
-                    response.send_lossy(false);
+                    verdict.reject();
                     return self;
                 }
                 delivers.push(PendingVerification::Notarized {
                     scoped: Scoped::scheme(scheme),
                     notarization,
                     block,
-                    response,
+                    verdict,
                 });
             }
         }
@@ -1676,7 +1792,11 @@ where
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
     ) -> Box<Self> {
         delivers.retain(|item| !item.response_closed());
         if delivers.is_empty() {
@@ -1729,9 +1849,9 @@ where
         for (index, item) in delivers.drain(..).enumerate() {
             if !verified[index] {
                 match item {
-                    PendingVerification::Finalized { response, .. }
-                    | PendingVerification::Notarized { response, .. } => {
-                        response.send_lossy(false);
+                    PendingVerification::Finalized { verdict, .. }
+                    | PendingVerification::Notarized { verdict, .. } => {
+                        verdict.reject();
                     }
                 }
                 continue;
@@ -1740,11 +1860,11 @@ where
                 PendingVerification::Finalized {
                     finalization,
                     block,
-                    response,
+                    verdict,
                     ..
                 } => {
                     // Valid finalization received.
-                    response.send_lossy(true);
+                    verdict.complete(&mut self.responses);
                     let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
@@ -1770,11 +1890,11 @@ where
                 PendingVerification::Notarized {
                     notarization,
                     block,
-                    response,
+                    verdict,
                     ..
                 } => {
                     // Valid notarization received.
-                    response.send_lossy(true);
+                    verdict.complete(&mut self.responses);
                     let round = notarization.round();
                     let commitment = notarization.proposal.payload;
                     let digest = V::commitment_to_inner(commitment);
@@ -2257,7 +2377,11 @@ where
     async fn try_repair_gaps<Buf: Buffer<V>>(
         mut self: Box<Self>,
         buffer: &mut Buf,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> (Box<Self>, bool) {
         // Gap repair needs a known processed floor. A floor transition may
@@ -2301,6 +2425,7 @@ where
                     // Request the missing block.
                     self.floor
                         .fetch_if_permitted(
+                            &mut self.responses,
                             resolver,
                             Request::finalized_by_height(commitment, last_finalized),
                         )
@@ -2365,6 +2490,7 @@ where
                         .expect("cursor above gap start has a parent");
                     self.floor
                         .fetch_if_permitted(
+                            &mut self.responses,
                             resolver,
                             Request::finalized_by_height(parent_commitment, parent_height),
                         )
@@ -2385,7 +2511,7 @@ where
         let requests: Vec<_> = missing_items.into_iter().map(Request::finalized).collect();
         if !requests.is_empty() {
             self.floor
-                .fetch_all_if_permitted(resolver, requests)
+                .fetch_all_if_permitted(&mut self.responses, resolver, requests)
                 .ignore();
         }
         (self, wrote)
@@ -2393,19 +2519,17 @@ where
 
     /// Buffers a processed height update in memory and metrics. Does NOT sync
     /// to durable storage. Sync metadata after buffered updates to make them durable.
-    fn update_processed_height(
-        &mut self,
-        height: Height,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
-    ) {
+    fn update_processed_height(&mut self, height: Height) {
         self.stream.acknowledge(height);
         self.floor.set_processed_height(height);
         let _ = self
             .processed_height
             .try_set(self.floor.processed_height().get());
 
-        // Resolver request retention is independent of caller-owned block subscriptions.
-        resolver.retain(handler::above_height_floor::<V::Commitment>(height));
+        // Resolver demand and application block subscriptions have independent lifetimes.
+        self.responses.retain(|key, annotation| {
+            handler::above_height_floor::<V::Commitment>(key, annotation, height)
+        });
     }
 
     /// Returns the latest recoverable round at or immediately after the processed height.
@@ -2464,7 +2588,11 @@ where
         height: Height,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
     ) -> Box<Self> {
         let Some(finalization) = self.get_finalization_by_height(height).await else {
             return self;
@@ -2490,7 +2618,11 @@ where
         round: Round,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
-        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+        resolver: &mut impl Resolver<
+            Key = ResolverRequestFor<V>,
+            Subscriber = Annotation,
+            Response = ResolverDelivery<V>,
+        >,
     ) -> Box<Self> {
         let processed_round = self.floor.round();
         if height > self.floor.processed_height() || round <= processed_round {
@@ -2507,8 +2639,10 @@ where
         );
         self.cache = self.cache.prune_by_view(prune_round).await;
 
-        // Resolver request retention is independent of caller-owned block subscriptions.
-        resolver.retain(handler::above_round_floor::<V::Commitment>(round));
+        // Each annotation follows its own height or round pruning axis.
+        self.responses.retain(|key, annotation| {
+            handler::above_round_floor::<V::Commitment>(key, annotation, round)
+        });
 
         // A superseded anchor is an ancestor of a processed block, so the floor
         // it announced is already active. Retire the acks it displaced and resume.

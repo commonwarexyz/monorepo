@@ -107,7 +107,7 @@ mod tests {
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{Recipients, Sender as _};
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
+    use commonware_resolver::{Delivery, Fetch, Resolver, Subscriber, TargetedResolver};
     use commonware_runtime::{
         Clock, Metrics, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
         utils::reschedule,
@@ -229,17 +229,21 @@ mod tests {
         }
     }
 
-    type CodingFetchRecord = Fetch<handler::Key<TestCommitment>, handler::Annotation>;
+    type CodingFetchRecord =
+        Fetch<handler::Key<TestCommitment>, handler::Annotation, handler::Response<TestCommitment>>;
     type CodingTargetedFetch = (handler::Key<TestCommitment>, NonEmptyVec<K>);
 
     /// A resolver that records each fetch invocation; other methods are no-ops.
-    #[derive(Clone, Default)]
+    ///
+    /// `_keepalive` keeps the actor's Producer receiver connected.
+    #[derive(Clone)]
     struct RecordingResolver {
         fetches: Arc<Mutex<Vec<CodingFetchRecord>>>,
+        routes: Arc<Mutex<Vec<CodingFetchRecord>>>,
         targeted: Arc<Mutex<Vec<CodingTargetedFetch>>>,
         auto_delivery: Arc<Mutex<Option<Bytes>>>,
         delivery_responses: Arc<Mutex<Vec<oneshot::Receiver<bool>>>>,
-        sender: Option<mailbox::Sender<handler::Message<TestCommitment>>>,
+        _keepalive: mailbox::Sender<handler::Message<TestCommitment>>,
     }
 
     impl RecordingResolver {
@@ -249,32 +253,42 @@ mod tests {
                 handler::Receiver::new(receiver),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
+                    routes: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
                     auto_delivery: Arc::new(Mutex::new(None)),
                     delivery_responses: Arc::new(Mutex::new(Vec::new())),
-                    sender: Some(sender),
+                    _keepalive: sender,
                 },
             )
         }
 
         fn record_fetch(&self, fetch: CodingFetchRecord) {
             self.fetches.lock().push(fetch.clone());
+            self.record_route(fetch);
+        }
+
+        fn record_route(&self, fetch: CodingFetchRecord) {
+            self.routes.lock().push(fetch.clone());
             let Some(value) = self.auto_delivery.lock().take() else {
                 return;
             };
-            let Some(sender) = &self.sender else {
-                return;
-            };
-            let (response, response_rx) = oneshot::channel();
+            let (verdict, response_rx) = oneshot::channel();
             self.delivery_responses.lock().push(response_rx);
-            let _ = sender.enqueue(handler::Message::Deliver {
-                delivery: Delivery {
-                    key: fetch.key,
-                    subscribers: NonEmptyVec::new((fetch.subscriber, tracing::Span::none())),
-                },
-                value,
-                response,
-            });
+            fetch
+                .response
+                .try_send(handler::Response {
+                    delivery: Delivery {
+                        key: fetch.key,
+                        subscribers: NonEmptyVec::new(Subscriber {
+                            subscriber: fetch.subscriber,
+                            response: fetch.response.clone(),
+                            span: fetch.span,
+                        }),
+                    },
+                    value,
+                    verdict,
+                })
+                .expect("recording resolver response route closed");
         }
 
         fn respond_to_next_fetch(&self, value: Bytes) {
@@ -286,24 +300,23 @@ mod tests {
         }
 
         async fn deliver(&self, fetch: CodingFetchRecord, value: Bytes) -> bool {
-            let (response, receiver) = oneshot::channel();
-            assert!(
-                self.sender
-                    .as_ref()
-                    .expect("resolver sender missing")
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: fetch.key,
-                            subscribers: NonEmptyVec::new((
-                                fetch.subscriber,
-                                tracing::Span::none()
-                            )),
-                        },
-                        value,
-                        response,
-                    })
-                    .accepted()
-            );
+            let (verdict, receiver) = oneshot::channel();
+            fetch
+                .response
+                .send(handler::Response {
+                    delivery: Delivery {
+                        key: fetch.key,
+                        subscribers: NonEmptyVec::new(Subscriber {
+                            subscriber: fetch.subscriber,
+                            response: fetch.response.clone(),
+                            span: fetch.span,
+                        }),
+                    },
+                    value,
+                    verdict,
+                })
+                .await
+                .expect("recording resolver response route closed");
             receiver.await.expect("delivery response missing")
         }
 
@@ -328,10 +341,11 @@ mod tests {
     impl Resolver for RecordingResolver {
         type Key = handler::Key<TestCommitment>;
         type Subscriber = handler::Annotation;
+        type Response = handler::Response<TestCommitment>;
 
         fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             self.record_fetch(fetch.into());
             Feedback::Ok
@@ -339,18 +353,11 @@ mod tests {
 
         fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             for fetch in fetches {
                 self.record_fetch(fetch.into());
             }
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
             Feedback::Ok
         }
     }
@@ -360,10 +367,12 @@ mod tests {
 
         fn fetch_targeted(
             &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback {
-            self.targeted.lock().push((fetch.into().key, targets));
+            let fetch = fetch.into();
+            self.targeted.lock().push((fetch.key, targets));
+            self.record_route(fetch);
             Feedback::Ok
         }
 
@@ -372,13 +381,35 @@ mod tests {
             fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         {
             let mut targeted = self.targeted.lock();
             for (fetch, targets) in fetches {
-                targeted.push((fetch.into().key, targets));
+                let fetch = fetch.into();
+                targeted.push((fetch.key, targets));
+                self.record_route(fetch);
             }
             Feedback::Ok
+        }
+    }
+
+    async fn wait_for_coding_fetch(
+        context: &deterministic::Context,
+        resolver: &RecordingResolver,
+        label: &str,
+        mut matches: impl FnMut(&CodingFetchRecord) -> bool,
+    ) -> CodingFetchRecord {
+        let start = context.current();
+        loop {
+            if let Some(fetch) = resolver.fetches().into_iter().find(&mut matches) {
+                return fetch;
+            }
+            assert!(
+                context.current().duration_since(start).unwrap_or_default()
+                    <= Duration::from_secs(5),
+                "{label} did not arrive"
+            );
+            context.sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -809,11 +840,6 @@ mod tests {
                 buffer,
             )
             .await;
-            let resolver_tx = resolver
-                .sender
-                .clone()
-                .expect("recording resolver should keep its sender");
-
             let genesis = genesis_block();
             let round = Round::new(Epoch::zero(), View::new(1));
             let height = Height::new(1);
@@ -832,24 +858,29 @@ mod tests {
             };
             let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
 
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver_tx
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Notarized { round },
-                            subscribers: NonEmptyVec::new((
-                                handler::Annotation::Notarization { round },
-                                tracing::Span::none(),
-                            )),
+            marshal.hint_notarized(round, notarization.proposal.payload);
+            while !resolver.fetches().iter().any(|fetch| {
+                matches!(
+                    (&fetch.key, &fetch.subscriber),
+                    (
+                        handler::Key::Notarized { round: key_round },
+                        handler::Annotation::Notarization {
+                            round: subscriber_round,
                         },
-                        value: (notarization, dishonest_block).encode(),
-                        response,
-                    })
-                    .accepted()
-            );
+                    ) if *key_round == round && *subscriber_round == round
+                )
+            }) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let fetch = resolver
+                .fetches()
+                .into_iter()
+                .find(|fetch| matches!(fetch.key, handler::Key::Notarized { round: found } if found == round))
+                .expect("notarized fetch missing");
             assert!(
-                !response_rx.await.unwrap(),
+                !resolver
+                    .deliver(fetch, (notarization, dishonest_block).encode())
+                    .await,
                 "notarized delivery should reject a dishonest coding config"
             );
 
@@ -3769,50 +3800,82 @@ mod tests {
                 schemes,
                 ..
             } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let (mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
+            let (mut mailbox, resolver, _actor_handle) = start_coding_actor_with_recording(
                 context.child("validator"),
                 "coalesced-block-delivery",
                 ConstantProvider::new(schemes[0].clone()),
                 RecordingCodingBuffer::default(),
             )
             .await;
-            let resolver_tx = resolver
-                .sender
-                .clone()
-                .expect("recording resolver should keep its sender");
 
-            let (_, candidate) = missing_candidate(participants[0].clone());
+            let (candidate_context, candidate) = missing_candidate(participants[0].clone());
             let commitment = candidate.commitment();
             let height = Height::new(1);
-            let subscription =
-                mailbox.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
-            context.sleep(Duration::from_millis(100)).await;
+            let subscription = mailbox.subscribe_by_commitment(
+                commitment,
+                core::CommitmentFallback::FetchByCommitment { height },
+            );
+            let untrusted =
+                wait_for_coding_fetch(&context, &resolver, "untrusted block fetch", |fetch| {
+                    matches!(
+                        (&fetch.key, &fetch.subscriber),
+                        (
+                            handler::Key::Block(requested),
+                            handler::Annotation::Untrusted {
+                                height: requested_height,
+                            },
+                        ) if *requested == commitment && *requested_height == height
+                    )
+                })
+                .await;
+
+            let finalization = CodingHarness::make_finalization(
+                Proposal::new(candidate_context.round, View::zero(), commitment),
+                &schemes,
+                QUORUM,
+            );
+            CodingHarness::report_finalization(&mut mailbox, finalization).await;
+            let finalized =
+                wait_for_coding_fetch(&context, &resolver, "finalized block fetch", |fetch| {
+                    matches!(
+                        (&fetch.key, &fetch.subscriber),
+                        (
+                            handler::Key::Block(requested),
+                            handler::Annotation::Finalized(handler::Finalized::ByRound {
+                                round,
+                            }),
+                        ) if *requested == commitment && *round == candidate_context.round
+                    )
+                })
+                .await;
 
             // One key can carry an ancestry subscriber without certification
             // evidence and a finalized-chain subscriber at once. The finalized
             // subscriber alone binds the coding root, so the shared delivery
             // decodes without recomputing it and lands in the finalized archive.
-            let mut subscribers = NonEmptyVec::new((
-                handler::Annotation::Untrusted { height },
-                tracing::Span::none(),
-            ));
-            subscribers.push((
-                handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
-                tracing::Span::none(),
-            ));
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver_tx
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: handler::Key::Block(commitment),
-                            subscribers,
-                        },
-                        value: candidate.encode(),
-                        response,
-                    })
-                    .accepted()
-            );
+            let response_route = untrusted.response.clone();
+            let mut subscribers = NonEmptyVec::new(Subscriber {
+                subscriber: untrusted.subscriber,
+                response: untrusted.response,
+                span: untrusted.span,
+            });
+            subscribers.push(Subscriber {
+                subscriber: finalized.subscriber,
+                response: finalized.response,
+                span: finalized.span,
+            });
+            let (verdict, response_rx) = oneshot::channel();
+            response_route
+                .send(handler::Response {
+                    delivery: Delivery {
+                        key: handler::Key::Block(commitment),
+                        subscribers,
+                    },
+                    value: candidate.encode(),
+                    verdict,
+                })
+                .await
+                .expect("coalesced response route closed");
             assert!(
                 response_rx.await.unwrap(),
                 "coalesced delivery should validate"
@@ -4289,26 +4352,7 @@ mod tests {
             let _ = mailbox.get_processed_height().await;
 
             // The original fetch can still arrive, but must not retain older ancestry evidence
-            let (response, response_rx) = oneshot::channel();
-            assert!(
-                resolver
-                    .sender
-                    .as_ref()
-                    .expect("resolver sender missing")
-                    .enqueue(handler::Message::Deliver {
-                        delivery: Delivery {
-                            key: fetch.key,
-                            subscribers: NonEmptyVec::new((
-                                fetch.subscriber,
-                                tracing::Span::none()
-                            )),
-                        },
-                        value: parent.encode(),
-                        response,
-                    })
-                    .accepted()
-            );
-            assert!(response_rx.await.expect("delivery response missing"));
+            assert!(resolver.deliver(fetch, parent.encode()).await);
             subscriptions.push(mailbox.subscribe_by_commitment(
                 grandparent.commitment(),
                 core::CommitmentFallback::FetchByCommitment {

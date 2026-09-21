@@ -1,11 +1,14 @@
 use crate::types::{Height, Round};
 use bytes::{BufMut, Bytes};
-use commonware_actor::mailbox::{self, Overflow, Policy, Sender};
+use commonware_actor::mailbox::{self, Policy, Sender};
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::Digest;
-use commonware_resolver::{Consumer, Delivery, Fetch as ResolverFetch, p2p::Producer};
+use commonware_resolver::{Fetch as ResolverFetch, Response as ResolverResponse, p2p::Producer};
 use commonware_runtime::Metrics;
-use commonware_utils::{Span, channel::oneshot};
+use commonware_utils::{
+    Span,
+    channel::{mpsc, oneshot},
+};
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -20,18 +23,8 @@ const BLOCK_REQUEST: u8 = 0;
 const FINALIZED_REQUEST: u8 = 1;
 const NOTARIZED_REQUEST: u8 = 2;
 
-/// Messages sent from the resolver's [Consumer]/[Producer] implementation
-/// to the marshal actor.
+/// Messages sent from the resolver's [Producer] implementation to the marshal actor.
 pub(crate) enum Message<D: Digest> {
-    /// A request to deliver a value for a given key.
-    Deliver {
-        /// The delivery metadata attached to the resolved value.
-        delivery: Delivery<Key<D>, Annotation>,
-        /// The value being delivered.
-        value: Bytes,
-        /// A channel to send the result of the delivery.
-        response: oneshot::Sender<bool>,
-    },
     /// A request to produce a value for a given key.
     Produce {
         /// The key of the value to produce.
@@ -41,70 +34,19 @@ pub(crate) enum Message<D: Digest> {
     },
 }
 
-impl<D: Digest> Message<D> {
-    /// Returns true if the requester has stopped waiting for this response.
-    pub(crate) fn response_closed(&self) -> bool {
-        match self {
-            Self::Deliver { response, .. } => response.is_closed(),
-            Self::Produce { response, .. } => response.is_closed(),
-        }
-    }
-}
-
-/// Deliveries retained while the ready queue is full.
-pub(crate) struct Pending<D: Digest>(VecDeque<Message<D>>);
-
-impl<D: Digest> Default for Pending<D> {
-    fn default() -> Self {
-        Self(VecDeque::new())
-    }
-}
-
-impl<D: Digest> Overflow<Message<D>> for Pending<D> {
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    fn drain<F>(&mut self, mut push: F)
-    where
-        F: FnMut(Message<D>) -> Option<Message<D>>,
-    {
-        while let Some(message) = self.0.pop_front() {
-            if message.response_closed() {
-                continue;
-            }
-
-            if let Some(message) = push(message) {
-                self.0.push_front(message);
-                break;
-            }
-        }
-    }
-}
-
 impl<D: Digest> Policy for Message<D> {
-    type Overflow = Pending<D>;
+    type Overflow = VecDeque<Self>;
 
-    fn handle(overflow: &mut Self::Overflow, message: Self) {
-        // Drop produce requests so the serve backlog stays bounded by the ready
-        // queue. We prefer handling our own responses over serving peers, who can
-        // ask a less loaded peer instead.
-        if matches!(message, Self::Produce { .. }) {
-            return;
-        }
-
-        // Retain deliveries that still have a waiting requester.
-        if message.response_closed() {
-            return;
-        }
-        overflow.0.push_back(message);
+    fn handle(_overflow: &mut Self::Overflow, _message: Self) {
+        // The bounded ready queue limits peer-serving work. A peer can ask
+        // another provider when this actor is busy.
     }
 }
 
 /// A handler that forwards requests from the resolver to the marshal actor.
 ///
-/// This struct implements the [Consumer] and [Producer] traits from the
-/// resolver, and acts as a bridge to the main actor loop.
+/// This struct implements the resolver [Producer] and forwards peer requests
+/// to the main actor loop.
 #[derive(Clone)]
 pub struct Handler<D: Digest> {
     sender: Sender<Message<D>>,
@@ -142,27 +84,6 @@ impl<D: Digest> Receiver<D> {
     }
 }
 
-impl<D: Digest> Consumer for Handler<D> {
-    type Key = Key<D>;
-    type Value = Bytes;
-    type Subscriber = Annotation;
-    type Outcome = bool;
-
-    fn deliver(
-        &mut self,
-        delivery: Delivery<Self::Key, Self::Subscriber>,
-        value: Self::Value,
-    ) -> oneshot::Receiver<bool> {
-        let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::Deliver {
-            delivery,
-            value,
-            response,
-        });
-        receiver
-    }
-}
-
 impl<D: Digest> Producer for Handler<D> {
     type Key = Key<D>;
 
@@ -172,6 +93,9 @@ impl<D: Digest> Producer for Handler<D> {
         receiver
     }
 }
+
+/// A resolved response routed to the marshal actor that owns its demand.
+pub(crate) type Response<D> = ResolverResponse<Key<D>, Annotation, Bytes, bool>;
 
 /// Local processing annotation for a resolved key.
 ///
@@ -356,8 +280,8 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    pub(crate) fn into_inner(self) -> ResolverFetch<Key<D>, Annotation> {
-        let (key, subscriber) = match self.kind {
+    pub(crate) const fn parts(&self) -> (Key<D>, Annotation) {
+        match self.kind {
             RequestKind::Notarized { round } => {
                 (Key::Notarized { round }, Annotation::Notarization { round })
             }
@@ -379,30 +303,31 @@ impl<D: Digest> Request<D> {
                 Key::Block(commitment),
                 Annotation::Finalized(Finalized::ByRound { round }),
             ),
-        };
+        }
+    }
+
+    pub(crate) fn into_inner(
+        self,
+        response: mpsc::Sender<Response<D>>,
+    ) -> ResolverFetch<Key<D>, Annotation, Response<D>> {
+        let (key, subscriber) = self.parts();
         let span = info_span!("marshal.resolver.fetch", key = %key);
         ResolverFetch {
             key,
             subscriber,
+            response,
             span,
         }
     }
 }
 
-impl<D: Digest> From<Request<D>> for ResolverFetch<Key<D>, Annotation> {
-    fn from(fetch: Request<D>) -> Self {
-        fetch.into_inner()
-    }
-}
-
-/// Returns a predicate that keeps resolver requests above the processed height floor.
-///
-/// Unrelated requests are retained. Height-bound requests are pruned once the
-/// processed height reaches them.
+/// Returns whether a resolver request is above the processed height floor.
 pub(crate) fn above_height_floor<D: Digest>(
+    request: &Key<D>,
+    annotation: &Annotation,
     height: Height,
-) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
-    move |request, annotation| match (request, annotation) {
+) -> bool {
+    match (request, annotation) {
         (Key::Finalized { height: requested }, _) => *requested > height,
         (
             Key::Block(_),
@@ -414,14 +339,13 @@ pub(crate) fn above_height_floor<D: Digest>(
     }
 }
 
-/// Returns a predicate that keeps resolver requests above the processed round floor.
-///
-/// Unrelated requests are retained. Round-bound requests are pruned once the
-/// processed round reaches them.
+/// Returns whether a resolver request is above the processed round floor.
 pub(crate) fn above_round_floor<D: Digest>(
+    request: &Key<D>,
+    annotation: &Annotation,
     round: Round,
-) -> impl Fn(&Key<D>, &Annotation) -> bool + Send + 'static {
-    move |request, annotation| match (request, annotation) {
+) -> bool {
+    match (request, annotation) {
         (Key::Notarized { round: requested }, _) => *requested > round,
         (Key::Block(_), Annotation::Finalized(Finalized::ByRound { round: requested })) => {
             *requested > round
@@ -561,32 +485,13 @@ mod tests {
         Hasher as _,
         sha256::{Digest as Sha256Digest, Sha256},
     };
-    use commonware_utils::vec::NonEmptyVec;
     use std::collections::BTreeSet;
 
     type D = Sha256Digest;
 
     #[test]
-    fn handle_retains_open_deliveries_only() {
-        let mut overflow = Pending::<D>::default();
-        let deliver = |height: u64, response| Message::Deliver {
-            delivery: Delivery {
-                key: Key::Finalized {
-                    height: Height::new(height),
-                },
-                subscribers: NonEmptyVec::new((
-                    Annotation::Finalized(Finalized::ByHeight {
-                        height: Height::new(height),
-                    }),
-                    tracing::Span::none(),
-                )),
-            },
-            value: Bytes::new(),
-            response,
-        };
-
-        // An overflowed produce request is dropped and its requester sees the
-        // closed response.
+    fn handle_drops_overflowed_produce_request() {
+        let mut overflow = VecDeque::<Message<D>>::new();
         let (response, mut produce) = oneshot::channel();
         Message::handle(
             &mut overflow,
@@ -601,30 +506,7 @@ mod tests {
             produce.try_recv(),
             Err(oneshot::error::TryRecvError::Closed)
         ));
-
-        // Deliveries are retained, and drain skips one whose requester left.
-        let (response, closed) = oneshot::channel();
-        Message::handle(&mut overflow, deliver(2, response));
-        let (response, _open) = oneshot::channel();
-        Message::handle(&mut overflow, deliver(3, response));
-        drop(closed);
-
-        let mut messages = Vec::new();
-        Overflow::drain(&mut overflow, |message| {
-            messages.push(message);
-            None
-        });
-        assert_eq!(messages.len(), 1);
-        assert!(matches!(
-            messages.pop(),
-            Some(Message::Deliver {
-                delivery: Delivery {
-                    key: Key::Finalized { height },
-                    ..
-                },
-                ..
-            }) if height == Height::new(3)
-        ));
+        assert!(overflow.is_empty());
     }
 
     #[test]
@@ -754,34 +636,36 @@ mod tests {
             height: Height::new(100),
         };
 
-        let predicate = above_height_floor(floor);
-        assert!(predicate(
+        assert!(above_height_floor(
             &higher_finalized,
             &Annotation::Finalized(Finalized::ByHeight {
                 height: Height::new(200),
-            })
+            }),
+            floor,
         ));
-        assert!(predicate(
+        assert!(above_height_floor(
             &notarized,
             &Annotation::Notarization {
                 round: Round::new(Epoch::new(333), View::new(150)),
-            }
+            },
+            floor,
         ));
-        assert!(predicate(&block, &fresh_certified));
-        assert!(predicate(&block, &fresh_untrusted));
+        assert!(above_height_floor(&block, &fresh_certified, floor));
+        assert!(above_height_floor(&block, &fresh_untrusted, floor));
 
         let same_height = Key::<D>::Finalized {
             height: Height::new(100),
         };
-        assert!(!predicate(
+        assert!(!above_height_floor(
             &same_height,
             &Annotation::Finalized(Finalized::ByHeight {
                 height: Height::new(100),
-            })
+            }),
+            floor,
         ));
-        assert!(!predicate(&block, &stale_finalized));
-        assert!(!predicate(&block, &stale_certified));
-        assert!(!predicate(&block, &stale_untrusted));
+        assert!(!above_height_floor(&block, &stale_finalized, floor));
+        assert!(!above_height_floor(&block, &stale_certified, floor));
+        assert!(!above_height_floor(&block, &stale_untrusted, floor));
     }
 
     #[test]
@@ -798,36 +682,40 @@ mod tests {
             height: Height::new(100),
         };
 
-        let predicate = above_round_floor(floor);
-        assert!(predicate(
+        assert!(above_round_floor(
             &higher_notarized,
             &Annotation::Notarization {
                 round: Round::new(Epoch::new(1), View::new(11)),
-            }
+            },
+            floor,
         ));
-        assert!(predicate(
+        assert!(above_round_floor(
             &finalized,
             &Annotation::Finalized(Finalized::ByHeight {
                 height: Height::new(100),
-            })
+            }),
+            floor,
         ));
-        assert!(predicate(
+        assert!(above_round_floor(
             &block,
             &Annotation::Finalized(Finalized::ByRound {
                 round: Round::new(Epoch::new(1), View::new(11)),
-            })
+            }),
+            floor,
         ));
-        assert!(!predicate(
+        assert!(!above_round_floor(
             &same_notarized,
             &Annotation::Notarization {
                 round: Round::new(Epoch::new(1), View::new(10)),
-            }
+            },
+            floor,
         ));
-        assert!(!predicate(
+        assert!(!above_round_floor(
             &block,
             &Annotation::Finalized(Finalized::ByRound {
                 round: Round::new(Epoch::new(1), View::new(10)),
-            })
+            }),
+            floor,
         ));
     }
 

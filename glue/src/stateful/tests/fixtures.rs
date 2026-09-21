@@ -1,6 +1,7 @@
 //! Shared marshal fixtures for stateful actor tests.
 
 use super::mocks::{TestBlock, TestScheme, TestVariant};
+use bytes::Bytes;
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Heightable as _, Reporter,
@@ -78,25 +79,19 @@ pub(crate) struct IgnoreResolver;
 impl Resolver for IgnoreResolver {
     type Key = handler::Key<Sha256Digest>;
     type Subscriber = handler::Annotation;
+    type Response = commonware_resolver::Response<Self::Key, Self::Subscriber, Bytes, bool>;
 
     fn fetch<F>(&mut self, _key: F) -> Feedback
     where
-        F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
         Feedback::Ok
     }
 
     fn fetch_all<F>(&mut self, _keys: Vec<F>) -> Feedback
     where
-        F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
-        Feedback::Ok
-    }
-
-    fn retain(
-        &mut self,
-        _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-    ) -> Feedback {
         Feedback::Ok
     }
 }
@@ -106,7 +101,7 @@ impl TargetedResolver for IgnoreResolver {
 
     fn fetch_targeted(
         &mut self,
-        _fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        _fetch: impl Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         _targets: NonEmptyVec<Self::PublicKey>,
     ) -> Feedback {
         Feedback::Ok
@@ -114,7 +109,7 @@ impl TargetedResolver for IgnoreResolver {
 
     fn fetch_all_targeted<F>(&mut self, _keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
     where
-        F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
         Feedback::Ok
     }

@@ -4,7 +4,7 @@ use crate::marshal::resolver::handler::{self, Annotation, Key, Receiver as Handl
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
-use commonware_resolver::p2p;
+use commonware_resolver::{ChannelConsumer, p2p};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
 use rand_core::Rng;
 use std::{num::NonZeroUsize, time::Duration};
@@ -44,7 +44,7 @@ where
 }
 
 /// Mailbox for issuing marshal backfill requests.
-pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
+pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation, handler::Response<D>>;
 
 /// Initialize a P2P resolver.
 pub fn init<E, C, B, D, S, R, P>(
@@ -68,7 +68,7 @@ where
         p2p::Config {
             peer_provider: config.peer_provider,
             blocker: config.blocker,
-            consumer: handler.clone(),
+            consumer: ChannelConsumer::default(),
             producer: handler,
             mailbox_size: config.mailbox_size,
             me: Some(config.public_key),

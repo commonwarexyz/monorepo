@@ -1,10 +1,9 @@
-use super::Variant;
+use super::{Variant, actor::ResolverVerdict};
 use crate::simplex::{
     scheme::Scheme,
     types::{Finalization, Notarization},
 };
 use commonware_cryptography::certificate::{Scheme as CertificateScheme, Scoped};
-use commonware_utils::channel::oneshot;
 
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
 ///
@@ -18,13 +17,13 @@ where
         scoped: Scoped<S>,
         notarization: Notarization<S, V::Commitment>,
         block: V::Block,
-        response: oneshot::Sender<bool>,
+        verdict: ResolverVerdict<V>,
     },
     Finalized {
         scoped: Scoped<S>,
         finalization: Finalization<S, V::Commitment>,
         block: V::ApplicationBlock,
-        response: oneshot::Sender<bool>,
+        verdict: ResolverVerdict<V>,
     },
 }
 
@@ -41,8 +40,8 @@ where
 
     pub(super) fn response_closed(&self) -> bool {
         match self {
-            Self::Notarized { response, .. } | Self::Finalized { response, .. } => {
-                response.is_closed()
+            Self::Notarized { verdict, .. } | Self::Finalized { verdict, .. } => {
+                verdict.response_closed()
             }
         }
     }

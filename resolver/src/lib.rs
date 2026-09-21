@@ -8,108 +8,128 @@
 commonware_macros::stability_scope!(BETA {
     use commonware_actor::Feedback;
     use commonware_cryptography::PublicKey;
-    use commonware_utils::{Span, channel::oneshot, vec::NonEmptyVec};
-    use core::cmp::Ordering;
+    use commonware_utils::{Span, channel::mpsc, vec::NonEmptyVec};
+    use std::{fmt, future::Future, time::Duration};
 
     pub mod delivery;
     mod ingress;
     pub mod opaque;
     pub mod p2p;
     mod subscribers;
+    mod response;
 
-    /// A key to fetch data for a subscriber.
-    #[derive(Clone, Debug)]
-    pub struct Fetch<K, S = ()> {
+    pub use response::{ChannelConsumer, Response};
+
+    // Idle sources and consumers need not produce another event after callers leave.
+    pub(crate) const RECLAIM_INTERVAL: Duration = Duration::from_secs(1);
+
+    /// A fetch whose demand lasts while its response receiver remains open.
+    pub struct Fetch<K, S, R> {
         /// The peer-visible key.
         pub key: K,
-        /// Subscriber attached to the key.
+        /// Local metadata describing the demand.
         pub subscriber: S,
+        /// Channel through which the consumer responds to this demand.
+        pub response: mpsc::Sender<R>,
         /// Trace span carried from issuance to delivery.
         pub span: tracing::Span,
     }
 
-    impl<K: PartialEq, S: PartialEq> PartialEq for Fetch<K, S> {
-        fn eq(&self, other: &Self) -> bool {
-            self.key == other.key && self.subscriber == other.subscriber
-        }
-    }
-
-    impl<K: Eq, S: Eq> Eq for Fetch<K, S> {}
-
-    impl<K: PartialOrd, S: PartialOrd> PartialOrd for Fetch<K, S> {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            match self.key.partial_cmp(&other.key)? {
-                Ordering::Equal => self.subscriber.partial_cmp(&other.subscriber),
-                ordering => Some(ordering),
-            }
-        }
-    }
-
-    impl<K: Ord, S: Ord> Ord for Fetch<K, S> {
-        fn cmp(&self, other: &Self) -> Ordering {
-            self.key
-                .cmp(&other.key)
-                .then_with(|| self.subscriber.cmp(&other.subscriber))
-        }
-    }
-
-    impl<K, S: Default> From<K> for Fetch<K, S> {
-        fn from(key: K) -> Self {
+    impl<K: Clone, S: Clone, R> Clone for Fetch<K, S, R> {
+        fn clone(&self) -> Self {
             Self {
-                key,
-                subscriber: S::default(),
-                span: tracing::Span::none(),
+                key: self.key.clone(),
+                subscriber: self.subscriber.clone(),
+                response: self.response.clone(),
+                span: self.span.clone(),
             }
         }
     }
 
-    /// Data delivered for a resolved fetch.
-    #[derive(Clone, Debug)]
-    pub struct Delivery<K, S> {
-        /// The peer-visible key used to validate the response.
-        pub key: K,
-        /// Subscribers that were still retained when the response arrived, each
-        /// paired with the trace span of the fetch that requested it.
-        pub subscribers: NonEmptyVec<(S, tracing::Span)>,
+    impl<K: fmt::Debug, S: fmt::Debug, R> fmt::Debug for Fetch<K, S, R> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Fetch")
+                .field("key", &self.key)
+                .field("subscriber", &self.subscriber)
+                .field("response", &self.response)
+                .finish_non_exhaustive()
+        }
     }
 
-    impl<K: PartialEq, S: PartialEq> PartialEq for Delivery<K, S> {
+    impl<K: PartialEq, S: PartialEq, R> PartialEq for Fetch<K, S, R> {
         fn eq(&self, other: &Self) -> bool {
             self.key == other.key
-                && self.subscribers.len() == other.subscribers.len()
-                && self
-                    .subscribers
-                    .iter()
-                    .zip(other.subscribers.iter())
-                    .all(|((a, _), (b, _))| a == b)
+                && self.subscriber == other.subscriber
+                && self.response.same_channel(&other.response)
         }
     }
+    impl<K: Eq, S: Eq, R> Eq for Fetch<K, S, R> {}
 
-    impl<K: Eq, S: Eq> Eq for Delivery<K, S> {}
+    /// A response route and its local demand metadata.
+    ///
+    /// Equal metadata on different channels identifies independent callers.
+    pub struct Subscriber<S, R> {
+        /// Local metadata describing the demand.
+        pub subscriber: S,
+        /// Channel through which the consumer responds.
+        pub response: mpsc::Sender<R>,
+        /// Trace span of the fetch that introduced this demand.
+        pub span: tracing::Span,
+    }
 
-    impl<K: PartialOrd, S: PartialOrd> PartialOrd for Delivery<K, S> {
-        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-            match self.key.partial_cmp(&other.key)? {
-                Ordering::Equal => self
-                    .subscribers
-                    .iter()
-                    .map(|(subscriber, _)| subscriber)
-                    .partial_cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber)),
-                ordering => Some(ordering),
+    impl<S: Clone, R> Clone for Subscriber<S, R> {
+        fn clone(&self) -> Self {
+            Self {
+                subscriber: self.subscriber.clone(),
+                response: self.response.clone(),
+                span: self.span.clone(),
             }
         }
     }
-
-    impl<K: Ord, S: Ord> Ord for Delivery<K, S> {
-        fn cmp(&self, other: &Self) -> Ordering {
-            self.key.cmp(&other.key).then_with(|| {
-                self.subscribers
-                    .iter()
-                    .map(|(subscriber, _)| subscriber)
-                    .cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber))
-            })
+    impl<S: fmt::Debug, R> fmt::Debug for Subscriber<S, R> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Subscriber")
+                .field("subscriber", &self.subscriber)
+                .field("response", &self.response)
+                .finish_non_exhaustive()
         }
     }
+    impl<S: PartialEq, R> PartialEq for Subscriber<S, R> {
+        fn eq(&self, other: &Self) -> bool {
+            self.subscriber == other.subscriber && self.response.same_channel(&other.response)
+        }
+    }
+    impl<S: Eq, R> Eq for Subscriber<S, R> {}
+
+    /// The exact response routes included in one consumer delivery.
+    pub struct Delivery<K, S, R> {
+        /// The peer-visible key used to validate the response.
+        pub key: K,
+        /// Demand that was open when this delivery began.
+        pub subscribers: NonEmptyVec<Subscriber<S, R>>,
+    }
+    impl<K: Clone, S: Clone, R> Clone for Delivery<K, S, R> {
+        fn clone(&self) -> Self {
+            Self {
+                key: self.key.clone(),
+                subscribers: self.subscribers.clone(),
+            }
+        }
+    }
+    impl<K: fmt::Debug, S: fmt::Debug, R> fmt::Debug for Delivery<K, S, R> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("Delivery")
+                .field("key", &self.key)
+                .field("subscribers", &self.subscribers)
+                .finish()
+        }
+    }
+    impl<K: PartialEq, S: PartialEq, R> PartialEq for Delivery<K, S, R> {
+        fn eq(&self, other: &Self) -> bool {
+            self.key == other.key && self.subscribers == other.subscribers
+        }
+    }
+    impl<K: Eq, S: Eq, R> Eq for Delivery<K, S, R> {}
 
     /// Consumer disposition for a delivered response.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,6 +173,9 @@ commonware_macros::stability_scope!(BETA {
         /// Type used to track subscribers on fetch keys.
         type Subscriber: Clone + Eq + Send + 'static;
 
+        /// Response sent to the caller.
+        type Response: Send + 'static;
+
         /// Delivery disposition returned after validation.
         ///
         /// Consumers that only distinguish valid and invalid data may use
@@ -160,74 +183,46 @@ commonware_macros::stability_scope!(BETA {
         /// [`crate::Outcome::Invalid`].
         type Outcome: Into<crate::Outcome> + Send + 'static;
 
-        /// Deliver data to the consumer.
+        /// Deliver one response for the supplied demand snapshot.
         ///
-        /// Returns a receiver that reports whether the response completes the
-        /// delivery, is invalid, is valid but leaves subscribers unresolved, or
-        /// can be ignored because the key is no longer needed.
+        /// The resolver may drop the returned future when all delivered receivers
+        /// close. A surviving later caller can receive the cached value in a new
+        /// delivery. Returning `None` leaves this response unjudged and retires
+        /// only the supplied snapshot, without penalizing its source.
         ///
-        /// The returned receiver may be dropped before completion if the application
-        /// cancels the fetch via [`Resolver::retain`]. When this happens, the
-        /// resolver discards the validation result.
-        ///
-        /// If the consumer drops the sender without reporting a verdict, the
-        /// response is handed to the remaining subscribers, or the key is retired
-        /// without penalizing its source when none remain. The subscribers in the
-        /// dropped delivery are not retried.
-        ///
-        /// Implementations of [`Resolver`] must only invoke `deliver` for keys that were
-        /// previously requested via [`Resolver::fetch`] (or [`TargetedResolver`] variants).
-        ///
-        /// `delivery` contains the peer-visible key and the retained subscribers
-        /// for the fetch. Subscribers decide who should observe a valid response;
-        /// they do not define peer validity.
+        /// Only previously requested keys may be delivered. Subscribers describe
+        /// local demand. Validity is determined by the peer-visible key.
         fn deliver(
             &mut self,
-            delivery: Delivery<Self::Key, Self::Subscriber>,
+            delivery: Delivery<Self::Key, Self::Subscriber, Self::Response>,
             value: Self::Value,
-        ) -> oneshot::Receiver<Self::Outcome>;
+        ) -> impl Future<Output = Option<Self::Outcome>> + Send + 'static;
     }
 
-    /// Responsible for fetching data and notifying a `Consumer`.
+    /// Fetches data while the caller keeps its response receiver open.
+    ///
+    /// Closing a receiver cancels only its request. Cancellation is asynchronous,
+    /// so a fetch attempt may already be in progress when it takes effect.
     pub trait Resolver: Clone + Send + 'static {
         /// Type used to key data requested from peers.
         type Key: Span;
-
-        /// Type used to track subscribers on fetch keys.
-        ///
-        /// Implementations that also own the [`Consumer`] should supply subscribers to
-        /// [`Consumer::deliver`] when a fetch resolves.
+        /// Local demand metadata.
         type Subscriber: Clone + Eq + Send + 'static;
+        /// Response produced by the consumer.
+        type Response: Send + 'static;
 
-        /// Initiate a fetch.
+        /// Initiate a fetch. Reusing the same channel and metadata updates existing demand.
         ///
-        /// The resolver fetches and delivers the key. The subscriber is
-        /// retained and supplied to [`Consumer::deliver`] when the fetch resolves.
-        /// If multiple subscribers are attached to the same key,
-        /// the fetch is retained as long as at least one subscriber satisfies the
-        /// latest [`retain`](Self::retain) predicate.
-        ///
-        /// Passing a bare key is supported when `Subscriber: Default`.
-        fn fetch<F>(&mut self, key: F) -> Feedback
+        /// Keep the receiver open through rejected candidates until the request is
+        /// satisfied or no longer needed. The feedback reports mailbox admission.
+        fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send;
 
-        /// Initiate fetches for a batch of keys.
-        fn fetch_all<F>(&mut self, keys: Vec<F>) -> Feedback
+        /// Initiate a batch of fetches.
+        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
-
-        /// Retain only fetch subscribers satisfying the predicate.
-        ///
-        /// The predicate receives the peer-visible key and subscriber.
-        ///
-        /// Fetches not retained are canceled. If response validation is in
-        /// progress, cancellation may drop the [`Consumer::deliver`] future
-        /// before it reports whether the data was valid.
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback;
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send;
     }
 
     /// Extension for resolvers that accept target peer hints.
@@ -241,7 +236,7 @@ commonware_macros::stability_scope!(BETA {
         /// merge with existing in-progress fetches, or are discarded.
         fn fetch_targeted(
             &mut self,
-            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
             targets: NonEmptyVec<Self::PublicKey>,
         ) -> Feedback;
 
@@ -253,6 +248,6 @@ commonware_macros::stability_scope!(BETA {
             keys: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
-            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
+            F: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send;
     }
 });

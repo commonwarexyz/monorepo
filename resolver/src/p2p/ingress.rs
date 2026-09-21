@@ -1,44 +1,62 @@
-use crate::{Fetch, Resolver, TargetedResolver, ingress};
+use crate::{Fetch, Resolver, Subscriber, TargetedResolver, ingress};
 use commonware_actor::{Feedback, mailbox::Sender};
 use commonware_cryptography::PublicKey;
 use commonware_utils::{Span, vec::NonEmptyVec};
 
 /// A key to fetch data for, optionally with target peers.
-pub type FetchKey<K, P, S> = ingress::FetchKey<K, S, Option<NonEmptyVec<P>>>;
+pub type FetchKey<K, P, S, R> = ingress::FetchKey<K, S, R, Option<NonEmptyVec<P>>>;
 
 /// Messages that can be sent to the peer actor.
-pub type Message<K, P, S> = ingress::Message<K, S, Option<NonEmptyVec<P>>>;
+pub type Message<K, P, S, R> = ingress::Message<K, S, R, Option<NonEmptyVec<P>>>;
 
-fn fetch_key<K, P, S>(fetch: Fetch<K, S>, targets: Option<NonEmptyVec<P>>) -> FetchKey<K, P, S> {
+fn fetch_key<K, P, S, R>(
+    fetch: Fetch<K, S, R>,
+    targets: Option<NonEmptyVec<P>>,
+) -> FetchKey<K, P, S, R> {
     FetchKey {
         key: fetch.key,
-        subscribers: NonEmptyVec::new((fetch.subscriber, fetch.span)),
-        metadata: targets,
+        subscribers: NonEmptyVec::new((
+            Subscriber {
+                subscriber: fetch.subscriber,
+                response: fetch.response,
+                span: fetch.span,
+            },
+            targets,
+        )),
     }
 }
 
 /// A way to send messages to the peer actor.
-#[derive(Clone)]
-pub struct Mailbox<K: Span, P: Eq, S: Eq = ()> {
+pub struct Mailbox<K: Span, P: Eq, S: Eq, R> {
     /// The channel that delivers messages to the peer actor.
-    sender: Sender<Message<K, P, S>>,
+    sender: Sender<Message<K, P, S, R>>,
 }
 
-impl<K: Span, P: Eq, S: Eq> Mailbox<K, P, S> {
+impl<K: Span, P: Eq, S: Eq, R> Clone for Mailbox<K, P, S, R> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
+}
+
+impl<K: Span, P: Eq, S: Eq, R> Mailbox<K, P, S, R> {
     /// Create a new mailbox.
-    pub(super) const fn new(sender: Sender<Message<K, P, S>>) -> Self {
+    pub(super) const fn new(sender: Sender<Message<K, P, S, R>>) -> Self {
         Self { sender }
     }
 }
 
-impl<K, P, S> Resolver for Mailbox<K, P, S>
+impl<K, P, S, R> Resolver for Mailbox<K, P, S, R>
 where
     K: Span,
     P: PublicKey,
     S: Clone + Eq + Send + 'static,
+    R: Send + 'static,
 {
     type Key = K;
     type Subscriber = S;
+    type Response = R;
 
     /// Send a fetch to the peer actor.
     ///
@@ -48,18 +66,10 @@ where
     /// If the engine has shut down, this is a no-op.
     fn fetch<D>(&mut self, key: D) -> Feedback
     where
-        D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        D: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
-        let Fetch {
-            key,
-            subscriber,
-            span,
-        } = key.into();
-        self.sender.enqueue(Message::Fetch(vec![FetchKey {
-            key,
-            subscribers: NonEmptyVec::new((subscriber, span)),
-            metadata: None,
-        }]))
+        self.sender
+            .enqueue(Message::Fetch(vec![fetch_key(key.into(), None)]))
     }
 
     /// Send fetches to the peer actor for a batch of keys.
@@ -70,7 +80,7 @@ where
     /// If the engine has shut down, this is a no-op.
     fn fetch_all<D>(&mut self, keys: Vec<D>) -> Feedback
     where
-        D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        D: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
         self.sender.enqueue(Message::Fetch(
             keys.into_iter()
@@ -78,25 +88,14 @@ where
                 .collect(),
         ))
     }
-
-    /// Send a retain request to the peer actor.
-    ///
-    /// If the engine has shut down, this is a no-op.
-    fn retain(
-        &mut self,
-        predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-    ) -> Feedback {
-        self.sender.enqueue(Message::Retain {
-            predicate: Box::new(predicate),
-        })
-    }
 }
 
-impl<K, P, S> TargetedResolver for Mailbox<K, P, S>
+impl<K, P, S, R> TargetedResolver for Mailbox<K, P, S, R>
 where
     K: Span,
     P: PublicKey,
     S: Clone + Eq + Send + 'static,
+    R: Send + 'static,
 {
     type PublicKey = P;
 
@@ -114,19 +113,11 @@ where
     /// If the engine has shut down, this is a no-op.
     fn fetch_targeted(
         &mut self,
-        key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        key: impl Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
         targets: NonEmptyVec<Self::PublicKey>,
     ) -> Feedback {
-        let Fetch {
-            key,
-            subscriber,
-            span,
-        } = key.into();
-        self.sender.enqueue(Message::Fetch(vec![FetchKey {
-            key,
-            subscribers: NonEmptyVec::new((subscriber, span)),
-            metadata: Some(targets),
-        }]))
+        self.sender
+            .enqueue(Message::Fetch(vec![fetch_key(key.into(), Some(targets))]))
     }
 
     /// Send targeted fetches to the peer actor for a batch of keys.
@@ -134,7 +125,7 @@ where
     /// If the engine has shut down, this is a no-op.
     fn fetch_all_targeted<D>(&mut self, keys: Vec<(D, NonEmptyVec<Self::PublicKey>)>) -> Feedback
     where
-        D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        D: Into<Fetch<Self::Key, Self::Subscriber, Self::Response>> + Send,
     {
         self.sender.enqueue(Message::Fetch(
             keys.into_iter()
@@ -148,41 +139,32 @@ where
 mod tests {
     use super::*;
     use commonware_actor::mailbox::{Overflow, Policy};
+    use commonware_utils::{channel::mpsc, non_empty_vec};
 
-    type TestMessage = Message<u8, u8, u16>;
-    type TestPending = ingress::Pending<u8, u16, Option<NonEmptyVec<u8>>>;
+    type TestMessage = Message<u8, u8, u16, u8>;
+    type TestPending = ingress::Pending<u8, u16, u8, Option<NonEmptyVec<u8>>>;
 
-    fn fetch(key: u8, subscriber: u16, targets: Option<NonEmptyVec<u8>>) -> TestMessage {
-        Message::Fetch(vec![FetchKey {
-            key,
-            subscribers: NonEmptyVec::new((subscriber, tracing::Span::none())),
-            metadata: targets,
-        }])
+    fn subscriber(value: u16) -> (Subscriber<u16, u8>, mpsc::Receiver<u8>) {
+        let (response, receiver) = mpsc::channel(1);
+        (
+            Subscriber {
+                subscriber: value,
+                response,
+                span: tracing::Span::none(),
+            },
+            receiver,
+        )
     }
 
-    fn fetch_with_subscribers(
+    fn fetch(
         key: u8,
-        subscribers: Vec<u16>,
+        subscriber: Subscriber<u16, u8>,
         targets: Option<NonEmptyVec<u8>>,
     ) -> TestMessage {
         Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::from_unchecked(
-                subscribers
-                    .into_iter()
-                    .map(|subscriber| (subscriber, tracing::Span::none()))
-                    .collect(),
-            ),
-            metadata: targets,
+            subscribers: non_empty_vec![(subscriber, targets)],
         }])
-    }
-
-    fn subscriber_is(value: u16) -> impl Fn(&u8, &u16) -> bool + Send {
-        move |_, subscriber| *subscriber == value
-    }
-
-    fn targets(values: &[u8]) -> NonEmptyVec<u8> {
-        NonEmptyVec::from_unchecked(values.to_vec())
     }
 
     fn drain(pending: &mut TestPending) -> Vec<TestMessage> {
@@ -194,153 +176,121 @@ mod tests {
         messages
     }
 
-    fn assert_fetch(message: &TestMessage, expected_key: u8, expected_targets: Option<&[u8]>) {
-        let Message::Fetch(keys) = message else {
-            panic!("expected fetch");
-        };
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].key, expected_key);
-        match (&keys[0].metadata, expected_targets) {
-            (None, None) => {}
-            (Some(actual), Some(expected)) => assert_eq!(&actual[..], expected),
-            _ => panic!("unexpected targets"),
-        }
-    }
-
-    fn assert_fetch_keys(message: &TestMessage, expected: &[u8]) {
-        let Message::Fetch(keys) = message else {
-            panic!("expected fetch");
-        };
-        let actual: Vec<_> = keys.iter().map(|key| key.key).collect();
-        assert_eq!(actual, expected);
-    }
-
-    fn assert_fetch_subscribers(
-        message: &TestMessage,
-        expected_key: u8,
-        expected_subscribers: &[u16],
-    ) {
-        let Message::Fetch(keys) = message else {
-            panic!("expected fetch");
-        };
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys[0].key, expected_key);
-        let actual: Vec<_> = keys[0]
-            .subscribers
-            .iter()
-            .map(|(subscriber, _)| *subscriber)
-            .collect();
-        assert_eq!(actual, expected_subscribers);
+    fn fetched(message: &TestMessage) -> &FetchKey<u8, u8, u16, u8> {
+        let Message::Fetch(fetches) = message;
+        assert_eq!(fetches.len(), 1);
+        &fetches[0]
     }
 
     #[test]
-    fn targeted_fetches_for_same_key_are_merged() {
+    fn targeted_fetches_merge_targets_for_the_same_route() {
         let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, fetch(1, 10, Some(targets(&[2, 3]))));
-        Policy::handle(&mut pending, fetch(1, 11, Some(targets(&[3, 4]))));
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 1);
-        assert_fetch(&messages[0], 1, Some(&[2, 3, 4]));
-        assert_fetch_subscribers(&messages[0], 1, &[10, 11]);
-    }
-
-    #[test]
-    fn duplicate_fetches_for_same_key_merge_subscribers() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11], None));
-        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![11, 12], None));
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 1);
-        assert_fetch_subscribers(&messages[0], 1, &[10, 11, 12]);
-    }
-
-    #[test]
-    fn unrestricted_fetch_dominates_targeted_fetches() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, fetch(1, 10, Some(targets(&[2]))));
-        Policy::handle(&mut pending, fetch(1, 11, None));
-        Policy::handle(&mut pending, fetch(1, 12, Some(targets(&[3]))));
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 1);
-        assert_fetch(&messages[0], 1, None);
-    }
-
-    #[test]
-    fn retain_removes_fetches_for_dropped_subscribers() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, fetch(1, 10, None));
-        Policy::handle(&mut pending, fetch(2, 11, None));
-        Policy::handle(
-            &mut pending,
-            Message::Retain {
-                predicate: Box::new(subscriber_is(11)),
-            },
-        );
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], Message::Retain { .. }));
-        assert_fetch(&messages[1], 2, None);
-    }
-
-    #[test]
-    fn retain_prunes_pending_fetch_subscribers() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11], None));
-        Policy::handle(
-            &mut pending,
-            Message::Retain {
-                predicate: Box::new(subscriber_is(11)),
-            },
-        );
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], Message::Retain { .. }));
-        assert_fetch_subscribers(&messages[1], 1, &[11]);
-    }
-
-    #[test]
-    fn retain_drops_pending_fetch_when_all_subscribers_are_dropped() {
-        let mut pending = TestPending::default();
-
-        Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11], None));
-        Policy::handle(
-            &mut pending,
-            Message::Retain {
-                predicate: Box::new(subscriber_is(12)),
-            },
-        );
-
-        let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 1);
-        assert!(matches!(messages[0], Message::Retain { .. }));
-    }
-
-    #[test]
-    fn fetch_after_retain_is_retained_when_subscriber_is_dropped() {
-        let mut pending = TestPending::default();
+        let (subscriber, _receiver) = subscriber(10);
 
         Policy::handle(
             &mut pending,
-            Message::Retain {
-                predicate: Box::new(|_, subscriber| *subscriber != 10),
-            },
+            fetch(1, subscriber.clone(), Some(non_empty_vec![2, 3])),
         );
-        Policy::handle(&mut pending, fetch(1, 10, None));
-        Policy::handle(&mut pending, fetch(2, 11, None));
+        Policy::handle(
+            &mut pending,
+            fetch(1, subscriber, Some(non_empty_vec![3, 4])),
+        );
 
         let messages = drain(&mut pending);
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(messages[0], Message::Retain { .. }));
-        assert_fetch_keys(&messages[1], &[1, 2]);
+        let fetch = fetched(&messages[0]);
+        assert_eq!(fetch.subscribers.len().get(), 1);
+        assert_eq!(fetch.subscribers[0].1, Some(non_empty_vec![2, 3, 4]));
+    }
+
+    #[test]
+    fn equal_metadata_on_independent_channels_remains_separate() {
+        let mut pending = TestPending::default();
+        let (first, _first_receiver) = subscriber(10);
+        let (second, _second_receiver) = subscriber(10);
+
+        Policy::handle(&mut pending, fetch(1, first, Some(non_empty_vec![2])));
+        Policy::handle(&mut pending, fetch(1, second, Some(non_empty_vec![2])));
+
+        let messages = drain(&mut pending);
+        let fetch = fetched(&messages[0]);
+        assert_eq!(fetch.subscribers.len().get(), 2);
+        assert!(
+            !fetch.subscribers[0]
+                .0
+                .response
+                .same_channel(&fetch.subscribers[1].0.response)
+        );
+        assert_eq!(fetch.subscribers[0].1, Some(non_empty_vec![2]));
+        assert_eq!(fetch.subscribers[1].1, Some(non_empty_vec![2]));
+    }
+
+    #[test]
+    fn canceled_unrestricted_demand_does_not_broaden_surviving_targeted_demand() {
+        let mut pending = TestPending::default();
+        let (unrestricted, unrestricted_receiver) = subscriber(10);
+        let (targeted, _targeted_receiver) = subscriber(11);
+
+        Policy::handle(&mut pending, fetch(1, unrestricted, None));
+        Policy::handle(&mut pending, fetch(1, targeted, Some(non_empty_vec![2, 3])));
+        drop(unrestricted_receiver);
+
+        let messages = drain(&mut pending);
+        let fetch = fetched(&messages[0]);
+        assert_eq!(fetch.subscribers.len().get(), 1);
+        assert_eq!(fetch.subscribers[0].0.subscriber, 11);
+        assert_eq!(fetch.subscribers[0].1, Some(non_empty_vec![2, 3]));
+    }
+
+    #[test]
+    fn unrestricted_metadata_dominates_only_its_own_route() {
+        let mut pending = TestPending::default();
+        let (first, _first_receiver) = subscriber(10);
+        let same_route = first.clone();
+        let (targeted, _targeted_receiver) = subscriber(11);
+
+        Policy::handle(&mut pending, fetch(1, first, Some(non_empty_vec![2])));
+        Policy::handle(&mut pending, fetch(1, same_route, None));
+        Policy::handle(&mut pending, fetch(1, targeted, Some(non_empty_vec![3])));
+
+        let messages = drain(&mut pending);
+        let fetch = fetched(&messages[0]);
+        assert_eq!(fetch.subscribers.len().get(), 2);
+        assert!(fetch.subscribers[0].1.is_none());
+        assert_eq!(fetch.subscribers[1].1, Some(non_empty_vec![3]));
+    }
+
+    #[test]
+    fn replacement_channel_with_same_metadata_survives() {
+        let mut pending = TestPending::default();
+        let (old, old_receiver) = subscriber(10);
+        let (replacement, _replacement_receiver) = subscriber(10);
+        let replacement_response = replacement.response.clone();
+
+        Policy::handle(&mut pending, fetch(1, old, Some(non_empty_vec![2])));
+        Policy::handle(&mut pending, fetch(1, replacement, Some(non_empty_vec![2])));
+        drop(old_receiver);
+
+        let messages = drain(&mut pending);
+        let fetch = fetched(&messages[0]);
+        assert_eq!(fetch.subscribers.len().get(), 1);
+        assert!(
+            fetch.subscribers[0]
+                .0
+                .response
+                .same_channel(&replacement_response)
+        );
+        assert_eq!(fetch.subscribers[0].1, Some(non_empty_vec![2]));
+    }
+
+    #[test]
+    fn all_closed_routes_are_not_admitted() {
+        let mut pending = TestPending::default();
+        let (subscriber, receiver) = subscriber(10);
+        drop(receiver);
+
+        Policy::handle(&mut pending, fetch(1, subscriber, None));
+
+        assert!(drain(&mut pending).is_empty());
+        assert!(Overflow::is_empty(&pending));
     }
 }

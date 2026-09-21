@@ -6,7 +6,7 @@ use super::{
     ingress::{FetchKey, Mailbox, Message},
     metrics, wire,
 };
-use crate::{Consumer, Delivery, Outcome, subscribers};
+use crate::{Consumer, Delivery, Outcome, RECLAIM_INTERVAL, ingress::Metadata as _, subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -19,7 +19,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
-use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
+use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool, vec::NonEmptyVec};
 use futures::{
     StreamExt,
     future::{self, Either},
@@ -48,7 +48,6 @@ where
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
-    Con::Subscriber: Eq,
 {
     /// Context used to spawn tasks, manage time, etc.
     context: ContextCell<E>,
@@ -66,7 +65,7 @@ where
     last_peer_set_id: Option<u64>,
 
     /// Mailbox that makes and prunes fetches
-    mailbox: mailbox::Receiver<Message<Key, P, Con::Subscriber>>,
+    mailbox: mailbox::Receiver<Message<Key, P, Con::Subscriber, Con::Response>>,
 
     /// Manages outgoing fetch requests
     fetcher: Fetcher<E, P, Key, NetS>,
@@ -75,7 +74,7 @@ where
     inflight: Inflight<Con, P>,
 
     /// Subscribers that keep each fetch alive.
-    subscribers: subscribers::Tracker<Key, Con::Subscriber>,
+    subscribers: subscribers::Tracker<Key, Con::Subscriber, Con::Response>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -104,7 +103,6 @@ where
     Pro: Producer<Key = Key>,
     NetS: Sender<PublicKey = P>,
     NetR: Receiver<PublicKey = P>,
-    Con::Subscriber: Clone + Ord + Send + 'static,
 {
     /// Creates a new `Actor` with the given configuration.
     ///
@@ -112,7 +110,7 @@ where
     pub fn new(
         context: E,
         cfg: Config<P, D, B, Key, Con, Pro>,
-    ) -> (Self, Mailbox<Key, P, Con::Subscriber>) {
+    ) -> (Self, Mailbox<Key, P, Con::Subscriber, Con::Response>) {
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
 
         let metrics = metrics::Metrics::init(&context);
@@ -165,10 +163,23 @@ where
         );
         let mut peer_set_subscription = self.peer_provider.subscribe().await;
         let mut blocked_subscription = Some(self.blocker.blocked());
+        let mut next_reclaim = self.context.current() + RECLAIM_INTERVAL;
 
         select_loop! {
             self.context,
             on_start => {
+                // A fixed deadline also covers work with no source or peer wakeup.
+                // Checking it here prevents busy event streams from delaying cleanup.
+                if !self.subscribers.is_empty() && self.context.current() >= next_reclaim {
+                    for key in self.subscribers.keys() { self.prune_key(&key); }
+                    next_reclaim = self.context.current() + RECLAIM_INTERVAL;
+                }
+                let deadline_reclaim = if self.subscribers.is_empty() {
+                    Either::Right(future::pending())
+                } else {
+                    Either::Left(self.context.sleep_until(next_reclaim))
+                };
+
                 // Wait for the next blocked-set update, or forever once the
                 // network stops publishing them.
                 let blocked_update = blocked_subscription.as_mut().map_or_else(
@@ -222,9 +233,13 @@ where
                     }
                 }
             },
+            _ = deadline_reclaim => {},
             // Handle active deadline
             _ = deadline_active => {
-                if let Some(key) = self.fetcher.pop_active() {
+                if let Some(key) = self.fetcher.active_key().cloned()
+                    && self.prune_key(&key)
+                {
+                    self.fetcher.pop_active().expect("active request");
                     debug!(?key, "requester timeout");
                     self.metrics.fetch.inc(Status::Failure);
                     self.fetcher.add_retry(key);
@@ -235,8 +250,7 @@ where
             // completed key no longer in flight, not be deduplicated against
             // it and dropped when it completes.
             delivery = self.inflight.next_delivery() => {
-                // If the delivery was aborted, its inflight entry was dropped (via
-                // Retain or shutdown) before the consumer finished validating.
+                // Canceled generations cannot change a replacement delivery.
                 if let Ok((peer, elapsed, bytes, delivery, result)) = delivery {
                     self.handle_delivery(peer, elapsed, bytes, delivery, result);
                 }
@@ -246,54 +260,32 @@ where
                 error!("mailbox closed");
                 return;
             } => {
-                match msg {
-                    Message::Fetch(keys) => {
-                        for FetchKey {
-                            key,
-                            subscribers,
-                            metadata: targets,
-                        } in keys
-                        {
-                            trace!(?key, "mailbox: fetch");
+                let Message::Fetch(keys) = msg;
+                for FetchKey { key, subscribers } in keys.into_iter().filter_map(FetchKey::into_live) {
+                    trace!(?key, "mailbox: fetch");
+                    self.prune_key(&key);
+                    let is_new = !self.inflight.contains(&key);
+                    let mut incoming = subscribers.into_iter();
+                    let (first, mut targets) = incoming.next().expect("nonempty fetch");
+                    let mut subscribers = NonEmptyVec::new(first);
+                    for (subscriber, hints) in incoming {
+                        targets.merge(hints);
+                        subscribers.push(subscriber);
+                    }
+                    self.subscribers.insert(key.clone(), subscribers);
+                    if !self.subscribers.contains(&key) { continue; }
 
-                            // Check if the fetch is already in progress
-                            let is_new = !self.inflight.contains(&key);
-                            self.subscribers.insert(key.clone(), subscribers);
-
-                            // Update targets
-                            match targets {
-                                Some(targets) => {
-                                    // Only add targets if this is a new fetch OR the existing
-                                    // fetch already has targets. Don't restrict an "all" fetch
-                                    // (no targets) to specific targets.
-                                    if is_new || self.fetcher.has_targets(&key) {
-                                        self.fetcher.add_targets(key.clone(), targets);
-                                    }
-                                }
-                                None => self.fetcher.clear_targets(&key),
-                            }
-
-                            // Only start new fetch if not already in progress
-                            if is_new {
-                                self.inflight.insert(
-                                    key.clone(),
-                                    self.metrics.fetch_duration.timer(self.context.as_ref()),
-                                );
-                                self.fetcher.add_ready(key);
-                            } else {
-                                trace!(?key, "updated targets for existing fetch");
+                    match targets {
+                        Some(targets) => {
+                            if is_new || self.fetcher.has_targets(&key) {
+                                self.fetcher.add_targets(key.clone(), targets);
                             }
                         }
+                        None => self.fetcher.clear_targets(&key),
                     }
-                    Message::Retain { predicate } => {
-                        trace!("mailbox: retain");
-
-                        self.subscribers
-                            .retain(|key, subscriber| predicate(key, subscriber));
-                        let subscribers = &self.subscribers;
-                        self.fetcher.retain(|key| subscribers.contains(key));
-                        let count = self.inflight.retain(|key| subscribers.contains(key)) as u64;
-                        self.record_cancellations(count);
+                    if is_new {
+                        self.inflight.insert(key.clone(), self.metrics.fetch_duration.timer(self.context.as_ref()));
+                        self.fetcher.add_ready(key);
                     }
                 }
             },
@@ -358,18 +350,38 @@ where
                     .get_pending_deadline()
                     .is_some_and(|deadline| deadline <= self.context.current())
                 {
-                    self.fetcher.fetch(&mut sender);
+                    let subscribers = &mut self.subscribers;
+                    let abandoned = self.fetcher.fetch(&mut sender, |key| subscribers.prune(key));
+                    for key in abandoned { self.cancel_key(&key); }
                 }
             },
         }
     }
 
-    /// Record cancellation metrics for a retain-style operation.
-    fn record_cancellations(&mut self, count: u64) {
-        if count == 0 {
-            self.metrics.cancel.inc(Status::Dropped);
-        } else {
-            self.metrics.cancel.inc_by(Status::Success, count);
+    /// Reconcile this key with its response owners before doing more work.
+    fn prune_key(&mut self, key: &Key) -> bool {
+        if !self.subscribers.prune(key) {
+            self.cancel_key(key);
+            return false;
+        }
+        if self.inflight.cancel_closed_delivery(key) {
+            let Some(subscribers) = self.subscribers.pending(key) else {
+                self.cancel_key(key);
+                return false;
+            };
+            self.inflight.redeliver(Delivery {
+                key: key.clone(),
+                subscribers,
+            });
+        }
+        true
+    }
+
+    fn cancel_key(&mut self, key: &Key) {
+        self.subscribers.remove(key);
+        self.fetcher.remove(key);
+        if self.inflight.cancel(key) {
+            self.metrics.cancel.inc(Status::Success);
         }
     }
 
@@ -422,15 +434,19 @@ where
     fn handle_network_response(&mut self, peer: P, id: u64, response: Bytes) {
         trace!(?peer, ?id, "peer response: data");
 
-        // Get the key associated with the response, if any
+        let Some(key) = self.fetcher.response_key(id, &peer).cloned() else {
+            return;
+        };
+        if !self.prune_key(&key) {
+            return;
+        }
         let Some((key, elapsed)) = self.fetcher.pop_response(id, &peer) else {
             // It's possible that the key does not exist if the request was pruned.
             return;
         };
 
         let Some(subscribers) = self.subscribers.pending(&key) else {
-            warn!(?key, "response for fetch with no subscribers");
-            self.inflight.cancel(&key);
+            self.cancel_key(&key);
             return;
         };
         let delivery = Delivery { key, subscribers };
@@ -445,7 +461,7 @@ where
         peer: P,
         elapsed: std::time::Duration,
         bytes: usize,
-        delivery: Delivery<Key, Con::Subscriber>,
+        delivery: Delivery<Key, Con::Subscriber, Con::Response>,
         outcome: Option<Outcome>,
     ) {
         let Delivery {
@@ -459,9 +475,7 @@ where
         // did not judge it for these subscribers. Hand the response to the
         // remaining subscribers, or retire the key when none remain.
         let Some(outcome) = outcome else {
-            let remaining = self
-                .subscribers
-                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+            let remaining = self.subscribers.remove_delivered(&key, delivered);
             if let Some(subscribers) = remaining {
                 self.inflight.redeliver(Delivery { key, subscribers });
                 return;
@@ -483,9 +497,7 @@ where
                 // Remove only the subscribers that accepted this response. If other
                 // subscribers still need the key, deliver the same accepted response
                 // locally with the remaining annotations.
-                let remaining = self
-                    .subscribers
-                    .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
+                let remaining = self.subscribers.remove_delivered(&key, delivered);
 
                 if let Some(subscribers) = remaining {
                     if !already_accepted {
@@ -509,7 +521,9 @@ where
                 // response or penalize the peer; retry the same key.
                 self.metrics.fetch.inc(Status::Ambiguous);
                 self.inflight.discard_response(&key);
-                self.fetcher.add_retry(key);
+                if self.prune_key(&key) {
+                    self.fetcher.add_retry(key);
+                }
             }
             Outcome::Invalid => {
                 // A previously accepted response is only redelivered locally to subscribers that
@@ -534,7 +548,9 @@ where
                 commonware_p2p::block!(self.blocker, peer, "invalid data received");
                 self.metrics.fetch.inc(Status::Failure);
                 self.inflight.discard_response(&key);
-                self.fetcher.add_retry(key);
+                if self.prune_key(&key) {
+                    self.fetcher.add_retry(key);
+                }
             }
             Outcome::Ignored => {
                 // The consumer no longer needs the key. Retire the entire fetch without
@@ -551,7 +567,12 @@ where
     fn handle_network_error_response(&mut self, peer: P, id: u64) {
         trace!(?peer, ?id, "peer response: error");
 
-        // Get the key associated with the response, if any
+        let Some(key) = self.fetcher.response_key(id, &peer).cloned() else {
+            return;
+        };
+        if !self.prune_key(&key) {
+            return;
+        }
         let Some(key) = self.fetcher.pop_missing(id, &peer) else {
             // It's possible that the key does not exist if the request was pruned.
             return;

@@ -225,7 +225,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     ///
     /// Scans from the cursor (never below the floor), requesting each term's
     /// anchor and advancing the cursor past everything scanned. Requests
-    /// stay pending in the resolver until answered or retained out (we must
+    /// stay pending in the resolver until answered or their receivers retire (we must
     /// eventually receive a nullification at the anchor or a
     /// notarization/finalization at a higher view). See the
     /// [module docs](super) for the full strategy, including how mid-term
