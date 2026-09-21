@@ -2,7 +2,11 @@ use crate::{
     Context,
     journal::{authenticated, contiguous::Contiguous},
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT, Proof},
-    qmdb::{self, operation::Floored, sync::ServeError},
+    qmdb::{
+        self,
+        operation::Floored,
+        sync::{ServeError, source},
+    },
 };
 use bytes::BufMut;
 use commonware_codec::{
@@ -445,7 +449,10 @@ pub trait Source: Send + Sync {
     /// Serves a response with optional [`Feedback`] for reporting its validity.
     ///
     /// Dropping the future or feedback cancels the request without judging the response.
-    fn serve(&self, request: Request<Self::Family>) -> impl Future<Output = Result<Self>> + Send;
+    fn serve(
+        &self,
+        request: Request<Self::Family>,
+    ) -> impl Future<Output = source::Result<Self>> + Send;
 }
 
 impl<T> Source for Arc<T>
@@ -457,7 +464,10 @@ where
     type Op = T::Op;
     type Error = T::Error;
 
-    fn serve(&self, request: Request<Self::Family>) -> impl Future<Output = Result<Self>> + Send {
+    fn serve(
+        &self,
+        request: Request<Self::Family>,
+    ) -> impl Future<Output = source::Result<Self>> + Send {
         T::serve(self, request)
     }
 }
@@ -472,7 +482,7 @@ where
     type Op = T::Op;
     type Error = ServeError<T::Family>;
 
-    async fn serve(&self, request: Request<Self::Family>) -> Result<Self> {
+    async fn serve(&self, request: Request<Self::Family>) -> source::Result<Self> {
         let source = self.as_ref().ok_or(ServeError::MissingSource)?;
         Ok(source.serve(request).await?)
     }
@@ -489,7 +499,7 @@ macro_rules! impl_locked_source {
             type Op = T::Op;
             type Error = T::Error;
 
-            async fn serve(&self, request: Request<Self::Family>) -> Result<Self> {
+            async fn serve(&self, request: Request<Self::Family>) -> source::Result<Self> {
                 self.read().await.serve(request).await
             }
         }
@@ -522,7 +532,7 @@ where
             max_ops = request.max_ops().get(),
         ),
     )]
-    async fn serve(&self, request: Request<F>) -> Result<Self> {
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         // Reject before the floor lookup so the error carries the requested size and the
         // floor read never touches out-of-range locations.
         if request.size() > self.size() {
@@ -576,7 +586,7 @@ where
     type Op = crate::qmdb::any::operation::Operation<F, U>;
     type Error = qmdb::Error<F>;
 
-    async fn serve(&self, request: Request<F>) -> Result<Self> {
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         self.log.serve(request).await
     }
 }
@@ -596,7 +606,7 @@ pub(crate) mod tests {
         NZU64,
         sync::{AsyncRwLock, Mutex, TracedAsyncRwLock},
     };
-    use std::{marker::PhantomData, mem, sync::Arc};
+    use std::{marker::PhantomData, mem, result::Result, sync::Arc};
 
     macro_rules! assert_source_variants {
         ($db:ty) => {
@@ -649,7 +659,7 @@ pub(crate) mod tests {
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn serve(&self, _request: Request<F>) -> Result<Self> {
+        async fn serve(&self, _request: Request<F>) -> source::Result<Self> {
             let mut responses = mem::take(&mut *self.responses.lock()).into_iter();
             let response = responses.next().ok_or(qmdb::Error::KeyNotFound)?;
             let (candidate_tx, candidate_rx) = mpsc::channel(responses.len().max(1));
@@ -780,19 +790,13 @@ pub(crate) mod tests {
     pub async fn fetch_compact_state<R: Source>(
         source: &R,
         target: crate::qmdb::sync::CompactTarget<R::Family, R::Digest>,
-    ) -> std::result::Result<Response<R::Family, R::Op, R::Digest>, R::Error>
-    where
-        R::Op: Send + 'static,
-    {
-        let (response, feedback) = source
+    ) -> Result<Response<R::Family, R::Op, R::Digest>, R::Error> {
+        let (response, _feedback) = source
             .serve(Request::Boundary {
                 size: target.size,
                 start: target.size - 1,
             })
             .await?;
-        if let Some(feedback) = feedback {
-            feedback.accept();
-        }
         Ok(response)
     }
 
@@ -805,14 +809,14 @@ pub(crate) mod tests {
     where
         F: Family,
         D: Digest,
-        Op: Send + Sync + Clone + 'static,
+        Op: Send + Sync,
     {
         type Family = F;
         type Digest = D;
         type Op = Op;
         type Error = qmdb::Error<F>;
 
-        async fn serve(&self, _request: Request<F>) -> Result<Self> {
+        async fn serve(&self, _request: Request<F>) -> source::Result<Self> {
             Err(qmdb::Error::KeyNotFound) // Arbitrary dummy error
         }
     }
@@ -1119,6 +1123,32 @@ pub(crate) mod tests {
             };
             let result = lock.serve(request).await;
             assert!(matches!(result, Err(crate::qmdb::Error::KeyNotFound)));
+        });
+    }
+
+    #[test]
+    fn fetch_compact_state_leaves_response_unjudged() {
+        deterministic::Runner::default().start(|_context| async move {
+            let size = Location::new(1);
+            let response = Response::<mmr::Family, u64, ShaDigest>::Boundary {
+                proof: Proof {
+                    leaves: size,
+                    inactive_peaks: 0,
+                    digests: vec![],
+                },
+                op: 7,
+                pinned_nodes: vec![],
+            };
+            let expected = response.encode();
+            let source = SequenceSource::new(vec![response]);
+            let target = crate::qmdb::sync::CompactTarget {
+                root: ShaDigest::from([7u8; 32]),
+                size,
+            };
+
+            let response = fetch_compact_state(&source, target).await.unwrap();
+            assert_eq!(response.encode(), expected);
+            assert!(source.take_verdicts().await.is_empty());
         });
     }
 

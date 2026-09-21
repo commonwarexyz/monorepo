@@ -312,10 +312,10 @@ where
         }
         self.metrics.deliveries.inc(status::Status::Success);
         self.work.push(async move {
+            // All callers verify the same QMDB history. Closed receipts abstain.
             let mut verdict = None;
-            for result in future::join_all(verdicts).await {
-                // All callers verify the same QMDB history. Closed receipts abstain.
-                verdict = verdict.or(result.ok());
+            for receiver in verdicts {
+                verdict = verdict.or(receiver.await.ok());
             }
             if let Some(verdict) = verdict {
                 feedback_tx.send_lossy(verdict);
@@ -345,14 +345,11 @@ where
         self.serves.push(async move {
             let result = database.serve(key).await;
 
-            let Ok((response, feedback)) = result else {
+            let Ok((response, _feedback)) = result else {
                 serve_requests.inc(status::Status::Failure);
                 return;
             };
 
-            if let Some(feedback) = feedback {
-                feedback.accept();
-            }
             response_tx.send_lossy(response.encode());
             serve_requests.inc(status::Status::Success);
         });
@@ -449,6 +446,24 @@ mod tests {
     type TestResponse = Response<mmr::Family, TestOp, sha256::Digest>;
     type TestSubscriber = handler::Subscriber<TestResponse>;
 
+    struct FeedbackSource(Mutex<Option<(TestResponse, sync::Feedback<TestResponse>)>>);
+
+    impl Source for FeedbackSource {
+        type Family = mmr::Family;
+        type Digest = sha256::Digest;
+        type Op = TestOp;
+        type Error = sync::ServeError<mmr::Family>;
+
+        async fn serve(&self, _request: Request<mmr::Family>) -> sync::source::Result<Self> {
+            let (response, feedback) = self
+                .0
+                .lock()
+                .take()
+                .ok_or(sync::ServeError::MissingSource)?;
+            Ok((response, Some(feedback)))
+        }
+    }
+
     #[derive(Default)]
     struct Recorded {
         fetches: Vec<(Request<mmr::Family>, TestSubscriber)>,
@@ -531,9 +546,9 @@ mod tests {
         }
     }
 
-    fn test_config(
-        database: Option<Shared<TestDb>>,
-    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
+    fn test_config<DB>(
+        database: Option<Shared<DB>>,
+    ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, DB> {
         Config {
             peer_provider: DummyProvider,
             blocker: DummyBlocker,
@@ -830,6 +845,32 @@ mod tests {
                 .await
                 .expect("response should be available after attach");
             assert!(!payload.is_empty());
+        });
+    }
+
+    #[test]
+    fn produce_drops_source_feedback_without_judging() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = init_seeded_db(context.child("resolver_db"), "produce-feedback").await;
+            let request = test_request_at(db.read().await.bounds().end);
+            let (response, _) = db.serve(request).await.unwrap();
+            let expected = response.encode();
+            let (verdict, verdict_rx) = oneshot::channel();
+            let (_, candidates) = mpsc::channel(1);
+            let source = FeedbackSource(Mutex::new(Some((
+                response,
+                sync::Feedback::new(verdict, candidates),
+            ))));
+            let (mut actor, _mailbox) = Actor::new(
+                context.child("actor"),
+                test_config(Some(Shared::new("feedback_source", source))),
+            );
+
+            let (response_tx, response_rx) = oneshot::channel();
+            actor.handle_produce(request, response_tx);
+            actor.serves.next_completed().await;
+            assert_eq!(response_rx.await.unwrap(), expected);
+            assert!(verdict_rx.await.is_err());
         });
     }
 
@@ -1226,8 +1267,12 @@ mod tests {
         });
     }
 
-    #[test]
-    fn fanout_waits_for_slow_receipt_and_preserves_other_demand_on_cancel() {
+    #[rstest::rstest]
+    #[case(0)]
+    #[case(1)]
+    fn fanout_waits_for_slow_receipt_and_preserves_other_demand_on_cancel(
+        #[case] first_to_reject: usize,
+    ) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut actor, mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
@@ -1239,6 +1284,9 @@ mod tests {
             for _ in 0..2 {
                 let message = actor.mailbox_rx.recv().await.unwrap();
                 actor.handle_mailbox_message(&mut resolver, message);
+            }
+            if first_to_reject == 1 {
+                std::mem::swap(&mut first, &mut slow);
             }
             let delivery =
                 test_delivery(request, resolver.0.lock().subscriptions[&request].clone());
@@ -1254,7 +1302,7 @@ mod tests {
                 Err(oneshot::error::TryRecvError::Empty)
             ));
 
-            // The first caller leaves while the second candidate is still queued.
+            // The rejecting caller leaves while the slow candidate is still queued.
             // A fresh registration must survive both the old closure and its verdict.
             drop(retry);
             actor.work.next_completed().await;
@@ -1273,7 +1321,13 @@ mod tests {
                     .iter()
                     .map(|s| s.id)
                     .collect::<Vec<_>>();
-                assert_eq!(ids, [recorded.fetches[1].1.id, recorded.fetches[2].1.id]);
+                assert_eq!(
+                    ids,
+                    [
+                        recorded.fetches[1 - first_to_reject].1.id,
+                        recorded.fetches[2].1.id,
+                    ]
+                );
             }
 
             // Both channels have room for the retry, and neither surviving caller re-registers.

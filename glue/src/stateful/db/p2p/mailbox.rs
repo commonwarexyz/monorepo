@@ -2,7 +2,6 @@
 
 use crate::stateful::db::{AttachableResolver, Shared};
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
@@ -169,9 +168,9 @@ where
 impl<DB, F, Op, D> Source for Mailbox<DB, F, Op, D>
 where
     F: Family,
-    Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
+    Op: Send,
     D: Digest,
-    DB: Send + Sync + 'static,
+    DB: Send + Sync,
 {
     type Family = F;
     type Digest = D;
@@ -193,7 +192,7 @@ where
 impl<DB, F, Op, D> AttachableResolver<DB> for Mailbox<DB, F, Op, D>
 where
     F: Family,
-    Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
+    Op: Send + 'static,
     D: Digest,
     DB: Send + Sync + 'static,
 {
