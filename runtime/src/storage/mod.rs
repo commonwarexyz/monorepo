@@ -7,7 +7,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use ::tokio::sync::watch;
     use cfg_if::cfg_if;
     use commonware_formatting::hex;
-    use commonware_utils::sync::Mutex;
+    use commonware_utils::sync::{Mutex, MutexGuard};
     #[cfg(not(target_os = "linux"))]
     use std::collections::HashSet;
     use std::{
@@ -426,10 +426,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Shared by every handle of one open, it counts mutations requiring a full-file barrier.
     /// Each sync credits only mutations completed before it began, so a mutation racing a sync
-    /// stays dirty. It retains the first durability failure so a later flush cannot certify
-    /// bytes the kernel already reported lost.
+    /// stays dirty. It retains the first observed durability failure so later accounting
+    /// cannot certify bytes the kernel already reported lost.
     #[derive(Default)]
     pub(crate) struct Tracker {
+        durability: Mutex<()>,
         written: AtomicU64,
         completed: AtomicU64,
         synced: AtomicU64,
@@ -439,6 +440,15 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 
     impl Tracker {
+        /// Serialize a blocking barrier with its terminal accounting.
+        pub(crate) fn durability(&self) -> Result<MutexGuard<'_, ()>, Error> {
+            let guard = self.durability.lock();
+            if let Some(error) = self.failure() {
+                return Err(error);
+            }
+            Ok(guard)
+        }
+
         /// Record a mutation that needs a completed sync.
         pub(crate) fn write(&self) {
             self.written.fetch_add(1, Ordering::AcqRel);

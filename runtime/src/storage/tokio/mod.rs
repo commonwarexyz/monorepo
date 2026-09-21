@@ -42,7 +42,8 @@ pub struct Storage {
 #[derive(Default)]
 struct Namespace {
     /// Partitions whose inherited directory changes are durable. Creation and removal maintain
-    /// this state under the same lock. Removing a partition retires its entry.
+    /// this state under the same lock. Removal retires the entry before unlinking, and a blob
+    /// removal restores it once the partition directory is synced.
     #[cfg(target_os = "macos")]
     synced: HashSet<PathBuf>,
     #[cfg(all(test, target_os = "macos"))]
@@ -282,9 +283,7 @@ impl crate::Storage for Storage {
         // durable.
         self.dispatch(move |_namespace| {
             #[cfg(target_os = "macos")]
-            if name.is_none() {
-                _namespace.synced.remove(&path);
-            }
+            _namespace.synced.remove(&path);
 
             // Remove all related files
             let sync_path = if let Some(name) = &name {
@@ -301,6 +300,10 @@ impl crate::Storage for Storage {
             };
 
             pending.forget(&partition, name.as_deref());
+            #[cfg(all(test, target_os = "macos"))]
+            if let Some(error) = _namespace.fail_sync.take() {
+                return Err(error);
+            }
             sync_dir(&sync_path)?;
             #[cfg(target_os = "macos")]
             if name.is_some() {
@@ -320,6 +323,8 @@ impl crate::Storage for Storage {
             // Scan the partition directory
             let entries =
                 fs::read_dir(&path).map_err(|_| Error::PartitionMissing(partition.clone()))?;
+
+            // Make inherited entry changes durable before reporting the names.
             #[cfg(target_os = "macos")]
             _namespace.sync_once(&path)?;
             let mut blobs = Vec::new();
@@ -1318,6 +1323,48 @@ mod tests {
                 .contains(&directory.join("missing"))
         );
         settle(&storage).await;
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A blob removal whose directory sync fails leaves an unsynced unlink behind. The
+    /// partition must not stay marked synced, so the next scan or open flushes it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_blob_remove_sync_failure_retires_partition() {
+        let directory =
+            env::temp_dir().join(format!("storage_tokio_remove_fail_{}", random_suffix()));
+        let partition = directory.join("partition");
+        let config = Config::new(directory.clone(), Layout::ALL);
+        {
+            let storage = Storage::new(config.clone(), test_pool());
+            drop(storage.open("partition", b"blob").await.unwrap());
+            settle(&storage).await;
+        }
+
+        let storage = Storage::new(config, test_pool());
+        crate::storage::sync(&directory).unwrap();
+        assert_eq!(
+            storage.scan("partition").await.unwrap(),
+            vec![b"blob".to_vec()]
+        );
+        assert_eq!(storage.lock.lock().await.syncs, 1);
+        assert!(storage.lock.lock().await.synced.contains(&partition));
+
+        // The unlink lands, then the directory sync fails.
+        storage.lock.lock().await.fail_sync = Some(Error::WriteFailed);
+        assert!(matches!(
+            storage.remove("partition", Some(b"blob")).await,
+            Err(Error::WriteFailed)
+        ));
+        assert!(!partition.join(hex(b"blob")).exists());
+        assert!(!storage.lock.lock().await.synced.contains(&partition));
+
+        // The next scan flushes the directory the removal left unsynced.
+        assert!(storage.scan("partition").await.unwrap().is_empty());
+        assert_eq!(storage.lock.lock().await.syncs, 2);
+        assert!(storage.lock.lock().await.synced.contains(&partition));
+
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
     }

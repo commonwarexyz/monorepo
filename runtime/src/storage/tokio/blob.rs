@@ -154,9 +154,7 @@ impl Shared {
     /// Flush this open's mutations, crediting the tracker on success and poisoning it on failure.
     /// A poisoned open rejects every later durability claim.
     fn flush(&self, seen: u64) -> Result<(), Error> {
-        if let Some(error) = self.tracker.failure() {
-            return Err(error);
-        }
+        let _durability = self.tracker.durability()?;
         match self.barrier() {
             Ok(()) => self.tracker.end_sync(seen),
             Err(error) => {
@@ -545,8 +543,11 @@ impl crate::Blob for Blob {
                 bufs
             };
 
-            // Remaining buffers stay owned here until terminal error accounting completes.
-            // Their owners may unwind when dropped.
+            let _durability = if fused {
+                Some(file.tracker.durability()?)
+            } else {
+                None
+            };
             let result = Self::write_vectored_at(cache, &file, offset, &mut bufs, flags);
             #[cfg(test)]
             if fused {
@@ -558,9 +559,6 @@ impl crate::Blob for Blob {
                 file.tracker.poison(error);
             }
             result?;
-            if fused && let Some(error) = file.tracker.failure() {
-                return Err(error);
-            }
             if !fused {
                 file.tracker.complete();
             }
@@ -713,71 +711,83 @@ mod tests {
                 Operation::Write(IOVEC_BATCH_SIZE + 1),
             ] {
                 for failure_first in [false, true] {
-                    let (storage, directory) = storage_for_reopen_test(
-                        &format!("overlapping_failure_{operation:?}_{failure_first}"),
-                        Layout::ALL,
-                    );
-                    let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-                    blob.write_at(0, b"prefix", WriteOptions::default())
-                        .await
-                        .unwrap();
-
-                    // Both barriers pass admission before either result is accounted for.
-                    // The gate chooses which terminal result reaches the tracker first.
-                    let (entered, entering) = ::tokio::sync::oneshot::channel();
-                    let (release, gate) = mpsc::channel();
-                    *blob.open.shared.test.after_sync.lock() = Some((entered, gate));
-                    if !failure_first {
-                        *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
-                    }
-                    let mut gated = Box::pin(run(
-                        &blob,
-                        if failure_first {
-                            operation
-                        } else {
-                            Operation::Sync
-                        },
-                    ));
-                    assert!((&mut gated).now_or_never().is_none());
-                    entering.await.unwrap();
-                    if failure_first {
-                        *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
-                    }
-                    let other = run(
-                        &blob,
-                        if failure_first {
-                            Operation::Sync
-                        } else {
-                            operation
-                        },
-                    )
-                    .await;
-                    release.send(()).unwrap();
-                    let gated = gated.await;
-                    let (failed, successful) = if failure_first {
-                        (other, gated)
-                    } else {
-                        (gated, other)
-                    };
-                    let dirty = blob.open.tracker.is_dirty();
-                    let retained = blob.open.tracker.failure();
-                    drop(blob);
-                    let reopened = storage.open("partition", b"blob").await;
-                    storage.remove("partition", None).await.unwrap();
-                    drop(storage);
-                    std::fs::remove_dir_all(directory).unwrap();
-
-                    assert!(matches!(failed, Err(Error::Closed)));
-                    assert!(matches!(retained, Some(Error::Closed)));
-                    assert!(matches!(reopened, Err(Error::Closed)));
-                    if failure_first {
-                        assert!(
-                            matches!(successful, Err(Error::Closed)),
-                            "{operation:?} acknowledged after a retained failure: {successful:?}"
+                    for cancel in [false, true] {
+                        let (storage, directory) = storage_for_reopen_test(
+                            &format!("overlapping_failure_{operation:?}_{failure_first}_{cancel}"),
+                            Layout::ALL,
                         );
-                        assert!(dirty, "a failed durability claim credited the prefix");
-                    } else {
-                        successful.unwrap();
+                        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+                        blob.write_at(0, b"prefix", WriteOptions::default())
+                            .await
+                            .unwrap();
+
+                        // Pause the first barrier before its result reaches the tracker.
+                        let (entered, entering) = ::tokio::sync::oneshot::channel();
+                        let (release, gate) = mpsc::channel();
+                        *blob.open.shared.test.after_sync.lock() = Some((entered, gate));
+                        if failure_first {
+                            *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
+                        }
+                        let mut first = Box::pin(run(
+                            &blob,
+                            if failure_first {
+                                Operation::Sync
+                            } else {
+                                operation
+                            },
+                        ));
+                        assert!((&mut first).now_or_never().is_none());
+                        entering.await.unwrap();
+                        assert!(
+                            blob.open.tracker.durability.try_lock().is_none(),
+                            "barrier released admission before accounting"
+                        );
+                        let first = if cancel {
+                            drop(first);
+                            None
+                        } else {
+                            Some(first)
+                        };
+                        if !failure_first {
+                            *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
+                        }
+
+                        let mut second = Box::pin(run(
+                            &blob,
+                            if failure_first {
+                                operation
+                            } else {
+                                Operation::Sync
+                            },
+                        ));
+                        assert!((&mut second).now_or_never().is_none());
+                        let early = (&mut second).now_or_never();
+                        release.send(()).unwrap();
+                        assert!(
+                            early.is_none(),
+                            "barrier completed before predecessor accounting"
+                        );
+                        let first = futures::future::OptionFuture::from(first).await;
+                        let second = second.await;
+                        if failure_first {
+                            assert!(matches!(first, None | Some(Err(Error::Closed))));
+                            assert!(matches!(second, Err(Error::Closed)));
+                            assert!(blob.open.tracker.is_dirty());
+                        } else {
+                            if let Some(first) = first {
+                                first.unwrap();
+                            }
+                            assert!(matches!(second, Err(Error::Closed)));
+                        }
+                        assert!(matches!(blob.open.tracker.failure(), Some(Error::Closed)));
+                        drop(blob);
+                        assert!(matches!(
+                            storage.open("partition", b"blob").await,
+                            Err(Error::Closed)
+                        ));
+                        storage.remove("partition", None).await.unwrap();
+                        drop(storage);
+                        std::fs::remove_dir_all(directory).unwrap();
                     }
                 }
             }
