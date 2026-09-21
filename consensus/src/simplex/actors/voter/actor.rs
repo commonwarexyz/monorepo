@@ -138,8 +138,8 @@ enum ProposalState<D> {
     Deferred,
     /// A volatile build result awaiting durable parent certification.
     Held(D),
-    /// A held result whose parent has certified. The next wait checks its
-    /// eligibility before publication.
+    /// A held result whose parent has durably certified, awaiting proposal
+    /// eligibility checks.
     Ready(D),
 }
 
