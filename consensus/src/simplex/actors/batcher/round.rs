@@ -17,7 +17,6 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use commonware_runtime::telemetry::metrics::histogram;
 use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::sync::Arc;
@@ -46,8 +45,6 @@ pub struct Round<
 
     /// Whether we've already sent the selected proposal to the voter.
     proposal_sent: bool,
-
-    pub(super) verify_latency: histogram::Accumulator,
 
     /// Root span of the view, shared with the voter's round.
     ///
@@ -79,8 +76,6 @@ impl<
             votes: VoteTracker::new(len, track_historical_votes),
 
             proposal_sent: false,
-
-            verify_latency: histogram::Accumulator::default(),
 
             span: ViewSpan::new(),
         }
@@ -369,11 +364,11 @@ impl<
         Some(proposal)
     }
 
-    /// Processes the first ready kind (notarizes, nullifies, then finalizes), recording
-    /// any completed certificate before returning it to the caller.
+    /// Attempts to construct a certificate from the first ready kind (notarizes,
+    /// nullifies, then finalizes), recording it before returning it to the caller.
     ///
     /// Do not cancel unless the round will also be discarded.
-    pub async fn try_verify<E: CryptoRng>(
+    pub async fn try_construct<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,

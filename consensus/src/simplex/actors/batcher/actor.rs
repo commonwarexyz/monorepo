@@ -21,7 +21,7 @@ use commonware_runtime::{
     telemetry::{
         metrics::{
             Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
-            histogram::Buckets,
+            histogram::{self, Buckets},
         },
         traces::TracedExt as _,
     },
@@ -91,7 +91,7 @@ where
     inbound_messages: CounterFamily<Inbound>,
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     batch_size: Histogram,
-    verify_latency: Histogram,
+    verify_latency: histogram::Timed,
     verify_fallback: Counter,
 }
 
@@ -123,7 +123,7 @@ where
         );
         let verify_latency = context.histogram(
             "verify_latency",
-            "total vote verification and certificate assembly time per view",
+            "latency of vote verification and certificate assembly",
             Buckets::CRYPTOGRAPHY,
         );
         let verify_fallback = context.counter(
@@ -166,7 +166,7 @@ where
                 inbound_messages,
                 latest_vote,
                 batch_size,
-                verify_latency,
+                verify_latency: histogram::Timed::new(verify_latency),
                 verify_fallback,
             },
             Mailbox::new(sender),
@@ -314,8 +314,8 @@ where
         }
     }
 
-    /// Batch-verifies any ready votes for `view` and forwards newly
-    /// constructible certificates to the voter.
+    /// Attempts to construct certificates from ready votes for `view` and forwards
+    /// them to the voter.
     async fn process_view(
         &mut self,
         voter: &mut voter::Mailbox<S, D>,
@@ -323,18 +323,16 @@ where
         round: &mut Round<S, B, D, Re>,
     ) {
         loop {
-            let start = self.context.current();
+            let timer = self.verify_latency.timer(self.context.as_ref());
             let Some(verification) = round
-                .try_verify(self.context.as_mut(), &self.strategy)
+                .try_construct(self.context.as_mut(), &self.strategy)
                 .await
             else {
                 trace!(%view, "no verifier ready");
                 break;
             };
 
-            round
-                .verify_latency
-                .add_between(start, self.context.current());
+            timer.observe(self.context.as_ref());
 
             if verification.fallback {
                 self.verify_fallback.inc();
@@ -434,10 +432,9 @@ where
                         };
                         finalized = new_finalized;
 
-                        // Finalized views no longer run verification, even while retained for reporting.
+                        // Close the root span of any view the chain has now decided
                         for (_, round) in work.range_mut(..=finalized) {
                             round.close_span();
-                            round.verify_latency.observe(&self.verify_latency);
                         }
 
                         // Track the new current view, adopting the voter's view

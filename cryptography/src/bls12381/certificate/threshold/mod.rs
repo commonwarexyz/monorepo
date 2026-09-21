@@ -8,6 +8,13 @@
 //! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
 //!
+//! For a fixed, securely generated sharing, threshold unforgeability implies that, except with
+//! negligible probability, a coalition producing a fresh certificate in the standard corruption and
+//! partial-signing model has a transcript containing exposed shares or valid responses for the exact
+//! subject covering a quorum of distinct participants. Those shares and responses suffice to compute
+//! valid partials for that quorum. This is not a public proof of knowledge or a guarantee about a
+//! later recipient.
+//!
 //! Certificate verification does not validate the partials supplied to assembly. Invalid partials
 //! can have cancelling interpolation errors, even with exactly a quorum of inputs. A valid
 //! certificate therefore authenticates quorum authorization without proving input validity or

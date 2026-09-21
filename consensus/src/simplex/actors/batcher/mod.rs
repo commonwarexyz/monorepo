@@ -457,7 +457,7 @@ mod tests {
 
         // Process the pending votes on the strategy's pool.
         let verification = round
-            .try_verify(&mut rng, &strategy)
+            .try_construct(&mut rng, &strategy)
             .await
             .expect("quorum of notarizes must be ready");
         assert_eq!(verification.batch, schemes.len());
@@ -471,7 +471,7 @@ mod tests {
         assert!(notarization.verify(&mut rng, &verifier, &Sequential));
 
         // Completed kinds do not emit another certificate.
-        assert!(round.try_verify(&mut rng, &strategy).await.is_none());
+        assert!(round.try_construct(&mut rng, &strategy).await.is_none());
     }
 
     fn threshold_vote<S: Scheme<Sha256Digest>>(
@@ -529,7 +529,7 @@ mod tests {
             }
 
             let verification = tracked
-                .try_verify(&mut rng, &Sequential)
+                .try_construct(&mut rng, &Sequential)
                 .await
                 .expect("mixed trusted and pending quorum must be ready");
             assert_eq!(verification.batch, quorum - 1);
@@ -567,7 +567,7 @@ mod tests {
 
             let late = threshold_vote(&schemes[quorum], kind, round_id, &proposal);
             assert!(tracked.add_network(participants[quorum].clone(), late));
-            assert!(tracked.try_verify(&mut rng, &Sequential).await.is_none());
+            assert!(tracked.try_construct(&mut rng, &Sequential).await.is_none());
         }
     }
 
@@ -632,7 +632,7 @@ mod tests {
             }
 
             let mut result = tracked
-                .try_verify(&mut rng, &Sequential)
+                .try_construct(&mut rng, &Sequential)
                 .await
                 .expect("candidate quorum must be ready");
             assert_eq!(result.batch, batch);
@@ -641,10 +641,10 @@ mod tests {
             assert_eq!(tracked.has_certificate(kind), valid_quorum);
             if !valid_quorum {
                 assert!(result.certificate.is_none());
-                assert!(tracked.try_verify(&mut rng, &Sequential).await.is_none());
+                assert!(tracked.try_construct(&mut rng, &Sequential).await.is_none());
                 assert!(tracked.add_network(participants[quorum].clone(), votes[quorum].clone()));
                 result = tracked
-                    .try_verify(&mut rng, &Sequential)
+                    .try_construct(&mut rng, &Sequential)
                     .await
                     .expect("replacement vote must complete the verified quorum");
                 assert_eq!(result.batch, 1);
@@ -724,7 +724,7 @@ mod tests {
         }
 
         let notarize = tracked
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("notarize candidate quorum must be processed first");
         assert!(notarize.fallback);
@@ -733,7 +733,7 @@ mod tests {
         assert!(!tracked.has_certificate(Kind::Notarization));
 
         let nullify = tracked
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("nullify quorum must retain its optimistic attempt");
         assert!(matches!(
@@ -795,7 +795,7 @@ mod tests {
         let Batch {
             invalid, fallback, ..
         } = tracked
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("candidate quorum must be processed");
         assert!(fallback);
@@ -832,7 +832,7 @@ mod tests {
         assert!(round.try_forward_proposal(Participant::new(0)).is_none());
 
         let result = round
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("a constructed quorum must complete before the leader update");
         assert_eq!(result.batch, 0);
@@ -848,7 +848,7 @@ mod tests {
             Some(proposal)
         );
         assert!(round.has_certificate(Kind::Notarization));
-        assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
+        assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
     }
 
     #[test_async]
@@ -891,7 +891,7 @@ mod tests {
             let vote = Notarize::sign(&schemes[i], proposal.clone()).unwrap();
             assert!(round.add_network(participants[i].clone(), Vote::Notarize(vote)));
         }
-        assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
+        assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
 
         let vote = Notarize::sign(&schemes[quorum - 1], proposal).unwrap();
         assert!(round.add_network(participants[quorum - 1].clone(), Vote::Notarize(vote)));
@@ -901,7 +901,7 @@ mod tests {
             fallback,
             certificate,
         } = round
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("unique signer quorum must be ready");
         assert_eq!(processed, quorum - 1);
@@ -1411,7 +1411,7 @@ mod tests {
                 fallback,
                 certificate,
             } = round
-                .try_verify(&mut rng, &Sequential)
+                .try_construct(&mut rng, &Sequential)
                 .await
                 .expect("certificate quorum must be ready");
             assert_eq!(processed, quorum_size);
@@ -1491,7 +1491,7 @@ mod tests {
             fallback,
             certificate,
         } = round
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("restored finalize quorum must be ready");
         assert_eq!(processed, quorum_size - 1);
@@ -1556,7 +1556,7 @@ mod tests {
             fallback,
             certificate,
         } = round
-            .try_verify(&mut rng, &Sequential)
+            .try_construct(&mut rng, &Sequential)
             .await
             .expect("restored finalize quorum must be ready");
         assert_eq!(processed, quorum_size);
@@ -1572,7 +1572,7 @@ mod tests {
 
     /// When multiple kinds are verifiable, votes verify in kind order.
     #[test_async]
-    async fn test_verify_prioritizes_kinds_in_order() {
+    async fn test_construct_prioritizes_kinds_in_order() {
         let mut rng = test_rng();
         let Fixture {
             participants,
@@ -1604,13 +1604,13 @@ mod tests {
         // Notarizes verify first, then nullifies, then nothing
         let Batch {
             batch: processed, ..
-        } = round.try_verify(&mut rng, &Sequential).await.unwrap();
+        } = round.try_construct(&mut rng, &Sequential).await.unwrap();
         assert_eq!(processed, quorum);
         let Batch {
             batch: processed, ..
-        } = round.try_verify(&mut rng, &Sequential).await.unwrap();
+        } = round.try_construct(&mut rng, &Sequential).await.unwrap();
         assert_eq!(processed, schemes.len());
-        assert!(round.try_verify(&mut rng, &Sequential).await.is_none());
+        assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
     }
 
     /// The leader's notarize reveals the proposal while both a finalize
@@ -1753,17 +1753,7 @@ mod tests {
             assert!(received_finalization);
 
             let metrics = context.encode();
-            assert!(metrics.contains("actor_verify_latency_count 0\n"), "{metrics}");
-            batcher_mailbox.update(
-                Span::none(),
-                view.next(),
-                Participant::from_usize(leader),
-                view,
-                None,
-            );
-            while !context.encode().contains("actor_verify_latency_count 1\n") {
-                context.sleep(Duration::from_millis(1)).await;
-            }
+            assert!(metrics.contains("actor_verify_latency_count 2\n"), "{metrics}");
         });
     }
 
@@ -1809,7 +1799,7 @@ mod tests {
                 true,
             );
             assert!(
-                round.try_verify(&mut rng, &Sequential).await.is_none(),
+                round.try_construct(&mut rng, &Sequential).await.is_none(),
                 "mixed finalizes for old and certified proposals must not form a certificate"
             );
 
@@ -1833,7 +1823,7 @@ mod tests {
                 );
             }
             let certificate = round
-                .try_verify(&mut rng, &Sequential)
+                .try_construct(&mut rng, &Sequential)
                 .await
                 .expect("matching finalizes should be ready")
                 .certificate
@@ -3225,7 +3215,7 @@ mod tests {
                 "optimistic recovery failure must increment the fallback counter: {metrics}"
             );
             assert!(
-                metrics.contains("actor_verify_latency_count 0\n"),
+                metrics.contains("actor_verify_latency_count 1\n"),
                 "{metrics}"
             );
 
@@ -3273,15 +3263,11 @@ mod tests {
             let metrics = context.encode();
             assert!(metrics.contains("verify_fallback_total 1\n"), "{metrics}");
             assert!(
-                metrics.contains("actor_verify_latency_count 0\n"),
+                metrics.contains("actor_verify_latency_count 2\n"),
                 "{metrics}"
             );
 
-            // Both attempts belong to one view; finalization retires its verification work.
             batcher_mailbox.update(Span::none(), view.next(), leader, view, None);
-            while !context.encode().contains("actor_verify_latency_count 1\n") {
-                context.sleep(Duration::from_millis(1)).await;
-            }
 
             let late = Nullify::sign::<Sha256Digest>(&schemes[2], round).unwrap();
             participant_senders[2].as_mut().unwrap().send(
@@ -3314,7 +3300,7 @@ mod tests {
                 }
                 let metrics = context.encode();
                 assert!(
-                    metrics.contains("actor_verify_latency_count 1\n"),
+                    metrics.contains("actor_verify_latency_count 2\n"),
                     "{metrics}"
                 );
                 assert!(metrics.contains("verify_fallback_total 1\n"), "{metrics}");
