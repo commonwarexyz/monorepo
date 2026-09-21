@@ -397,6 +397,105 @@ impl<K, V> Map<K, V> {
         &mut self.values
     }
 
+    /// Maps each value in key order, cloning the keys without sorting or validating them.
+    ///
+    /// The closure receives references to the key and value. The new values may
+    /// borrow from this map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::ordered::Map;
+    ///
+    /// let map = Map::try_from([(2, "two"), (1, "one")]).unwrap();
+    /// let lengths = map.map_values(|_, value| value.len());
+    /// assert_eq!(lengths.keys(), map.keys());
+    /// assert_eq!(lengths.values(), &[3, 3]);
+    /// ```
+    pub fn map_values<'a, U, F>(&'a self, mut f: F) -> Map<K, U>
+    where
+        K: Clone,
+        F: FnMut(&'a K, &'a V) -> U,
+    {
+        Map {
+            keys: self.keys.clone(),
+            values: self
+                .iter_pairs()
+                .map(|(key, value)| f(key, value))
+                .collect(),
+        }
+    }
+
+    /// Tries to map each value in key order, cloning the keys only on success.
+    ///
+    /// The closure receives references to the key and value. The new values may
+    /// borrow from this map. Returns the first error without calling the closure
+    /// for subsequent entries. Keys are neither sorted nor validated.
+    pub fn try_map_values<'a, U, E, F>(&'a self, mut f: F) -> Result<Map<K, U>, E>
+    where
+        K: Clone,
+        F: FnMut(&'a K, &'a V) -> Result<U, E>,
+    {
+        let mut values = Vec::with_capacity(self.len());
+        for (key, value) in self.iter_pairs() {
+            values.push(f(key, value)?);
+        }
+        Ok(Map {
+            keys: self.keys.clone(),
+            values,
+        })
+    }
+
+    /// Consumes the map and maps each value in key order, reusing the key allocation.
+    ///
+    /// The closure receives a reference to the key and the owned value. Keys are
+    /// neither cloned, sorted, nor validated.
+    pub fn map_values_into<U, F>(self, mut f: F) -> Map<K, U>
+    where
+        F: FnMut(&K, V) -> U,
+    {
+        let values = self
+            .keys
+            .iter()
+            .zip(self.values)
+            .map(|(key, value)| f(key, value))
+            .collect();
+        Map {
+            keys: self.keys,
+            values,
+        }
+    }
+
+    /// Consumes the map and tries to map each value in key order, reusing the key allocation.
+    ///
+    /// The closure receives a reference to the key and the owned value. Returns
+    /// the first error without calling the closure for subsequent entries. Keys
+    /// are neither cloned, sorted, nor validated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::ordered::Map;
+    ///
+    /// let map = Map::try_from([(2, String::from("20")), (1, String::from("10"))]).unwrap();
+    /// let parsed = map.try_map_values_into(|_, value| value.parse::<u32>()).unwrap();
+    /// assert_eq!(parsed.keys().as_ref(), &[1, 2]);
+    /// assert_eq!(parsed.values(), &[10, 20]);
+    /// ```
+    pub fn try_map_values_into<U, E, F>(self, mut f: F) -> Result<Map<K, U>, E>
+    where
+        F: FnMut(&K, V) -> Result<U, E>,
+    {
+        let mut values = Vec::with_capacity(self.len());
+        for (key, value) in self.keys.iter().zip(self.values) {
+            values.push(f(key, value)?);
+        }
+        Ok(Map {
+            keys: self.keys,
+            values,
+        })
+    }
+
     /// Truncates the map to at most `len` entries.
     pub fn truncate(&mut self, len: usize) {
         self.keys.0.truncate(len);
@@ -404,7 +503,7 @@ impl<K, V> Map<K, V> {
     }
 
     /// Returns a zipped iterator over keys and values.
-    pub fn iter_pairs(&self) -> impl Iterator<Item = (&K, &V)> {
+    pub fn iter_pairs(&self) -> impl ExactSizeIterator<Item = (&K, &V)> + DoubleEndedIterator {
         self.keys.iter().zip(self.values.iter())
     }
 
@@ -412,7 +511,9 @@ impl<K, V> Map<K, V> {
     ///
     /// This is provided because the borrow checker does not let you combine
     /// the other functions yourself.
-    pub fn iter_pairs_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+    pub fn iter_pairs_mut(
+        &mut self,
+    ) -> impl ExactSizeIterator<Item = (&K, &mut V)> + DoubleEndedIterator {
         self.keys.iter().zip(self.values.iter_mut())
     }
 
@@ -696,7 +797,7 @@ impl<K, V> BiMap<K, V> {
     }
 
     /// Returns a zipped iterator over keys and values.
-    pub fn iter_pairs(&self) -> impl Iterator<Item = (&K, &V)> {
+    pub fn iter_pairs(&self) -> impl ExactSizeIterator<Item = (&K, &V)> + DoubleEndedIterator {
         self.inner.iter_pairs()
     }
 
@@ -876,6 +977,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use core::cell::Cell;
 
     #[test]
     fn test_sorted_unique_construct_unseal() {
@@ -1011,6 +1113,189 @@ mod test {
             *value += 1;
         }
         assert_eq!(map.values(), &[11, 21]);
+    }
+
+    #[test]
+    fn test_map_values_borrowed() {
+        struct Value(String);
+
+        let map = Map::try_from([
+            (3, Value("three".into())),
+            (1, Value("one".into())),
+            (2, Value("two".into())),
+        ])
+        .unwrap();
+        let mut visited = Vec::new();
+        let mapped = map.map_values(|key, value| {
+            visited.push(*key);
+            (key, value.0.as_str())
+        });
+        assert_eq!(visited, [1, 2, 3]);
+        assert_eq!(mapped.keys(), map.keys());
+        assert_eq!(mapped.values(), &[(&1, "one"), (&2, "two"), (&3, "three")]);
+
+        visited.clear();
+        let mapped = map
+            .try_map_values(|key, value| {
+                visited.push(*key);
+                Ok::<_, ()>((key, value.0.as_str()))
+            })
+            .unwrap();
+        assert_eq!(visited, [1, 2, 3]);
+        assert_eq!(mapped.keys(), map.keys());
+        assert_eq!(mapped.values(), &[(&1, "one"), (&2, "two"), (&3, "three")]);
+        assert_eq!(map.get_value(&2).unwrap().0, "two");
+    }
+
+    #[test]
+    fn test_map_values_into_reuses_keys() {
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+        struct Key(u8);
+        struct Value(String);
+
+        let map = Map::try_from([
+            (Key(3), Value("three".into())),
+            (Key(1), Value("one".into())),
+            (Key(2), Value("two".into())),
+        ])
+        .unwrap();
+        let keys_ptr = map.keys().as_ref().as_ptr();
+        let mut visited = Vec::new();
+        let mapped = map.map_values_into(|key, value| {
+            visited.push(key.0);
+            value.0
+        });
+        assert_eq!(visited, [1, 2, 3]);
+        assert_eq!(mapped.keys().as_ref().as_ptr(), keys_ptr);
+        assert_eq!(mapped.values(), &["one", "two", "three"]);
+
+        visited.clear();
+        let mapped = mapped
+            .try_map_values_into(|key, value| {
+                visited.push(key.0);
+                Ok::<_, ()>(value.into_bytes())
+            })
+            .unwrap();
+        assert_eq!(visited, [1, 2, 3]);
+        assert_eq!(mapped.keys().as_ref().as_ptr(), keys_ptr);
+        assert_eq!(mapped.keys().as_ref(), &[Key(1), Key(2), Key(3)]);
+        assert_eq!(
+            mapped.values(),
+            &[b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+        );
+    }
+
+    #[test]
+    fn test_map_values_empty() {
+        let map = Map::<u8, ()>::default();
+        let mapped: Map<_, u32> = map.map_values(|_, _| unreachable!());
+        assert!(mapped.is_empty());
+        let mapped: Result<Map<_, u32>, ()> = map.try_map_values(|_, _| unreachable!());
+        assert!(mapped.unwrap().is_empty());
+        let mapped: Map<_, u32> = map.clone().map_values_into(|_, _| unreachable!());
+        assert!(mapped.is_empty());
+        let mapped: Result<Map<_, u32>, ()> = map.try_map_values_into(|_, _| unreachable!());
+        assert!(mapped.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_try_map_values_short_circuits() {
+        let map = Map::try_from([(3, "three"), (1, "one"), (2, "two")]).unwrap();
+        for failed_key in 1..=3 {
+            let mut visited = Vec::new();
+            let result = map.try_map_values(|key, value| {
+                visited.push(*key);
+                if *key == failed_key {
+                    Err((key, *value))
+                } else {
+                    Ok(value.len())
+                }
+            });
+            assert_eq!(
+                result,
+                Err((&failed_key, *map.get_value(&failed_key).unwrap()))
+            );
+            assert_eq!(visited, (1..=failed_key).collect::<Vec<_>>());
+            assert_eq!(map.values(), &["one", "two", "three"]);
+
+            visited.clear();
+            let result = map.clone().try_map_values_into(|key, value| {
+                visited.push(*key);
+                if *key == failed_key {
+                    Err((*key, value))
+                } else {
+                    Ok(value.len())
+                }
+            });
+            assert_eq!(
+                result,
+                Err((failed_key, *map.get_value(&failed_key).unwrap()))
+            );
+            assert_eq!(visited, (1..=failed_key).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn test_try_map_values_drops_on_error() {
+        struct Tracked<'a>(&'a Cell<usize>);
+
+        impl Drop for Tracked<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() + 1);
+            }
+        }
+
+        let input_drops = Cell::new(0);
+        let output_drops = Cell::new(0);
+        let map = Map::try_from_iter((1..=3).map(|key| (key, Tracked(&input_drops)))).unwrap();
+        let result = map.try_map_values(|key, _| {
+            if *key == 2 {
+                Err(*key)
+            } else {
+                Ok(Tracked(&output_drops))
+            }
+        });
+        assert_eq!(result.err(), Some(2));
+        assert_eq!(input_drops.get(), 0);
+        assert_eq!(output_drops.get(), 1);
+
+        output_drops.set(0);
+        let result = map.try_map_values_into(|key, _| {
+            if *key == 2 {
+                Err(*key)
+            } else {
+                Ok(Tracked(&output_drops))
+            }
+        });
+        assert_eq!(result.err(), Some(2));
+        assert_eq!(input_drops.get(), 3);
+        assert_eq!(output_drops.get(), 1);
+    }
+
+    #[test]
+    fn test_pair_iterators() {
+        fn check(mut pairs: impl ExactSizeIterator<Item = (u8, u8)> + DoubleEndedIterator) {
+            assert_eq!(pairs.len(), 3);
+            assert_eq!(pairs.next(), Some((1, 10)));
+            assert_eq!(pairs.len(), 2);
+            assert_eq!(pairs.next_back(), Some((3, 30)));
+            assert_eq!(pairs.len(), 1);
+            assert_eq!(pairs.next_back(), Some((2, 20)));
+            assert_eq!(pairs.len(), 0);
+            assert_eq!(pairs.next(), None);
+            assert_eq!(pairs.next_back(), None);
+        }
+
+        let mut map = Map::try_from([(3, 30), (1, 10), (2, 20)]).unwrap();
+        check(map.iter_pairs().map(|(&key, &value)| (key, value)));
+        check(map.iter_pairs_mut().map(|(&key, value)| {
+            let previous = *value;
+            *value += key;
+            (key, previous)
+        }));
+        assert_eq!(map.values(), &[11, 22, 33]);
+        let bimap = BiMap::try_from([(3, 30), (1, 10), (2, 20)]).unwrap();
+        check(bimap.iter_pairs().map(|(&key, &value)| (key, value)));
     }
 
     #[test]
