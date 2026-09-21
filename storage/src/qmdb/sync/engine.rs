@@ -445,6 +445,9 @@ where
             }
         }
 
+        // Preserve operation fetches for retained targets beyond the new lower bound.
+        // The lower bound never decreases, so this cancels old boundary requests and
+        // leaves the new boundary free for fetching pinned nodes.
         let new_start = new_target.range.start();
         self.outstanding_requests.retain(|request| {
             request.start() > new_start && self.retained_sizes.contains(&request.size())

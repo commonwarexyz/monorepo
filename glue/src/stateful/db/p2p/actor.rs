@@ -177,11 +177,11 @@ where
             _ = &mut resolver_task => {
                 return;
             },
+            // Drive verdicts and subscription retirement independently of database reads.
+            _ = self.work.next_completed() => {},
             // Drive reads and release their slots on completion.
             // Each future sends its response and records the outcome.
             _ = self.serves.next_completed() => {},
-            // Drive verdicts and subscription retirement independently of database reads.
-            _ = self.work.next_completed() => {},
             Some(message) = mailbox_message else continue => {
                 self.handle_mailbox_message(&mut resolver_mailbox, message);
             },
@@ -239,11 +239,7 @@ where
                 let pending_requests = self.metrics.pending_requests.clone();
                 self.work.push(async move {
                     response.closed().await;
-
-                    // Native registrations and deliveries keep their reply sender alive.
-                    if response.strong_count() > 1 {
-                        resolver.retain(move |_, subscriber| subscriber.id != id);
-                    }
+                    resolver.retain(move |_, subscriber| subscriber.id != id);
                     pending_requests.dec();
                 });
             }
@@ -941,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_native_ownership_skips_redundant_retain() {
+    fn completed_request_cleanup_preserves_new_subscriber() {
         deterministic::Runner::default().start(|context| async move {
             let (mut actor, mailbox) = TestActor::new(context, test_config(None));
             let mut resolver = RecordingResolver::default();
@@ -958,15 +954,27 @@ mod tests {
             feedback.unwrap().accept();
             assert!(verdict.await.unwrap());
 
-            // Native completion releases every registration and snapshot before the
-            // closure waiter is polled. The recorder's history also owns a sender clone.
-            {
-                let mut recorded = resolver.0.lock();
-                recorded.subscriptions.clear();
-                recorded.fetches.clear();
-            }
+            // Native completion retires the old subscription before a new caller arrives.
+            resolver.0.lock().subscriptions.clear();
+            let (response, receiver) = mpsc::channel(1);
+            actor.handle_mailbox_message(
+                &mut resolver,
+                mailbox::Message::GetOperations { request, response },
+            );
+
+            // Delayed cleanup of the completed request must preserve the new subscription.
             actor.work.next_completed().await;
-            assert_eq!(resolver.0.lock().retains, 0);
+            {
+                let recorded = resolver.0.lock();
+                let subscribers = &recorded.subscriptions[&request];
+                assert_eq!(subscribers.len(), 1);
+                assert_eq!(subscribers[0].id, recorded.fetches[1].1.id);
+            }
+            assert_eq!(actor.metrics.pending_requests.get(), 1);
+
+            drop(receiver);
+            actor.work.next_completed().await;
+            assert!(resolver.0.lock().subscriptions.is_empty());
             assert_eq!(actor.metrics.pending_requests.get(), 0);
             assert!(actor.work.is_empty());
         });
