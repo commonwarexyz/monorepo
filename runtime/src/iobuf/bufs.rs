@@ -1310,14 +1310,14 @@ impl From<Vec<IoBufMut>> for IoBufsMut {
     }
 }
 
-/// Zero-copy: collects the chunks, retaining empty buffers with writable capacity.
+/// Zero-copy: collects the chunks, dropping zero-capacity ones.
 impl<const N: usize> From<[IoBufMut; N]> for IoBufsMut {
     fn from(bufs: [IoBufMut; N]) -> Self {
         Self::from_iter(bufs)
     }
 }
 
-/// Zero-copy: collects the chunks, retaining empty buffers with writable capacity.
+/// Zero-copy: collects the chunks, dropping zero-capacity ones.
 impl FromIterator<IoBufMut> for IoBufsMut {
     fn from_iter<T: IntoIterator<Item = IoBufMut>>(bufs: T) -> Self {
         Self::from_writable_chunks_iter(bufs)
@@ -1798,12 +1798,12 @@ mod tests {
             // The test and the buffer each hold one reference to the owner.
             assert!(owners.iter().all(|owner| Arc::strong_count(owner) == 2));
 
-            let mut items_polled = 0;
+            let mut items_pulled = 0;
             let result = bufs
                 .into_iter()
                 .enumerate()
                 .map(|(index, buf)| {
-                    items_polled += 1;
+                    items_pulled += 1;
                     if index == fail_at {
                         Err("injected")
                     } else {
@@ -1813,8 +1813,8 @@ mod tests {
                 .collect::<Result<IoBufs, _>>();
 
             assert_eq!(result.unwrap_err(), "injected");
-            assert_eq!(items_polled, fail_at + 1);
-            // Only the test's reference remains, including for unpolled buffers.
+            assert_eq!(items_pulled, fail_at + 1);
+            // Only the test's reference remains, including for unconsumed buffers.
             for owner in owners {
                 assert_eq!(Arc::strong_count(&owner), 1);
             }
