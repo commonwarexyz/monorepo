@@ -1,4 +1,4 @@
-use super::utils::{BenchSubject, OptimisticAssembleCase, bench_optimistic_assemble};
+use super::utils::optimistic_assemble::{BenchSubject, Case, bench_case};
 use commonware_cryptography::{
     Signer as _,
     bls12381::{
@@ -64,13 +64,8 @@ fn bench_variant<V: Variant>(c: &mut Criterion, variant: &str) {
                 Mode::NonZeroCounter => "counter",
                 Mode::RootsOfUnity => "roots",
             };
-            for case in [
-                OptimisticAssembleCase::Valid,
-                OptimisticAssembleCase::Bad,
-                OptimisticAssembleCase::Spare,
-                OptimisticAssembleCase::Split,
-            ] {
-                bench_optimistic_assemble::<_, Sha256Digest>(
+            for case in [Case::Valid, Case::Bad, Case::Spare, Case::Split] {
+                bench_case::<_, Sha256Digest>(
                     c,
                     &format!(
                         "{}/variant={} mode={} n={} case={}",
