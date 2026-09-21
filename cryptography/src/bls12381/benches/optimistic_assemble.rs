@@ -103,22 +103,6 @@ fn fixture<S: Scheme>(
     (pending, vec![invalid])
 }
 
-fn baseline<S, R, D>(
-    scheme: &S,
-    rng: &mut R,
-    subject: S::Subject<'static, D>,
-    pending: Vec<Attestation<S>>,
-    quorum: usize,
-) -> (Verification<S>, Option<S::Certificate>)
-where
-    S: Scheme,
-    R: rand_core::CryptoRng,
-    D: Digest,
-{
-    let result = scheme.verify_attestations::<_, D, _>(rng, subject, pending, &Sequential);
-    finish_verification(scheme, result, quorum)
-}
-
 fn optimistic<S, R, D>(
     scheme: &S,
     rng: &mut R,
@@ -131,7 +115,7 @@ where
     R: rand_core::CryptoRng,
     D: Digest,
 {
-    let result = match scheme.optimistic_assemble::<_, D, _, _>(
+    let mut result = match scheme.optimistic_assemble::<_, D, _, _>(
         rng,
         subject,
         pending,
@@ -141,14 +125,6 @@ where
         Ok(certificate) => return (Verification::new(Vec::new(), Vec::new()), Some(certificate)),
         Err(result) => result,
     };
-    finish_verification(scheme, result, quorum)
-}
-
-fn finish_verification<S: Scheme>(
-    scheme: &S,
-    mut result: Verification<S>,
-    quorum: usize,
-) -> (Verification<S>, Option<S::Certificate>) {
     let certificate = if result.verified.len() >= quorum {
         Some(
             scheme
@@ -178,28 +154,6 @@ fn assert_invalid(invalid: &[Participant], expected: &[Participant]) {
     assert!(invalid.windows(2).all(|pair| pair[0] != pair[1]));
     assert!(expected.windows(2).all(|pair| pair[0] != pair[1]));
     assert_eq!(invalid, expected);
-}
-
-fn assert_outcome<S, D>(
-    scheme: &S,
-    mut rng: TestRng,
-    subject: S::Subject<'static, D>,
-    result: &(Verification<S>, Option<S::Certificate>),
-    case: Case,
-    expected_invalid: &[Participant],
-    expected_verified: &[Attestation<S>],
-) where
-    S: Scheme,
-    D: Digest,
-{
-    assert_eq!(result.1.is_some(), case.expects_certificate());
-    if let Some(certificate) = &result.1 {
-        assert_invalid(&result.0.invalid, expected_invalid);
-        assert!(result.0.verified.is_empty());
-        assert!(scheme.verify_certificate::<_, D>(&mut rng, subject, certificate, &Sequential,));
-    } else {
-        assert_verification(&result.0, expected_verified, expected_invalid);
-    }
 }
 
 pub fn bench_case<S, D>(
@@ -277,16 +231,6 @@ pub fn bench_case<S, D>(
         assert_verification(&verification, &expected_verified, &expected_invalid);
     }
 
-    // Establish the whole-batch verification evidence independently.
-    let mut verification_rng = TestRng::new(RNG_SEED);
-    let verification = scheme.verify_attestations::<_, D, _>(
-        &mut verification_rng,
-        subject.clone(),
-        pending.clone(),
-        &Sequential,
-    );
-    assert_verification(&verification, &expected_verified, &expected_invalid);
-
     // Establish that both recursive halves independently require invalid isolation.
     if matches!(case, Case::Split) {
         let chunk = pending.len().div_ceil(2);
@@ -314,65 +258,36 @@ pub fn bench_case<S, D>(
         }
     }
 
-    // Establish equivalent complete outcomes before timing either path.
-    let optimistic_result = optimistic(
+    // Verify the final certificate or retained fallback evidence before timing.
+    let result = optimistic(
         scheme,
         &mut TestRng::new(RNG_SEED),
         subject.clone(),
         pending.clone(),
         quorum,
     );
-    assert_outcome(
-        scheme,
-        TestRng::new(RNG_SEED),
-        subject.clone(),
-        &optimistic_result,
-        case,
-        &expected_invalid,
-        &expected_verified,
-    );
-    let baseline_result = baseline(
-        scheme,
-        &mut TestRng::new(RNG_SEED),
-        subject.clone(),
-        pending.clone(),
-        quorum,
-    );
-    assert_outcome(
-        scheme,
-        TestRng::new(RNG_SEED),
-        subject.clone(),
-        &baseline_result,
-        case,
-        &expected_invalid,
-        &expected_verified,
-    );
+    assert_eq!(result.1.is_some(), case.expects_certificate());
+    if let Some(certificate) = &result.1 {
+        assert_invalid(&result.0.invalid, &expected_invalid);
+        assert!(result.0.verified.is_empty());
+        assert!(scheme.verify_certificate::<_, D>(
+            &mut TestRng::new(RNG_SEED),
+            subject.clone(),
+            certificate,
+            &Sequential,
+        ));
+    } else {
+        assert_verification(&result.0, &expected_verified, &expected_invalid);
+    }
 
-    let mut optimistic_rng = TestRng::new(RNG_SEED);
-    c.bench_function(&format!("{name} path=optimistic"), |b| {
+    let mut rng = TestRng::new(RNG_SEED);
+    c.bench_function(name, |b| {
         b.iter_batched(
             || pending.clone(),
             |pending| {
                 black_box(optimistic(
                     scheme,
-                    &mut optimistic_rng,
-                    subject.clone(),
-                    pending,
-                    quorum,
-                ));
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    let mut baseline_rng = TestRng::new(RNG_SEED);
-    c.bench_function(&format!("{name} path=baseline"), |b| {
-        b.iter_batched(
-            || pending.clone(),
-            |pending| {
-                black_box(baseline(
-                    scheme,
-                    &mut baseline_rng,
+                    &mut rng,
                     subject.clone(),
                     pending,
                     quorum,
