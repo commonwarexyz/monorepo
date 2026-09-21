@@ -58,7 +58,7 @@ pub async fn sync<DB, S>(
 ) -> Result<DB, Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: Database,
-    DB::Op: Encode + 'static,
+    DB::Op: Encode,
     S: SourceFor<DB>,
 {
     Engine::new(config).await?.sync().await

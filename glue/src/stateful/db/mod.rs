@@ -1702,7 +1702,7 @@ pub(crate) async fn sync_standard_db<E, DB, S>(
 ) -> Result<DB, sync::Error<DB::Family, S::Error, DB::Digest>>
 where
     DB: sync::Database<Context = E>,
-    DB::Op: Encode + 'static,
+    DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
     sync::sync(sync::engine::Config {
@@ -1745,7 +1745,7 @@ pub(crate) async fn sync_compact_db<E, DB, S>(
 where
     E: Metrics + Spawner,
     DB: sync::Database<Context = E>,
-    DB::Op: Encode + 'static,
+    DB::Op: Encode,
     S: sync::SourceFor<DB>,
 {
     let mut initial = sync::Target::try_from(&target).map_err(sync::Error::Engine)?;

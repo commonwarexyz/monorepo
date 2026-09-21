@@ -277,7 +277,7 @@ impl<DB, S> Engine<DB, S>
 where
     DB: Database,
     S: SourceFor<DB>,
-    DB::Op: Encode + 'static,
+    DB::Op: Encode,
 {
     pub async fn new(config: Config<DB, S>) -> Result<Self, Error<DB, S>> {
         if !config.target.range.end().is_valid() {
