@@ -8,6 +8,7 @@
 pub mod batch;
 #[cfg(test)]
 pub(crate) mod conformance;
+mod element;
 pub mod hasher;
 #[cfg(feature = "std")]
 mod persisted;
@@ -30,6 +31,7 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Read, Write};
 use commonware_cryptography::Digest;
 use core::fmt::Debug;
+pub use element::{Element, Encoded};
 pub use location::{Location, LocationRangeExt};
 pub use position::Position;
 #[cfg(test)]

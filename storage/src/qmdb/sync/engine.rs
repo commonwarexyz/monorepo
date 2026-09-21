@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::{Family, Location, hasher::Standard as StandardHasher},
+    merkle::{Encoded, Family, Location, hasher::Standard as StandardHasher},
     qmdb::{
         self,
         sync::{
@@ -594,8 +594,12 @@ where
                 let Some(root) = self.verification_root(size) else {
                     return Ok(());
                 };
-                if !proof.verify_range_inclusion_encoded(&self.hasher, &operations, start_loc, root)
-                {
+                if !proof.verify_range_inclusion(
+                    &self.hasher,
+                    operations.iter().map(Encoded),
+                    start_loc,
+                    root,
+                ) {
                     return Self::reject_response(feedback_tx);
                 }
                 if let Some(feedback_tx) = feedback_tx {

@@ -4,7 +4,7 @@
 //! family (MMR, MMB, etc.) reuses the shared verification and reconstruction logic in this module,
 //! while retaining any family-specific proof helpers in its submodule.
 
-use crate::merkle::{Bagging, Error, Family, Location, Position, hasher::Hasher};
+use crate::merkle::{Bagging, Error, Family, Location, Position, element::Element, hasher::Hasher};
 use alloc::{
     collections::{BTreeMap, BTreeSet},
     vec,
@@ -14,18 +14,6 @@ use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::Digest;
 use core::ops::Range;
-
-/// Encode each leaf into one reusable buffer before hashing it at its Merkle position.
-pub(super) fn encode_leaf<F: Family, H: Hasher<F>, E: Write>(
-    hasher: &H,
-) -> impl FnMut(Position<F>, &E) -> H::Digest {
-    let mut buf = Vec::new();
-    move |pos, element| {
-        buf.clear();
-        element.write(&mut buf);
-        hasher.leaf_digest(pos, &buf)
-    }
-}
 
 /// Errors that can occur when reconstructing a digest from a proof due to invalid input.
 #[derive(thiserror::Error, Debug)]
@@ -157,51 +145,21 @@ impl<F: Family, D: Digest> Proof<F, D> {
 
     /// Return true if this proof verifies against the supplied root, using the bagging carried by
     /// `hasher`.
+    ///
+    /// Use `operations.iter().map(Encoded)` to encode operations incrementally; see
+    /// [`crate::merkle::Encoded`].
     pub fn verify_range_inclusion<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         root: &D,
     ) -> bool
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Element,
     {
-        self.verify_range_inclusion_with(hasher, elements, start_loc, root, |pos, element| {
-            hasher.leaf_digest(pos, element.as_ref())
-        })
-    }
-
-    /// Like [`Self::verify_range_inclusion`], but encodes each element into a reusable scratch buffer.
-    ///
-    /// Temporary encoding storage is proportional to the largest encoded element.
-    pub fn verify_range_inclusion_encoded<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location<F>,
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<F, Digest = D>,
-        E: Write,
-    {
-        self.verify_range_inclusion_with(hasher, elements, start_loc, root, encode_leaf(hasher))
-    }
-
-    fn verify_range_inclusion_with<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location<F>,
-        root: &D,
-        leaf: impl FnMut(Position<F>, &E) -> D,
-    ) -> bool
-    where
-        H: Hasher<F, Digest = D>,
-    {
-        match self.reconstruct_root_inner_with(hasher, elements, start_loc, None, leaf) {
+        match self.reconstruct_root_inner(hasher, elements, start_loc, None) {
             Ok(reconstructed_root) => *root == reconstructed_root,
             Err(_error) => {
                 #[cfg(feature = "std")]
@@ -233,50 +191,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
     ) -> bool
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        self.verify_multi_inclusion_with(
-            hasher,
-            elements,
-            root,
-            |(_, loc)| *loc,
-            |pos, (element, _)| hasher.leaf_digest(pos, element.as_ref()),
-        )
-    }
-
-    /// Verify a multi-proof for `(location, element)` pairs, encoding each element into a
-    /// reusable scratch buffer. Temporary encoding storage is proportional to the largest
-    /// encoded element. Uses the bagging carried by `hasher`.
-    pub fn verify_multi_inclusion_encoded<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[(Location<F>, E)],
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<F, Digest = D>,
-        E: Write,
-    {
-        let mut leaf = encode_leaf(hasher);
-        self.verify_multi_inclusion_with(
-            hasher,
-            elements,
-            root,
-            |(loc, _)| *loc,
-            |pos, (_, element)| leaf(pos, element),
-        )
-    }
-
-    fn verify_multi_inclusion_with<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        root: &D,
-        location: impl Fn(&E) -> Location<F>,
-        mut leaf: impl FnMut(Position<F>, &E) -> D,
-    ) -> bool
-    where
-        H: Hasher<F, Digest = D>,
+        E: Element,
     {
         let bagging = hasher.root_bagging();
         // Empty proof is valid only for an empty tree with no extra digest data.
@@ -294,18 +209,17 @@ impl<F: Family, D: Digest> Proof<F, D> {
         let mut node_positions = BTreeSet::new();
         let mut blueprints = BTreeMap::new();
 
-        for element in elements {
-            let loc = location(element);
+        for (_, loc) in elements {
             if !loc.is_valid_index() {
                 return false;
             }
             // `loc` is valid so it won't overflow from +1
-            let Ok(bp) = Blueprint::new(self.leaves, self.inactive_peaks, bagging, loc..loc + 1)
+            let Ok(bp) = Blueprint::new(self.leaves, self.inactive_peaks, bagging, *loc..*loc + 1)
             else {
                 return false;
             };
             node_positions.extend(bp.required_positions());
-            blueprints.insert(loc, bp);
+            blueprints.insert(*loc, bp);
         }
 
         // Verify we have the exact number of digests needed
@@ -323,9 +237,9 @@ impl<F: Family, D: Digest> Proof<F, D> {
         // Verify each element by reconstructing its sub-proof in the canonical layout and checking
         // its root. Every required position was collected above and matched against `digests.len()`,
         // so `node_digests` is complete and `build_proof` cannot fail here.
-        for element in elements {
-            let loc = location(element);
-            let bp = &blueprints[&loc];
+        let mut scratch = Vec::new();
+        for (element, loc) in elements {
+            let bp = &blueprints[loc];
             let proof = bp
                 .build_proof(
                     hasher,
@@ -335,12 +249,11 @@ impl<F: Family, D: Digest> Proof<F, D> {
                 )
                 .expect("every node is present by construction");
 
-            match proof.reconstruct_root_inner_with(
+            match proof.reconstruct_root_inner(
                 hasher,
-                core::slice::from_ref(element),
-                loc,
+                &[element.as_bytes(&mut scratch)],
+                *loc,
                 None,
-                &mut leaf,
             ) {
                 Ok(reconstructed_root) if &reconstructed_root == root => {}
                 Ok(_) | Err(_) => return false,
@@ -356,12 +269,12 @@ impl<F: Family, D: Digest> Proof<F, D> {
     pub fn reconstruct_root<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
     ) -> Result<D, ReconstructionError>
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Element,
     {
         self.reconstruct_root_inner(hasher, elements, start_loc, None)
     }
@@ -375,66 +288,18 @@ impl<F: Family, D: Digest> Proof<F, D> {
     pub fn verify_range_inclusion_and_extract_digests<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         root: &D,
     ) -> Result<Vec<(Position<F>, D)>, Error<F>>
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        self.verify_range_inclusion_and_extract_digests_with(
-            hasher,
-            elements,
-            start_loc,
-            root,
-            |pos, element| hasher.leaf_digest(pos, element.as_ref()),
-        )
-    }
-
-    /// Like [`Self::verify_range_inclusion_and_extract_digests`], but encodes each element
-    /// into a reusable scratch buffer.
-    ///
-    /// Temporary encoding storage is proportional to the largest encoded element.
-    pub fn verify_range_inclusion_and_extract_digests_encoded<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location<F>,
-        root: &D,
-    ) -> Result<Vec<(Position<F>, D)>, Error<F>>
-    where
-        H: Hasher<F, Digest = D>,
-        E: Write,
-    {
-        self.verify_range_inclusion_and_extract_digests_with(
-            hasher,
-            elements,
-            start_loc,
-            root,
-            encode_leaf(hasher),
-        )
-    }
-
-    pub(super) fn verify_range_inclusion_and_extract_digests_with<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location<F>,
-        root: &D,
-        leaf: impl FnMut(Position<F>, &E) -> D,
-    ) -> Result<Vec<(Position<F>, D)>, Error<F>>
-    where
-        H: Hasher<F, Digest = D>,
+        E: Element,
     {
         let mut collected_digests = Vec::new();
-        let Ok(reconstructed_root) = self.reconstruct_root_inner_with(
-            hasher,
-            elements,
-            start_loc,
-            Some(&mut collected_digests),
-            leaf,
-        ) else {
+        let Ok(reconstructed_root) =
+            self.reconstruct_root_inner(hasher, elements, start_loc, Some(&mut collected_digests))
+        else {
             return Err(Error::InvalidProof);
         };
 
@@ -483,51 +348,17 @@ impl<F: Family, D: Digest> Proof<F, D> {
     pub fn verify_proof_and_pinned_nodes<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         pinned_nodes: &[D],
         root: &D,
     ) -> bool
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
+        E: Element,
     {
-        self.try_verify_proof_and_pinned_nodes(
-            hasher,
-            elements,
-            start_loc,
-            pinned_nodes,
-            root,
-            |pos, element| hasher.leaf_digest(pos, element.as_ref()),
-        )
-        .is_some()
-    }
-
-    /// Like [`Self::verify_proof_and_pinned_nodes`], but encodes each element into a reusable
-    /// scratch buffer.
-    ///
-    /// Temporary encoding storage is proportional to the largest encoded element.
-    pub fn verify_proof_and_pinned_nodes_encoded<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location<F>,
-        pinned_nodes: &[D],
-        root: &D,
-    ) -> bool
-    where
-        H: Hasher<F, Digest = D>,
-        E: Write,
-    {
-        self.try_verify_proof_and_pinned_nodes(
-            hasher,
-            elements,
-            start_loc,
-            pinned_nodes,
-            root,
-            encode_leaf(hasher),
-        )
-        .is_some()
+        self.try_verify_proof_and_pinned_nodes(hasher, elements, start_loc, pinned_nodes, root)
+            .is_some()
     }
 
     /// Fallible implementation of [`verify_proof_and_pinned_nodes`](Self::verify_proof_and_pinned_nodes).
@@ -535,27 +366,26 @@ impl<F: Family, D: Digest> Proof<F, D> {
     /// Returns `Some(())` if the proof and pins are consistent with `root`, `None` otherwise. The
     /// `Option` return lets the body use `?` on each fallible step; the public wrapper converts to
     /// `bool` via `.is_some()`.
-    #[allow(clippy::too_many_arguments)]
     fn try_verify_proof_and_pinned_nodes<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         pinned_nodes: &[D],
         root: &D,
-        leaf: impl FnMut(Position<F>, &E) -> D,
     ) -> Option<()>
     where
         H: Hasher<F, Digest = D>,
+        E: Element,
     {
         let bagging = hasher.root_bagging();
+        let elements = elements.into_iter();
+        let element_count = elements.len();
         let collected = self
-            .verify_range_inclusion_and_extract_digests_with(
-                hasher, elements, start_loc, root, leaf,
-            )
+            .verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)
             .ok()?;
 
-        if elements.is_empty() {
+        if element_count == 0 {
             return pinned_nodes.is_empty().then_some(());
         }
 
@@ -563,7 +393,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
             return None;
         }
 
-        let end_loc = start_loc.checked_add(elements.len() as u64)?;
+        let end_loc = start_loc.checked_add(element_count as u64)?;
         let bp = Blueprint::new(
             self.leaves,
             self.inactive_peaks,
@@ -630,57 +460,21 @@ impl<F: Family, D: Digest> Proof<F, D> {
     pub(crate) fn reconstruct_root_inner<H, E>(
         &self,
         hasher: &H,
-        elements: &[E],
+        elements: impl IntoIterator<Item = E, IntoIter: ExactSizeIterator>,
         start_loc: Location<F>,
         collected: Option<&mut Vec<(Position<F>, D)>>,
     ) -> Result<D, ReconstructionError>
     where
         H: Hasher<F, Digest = D>,
-        E: AsRef<[u8]>,
-    {
-        self.reconstruct_root_inner_with(hasher, elements, start_loc, collected, |pos, element| {
-            hasher.leaf_digest(pos, element.as_ref())
-        })
-    }
-
-    /// Like [`Self::reconstruct_root_inner`], but encodes each element into a reusable scratch buffer.
-    ///
-    /// Temporary encoding storage is proportional to the largest encoded element.
-    #[cfg(feature = "std")]
-    pub(crate) fn reconstruct_root_encoded_inner<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location<F>,
-        collected: Option<&mut Vec<(Position<F>, D)>>,
-    ) -> Result<D, ReconstructionError>
-    where
-        H: Hasher<F, Digest = D>,
-        E: Write,
-    {
-        self.reconstruct_root_inner_with(
-            hasher,
-            elements,
-            start_loc,
-            collected,
-            encode_leaf(hasher),
-        )
-    }
-
-    fn reconstruct_root_inner_with<H, E>(
-        &self,
-        hasher: &H,
-        elements: &[E],
-        start_loc: Location<F>,
-        collected: Option<&mut Vec<(Position<F>, D)>>,
-        mut leaf: impl FnMut(Position<F>, &E) -> D,
-    ) -> Result<D, ReconstructionError>
-    where
-        H: Hasher<F, Digest = D>,
+        E: Element,
     {
         let bagging = hasher.root_bagging();
+        let mut elements = elements.into_iter();
         let mut collected = collected;
-        if elements.is_empty() {
+        if elements.len() == 0 {
+            if elements.next().is_some() {
+                return Err(ReconstructionError::ExtraDigests);
+            }
             if start_loc == 0 {
                 if self.inactive_peaks != 0 {
                     return Err(ReconstructionError::InvalidProof);
@@ -729,12 +523,17 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
 
         let mut sibling_cursor = 0usize;
-        let mut elements_iter = elements.iter();
+        let mut scratch = Vec::new();
+        let mut leaf = |pos| {
+            let element = elements
+                .next()
+                .ok_or(ReconstructionError::MissingElements)?;
+            Ok(hasher.leaf_digest(pos, element.as_bytes(&mut scratch)))
+        };
         for peak in &bp.range_peaks {
             let peak_digest = peak.reconstruct_digest(
                 hasher,
                 &bp.range,
-                &mut elements_iter,
                 &mut leaf,
                 proof_digests.siblings,
                 &mut sibling_cursor,
@@ -757,7 +556,7 @@ impl<F: Family, D: Digest> Proof<F, D> {
         }
 
         // Verify all elements were consumed.
-        if elements_iter.next().is_some() {
+        if elements.next().is_some() {
             return Err(ReconstructionError::ExtraDigests);
         }
 
@@ -907,13 +706,11 @@ impl<F: Family> Subtree<F> {
     ///
     /// If `collected` is `Some`, every child `(position, digest)` pair encountered during
     /// reconstruction is appended to the vector.
-    #[allow(clippy::too_many_arguments)]
-    fn reconstruct_digest<D, H, E>(
+    fn reconstruct_digest<D, H>(
         &self,
         hasher: &H,
         range: &Range<Location<F>>,
-        elements: &mut E,
-        leaf: &mut impl FnMut(Position<F>, E::Item) -> D,
+        leaf: &mut impl FnMut(Position<F>) -> Result<D, ReconstructionError>,
         siblings: &[D],
         cursor: &mut usize,
         mut collected: Option<&mut Vec<(Position<F>, D)>>,
@@ -921,7 +718,6 @@ impl<F: Family> Subtree<F> {
     where
         D: Digest,
         H: Hasher<F, Digest = D>,
-        E: Iterator,
     {
         // Entirely outside the range: consume a sibling digest.
         if self.is_outside(range) {
@@ -934,10 +730,7 @@ impl<F: Family> Subtree<F> {
 
         // Leaf in range: hash the next element.
         if self.height == 0 {
-            let elem = elements
-                .next()
-                .ok_or(ReconstructionError::MissingElements)?;
-            return Ok(leaf(self.pos, elem));
+            return leaf(self.pos);
         }
 
         // Recurse into children.
@@ -945,7 +738,6 @@ impl<F: Family> Subtree<F> {
         let left_d = left.reconstruct_digest(
             hasher,
             range,
-            elements,
             leaf,
             siblings,
             cursor,
@@ -954,7 +746,6 @@ impl<F: Family> Subtree<F> {
         let right_d = right.reconstruct_digest(
             hasher,
             range,
-            elements,
             leaf,
             siblings,
             cursor,
@@ -1312,7 +1103,7 @@ mod tests {
     use super::*;
     use crate::merkle::{
         Bagging::{BackwardFold, ForwardFold},
-        Family, Location, LocationRangeExt as _,
+        Encoded, Family, Location, LocationRangeExt as _,
         hasher::Standard,
         mem::Mem,
         mmb, mmr,
@@ -1412,6 +1203,27 @@ mod tests {
         leaves - width
     }
 
+    /// Exercise actual element consumption even when an iterator misreports its length.
+    struct ClaimedSize<I> {
+        inner: I,
+        remaining: usize,
+    }
+
+    impl<I: Iterator> Iterator for ClaimedSize<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.remaining = self.remaining.saturating_sub(1);
+            self.inner.next()
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (self.remaining, Some(self.remaining))
+        }
+    }
+
+    impl<I: Iterator> ExactSizeIterator for ClaimedSize<I> {}
+
     fn encoded_verification<F: Family>() {
         // Alternating lengths exercise buffer clearing after both growth and shorter writes.
         let operations: Vec<_> = (0u64..31)
@@ -1444,11 +1256,19 @@ mod tests {
                 .unwrap();
                 let ops = &operations[range.clone()];
                 let bytes = &elements[range];
-                assert!(proof.verify_range_inclusion_encoded(&hasher, ops, start, &root));
+                assert!(proof.verify_range_inclusion(
+                    &hasher,
+                    ops.iter().map(Encoded),
+                    start,
+                    &root
+                ));
                 assert_eq!(
                     proof
-                        .verify_range_inclusion_and_extract_digests_encoded(
-                            &hasher, ops, start, &root
+                        .verify_range_inclusion_and_extract_digests(
+                            &hasher,
+                            ops.iter().map(Encoded),
+                            start,
+                            &root
                         )
                         .unwrap(),
                     proof
@@ -1457,8 +1277,12 @@ mod tests {
                 );
                 #[cfg(feature = "std")]
                 {
-                    let encoded_store = crate::merkle::verification::ProofStore::new_encoded(
-                        &hasher, &proof, ops, start, &root,
+                    let encoded_store = crate::merkle::verification::ProofStore::new(
+                        &hasher,
+                        &proof,
+                        ops.iter().map(Encoded),
+                        start,
+                        &root,
                     )
                     .unwrap();
                     let byte_store = crate::merkle::verification::ProofStore::new(
@@ -1477,31 +1301,35 @@ mod tests {
                 let pins: Vec<_> = F::nodes_to_pin(start)
                     .map(|pos| mem.get_node(pos).unwrap())
                     .collect();
-                assert!(
-                    proof.verify_proof_and_pinned_nodes_encoded(&hasher, ops, start, &pins, &root)
-                );
+                assert!(proof.verify_proof_and_pinned_nodes(
+                    &hasher,
+                    ops.iter().map(Encoded),
+                    start,
+                    &pins,
+                    &root
+                ));
                 let mut extra_pins = pins.clone();
                 extra_pins.push(D::EMPTY);
-                assert!(!proof.verify_proof_and_pinned_nodes_encoded(
+                assert!(!proof.verify_proof_and_pinned_nodes(
                     &hasher,
-                    ops,
+                    ops.iter().map(Encoded),
                     start,
                     &extra_pins,
                     &root
                 ));
                 if !pins.is_empty() {
-                    assert!(!proof.verify_proof_and_pinned_nodes_encoded(
+                    assert!(!proof.verify_proof_and_pinned_nodes(
                         &hasher,
-                        ops,
+                        ops.iter().map(Encoded),
                         start,
                         &pins[1..],
                         &root
                     ));
                     let mut wrong_pins = pins.clone();
                     wrong_pins[0].0[0] ^= 1;
-                    assert!(!proof.verify_proof_and_pinned_nodes_encoded(
+                    assert!(!proof.verify_proof_and_pinned_nodes(
                         &hasher,
-                        ops,
+                        ops.iter().map(Encoded),
                         start,
                         &wrong_pins,
                         &root
@@ -1510,24 +1338,39 @@ mod tests {
 
                 // Position binding, bounds, operation count, and operation contents.
                 for invalid_start in [start + 1, F::MAX_LEAVES, Location::new(u64::MAX)] {
-                    assert!(!proof.verify_range_inclusion_encoded(
+                    assert!(!proof.verify_range_inclusion(
                         &hasher,
-                        ops,
+                        ops.iter().map(Encoded),
                         invalid_start,
                         &root
                     ));
                 }
-                assert!(!proof.verify_range_inclusion_encoded(&hasher, &ops[1..], start, &root));
+                assert!(!proof.verify_range_inclusion(
+                    &hasher,
+                    ops[1..].iter().map(Encoded),
+                    start,
+                    &root
+                ));
                 let mut extra_ops = ops.to_vec();
                 extra_ops.push(operations[0].clone());
-                assert!(!proof.verify_range_inclusion_encoded(&hasher, &extra_ops, start, &root));
+                assert!(!proof.verify_range_inclusion(
+                    &hasher,
+                    extra_ops.iter().map(Encoded),
+                    start,
+                    &root
+                ));
                 let mut wrong_ops = ops.to_vec();
                 wrong_ops[0].0 ^= 1;
-                assert!(!proof.verify_range_inclusion_encoded(&hasher, &wrong_ops, start, &root));
+                assert!(!proof.verify_range_inclusion(
+                    &hasher,
+                    wrong_ops.iter().map(Encoded),
+                    start,
+                    &root
+                ));
                 assert!(matches!(
-                    proof.verify_range_inclusion_and_extract_digests_encoded(
+                    proof.verify_range_inclusion_and_extract_digests(
                         &hasher,
-                        ops,
+                        ops.iter().map(Encoded),
                         start,
                         &D::EMPTY
                     ),
@@ -1537,27 +1380,48 @@ mod tests {
                 let mut malformed = proof.clone();
                 malformed.digests.push(D::EMPTY);
                 assert!(matches!(
-                    malformed.verify_range_inclusion_and_extract_digests_encoded(
-                        &hasher, ops, start, &root
+                    malformed.verify_range_inclusion_and_extract_digests(
+                        &hasher,
+                        ops.iter().map(Encoded),
+                        start,
+                        &root
                     ),
                     Err(Error::InvalidProof),
                 ));
                 for i in 0..proof.digests.len() {
                     let mut missing = proof.clone();
                     missing.digests.remove(i);
-                    assert!(!missing.verify_range_inclusion_encoded(&hasher, ops, start, &root));
+                    assert!(!missing.verify_range_inclusion(
+                        &hasher,
+                        ops.iter().map(Encoded),
+                        start,
+                        &root
+                    ));
                     let mut tampered = proof.clone();
                     tampered.digests[i].0[0] ^= 1;
-                    assert!(!tampered.verify_range_inclusion_encoded(&hasher, ops, start, &root));
+                    assert!(!tampered.verify_range_inclusion(
+                        &hasher,
+                        ops.iter().map(Encoded),
+                        start,
+                        &root
+                    ));
                 }
                 let mut invalid_boundary = proof.clone();
                 invalid_boundary.inactive_peaks = usize::MAX;
-                assert!(
-                    !invalid_boundary.verify_range_inclusion_encoded(&hasher, ops, start, &root)
-                );
+                assert!(!invalid_boundary.verify_range_inclusion(
+                    &hasher,
+                    ops.iter().map(Encoded),
+                    start,
+                    &root
+                ));
                 let mut invalid_leaves = proof.clone();
                 invalid_leaves.leaves = Location::new(u64::MAX);
-                assert!(!invalid_leaves.verify_range_inclusion_encoded(&hasher, ops, start, &root));
+                assert!(!invalid_leaves.verify_range_inclusion(
+                    &hasher,
+                    ops.iter().map(Encoded),
+                    start,
+                    &root
+                ));
             }
         }
 
@@ -1569,36 +1433,66 @@ mod tests {
         let empty_root = hasher
             .root(Location::<F>::new(0), 0, core::iter::empty())
             .unwrap();
-        assert!(empty.verify_range_inclusion_encoded(
+        assert!(empty.verify_range_inclusion(
             &hasher,
-            &operations[..0],
+            operations[..0].iter().map(Encoded),
             Location::new(0),
             &empty_root
         ));
-        assert!(empty.verify_proof_and_pinned_nodes_encoded(
+        assert!(empty.verify_proof_and_pinned_nodes(
             &hasher,
-            &operations[..0],
+            operations[..0].iter().map(Encoded),
             Location::new(0),
             &[],
             &empty_root
         ));
-        assert!(!empty.verify_range_inclusion_encoded(
+        assert!(!empty.verify_range_inclusion(
             &hasher,
-            &operations[..0],
+            operations[..0].iter().map(Encoded),
             Location::new(1),
             &empty_root
         ));
-        assert!(!empty.verify_range_inclusion_encoded(
+        assert!(!empty.verify_range_inclusion(
             &hasher,
-            &operations[..1],
+            operations[..1].iter().map(Encoded),
             Location::new(0),
             &empty_root
         ));
+        assert!(matches!(
+            empty.reconstruct_root(
+                &hasher,
+                ClaimedSize {
+                    inner: elements[..1].iter(),
+                    remaining: 0
+                },
+                Location::new(0),
+            ),
+            Err(ReconstructionError::ExtraDigests),
+        ));
+        let full = Proof::<F, D> {
+            leaves: Location::new(2),
+            ..Proof::default()
+        };
+        for (actual, missing) in [(1, true), (3, false)] {
+            let result = full.reconstruct_root(
+                &hasher,
+                ClaimedSize {
+                    inner: elements[..actual].iter(),
+                    remaining: 2,
+                },
+                Location::new(0),
+            );
+            if missing {
+                assert!(matches!(result, Err(ReconstructionError::MissingElements)));
+            } else {
+                assert!(matches!(result, Err(ReconstructionError::ExtraDigests)));
+            }
+        }
         let mut extra_digest = empty;
         extra_digest.digests.push(D::EMPTY);
-        assert!(!extra_digest.verify_range_inclusion_encoded(
+        assert!(!extra_digest.verify_range_inclusion(
             &hasher,
-            &operations[..0],
+            operations[..0].iter().map(Encoded),
             Location::new(0),
             &empty_root
         ));
@@ -1690,16 +1584,14 @@ mod tests {
                 "multi-proof should verify for ({bagging:?}, {inactive_peaks})",
             );
 
-            let operations: Vec<_> = locations.iter().map(|loc| (*loc, **loc)).collect();
-            assert!(proof.verify_multi_inclusion_encoded(&hasher, &operations, &root));
-            let mut reordered = operations.clone();
-            reordered.reverse();
-            assert!(proof.verify_multi_inclusion_encoded(&hasher, &reordered, &root));
-            reordered[0].1 ^= 1;
-            assert!(!proof.verify_multi_inclusion_encoded(&hasher, &reordered, &root));
+            let operations: Vec<_> = locations.iter().map(|loc| **loc).collect();
+            let mut encoded: Vec<_> = operations.iter().map(Encoded).zip(locations).collect();
+            assert!(proof.verify_multi_inclusion(&hasher, &encoded, &root));
+            encoded.reverse();
+            assert!(proof.verify_multi_inclusion(&hasher, &encoded, &root));
             let mut extra_digest = proof.clone();
             extra_digest.digests.push(D::EMPTY);
-            assert!(!extra_digest.verify_multi_inclusion_encoded(&hasher, &operations, &root));
+            assert!(!extra_digest.verify_multi_inclusion(&hasher, &encoded, &root));
 
             let mut tampered_boundary = proof.clone();
             tampered_boundary.inactive_peaks = if inactive_peaks == 0 { 1 } else { 0 };
@@ -1708,16 +1600,12 @@ mod tests {
                 "inactive_peaks mutation should fail for ({bagging:?}, {inactive_peaks})",
             );
 
-            assert!(!tampered_boundary.verify_multi_inclusion_encoded(&hasher, &operations, &root));
+            assert!(!tampered_boundary.verify_multi_inclusion(&hasher, &encoded, &root));
 
             if !proof.digests.is_empty() {
                 let mut tampered_digest = proof.clone();
                 tampered_digest.digests[0].0[0] ^= 1;
-                assert!(!tampered_digest.verify_multi_inclusion_encoded(
-                    &hasher,
-                    &operations,
-                    &root
-                ));
+                assert!(!tampered_digest.verify_multi_inclusion(&hasher, &encoded, &root));
                 assert!(
                     !tampered_digest.verify_multi_inclusion(&hasher, &elements, &root),
                     "digest mutation should fail for ({bagging:?}, {inactive_peaks})",
