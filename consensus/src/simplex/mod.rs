@@ -244,11 +244,9 @@
 //!
 //! ### Pipelined Handoff
 //!
-//! A pipelined handoff lets the incoming leader prepare its term-start proposal before the
-//! parent certifies. The application decides, per request, whether to prepare a candidate and
-//! whether consensus may publish it before the parent certifies.
-//!
-//! **Preparation** builds or reuses a candidate.
+//! A pipelined handoff lets the incoming leader build or reuse its term-start proposal before
+//! the parent certifies. The application decides, per request, whether to prepare a candidate
+//! and whether consensus may publish it before the parent certifies.
 //!
 //! Handoff requests require an elector that can select the incoming leader without a certificate
 //! (see [`elector::Elector::elect_without_certificate`]) and an available outgoing tip. Otherwise,

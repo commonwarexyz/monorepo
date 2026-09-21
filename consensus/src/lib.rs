@@ -398,8 +398,8 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// incoming leader, not the outgoing one. Identify the outgoing leader from the
         /// elector's schedule or authenticated metadata for the parent's consensus round.
         /// A verified parent block can name an earlier proposer in its embedded context,
-        /// as with an epoch-boundary reproposal. If that identity
-        /// or trust is uncertain, prepare with [`HandoffPublication::AfterCertification`].
+        /// as with an epoch-boundary reproposal. If that identity or trust is uncertain,
+        /// prepare with [`HandoffPublication::AfterCertification`].
         ///
         /// This method runs synchronously on the proposal path. Do not block on I/O.
         /// If readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].
