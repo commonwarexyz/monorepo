@@ -211,17 +211,18 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub trait CertifiableAutomaton: Automaton {
         /// Generate a payload for a term-start proposal whose parent is not yet certified.
         ///
-        /// [`HandoffProposal::Proposed`] carries the same verification and certification
-        /// commitments as a payload from [`Automaton::propose`].
+        /// Returning [`HandoffProposal::Proposed`] commits the application to the same
+        /// verification and certification obligations as returning a payload from
+        /// [`Automaton::propose`].
         /// With [`HandoffProposal::AwaitCertification`], consensus issues an ordinary
         /// [`Automaton::propose`] once the parent certifies. Closing the response abandons
         /// the local proposal opportunity for this view. Parent certification does not retry it.
         ///
         /// Return the receiver promptly and do any work behind it. Parent certification
         /// does not cancel this request. A pending response retains the proposal
-        /// opportunity until it resolves or consensus abandons the context. Consensus
-        /// may hold a completed candidate until its parent certifies. Stop pending work
-        /// when the receiver closes.
+        /// opportunity until it resolves or consensus abandons the context. With
+        /// [`HandoffPublication::AfterCertification`], consensus holds the candidate
+        /// until its parent certifies or finalizes. Stop pending work when the receiver closes.
         fn propose_handoff(
             &mut self,
             _context: Self::Context,
@@ -391,15 +392,17 @@ stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
         /// waits for parent certification before requesting an ordinary proposal.
         ///
         /// The application cannot revoke this decision. Publishing early trusts the outgoing
-        /// consensus leader not to equivocate. The context names the parent by view and digest.
-        /// Its leader field names the incoming leader, not the outgoing one. Identify the
-        /// outgoing leader from the elector's schedule or authenticated metadata for the
-        /// parent's consensus round. A verified parent block can name an earlier proposer
-        /// in its embedded context, as with an epoch-boundary reproposal. If that identity
+        /// consensus leader not to equivocate.
+        ///
+        /// The context names the parent by view and digest. Its leader field names the
+        /// incoming leader, not the outgoing one. Identify the outgoing leader from the
+        /// elector's schedule or authenticated metadata for the parent's consensus round.
+        /// A verified parent block can name an earlier proposer in its embedded context,
+        /// as with an epoch-boundary reproposal. If that identity
         /// or trust is uncertain, prepare with [`HandoffPublication::AfterCertification`].
         ///
-        /// Make this decision from information already available to the application. If
-        /// readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].
+        /// This method runs synchronously on the proposal path. Do not block on I/O.
+        /// If readiness is uncertain, return [`HandoffPolicy::AwaitCertification`].
         fn handoff_policy(&self, _context: &Self::Context) -> HandoffPolicy {
             HandoffPolicy::AwaitCertification
         }

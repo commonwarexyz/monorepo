@@ -1404,7 +1404,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     // issuance window and the explicit rule outside it.
     // `handoff_ancestry_payload` is the cross-term counterpart: what the
     // outgoing term's final view may contribute to a pipelined-handoff
-    // proposal (`handoff_leader` and `handoff_parent` decide when it applies).
+    // proposal (`handoff_leader` and `is_handoff_parent` decide when it applies).
     //
     // The `*_parent_ready` predicates answer whether a proposal's required
     // parent is settled enough to act on. Certification and finalization
@@ -1477,21 +1477,21 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// Returns whether `parent` can support a pipelined handoff. `parent` must
     /// end a term, the incoming leader must be the local signer, and the
     /// outgoing term must have no nullification.
-    fn handoff_parent(&self, parent: View) -> bool {
+    fn is_handoff_parent(&self, parent: View) -> bool {
         self.handoff_leader(parent.next())
             .is_some_and(|leader| self.is_me(leader))
             && self.highest_nullification_in_term(parent).is_none()
     }
 
     /// Returns `parent`'s payload when a pipelined handoff may build on it.
-    /// The parent must satisfy [`Self::handoff_parent`] and have usable
+    /// The parent must satisfy [`Self::is_handoff_parent`] and have usable
     /// optimistic ancestry.
     ///
-    /// The [`Self::handoff_parent`] check runs first because
+    /// The [`Self::is_handoff_parent`] check runs first because
     /// [`Self::optimistic_ancestry_payload`] serves a directly notarized
     /// `parent` without consulting it.
     fn handoff_ancestry_payload(&self, parent: View) -> Option<&D> {
-        if !self.handoff_parent(parent) {
+        if !self.is_handoff_parent(parent) {
             return None;
         }
         self.optimistic_ancestry_payload(parent)
@@ -1521,7 +1521,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
         // `view` may only be used as optimistic same-term ancestry when its
         // child is within the optimistic lookahead window, or as cross-term
         // ancestry when a pipelined handoff may build on it.
-        if !self.in_issuance_window(view.next()) && !self.handoff_parent(view) {
+        if !self.in_issuance_window(view.next()) && !self.is_handoff_parent(view) {
             return None;
         }
 
@@ -1724,13 +1724,7 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
     /// parent has certified, but certification waits for explicit certified or
     /// finalized parent ancestry.
     ///
-    /// Term-start views normally bypass this precheck because they are outside
-    /// the issuance window (see
-    /// [`Lookahead::issuance_floor`](crate::simplex::Lookahead)). Peers verify
-    /// term starts only through explicit ancestry. A pipelined-handoff proposal
-    /// can be locally endorsed without explicit ancestry. When it links
-    /// directly to the outgoing term's tip, that tip becomes its required
-    /// certification parent.
+    /// See [`Self::required_certification_parent`] for the parent each proposal requires.
     fn certification_parent_ready(&self, proposal: &Proposal<D>) -> Result<(), ParentPayloadError> {
         let (view, parent) = (proposal.view(), proposal.parent);
         Self::ensure_parent_precedes(view, parent)?;
@@ -1754,17 +1748,15 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Returns the parent whose explicit certification gates `proposal`.
     ///
-    /// In-term proposals require their immediate predecessor. Term-start
-    /// proposals normally arrive through explicit ancestry and need no extra
-    /// gate. A locally endorsed pipelined handoff instead links directly to the
-    /// uncertified outgoing tip, so it retains that gate.
+    /// In-term proposals require their immediate predecessor. A term-start
+    /// proposal requires its immediate predecessor when it names that view as
+    /// its parent and we have cast a notarize vote for the proposal.
     ///
-    /// The gate derives from a journaled fact in round state: our notarize vote
-    /// for a tip-linked proposal. Replay therefore restores the gate without
-    /// relying on the transient application decision. Non-endorsement
-    /// term-start votes also satisfy this rule. They are cast only with
-    /// explicitly certified ancestry, and append-ordered replay restores the
-    /// parent's certification before the vote.
+    /// Our notarize vote is journaled, so replay restores this gate without
+    /// relying on the transient application decision. Ordinary term-start
+    /// votes also satisfy this rule when they name their immediate predecessor.
+    /// Those votes require explicitly certified ancestry, and append-ordered
+    /// replay restores the parent's certification before the vote.
     fn required_certification_parent(&self, proposal: &Proposal<D>) -> Option<View> {
         let view = proposal.view();
         self.previous_in_term(view).or_else(|| {

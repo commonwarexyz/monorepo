@@ -262,17 +262,17 @@
 //! | Closed response | Abandon the local proposal opportunity |
 //!
 //! Consensus checks ordinary proposal eligibility before publication. Parent certification
-//! preserves unfinished builds and completed candidates. Consensus discards them on view exit
-//! or replacement of invalid ancestry. Restart also discards pending requests and held candidates.
-//! Other validators require explicitly certified ancestry before verifying or voting for a
-//! term-start proposal.
+//! does not cancel a pending request or discard a held candidate. Consensus discards them on
+//! view exit or replacement of invalid ancestry. Restart also discards pending requests and
+//! held candidates. Other validators require explicitly certified ancestry before verifying
+//! or voting for a term-start proposal.
 //!
 //! Marshal applications use [`crate::Application::handoff_policy`] to choose
 //! [`crate::HandoffPolicy::Prepare`] or the default [`crate::HandoffPolicy::AwaitCertification`].
 //! Stateful Glue exposes the same policy. The application makes a synchronous decision from
-//! available information and cannot revoke it. `Prepare` uses the ordinary construction path,
-//! which may reuse an existing block without calling the application builder. With
-//! `AfterCertification`, construction can overlap certification while consensus holds publication.
+//! available information. It cannot revoke this decision. `Prepare` uses the ordinary
+//! construction path, which may reuse an existing block without calling the application builder.
+//! With `AfterCertification`, construction can overlap certification while consensus holds publication.
 //! An application can choose this for individual handoffs whose outgoing leader it does not trust.
 //!
 //! With [`crate::HandoffPublication::AllowBeforeCertification`], rotating leaders can pipeline

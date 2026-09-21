@@ -233,8 +233,7 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     /// Selects the leader for `round` without its unlocking certificate.
     ///
     /// Returning `Some` allows the application to consider a pipelined handoff
-    /// (see [Pipelined Handoff]). The application decides whether to build for
-    /// the term's first view while the prior term's final view is uncertified.
+    /// (see [Pipelined Handoff]).
     ///
     /// Return `Some` only when the elector can derive the leader without a certificate.
     /// The result must equal [`Self::elect`] for every certificate that can
