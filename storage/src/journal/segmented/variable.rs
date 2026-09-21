@@ -94,7 +94,6 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use std::{
-    borrow::Borrow,
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
 };
@@ -240,7 +239,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     async fn get_many(
         &self,
         section: u64,
-        offsets: impl IntoIterator<Item: Borrow<u64> + Send, IntoIter: Send> + Send,
+        offsets: impl IntoIterator<Item = u64, IntoIter: Send> + Send,
     ) -> Result<Vec<V>, Error> {
         let mut offsets = offsets.into_iter().peekable();
         if offsets.peek().is_none() {
@@ -255,7 +254,6 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         let cfg = &self.codec_config;
         let mut items = Vec::with_capacity(offsets.size_hint().0);
         for offset in offsets {
-            let offset = *offset.borrow();
             let (_, _, item) = Self::read(compressed, cfg, blob, offset).await?;
             items.push(item);
         }
@@ -540,7 +538,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     pub async fn get_many(
         &self,
         section: u64,
-        offsets: impl IntoIterator<Item: Borrow<u64> + Send, IntoIter: Send> + Send,
+        offsets: impl IntoIterator<Item = u64, IntoIter: Send> + Send,
     ) -> Result<Vec<V>, Error> {
         self.0.get_many(section, offsets).await
     }
