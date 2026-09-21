@@ -2,6 +2,7 @@ use super::Checksum;
 use crate::{Blob, Error, ReadOptions};
 use bytes::{BufMut, Bytes, BytesMut};
 use commonware_codec::{Buf, FixedSize};
+use commonware_utils::Widen;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
 
@@ -112,8 +113,9 @@ impl<B: Blob> PageReader<B> {
         }
 
         // Keep the total page count in u64 and narrow only the bounded batch.
-        let max_pages = (self.physical_blob_size - start_offset) / self.physical_page_size as u64;
-        let pages_to_read = max_pages.min(self.prefetch_count as u64) as usize;
+        let max_pages =
+            (self.physical_blob_size - start_offset) / Widen::widen(self.physical_page_size);
+        let pages_to_read = max_pages.min(Widen::widen(self.prefetch_count)) as usize;
         if pages_to_read == 0 {
             return Ok(None);
         }

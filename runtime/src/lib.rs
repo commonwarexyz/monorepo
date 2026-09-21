@@ -682,10 +682,9 @@ stability_scope!(BETA {
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
     /// characters, dashes (`-`), or underscores (`_`). Names containing other
-    /// characters (e.g., `/`, `.`, spaces) will return an error.
-    ///
-    /// On case-insensitive filesystems, partition names that differ only by letter
-    /// case must not both be used.
+    /// characters (e.g., `/`, `.`, spaces) will return an error. On case-insensitive
+    /// filesystems, partition names that differ only by letter case must not both
+    /// be used.
     pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
