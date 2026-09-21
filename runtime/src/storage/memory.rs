@@ -513,8 +513,10 @@ impl crate::Blob for Blob {
 mod tests {
     use super::{Header, *};
     use crate::{
-        Blob, BufferPoolConfig, Runner, Spawner, Storage as _,
-        deterministic::BoxDynRng,
+        Blob, BufferPoolConfig, DEFAULT_BLOB_VERSION, Error, Runner, Spawner,
+        Storage as StorageTrait,
+        deterministic::{BoxDynRng, Runner as DeterministicRunner},
+        mocks::{MemoryStorage, RecordingContext},
         storage::{
             Layout,
             faulty::{
@@ -532,7 +534,7 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
-    async fn assert_logical_open_contract<S: crate::Storage>(storage: S, shared: S) {
+    async fn assert_logical_open_contract<S: StorageTrait>(storage: S, shared: S) {
         for name in [Some(b"blob".as_slice()), None] {
             // Storage clones and forwarding wrappers share the same logical open.
             let (first, _) = storage.open("partition", b"blob").await.unwrap();
@@ -540,17 +542,17 @@ mod tests {
                 .write_at(0, b"saved", WriteOptions::SYNC)
                 .await
                 .unwrap();
-            let clone = first.clone();
+            let retained = first.clone();
             assert!(matches!(
                 shared.open("partition", b"blob").await,
-                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+                Err(Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
             ));
             drop(first);
             assert!(matches!(
-                shared.open_versioned("partition", b"blob", crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION).await,
-                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+                shared.open_versioned("partition", b"blob", DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION).await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
             ));
-            drop(clone);
+            drop(retained);
             let (old, len) = shared.open("partition", b"blob").await.unwrap();
             assert_eq!(len, 5);
 
@@ -568,7 +570,7 @@ mod tests {
             drop(old);
             assert!(matches!(
                 storage.open("partition", b"blob").await,
-                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+                Err(Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
             ));
             current
                 .write_at(0, b"fresh", WriteOptions::SYNC)
@@ -594,11 +596,11 @@ mod tests {
     #[case::direct(false)]
     #[case::recording(true)]
     fn test_public_memory_logical_open(#[case] recording: bool) {
-        crate::deterministic::Runner::default().start(|_| async move {
-            let storage = crate::mocks::MemoryStorage::new(test_pool());
+        DeterministicRunner::default().start(|_| async move {
+            let storage = MemoryStorage::new(test_pool());
             if recording {
-                let (first, _) = crate::mocks::RecordingContext::new(storage.clone());
-                let (second, _) = crate::mocks::RecordingContext::new(storage);
+                let (first, _) = RecordingContext::new(storage.clone());
+                let (second, _) = RecordingContext::new(storage);
                 assert_logical_open_contract(first, second).await;
             } else {
                 assert_logical_open_contract(storage.clone(), storage).await;
@@ -617,7 +619,7 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let storage = crate::mocks::MemoryStorage::new(test_pool());
+            let storage = MemoryStorage::new(test_pool());
             run_storage_tests(context, storage).await;
         });
     }
@@ -651,7 +653,7 @@ mod tests {
         const NAME: &[u8] = b"blob";
         const INSTALLED: &[u8] = b"current";
 
-        let storage = crate::mocks::MemoryStorage::new(test_pool());
+        let storage = MemoryStorage::new(test_pool());
         let (stale, _) = storage.open(PARTITION, NAME).await.unwrap();
         stale
             .write_at(0, b"stale", WriteOptions::default())
@@ -687,7 +689,7 @@ mod tests {
         drop(stale);
         assert!(matches!(
             storage.open(PARTITION, NAME).await,
-            Err(crate::Error::BlobAlreadyOpen(_, _))
+            Err(Error::BlobAlreadyOpen(_, _))
         ));
         drop(fresh);
         drop(storage.open(PARTITION, NAME).await.unwrap());

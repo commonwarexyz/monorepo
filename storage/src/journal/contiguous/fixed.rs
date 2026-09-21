@@ -401,44 +401,15 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         checkpoint: Checkpoint<E>,
         max_size: Option<u64>,
     ) -> Result<Self, Error> {
-        let ceiling = max_size.unwrap_or(u64::MAX);
-        let items_per_blob = cfg.items_per_blob.get();
         if let Some(target) = checkpoint.clear_target() {
             warn!(
                 clear_target = target,
                 "crash repair: completing interrupted clear"
             );
-
-            // A persisted reset is authoritative even when an open requests another cap.
-            let new_partition = format!("{}-blobs", cfg.partition);
-            Partition::<E>::remove_all(&context, &cfg.partition).await?;
-            Partition::<E>::remove_all(&context, &new_partition).await?;
-            let partition = Partition::new(
-                context.child("blobs"),
-                new_partition,
-                cfg.page_cache.clone(),
-                cfg.write_buffer,
-            );
-            let tail = super::position_to_blob(target, items_per_blob);
-            let mut pending = BTreeMap::new();
-            pending.insert(tail, partition.open_recovery(tail).await?);
-            let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
-            if ceiling < target {
-                return Err(Error::ItemPruned(ceiling));
-            }
-            return Ok(Self {
-                context,
-                cfg,
-                checkpoint,
-                partition,
-                pending,
-                discarded: Vec::new(),
-                bounds: target..target,
-                watermark: target,
-                bounded: max_size.is_some(),
-                _marker: PhantomData,
-            });
+            return Self::complete_clear(context, cfg, checkpoint, target, max_size).await;
         }
+        let ceiling = max_size.unwrap_or(u64::MAX);
+        let items_per_blob = cfg.items_per_blob.get();
 
         let (blob_partition, names) = Partition::select(&context, &cfg.partition).await?;
         let partition = Partition::new(
@@ -565,6 +536,49 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         })
     }
 
+    /// Complete the reset to `target` staged in `checkpoint` without opening any stored blob.
+    ///
+    /// A persisted reset is authoritative even when the open requests another cap: the cap
+    /// is only checked against the reset size afterwards.
+    async fn complete_clear(
+        context: E,
+        cfg: Config,
+        checkpoint: Checkpoint<E>,
+        target: u64,
+        max_size: Option<u64>,
+    ) -> Result<Self, Error> {
+        let ceiling = max_size.unwrap_or(u64::MAX);
+        let items_per_blob = cfg.items_per_blob.get();
+        let new_partition = format!("{}-blobs", cfg.partition);
+        Partition::<E>::remove_all(&context, &cfg.partition).await?;
+        Partition::<E>::remove_all(&context, &new_partition).await?;
+        let partition = Partition::new(
+            context.child("blobs"),
+            new_partition,
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+        let tail = super::position_to_blob(target, items_per_blob);
+        let mut pending = BTreeMap::new();
+        pending.insert(tail, partition.open_recovery(tail).await?);
+        let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
+        if ceiling < target {
+            return Err(Error::ItemPruned(ceiling));
+        }
+        Ok(Self {
+            context,
+            cfg,
+            checkpoint,
+            partition,
+            pending,
+            discarded: Vec::new(),
+            bounds: target..target,
+            watermark: target,
+            bounded: max_size.is_some(),
+            _marker: PhantomData,
+        })
+    }
+
     /// Stage a reset to `size` in `checkpoint`, await `clear_dependents`, then complete the reset
     /// without opening any stored blob. A crash at any point leaves a durable intent that the
     /// next open finishes.
@@ -587,7 +601,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         }
         let checkpoint = checkpoint.stage_clear(size).await?;
         clear_dependents().await?;
-        Self::open(context, cfg, checkpoint, None).await
+        Self::complete_clear(context, cfg, checkpoint, size, None).await
     }
 
     /// Open offsets while completing any previously staged dependent reset.
@@ -678,10 +692,12 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
         let first = first_in_blob(self.bounds.start, blob, self.cfg.items_per_blob.get())?;
         let offset = Inner::<E, A>::items_to_bytes(pos - first)?;
+        // `bounds.end` is derived by walking `pending`, and every mutation keeps `pending`
+        // contiguous over `bounds`, so a position inside `bounds` always has a blob.
         let writer = self
             .pending
             .get(&blob)
-            .ok_or_else(|| Error::Corruption(format!("missing recovery blob {blob}")))?;
+            .expect("positions inside bounds map to a pending recovery blob");
         Ok(A::decode(
             writer.read_at(offset, A::SIZE).await?.coalesce(),
         )?)
@@ -1561,9 +1577,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
     /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
     /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune or rewind that
-    /// changes the journal. A failed recovery-watermark sync is not observed by commit and
-    /// resurfaces on the next sync.
+    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
+    /// journal. A failed recovery-watermark sync is not observed by commit and resurfaces on the
+    /// next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
         self.0 = inner;
@@ -2169,7 +2185,7 @@ mod tests {
     use commonware_runtime::{
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _, WriteOptions,
-        buffer::paged::{Writer, corrupt_page},
+        buffer::paged::{Recovery as PagedRecovery, Writer, corrupt_page},
         deterministic::{self, Context},
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, StorageEvent,
@@ -2177,7 +2193,7 @@ mod tests {
             release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, probability};
     use futures::{StreamExt, pin_mut};
     use std::num::NonZeroU16;
 
@@ -2201,6 +2217,41 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test]
+    fn test_unbounded_fixed_repairs_hole_after_full_capacity() {
+        deterministic::Runner::default().start(|context| async move {
+            let cache = CacheRef::from_pooler(&context, NZU16!(8), NZUsize!(8));
+            let cfg = Config {
+                partition: "initialization-extra-tail".into(),
+                items_per_blob: NZU64!(2),
+                page_cache: cache.clone(),
+                write_buffer: NZUsize!(128),
+                replay_buffer: NZUsize!(128),
+            };
+            let (blob, size) = context
+                .open("initialization-extra-tail-blobs", &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            writer.append(&[1; 32]).await.unwrap();
+            writer.sync().await.unwrap();
+            drop(writer);
+            corrupt_page(
+                &context,
+                "initialization-extra-tail-blobs",
+                &0u64.to_be_bytes(),
+                2,
+                8,
+            )
+            .await;
+            let result = Journal::<_, u64>::init(context.child("open"), cfg).await;
+            assert!(
+                result.is_ok(),
+                "unbounded recovery must trim a hole after capacity: {result:?}"
+            );
+        });
     }
 
     fn assert_dirty_blob_unlinked_before_drop(
@@ -2646,8 +2697,11 @@ mod tests {
             assert_eq!(recovery.size(), 0);
             assert_eq!(recovery.recovery_watermark(), 0);
             recovery = recovery.truncate(0).await.unwrap();
+
+            // Rebuild with values the surviving blobs never held so adopting their stale pages
+            // fails the reads below.
             for i in 0..13 {
-                recovery = recovery.append(&test_digest(i)).await.unwrap();
+                recovery = recovery.append(&test_digest(100 + i)).await.unwrap();
             }
             let journal = recovery.publish(13).await.unwrap();
             _ = Box::new(journal).sync().await.unwrap();
@@ -2656,7 +2710,7 @@ mod tests {
                 .unwrap();
             assert_eq!(journal.bounds(), 0..13);
             for value in 0..13 {
-                assert_eq!(journal.read(value).await.unwrap(), test_digest(value));
+                assert_eq!(journal.read(value).await.unwrap(), test_digest(100 + value));
             }
         });
     }
@@ -2680,7 +2734,7 @@ mod tests {
                                 (journal, _) = journal.append(&value).await.unwrap();
                             }
                             _ = journal.sync().await.unwrap();
-                            let rate = commonware_utils::Probability::new(numerator, 10).unwrap();
+                            let rate = Probability::new(numerator, 10).unwrap();
                             *context.storage_fault_config().write() = deterministic::FaultConfig {
                                 sync_rate: (kind == 0).then_some(rate),
                                 remove_rate: (kind == 1).then_some(rate),
@@ -5405,8 +5459,8 @@ mod tests {
     }
 
     /// A crash during the rollover fsync can persist a valid last page above a lost interior
-    /// page, which `Writer::new`'s backward scan cannot see. Recovery must forward-validate the
-    /// suspect blob and truncate at the hole.
+    /// page, which `PagedRecovery::open`'s backward scan cannot see. Recovery must forward-validate
+    /// the suspect blob and truncate at the hole.
     #[test_traced]
     fn test_fixed_recovery_truncates_torn_interior_page() {
         let executor = deterministic::Runner::default();
@@ -7054,7 +7108,7 @@ mod tests {
             let checkpoint = checkpoint.sync().await.unwrap();
             drop(checkpoint);
 
-            // This name would fail `Partition::open_many` if init tried to parse stale blobs before
+            // This name would fail `Partition::indices` if init tried to parse stale blobs before
             // honoring the clear intent.
             let (blob, _) = context.open(&blob_part, b"not-u64").await.unwrap();
             blob.write_at(0, vec![1, 2, 3], WriteOptions::SYNC)

@@ -1148,9 +1148,9 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             }
 
             // The floor's blob must retain its acknowledged prefix: a cut at or below the last
-            // acknowledged frame's start lost acknowledged data (a cut inside that frame is
-            // truncated, then rejected by replay in `align`). A floor at the blob boundary or
-            // below the offsets pruning boundary acknowledges nothing here.
+            // acknowledged frame's start lost acknowledged data (a cut inside that frame ends the
+            // frame scan short of the watermark, which `inspect` rejects). A floor at the blob
+            // boundary or below the offsets pruning boundary acknowledges nothing here.
             if blob == floor_blob
                 && floor > blob_first_position(blob, items_per_blob)?
                 && floor > offsets.pruning_boundary()
@@ -2725,48 +2725,136 @@ mod tests {
         },
         utils::codec::View,
     };
+    use commonware_codec::{Buf as CodecBuf, Error as CodecError, FixedSize, Read, Write};
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _,
         WriteOptions,
-        buffer::paged::{CacheRef, Writer, corrupt_page},
+        buffer::paged::{CacheRef, Recovery as PagedRecovery, Writer, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
             fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU64, NZUsize, Probability, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
-    use std::num::NonZeroU16;
+    use std::{
+        num::NonZeroU16,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: usize = 2;
+
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
-    struct Counted(u64);
-
-    impl commonware_codec::Write for Counted {
-        fn write(&self, buf: &mut impl bytes::BufMut) {
-            commonware_codec::Write::write(&self.0, buf);
+    fn initialization_cfg(
+        context: &deterministic::Context,
+        partition: &str,
+        items_per_section: u64,
+    ) -> Config<()> {
+        Config {
+            partition: partition.into(),
+            items_per_section: NonZeroU64::new(items_per_section).unwrap(),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(context, NZU16!(16), NZUsize!(4)),
+            write_buffer: NZUsize!(1),
+            replay_buffer: NZUsize!(256),
         }
     }
 
-    impl commonware_codec::FixedSize for Counted {
+    #[test]
+    fn test_recovery_failure_must_not_clear_durable_data() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = initialization_cfg(&context, "initialization-recovery-clear", 20);
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("seed"), config.clone(), 20)
+                    .await
+                    .unwrap();
+            for value in 0..8 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            handle.await.unwrap();
+            drop(journal);
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                remove_rate: Some(probability!(1.0)),
+                ..Default::default()
+            };
+
+            // Removing derived offsets may fail, but must never authorize clearing the data.
+            drop(Journal::<_, u64>::init(context.child("interrupted"), config.clone()).await);
+            *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+            let journal = Journal::<_, u64>::init(context.child("retry"), config)
+                .await
+                .unwrap();
+            assert_eq!(
+                journal.bounds(),
+                20..28,
+                "ordinary recovery must retain committed data after retry"
+            );
+            for pos in 20..28 {
+                assert_eq!(journal.read(pos).await.unwrap(), pos - 20);
+            }
+        });
+    }
+
+    #[test]
+    fn test_sync_rejects_missing_acknowledged_data() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = initialization_cfg(&context, "initialization-missing-anchor", 5);
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), config.clone())
+                .await
+                .unwrap();
+            for value in 0..20 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            _ = journal.sync().await.unwrap();
+            for section in 1u64..=4 {
+                context
+                    .remove(
+                        "initialization-missing-anchor_data",
+                        Some(&section.to_be_bytes()),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let result = <Journal<_, u64> as authenticated::Backing<_>>::recover(
+                context.child("sync"),
+                config,
+                Some(40),
+            )
+            .await;
+            let error = result.err().expect("missing acknowledged data must fail");
+            assert!(
+                matches!(error, Error::Corruption(_)),
+                "must reject missing data instead of authorizing a reset: {error}"
+            );
+        });
+    }
+
+    struct Counted(u64);
+
+    impl Write for Counted {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            Write::write(&self.0, buf);
+        }
+    }
+
+    impl FixedSize for Counted {
         const SIZE: usize = 8;
     }
 
-    impl commonware_codec::Read for Counted {
-        type Cfg = Arc<std::sync::atomic::AtomicUsize>;
+    impl Read for Counted {
+        type Cfg = Arc<AtomicUsize>;
 
-        fn read_cfg(
-            buf: &mut impl commonware_codec::Buf,
-            count: &Self::Cfg,
-        ) -> Result<Self, commonware_codec::Error> {
-            count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        fn read_cfg(buf: &mut impl CodecBuf, count: &Self::Cfg) -> Result<Self, CodecError> {
+            count.fetch_add(1, Ordering::Relaxed);
             Ok(Self(u64::read_cfg(buf, &())?))
         }
     }
@@ -2961,7 +3049,7 @@ mod tests {
         for start in [0, 7] {
             for watermark in [start, 10, 13] {
                 deterministic::Runner::default().start(|context| async move {
-                    let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let count = Arc::new(AtomicUsize::new(0));
                     let cfg = Config {
                         partition: "selected-offset".into(),
                         items_per_section: NZU64!(5),
@@ -2989,7 +3077,8 @@ mod tests {
                         Recovery::<_, Counted>::open(context.child("recover"), cfg, Some(12))
                             .await
                             .unwrap();
-                    count.store(0, std::sync::atomic::Ordering::Relaxed);
+                    count.store(0, Ordering::Relaxed);
+
                     // Every selectable end comes from a blob boundary, an acknowledged offset,
                     // or the inspection scan. Resolving it must not decode frames again.
                     for size in start..=12 {
@@ -2999,14 +3088,11 @@ mod tests {
                             (size - first) * 9
                         );
                     }
-                    assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), 0);
+                    assert_eq!(count.load(Ordering::Relaxed), 0);
                     for value in start..12 {
                         assert_eq!(pending.read(value).await.unwrap().0, value);
                     }
-                    assert_eq!(
-                        count.load(std::sync::atomic::Ordering::Relaxed),
-                        (12 - start) as usize
-                    );
+                    assert_eq!(count.load(Ordering::Relaxed), (12 - start) as usize);
                     let journal = Journal(Box::new(pending.publish(7).await.unwrap()));
                     assert_eq!(journal.bounds(), start..7);
                     if start < 7 {
@@ -3027,7 +3113,7 @@ mod tests {
             (None, 10, 3),
         ] {
             deterministic::Runner::default().start(|context| async move {
-                let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let count = Arc::new(AtomicUsize::new(0));
                 let cfg = Config {
                     partition: "decode-once".into(),
                     items_per_section: NZU64!(5),
@@ -3050,7 +3136,7 @@ mod tests {
                         .await
                         .unwrap(),
                 );
-                count.store(0, std::sync::atomic::Ordering::Relaxed);
+                count.store(0, Ordering::Relaxed);
                 let mut journal = match cap {
                     Some(cap) => {
                         Journal::<_, Counted>::init_at_most(context.child("recover"), cfg, cap)
@@ -3059,7 +3145,7 @@ mod tests {
                     None => Journal::<_, Counted>::init(context.child("recover"), cfg).await,
                 }
                 .unwrap();
-                assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed), expected);
+                assert_eq!(count.load(Ordering::Relaxed), expected);
                 let size = cap.unwrap_or(u64::MAX).min(13);
                 assert_eq!(journal.bounds(), 0..size);
                 for value in 0..size {
@@ -3073,14 +3159,12 @@ mod tests {
 
     #[test]
     fn test_interrupted_offset_rebuild_preserves_committed_data() {
-        fn config(
-            context: &deterministic::Context,
-        ) -> Config<<Counted as commonware_codec::Read>::Cfg> {
+        fn config(context: &deterministic::Context) -> Config<<Counted as Read>::Cfg> {
             Config {
                 partition: "interrupted-offset-rebuild".into(),
                 items_per_section: NZU64!(256),
                 compression: None,
-                codec_config: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                codec_config: Arc::new(AtomicUsize::new(0)),
                 page_cache: CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(128),
                 replay_buffer: NZUsize!(128),
@@ -3102,7 +3186,7 @@ mod tests {
                         drop(journal.commit().await.unwrap());
 
                         let count = cfg.codec_config.clone();
-                        count.store(0, std::sync::atomic::Ordering::Relaxed);
+                        count.store(0, Ordering::Relaxed);
                         *context.storage_fault_config().write() = deterministic::FaultConfig {
                             write_rate: Some(deterministic::WriteConfig {
                                 failure_rate: probability!(1.0),
@@ -3119,7 +3203,7 @@ mod tests {
 
                         // The fault must interrupt replay after it starts and before it reaches
                         // the end, so this exercises a partially rebuilt offsets suffix.
-                        let decoded = count.load(std::sync::atomic::Ordering::Relaxed);
+                        let decoded = count.load(Ordering::Relaxed);
                         assert!(decoded > 0 && decoded < (128 - start) as usize);
                     });
 
@@ -3148,24 +3232,24 @@ mod tests {
 
     #[test]
     fn test_bounded_initialization_retries_after_storage_faults() {
+        fn config(context: &deterministic::Context) -> Config<()> {
+            Config {
+                partition: "capped-faults".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(context, SMALL_PAGE_SIZE, NZUsize!(4)),
+                write_buffer: NZUsize!(128),
+                replay_buffer: NZUsize!(128),
+            }
+        }
+
         for start in [0, 7] {
             for kind in 0..3 {
                 for numerator in [1, 3, 7, 10] {
                     let (succeeded, checkpoint) = deterministic::Runner::default()
                         .start_and_recover(|context| async move {
-                            let cfg = Config {
-                                partition: "capped-faults".into(),
-                                items_per_section: NZU64!(5),
-                                compression: None,
-                                codec_config: (),
-                                page_cache: CacheRef::from_pooler(
-                                    &context,
-                                    SMALL_PAGE_SIZE,
-                                    NZUsize!(4),
-                                ),
-                                write_buffer: NZUsize!(128),
-                                replay_buffer: NZUsize!(128),
-                            };
+                            let cfg = config(&context);
                             let mut journal = Journal::<_, u64>::init_at_size(
                                 context.child("seed"),
                                 cfg.clone(),
@@ -3177,7 +3261,7 @@ mod tests {
                                 (journal, _) = journal.append(&value).await.unwrap();
                             }
                             _ = journal.sync().await.unwrap();
-                            let rate = commonware_utils::Probability::new(numerator, 10).unwrap();
+                            let rate = Probability::new(numerator, 10).unwrap();
                             *context.storage_fault_config().write() = deterministic::FaultConfig {
                                 sync_rate: (kind == 0).then_some(rate),
                                 remove_rate: (kind == 1).then_some(rate),
@@ -3197,19 +3281,7 @@ mod tests {
                     deterministic::Runner::from(checkpoint).start(|context| async move {
                         *context.storage_fault_config().write() =
                             deterministic::FaultConfig::default();
-                        let cfg = Config {
-                            partition: "capped-faults".into(),
-                            items_per_section: NZU64!(5),
-                            compression: None,
-                            codec_config: (),
-                            page_cache: CacheRef::from_pooler(
-                                &context,
-                                SMALL_PAGE_SIZE,
-                                NZUsize!(4),
-                            ),
-                            write_buffer: NZUsize!(128),
-                            replay_buffer: NZUsize!(128),
-                        };
+                        let cfg = config(&context);
                         if succeeded {
                             let journal =
                                 Journal::<_, u64>::init(context.child("ordinary"), cfg.clone())
@@ -5714,8 +5786,8 @@ mod tests {
     }
 
     /// A crash during the rollover fsync can persist a valid last page above a lost interior
-    /// page, which `Writer::new`'s backward scan cannot see. Recovery must truncate the suspect
-    /// blob at the hole instead of failing on an unreadable page.
+    /// page, which `PagedRecovery::open`'s backward scan cannot see. Recovery must truncate the
+    /// suspect blob at the hole instead of failing on an unreadable page.
     #[test_traced]
     fn test_variable_recovery_truncates_torn_interior_page() {
         let executor = deterministic::Runner::default();
@@ -5798,9 +5870,9 @@ mod tests {
     }
 
     /// A torn page beneath the offsets recovery watermark is external corruption, not a crash
-    /// artifact: the watermark only advances after the covering data fsync completes. Recovery
-    /// never re-reads blobs wholly below the floor's blob, so it adopts the journal unchanged
-    /// and the damage surfaces as read errors on the affected items.
+    /// artifact: the watermark only advances after the covering data fsync completes. In this
+    /// test, recovery adopts the journal unchanged and the damage surfaces as read errors on
+    /// the affected items.
     #[test_traced]
     fn test_variable_recovery_adopts_torn_page_below_watermark() {
         let executor = deterministic::Runner::default();

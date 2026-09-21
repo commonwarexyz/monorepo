@@ -1,5 +1,10 @@
 //! Mock implementations of runtime primitives for testing.
 
+#[cfg(any(test, feature = "test-utils"))]
+use crate::storage::{
+    memory::{Blob as MemBlob, Storage as MemStorage},
+    open::{Blob as OpenBlob, Opens},
+};
 use crate::{
     Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
     Metrics, Name, ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
@@ -16,6 +21,7 @@ use rand::{TryCryptoRng, TryRng};
 use std::{
     future::{Future, poll_fn},
     mem,
+    ops::RangeInclusive,
     sync::Arc,
     task::Poll,
 };
@@ -24,8 +30,8 @@ use std::{
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone)]
 pub struct MemoryStorage {
-    inner: crate::storage::memory::Storage,
-    opens: Arc<crate::storage::open::Opens>,
+    inner: MemStorage,
+    opens: Arc<Opens>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -33,7 +39,7 @@ impl MemoryStorage {
     /// Create an empty memory storage backend.
     pub fn new(pool: BufferPool) -> Self {
         Self {
-            inner: crate::storage::memory::Storage::new(pool),
+            inner: MemStorage::new(pool),
             opens: Arc::default(),
         }
     }
@@ -69,13 +75,13 @@ impl MemoryStorage {
 
 #[cfg(any(test, feature = "test-utils"))]
 impl Storage for MemoryStorage {
-    type Blob = crate::storage::open::Blob<crate::storage::memory::Blob>;
+    type Blob = OpenBlob<MemBlob>;
 
     async fn open_versioned(
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<BlobVersion>,
+        versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let opened = self.opens.open(
             partition,
@@ -774,7 +780,7 @@ impl<E: Storage> Storage for RecordingContext<E> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<BlobVersion>,
+        versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         let incarnation = self.recordings.open_incarnation(partition, name);
@@ -914,7 +920,7 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<BlobVersion>,
+        versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
@@ -1250,7 +1256,7 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<BlobVersion>,
+        versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
@@ -1340,7 +1346,7 @@ impl<E: Storage> Storage for SyncFaultContext<E> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<BlobVersion>,
+        versions: RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((

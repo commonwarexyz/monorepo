@@ -73,15 +73,23 @@ struct Shared {
     /// Settles the open once its last handle dropped and every operation finished.
     promise: Mutex<Option<Sender>>,
     #[cfg(test)]
+    test: TestState,
+}
+
+/// Hooks for controlling blocking storage operations in lifecycle tests.
+#[cfg(test)]
+#[derive(Default)]
+struct TestState {
+    /// Pause the next mutation after it enters the blocking pool.
     before_mutation: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
-    #[cfg(test)]
+    /// Pause the next sync after the filesystem operation completes.
     after_sync: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
 }
 
 #[cfg(test)]
 impl Shared {
     fn wait_before_mutation(&self) {
-        let hook = self.before_mutation.lock().take();
+        let hook = self.test.before_mutation.lock().take();
         if let Some((entered, release)) = hook {
             let _ = entered.send(());
             let _ = release.recv();
@@ -89,7 +97,7 @@ impl Shared {
     }
 
     fn wait_after_sync(&self) {
-        let hook = self.after_sync.lock().take();
+        let hook = self.test.after_sync.lock().take();
         if let Some((entered, release)) = hook {
             let _ = entered.send(());
             let _ = release.recv();
@@ -260,9 +268,7 @@ impl Blob {
             key: generation.key.clone(),
             promise: Mutex::new(None),
             #[cfg(test)]
-            before_mutation: Mutex::new(None),
-            #[cfg(test)]
-            after_sync: Mutex::new(None),
+            test: TestState::default(),
         });
         Self {
             open: Arc::new(Open { shared, generation }),
@@ -720,7 +726,7 @@ mod tests {
                     // The gate chooses which terminal result reaches the tracker first.
                     let (entered, entering) = ::tokio::sync::oneshot::channel();
                     let (release, gate) = mpsc::channel();
-                    *blob.open.shared.after_sync.lock() = Some((entered, gate));
+                    *blob.open.shared.test.after_sync.lock() = Some((entered, gate));
                     if !failure_first {
                         *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
                     }
@@ -814,7 +820,7 @@ mod tests {
         }
         let (entered, entering) = ::tokio::sync::oneshot::channel();
         let (release, gate) = mpsc::channel();
-        *blob.open.shared.before_mutation.lock() = Some((entered, gate));
+        *blob.open.shared.test.before_mutation.lock() = Some((entered, gate));
         let mut mutation = Box::pin(async {
             if shrink {
                 blob.resize(0).await

@@ -208,6 +208,7 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, SyncFaultContext, drive_pending_syncs},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
+    use rstest::rstest;
 
     type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
     type VariableJournal = variable::Journal<deterministic::Context, u64>;
@@ -880,8 +881,16 @@ mod tests {
         });
     }
 
+    #[rstest]
+    #[case::stale_below_start_leaves_blobs_unopened(30, 50, 70, false)]
+    #[case::start_inside_newest_blob_opens_it(27, 28, 40, true)]
     #[test_traced]
-    fn test_fixed_sync_journal_stale_below_start_leaves_blobs_unopened() {
+    fn test_fixed_sync_journal_committed_tail_at_requested_start(
+        #[case] initial_end: u8,
+        #[case] range_start: u64,
+        #[case] range_end: u64,
+        #[case] repairs_tail: bool,
+    ) {
         deterministic::Runner::default().start(|context| async move {
             let mut calls = Vec::new();
             for torn in [false, true] {
@@ -891,7 +900,7 @@ mod tests {
                 let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
                     .await
                     .unwrap();
-                for value in 0..30u8 {
+                for value in 0..initial_end {
                     (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
                 }
 
@@ -909,7 +918,10 @@ mod tests {
                     inner: context,
                     pending: pending.clone(),
                 };
-                let range = non_empty_range!(Location::<F>::new(50), Location::<F>::new(70));
+                let range = non_empty_range!(
+                    Location::<F>::new(range_start),
+                    Location::<F>::new(range_end)
+                );
                 let mut journal = drive_pending_syncs(
                     &pending,
                     <fixed::Journal<_, Digest> as Journal<F>>::new(
@@ -920,96 +932,36 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert_eq!(journal.bounds(), 50..50);
+                assert_eq!(journal.bounds(), range_start..range_start);
                 calls.push(pending.calls());
 
                 // The cleared journal accepts appends that survive an ordinary reopen.
-                for value in 50..53u8 {
-                    (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
+                for value in range_start..range_start + 3 {
+                    (journal, _) = journal.append(&Digest([value as u8; 32])).await.unwrap();
                 }
                 let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
                 drop(journal);
                 let journal = FixedJournal::init(reopen, cfg).await.unwrap();
-                assert_eq!(journal.bounds(), 50..53);
-                for value in 50..53u8 {
+                assert_eq!(journal.bounds(), range_start..range_start + 3);
+                for value in range_start..range_start + 3 {
                     assert_eq!(
-                        journal.read(value as u64).await.unwrap(),
-                        Digest([value; 32])
+                        journal.read(value).await.unwrap(),
+                        Digest([value as u8; 32])
                     );
                 }
                 journal.destroy().await.unwrap();
             }
 
-            // Every stored item lies below the range start, so the journal is reset without
-            // opening any blob: a torn tail costs no repair.
-            assert_eq!(calls[0], calls[1]);
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_sync_journal_start_inside_newest_blob_opens_it() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut calls = Vec::new();
-            for torn in [false, true] {
-                let context = context.child(if torn { "torn" } else { "clean" });
-                let mut cfg = test_cfg(&context);
-                cfg.partition = format!("sync-journal-{torn}");
-                let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
-                    .await
-                    .unwrap();
-                for value in 0..27u8 {
-                    (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
-                }
-
-                // Commit leaves the watermark behind the data, so the tail is unacknowledged.
-                let journal = journal.commit().await.unwrap();
-                drop(journal);
-                if torn {
-                    tear(&context, &format!("{}-blobs", cfg.partition), 5).await;
-                }
-
-                let reopen = context.child("reopen");
-                let pending = PendingSyncs::default();
-                pending.arm();
-                let delayed = DelayedSyncContext {
-                    inner: context,
-                    pending: pending.clone(),
-                };
-                let range = non_empty_range!(Location::<F>::new(28), Location::<F>::new(40));
-                let mut journal = drive_pending_syncs(
-                    &pending,
-                    <fixed::Journal<_, Digest> as Journal<F>>::new(
-                        delayed.child("sync"),
-                        cfg.clone(),
-                        range,
-                    ),
-                )
-                .await
-                .unwrap();
-                assert_eq!(journal.bounds(), 28..28);
-                calls.push(pending.calls());
-
-                // The cleared journal accepts appends that survive an ordinary reopen.
-                for value in 28..31u8 {
-                    (journal, _) = journal.append(&Digest([value; 32])).await.unwrap();
-                }
-                let journal = drive_pending_syncs(&pending, journal.sync()).await.unwrap();
-                drop(journal);
-                let journal = FixedJournal::init(reopen, cfg).await.unwrap();
-                assert_eq!(journal.bounds(), 28..31);
-                for value in 28..31u8 {
-                    assert_eq!(
-                        journal.read(value as u64).await.unwrap(),
-                        Digest([value; 32])
-                    );
-                }
-                journal.destroy().await.unwrap();
+            if repairs_tail {
+                // The range starts inside the newest blob, whose capacity reaches past it. Only
+                // its recovered size shows that no item reaches the range, so that blob is opened
+                // and a torn tail there is repaired before the reset.
+                assert!(calls[1] > calls[0]);
+            } else {
+                // Every stored item lies below the range start, so the journal is reset without
+                // opening any blob: a torn tail costs no repair.
+                assert_eq!(calls[0], calls[1]);
             }
-
-            // The range starts inside the newest blob, whose capacity reaches past it. Only its
-            // recovered size shows that no item reaches the range, so that blob is opened and a
-            // torn tail there is repaired before the reset.
-            assert!(calls[1] > calls[0]);
         });
     }
 

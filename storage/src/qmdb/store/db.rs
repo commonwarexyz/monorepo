@@ -370,6 +370,7 @@ where
     }
 
     /// Initializes a new [Db] with the given configuration.
+    ///
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
     #[boxed]
@@ -407,11 +408,8 @@ where
             (log, _) = log
                 .append(&Operation::CommitFloor(None, Location::new(0)))
                 .await?;
+            log = log.sync().await?;
         }
-
-        // Sync the log to avoid having to repeat any recovery that may have been performed on next
-        // startup.
-        let log = log.sync().await?;
 
         let last_commit_loc =
             Location::new(log.size().checked_sub(1).expect("commit should exist"));

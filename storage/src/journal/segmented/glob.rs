@@ -495,13 +495,7 @@ mod tests {
         }
 
         async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
-            let (context, partition, factory) = self.0.manager.test_configuration();
-            let cfg = Config {
-                partition,
-                write_buffer: factory.capacity,
-                compression: self.0.compression,
-                codec_config: self.0.codec_config.clone(),
-            };
+            let (context, cfg) = self.test_configuration();
             _ = self.sync_all().await?;
             let pending = Recovery::init(context, cfg).await?;
             let pending = pending.truncate_section(section, end).await?;

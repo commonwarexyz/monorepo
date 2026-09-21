@@ -3381,6 +3381,11 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
             Some(Height::new(3))
         );
 
+        // Stop the first marshal so its storage handles are released before the restart reopens
+        // the same partitions.
+        setup.actor_handle.abort();
+        let _ = setup.actor_handle.await;
+
         // Restart marshal and confirm the processed height restored from metadata.
         let restart = H::setup_validator_with(
             context
@@ -5412,8 +5417,10 @@ pub fn init_processed_height<H: TestHarness>() {
             context.sleep(Duration::from_millis(10)).await;
         }
 
-        // Drop the handle to simulate shutdown
+        // Drop the handle and stop the actor to simulate shutdown.
         drop(handle);
+        setup.actor_handle.abort();
+        let _ = setup.actor_handle.await;
 
         // Second session: create new validator instance, should recover processed height
         let setup2 = H::setup_validator(

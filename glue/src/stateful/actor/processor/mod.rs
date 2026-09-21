@@ -578,7 +578,7 @@ impl<T: Clone> Pruning<T> {
             return None;
         }
 
-        // Do not prune until we've observed the full rewind-safe marshal
+        // Do not prune until we've observed the full marshal retention
         // window after startup.
         if self.retained_targets.len() < self.marshal_retention_window {
             return None;

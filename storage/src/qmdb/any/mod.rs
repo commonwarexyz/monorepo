@@ -150,6 +150,7 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
 /// Initialize an `Any` authenticated db from the given config.
+///
 /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
 /// `None` selects the latest retained state.
 ///
@@ -256,7 +257,7 @@ pub(crate) mod test {
     use commonware_runtime::{
         BufferPooler, Supervisor as _, buffer::paged::CacheRef, deterministic::Context,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, bitmap::Prunable};
     use core::{future::Future, pin::Pin};
     use std::{
         collections::HashMap,
@@ -2756,8 +2757,7 @@ pub(crate) mod test {
     #[test_traced("INFO")]
     fn test_any_live_child_across_coarse_prune() {
         deterministic::Runner::default().start(|context| async move {
-            const CHUNK_BITS: u64 =
-                commonware_utils::bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
+            const CHUNK_BITS: u64 = Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
             const { assert!(CHUNK_BITS <= 600) };
 
             for child_after_prune in [false, true] {

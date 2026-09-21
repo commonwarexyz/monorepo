@@ -6,7 +6,7 @@
 //! by the [`sync_tests_for_harness!`] macro.
 
 use crate::{
-    journal::contiguous::Contiguous,
+    journal::contiguous::{Contiguous, fixed as contiguous_fixed},
     merkle::{self, Family, Location, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
         self,
@@ -24,6 +24,7 @@ use crate::{
 use commonware_codec::Encode;
 use commonware_cryptography::{Sha256, sha256};
 use commonware_macros::boxed;
+use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufferPooler, Metrics, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
@@ -1180,6 +1181,72 @@ macro_rules! sync_tests_for_harness {
 
 sync_tests_for_harness!(harnesses::VariableMmrHarness, variable_mmr);
 sync_tests_for_harness!(harnesses::VariableMmbHarness, variable_mmb);
+
+#[test]
+fn test_keyless_synced_range_reopens() {
+    type Db = keyless::fixed::Db<mmr::Family, deterministic::Context, u64, Sha256, Sequential>;
+
+    deterministic::Runner::default().start(|context| async move {
+        let make_config = |suffix: &str| {
+            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(8));
+            keyless::fixed::Config {
+                merkle: MerkleConfig {
+                    journal_partition: format!("{suffix}-merkle"),
+                    metadata_partition: format!("{suffix}-metadata"),
+                    items_per_blob: NZU64!(11),
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                    strategy: Sequential,
+                    page_cache: cache.clone(),
+                },
+                log: contiguous_fixed::Config {
+                    partition: format!("{suffix}-log"),
+                    items_per_blob: NZU64!(1),
+                    page_cache: cache,
+                    write_buffer: NZUsize!(1024),
+                    replay_buffer: NZUsize!(1024),
+                },
+            }
+        };
+        let source = Db::init(context.child("source"), make_config("source"), None)
+            .await
+            .unwrap();
+        let mut batch = source.new_batch();
+        for value in 0..10 {
+            batch = batch.append(value);
+        }
+        let batch = batch.merkleize(&source, None, Location::new(0)).await;
+        let (source, _) = source.apply_batch(batch).await.unwrap();
+        let source = Arc::new(source.sync().await.unwrap());
+        let config = make_config("client");
+        let client: Db = sync::sync(sync::engine::Config {
+            context: context.child("client"),
+            db_config: config.clone(),
+            target: sync::Target {
+                root: source.root(),
+                range: non_empty_range!(Location::new(5), source.bounds().end),
+            },
+            source: source.clone(),
+            apply_batch_size: NZU64!(10),
+            fetch_batch_size: NZU64!(5),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 8,
+        })
+        .await
+        .unwrap();
+        assert_eq!(*client.bounds().start, 5);
+        assert_eq!(*client.inactivity_floor_loc(), 0);
+        _ = client.sync().await.unwrap();
+        let reopened = Db::init(context.child("reopened"), config, None).await;
+        assert!(
+            reopened.is_ok(),
+            "valid synced Keyless must reopen: {reopened:?}"
+        );
+    });
+}
 
 /// A completed sync journal reuses local pinned nodes only when the persisted state can
 /// authenticate the target: a target starting below the local pruning boundary is declined,

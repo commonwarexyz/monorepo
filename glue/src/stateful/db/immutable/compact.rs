@@ -427,6 +427,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::{DatabaseSet, Unmerkleized};
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::select;
     use commonware_parallel::Sequential;
@@ -576,9 +577,7 @@ mod tests {
                 .set(key, value)
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(metadata);
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
             let expected_root = merkleized.root();
 
             {
@@ -615,9 +614,7 @@ mod tests {
                 .await
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Sha256::hash(&[&[11]]));
-            let first = crate::stateful::db::Unmerkleized::merkleize(first)
-                .await
-                .unwrap();
+            let first = Unmerkleized::merkleize(first).await.unwrap();
             let first_target = sync::CompactTarget {
                 root: first.root(),
                 size: first.bounds().tip.size,
@@ -633,9 +630,7 @@ mod tests {
                 .await
                 .set(Sha256::hash(&[&[3]]), Sha256::hash(&[&[4]]))
                 .with_metadata(Sha256::hash(&[&[22]]));
-            let second = crate::stateful::db::Unmerkleized::merkleize(second)
-                .await
-                .unwrap();
+            let second = Unmerkleized::merkleize(second).await.unwrap();
             let (slot, database) = db.write().await;
             let database = <FixedDb as ManagedDb<_>>::apply(database, second)
                 .await
@@ -673,17 +668,12 @@ mod tests {
                 .await
                 .set(Sha256::hash(&[&[1]]), Sha256::hash(&[&[2]]))
                 .with_metadata(Sha256::hash(&[&[3]]));
-            let batch = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
-            crate::stateful::db::DatabaseSet::apply(&db, batch).await;
-            let target = crate::stateful::db::DatabaseSet::committed_targets(&db).await;
-            crate::stateful::db::DatabaseSet::finalize(&db)
-                .await
-                .durable()
-                .await;
+            let batch = Unmerkleized::merkleize(batch).await.unwrap();
+            DatabaseSet::apply(&db, batch).await;
+            let target = DatabaseSet::committed_targets(&db).await;
+            DatabaseSet::finalize(&db).await.durable().await;
             drop(db);
-            let db = <Shared<FixedDb> as crate::stateful::db::DatabaseSet<_>>::init(
+            let db = <Shared<FixedDb> as DatabaseSet<_>>::init(
                 context.child("aligned_cap"),
                 config,
                 Some(target.clone()),

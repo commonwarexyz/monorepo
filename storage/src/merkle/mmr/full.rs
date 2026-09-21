@@ -234,7 +234,8 @@ mod tests {
 
             // A proof for the oldest item validates the pinned node boundary.
             mmr.proof(&hasher, prune_loc, 0).await.unwrap();
-            // prune all remaining leaves 1 at a time.
+
+            // Prune all remaining leaves one at a time.
             while mmr.size() > prune_pos {
                 let cap = mmr.leaves() - 1;
                 _ = mmr.sync().await.unwrap();

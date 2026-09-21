@@ -493,6 +493,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stateful::db::Unmerkleized;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -565,9 +566,7 @@ mod tests {
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
 
             {
                 let (slot, database) = db.write().await;
@@ -608,9 +607,7 @@ mod tests {
                 .append(U64::new(7))
                 .with_inactivity_floor(mmr::Location::new(1))
                 .with_metadata(U64::new(9));
-            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                .await
-                .unwrap();
+            let merkleized = Unmerkleized::merkleize(batch).await.unwrap();
 
             let valid_target = AnySyncTarget::new(
                 merkleized.root(),

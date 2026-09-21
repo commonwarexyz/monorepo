@@ -44,6 +44,7 @@ impl<
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
+    ///
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
     /// `None` selects the latest retained state.
     pub async fn init(
@@ -111,6 +112,7 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        ///
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
         /// `None` selects the latest retained state.
         pub async fn init(

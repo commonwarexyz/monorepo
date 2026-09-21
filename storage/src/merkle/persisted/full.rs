@@ -1878,8 +1878,6 @@ mod tests {
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent
     /// nodes, and confirms we appropriately recover to a valid state.
     async fn full_recovery_inner<F: Family>(context: deterministic::Context) {
-        use crate::journal::contiguous::fixed::{Config as JConfig, Journal};
-
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
