@@ -207,8 +207,6 @@ where
     async fn run(self) {
         if let Some(floor) = self.plan.floor().cloned() {
             self.start_state_sync(floor).await;
-        } else if self.plan.requires_state_sync_floor() {
-            panic!("interrupted state sync is missing its persisted floor");
         } else {
             self.start_from_marshal().await;
         }
@@ -219,11 +217,7 @@ where
     async fn start_state_sync(self, finalization: Finalization<S, V::Commitment>) {
         let (marshal, floor) = self.marshal;
         let metrics = StatefulMetrics::new(self.context.as_present());
-        let sync_metadata = self
-            .plan
-            .into_sync_metadata()
-            .begin_sync(finalization.clone())
-            .await;
+        let sync_metadata = self.plan.into_sync_metadata();
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
@@ -408,7 +402,7 @@ mod tests {
                     provider: (),
                     marshal: (marshal.mailbox, marshal.floor),
                     mailbox_size: NZUsize!(8),
-                    plan: plan.with_floor(finalization),
+                    plan: plan.with_floor(finalization).await,
                     resolvers: NoopResolver::default(),
                     sync_config: SyncEngineConfig {
                         fetch_batch_size: NZU64!(1),
