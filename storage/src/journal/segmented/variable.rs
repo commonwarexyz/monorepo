@@ -94,6 +94,7 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Replay as BlobReplay, Writer},
 };
 use std::{
+    borrow::Borrow,
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
 };
@@ -236,8 +237,13 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::get_many].
-    async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
-        if offsets.is_empty() {
+    async fn get_many(
+        &self,
+        section: u64,
+        offsets: impl IntoIterator<Item: Borrow<u64> + Send, IntoIter: Send> + Send,
+    ) -> Result<Vec<V>, Error> {
+        let mut offsets = offsets.into_iter().peekable();
+        if offsets.peek().is_none() {
             return Ok(Vec::new());
         }
         let blob = self
@@ -247,8 +253,9 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 
         let compressed = self.compression.is_some();
         let cfg = &self.codec_config;
-        let mut items = Vec::with_capacity(offsets.len());
-        for &offset in offsets {
+        let mut items = Vec::with_capacity(offsets.size_hint().0);
+        for offset in offsets {
+            let offset = *offset.borrow();
             let (_, _, item) = Self::read(compressed, cfg, blob, offset).await?;
             items.push(item);
         }
@@ -530,7 +537,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Read multiple items from the same section.
     ///
     /// Offsets should be sorted in ascending order.
-    pub async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
+    pub async fn get_many(
+        &self,
+        section: u64,
+        offsets: impl IntoIterator<Item: Borrow<u64> + Send, IntoIter: Send> + Send,
+    ) -> Result<Vec<V>, Error> {
         self.0.get_many(section, offsets).await
     }
 
@@ -1273,6 +1284,46 @@ mod tests {
 
             // Cleanup
             journal.destroy().await.expect("Failed to destroy journal");
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many_iterator() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "iterator-reads".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+            let mut offsets = Vec::new();
+            for value in 0..5u64 {
+                let offset;
+                (journal, offset, _) = journal.append(0, &value).await.unwrap();
+                offsets.push(offset);
+            }
+            assert_eq!(
+                journal
+                    .get_many(0, offsets.iter().copied().step_by(2))
+                    .await
+                    .unwrap(),
+                vec![0, 2, 4],
+            );
+            assert!(
+                journal
+                    .get_many(99, core::iter::empty::<u64>())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                journal.get_many(99, core::iter::once(0)).await,
+                Err(Error::SectionOutOfRange(99)),
+            ));
+            journal.destroy().await.unwrap();
         });
     }
 

@@ -486,7 +486,7 @@ where
     }
 
     /// Reconciles the list of peers that can be used to fetch future requests.
-    pub fn reconcile(&mut self, keep: &[P]) {
+    pub fn reconcile<'a>(&mut self, keep: impl IntoIterator<Item = &'a P>) {
         // New peers start with zero throughput, having delivered nothing yet. They
         // are tried via shuffled retries and earn a real score once they respond.
         self.participants.reconcile(keep, Reverse(0));

@@ -289,7 +289,7 @@ where
 /// each set of partial signatures has the same indices.
 pub fn recover_multiple<'a, V, I>(
     sharing: &Sharing<V>,
-    many_evals: Vec<I>,
+    many_evals: impl IntoIterator<Item = I>,
     strategy: &impl Strategy,
 ) -> Result<Vec<V::Signature>, Error>
 where
@@ -339,7 +339,7 @@ where
     I: IntoIterator<Item = &'a PartialSignature<V>>,
     V::Signature: 'a,
 {
-    let mut sigs = recover_multiple(sharing, vec![first, second], strategy)?;
+    let mut sigs = recover_multiple(sharing, [first, second], strategy)?;
     let second_sig = sigs.pop().unwrap();
     let first_sig = sigs.pop().unwrap();
     Ok((first_sig, second_sig))

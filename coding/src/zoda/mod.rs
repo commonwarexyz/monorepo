@@ -444,16 +444,15 @@ impl<D: Digest> CheckingData<D> {
 
         // Build elements for BMT multi-proof verification using the deterministically
         // computed indices for this shard
-        let proof_elements: Vec<(H::Digest, u32)> = these_shuffled_indices
+        let proof_elements = these_shuffled_indices
             .iter()
             .zip(weak_shard.shard.iter())
-            .map(|(&i, row)| (row_digest::<H>(row), i))
-            .collect();
+            .map(|(&i, row)| (row_digest::<H>(row), i));
 
         // Verify the multi-proof
         if weak_shard
             .inclusion_proof
-            .verify_multi_inclusion::<H>(&proof_elements, &self.root)
+            .verify_multi_inclusion::<H>(proof_elements, &self.root)
             .is_err()
         {
             return Err(Error::InvalidWeakShard);
