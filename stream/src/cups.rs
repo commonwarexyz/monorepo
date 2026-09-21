@@ -25,25 +25,33 @@
 //!
 //! # Records
 //!
-//! Each message is independently encrypted and authenticated with a 16-byte tag and empty AEAD
-//! associated data. A visible u32-varint length prefix frames the ciphertext and tag. Batching
+//! Version 0 encrypts and authenticates each message with a 16-byte tag and empty AEAD
+//! associated data. A visible u32-varint length prefix frames the ciphertext and tag. Version 1
+//! uses a 4-byte encrypted big-endian body length followed by a 16-byte header tag, then the
+//! encrypted payload followed by its 16-byte body tag. The body length includes the body tag.
+//! V1 encrypts its length fields, while traffic sizes and timing remain observable. Batching
 //! writes preserves individual record boundaries.
 //!
 //! Each direction uses a fixed session key and an implicit 96-bit counter nonce, starting at zero
-//! and encoded little-endian. The counter advances for each record and is never transmitted.
-//! Counter exhaustion requires a new connection. Counters bind records to their expected positions:
-//! replayed, reordered, or corrupted records fail authentication rather than being reordered for
-//! delivery. Callers must discard the connection after an authentication failure.
+//! and encoded little-endian. The counter advances once per record in version 0 and twice
+//! per record in version 1, first for the length header and then for the body. It is never
+//! transmitted. Counter exhaustion requires a new connection. Counters bind records to their
+//! expected positions: replayed, reordered, or corrupted records fail authentication rather than
+//! being reordered for delivery. Callers must discard the connection after an authentication
+//! failure.
 //!
 //! # Security
 //!
 //! SAKE provides mutual authentication and ephemeral session keys. CUPS protects record contents
-//! and integrity, while lengths, boundaries, and timing remain observable. There is no padding,
-//! in-session key ratchet, or rekeying. Callers must discard the connection after an I/O error or
-//! cancellation, as required by [crate::Sender] and [crate::Receiver].
+//! and integrity. Version 0 exposes lengths and boundaries; version 1 encrypts lengths, but
+//! traffic volume and timing remain observable. There is no padding, in-session key ratchet, or
+//! rekeying. Callers must discard the connection after an I/O error or cancellation, as required
+//! by [crate::Sender] and [crate::Receiver].
 
-use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
-use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
+use crate::utils::codec::{build_frame, recv_frame, send_frame, validate_frame_len};
+use commonware_codec::{
+    Copying, DecodeExt, Encode, EncodeSize, Error as CodecError, FixedSize, Write, varint::UInt,
+};
 use commonware_cryptography::{
     Signer,
     handshake::sake::{
@@ -68,6 +76,8 @@ const TAG_SIZE: u32 = {
     assert!(sake::TAG_SIZE <= u32::MAX as usize);
     sake::TAG_SIZE as u32
 };
+const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
+const V1_HEADER_SIZE: usize = V1_HEADER_PLAINTEXT_SIZE + TAG_SIZE as usize;
 
 /// Maximum supported plaintext message size.
 pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
@@ -118,7 +128,8 @@ pub enum Version {
     /// [sake::Version::V0]: the first handshake message's signature does not cover the dialer
     /// identity.
     V0,
-    /// [sake::Version::V1]: every handshake signature covers both identities.
+    /// [sake::Version::V1]: every handshake signature covers both identities, and record lengths
+    /// are encrypted and authenticated.
     V1,
 }
 
@@ -128,6 +139,68 @@ impl Version {
         match self {
             Self::V0 => sake::Version::V0,
             Self::V1 => sake::Version::V1,
+        }
+    }
+
+    /// Returns the encoded header size for an encrypted body of the given length.
+    fn header_len(self, body_len: u32) -> usize {
+        match self {
+            Self::V0 => UInt(body_len).encode_size(),
+            Self::V1 => V1_HEADER_SIZE,
+        }
+    }
+
+    /// Appends a record header, consuming a nonce when the header is encrypted.
+    fn append_header(
+        self,
+        chunk: &mut IoBufMut,
+        cipher: &mut SendCipher,
+        body_len: u32,
+    ) -> Result<(), Error> {
+        match self {
+            Self::V0 => UInt(body_len).write(chunk),
+            Self::V1 => {
+                let offset = chunk.len();
+                body_len.write(chunk);
+                let tag = cipher.send_in_place(&mut chunk.as_mut()[offset..])?;
+                chunk.put_slice(&tag);
+            }
+        }
+        Ok(())
+    }
+
+    /// Receives an encrypted body, validating its header before requesting body bytes.
+    async fn recv_frame(
+        self,
+        stream: &mut impl Stream,
+        cipher: &mut RecvCipher,
+        pool: &BufferPool,
+        max_body_len: u32,
+    ) -> Result<IoBufs, Error> {
+        match self {
+            Self::V0 => recv_frame(stream, max_body_len).await,
+            Self::V1 => {
+                let header = stream
+                    .recv(V1_HEADER_SIZE)
+                    .await
+                    .map_err(Error::RecvFailed)?;
+                let mut header = mutable_frame(pool, header);
+                let plaintext_len = cipher.recv_in_place(header.as_mut())?;
+                debug_assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
+
+                // Authenticate the header before decoding its length or requesting the body.
+                let body_len = u32::decode(Copying(&header.as_ref()[..V1_HEADER_PLAINTEXT_SIZE]))?;
+                if body_len < TAG_SIZE {
+                    return Err(HandshakeError::DecryptionFailed.into());
+                }
+                if body_len > max_body_len {
+                    return Err(Error::RecvTooLarge(body_len as usize));
+                }
+                stream
+                    .recv(body_len as usize)
+                    .await
+                    .map_err(Error::RecvFailed)
+            }
         }
     }
 }
@@ -252,12 +325,14 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
                 sink,
                 max_message_size,
                 pool: pool.clone(),
+                version: self.version,
             },
             Receiver {
                 cipher: recv,
                 stream,
                 max_message_size,
                 pool,
+                version: self.version,
             },
         ))
     }
@@ -316,12 +391,14 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
                 sink,
                 max_message_size,
                 pool: pool.clone(),
+                version: self.version,
             },
             Receiver {
                 cipher: recv,
                 stream,
                 max_message_size,
                 pool,
+                version: self.version,
             },
         ))
     }
@@ -333,6 +410,7 @@ pub struct Sender<O> {
     sink: O,
     max_message_size: u32,
     pool: BufferPool,
+    version: Version,
 }
 
 /// Describes one contiguous sink chunk made up of one or more encrypted frames.
@@ -344,12 +422,13 @@ struct ChunkPlan {
 impl<O: Sink> Sender<O> {
     /// Returns the total encoded size of one encrypted frame.
     ///
-    /// The returned size includes the length prefix, ciphertext, and AEAD tag.
+    /// The returned size includes the header, ciphertext, and AEAD tags.
     fn encrypted_frame_len(&self, plaintext_len: usize) -> Result<usize, Error> {
-        framed_len(
+        let body_len = validate_frame_len(
             plaintext_len + TAG_SIZE as usize,
             self.max_message_size.saturating_add(TAG_SIZE),
-        )
+        )?;
+        Ok(self.version.header_len(body_len) + body_len as usize)
     }
 
     /// Appends one encrypted frame directly into caller-provided storage.
@@ -362,22 +441,23 @@ impl<O: Sink> Sender<O> {
         chunk: &mut IoBufMut,
         mut bufs: IoBufs,
     ) -> Result<(), Error> {
-        append_frame(
-            chunk,
-            bufs.len() + TAG_SIZE as usize,
+        let body_len = bufs.len() + TAG_SIZE as usize;
+        build_frame(
+            body_len,
             self.max_message_size.saturating_add(TAG_SIZE),
-            |chunk, plaintext_offset| {
-                // Copy the plaintext directly into the frame.
-                chunk.put(&mut bufs);
-
-                // Encrypt in-place and append the tag to the frame.
-                let tag = self
-                    .cipher
-                    .send_in_place(&mut chunk.as_mut()[plaintext_offset..])?;
-                chunk.put_slice(&tag);
-                Ok(())
-            },
+            |len| self.version.append_header(chunk, &mut self.cipher, len),
         )?;
+
+        let plaintext_offset = chunk.len();
+        // Copy the plaintext directly into the frame.
+        chunk.put(&mut bufs);
+
+        // Encrypt in-place and append the tag to the frame.
+        let tag = self
+            .cipher
+            .send_in_place(&mut chunk.as_mut()[plaintext_offset..])?;
+        chunk.put_slice(&tag);
+        assert_eq!(chunk.len() - plaintext_offset, body_len);
         Ok(())
     }
 
@@ -501,6 +581,7 @@ pub struct Receiver<I> {
     stream: I,
     max_message_size: u32,
     pool: BufferPool,
+    version: Version,
 }
 
 impl<O: Sink> crate::Sender for Sender<O> {
@@ -528,6 +609,21 @@ impl<I: Stream> crate::Receiver for Receiver<I> {
     }
 }
 
+/// Recovers a received frame for in-place decryption, copying only when needed.
+fn mutable_frame(pool: &BufferPool, encrypted: IoBufs) -> IoBufMut {
+    match encrypted
+        .try_into_single()
+        .and_then(|buf| buf.try_into_mut().map_err(IoBufs::from))
+    {
+        Ok(buf) => buf,
+        Err(mut encrypted) => {
+            let mut buf = pool.alloc(encrypted.len());
+            buf.put(&mut encrypted);
+            buf
+        }
+    }
+}
+
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
     ///
@@ -535,26 +631,16 @@ impl<I: Stream> Receiver<I> {
     /// a single, uniquely-owned buffer. Otherwise, allocates a buffer from the
     /// pool, copies the ciphertext, and decrypts the copy in-place.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
-        let encrypted = recv_frame(
-            &mut self.stream,
-            self.max_message_size.saturating_add(TAG_SIZE),
-        )
-        .await?;
-
-        // Recover the received frame for in-place decryption when it is a
-        // single, uniquely-owned buffer. Otherwise, copy the ciphertext into
-        // a buffer allocated from the pool.
-        let mut decryption_buf = match encrypted
-            .try_into_single()
-            .and_then(|buf| buf.try_into_mut().map_err(IoBufs::from))
-        {
-            Ok(buf) => buf,
-            Err(mut encrypted) => {
-                let mut buf = self.pool.alloc(encrypted.len());
-                buf.put(&mut encrypted);
-                buf
-            }
-        };
+        let encrypted = self
+            .version
+            .recv_frame(
+                &mut self.stream,
+                &mut self.cipher,
+                &self.pool,
+                self.max_message_size.saturating_add(TAG_SIZE),
+            )
+            .await?;
+        let mut decryption_buf = mutable_frame(&self.pool, encrypted);
 
         // Decrypt in-place, get plaintext length back.
         let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
@@ -573,13 +659,12 @@ mod test {
         Handshake as _,
         utils::{Timeout, TimeoutError},
     };
-    use commonware_codec::varint::UInt;
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{
         BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
         Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, TestRng, sync::Mutex};
     use futures::FutureExt as _;
     use std::{
         panic::AssertUnwindSafe,
@@ -592,6 +677,81 @@ mod test {
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
+
+    #[test]
+    fn test_record_encoding() {
+        for version in [Version::V0, Version::V1] {
+            deterministic::Runner::default().start(|context| async move {
+                let (sink, mut stream) = mocks::Channel::init();
+                let mut sender = Sender {
+                    cipher: SendCipher::new(TestRng::new(0)),
+                    sink,
+                    max_message_size: 64,
+                    pool: context.network_buffer_pool().clone(),
+                    version,
+                };
+                let messages = [&b""[..], &b"hello"[..], &[7; 64][..]];
+                sender.send_many(messages).await.unwrap();
+
+                let mut cipher = SendCipher::new(TestRng::new(0));
+                for message in messages {
+                    let body_len = message.len() as u32 + TAG_SIZE;
+                    let mut expected = match version {
+                        Version::V0 => UInt(body_len).encode().to_vec(),
+                        Version::V1 => cipher.send(&body_len.to_be_bytes()).unwrap(),
+                    };
+                    expected.extend(cipher.send(message).unwrap());
+                    assert_eq!(
+                        stream.recv(expected.len()).await.unwrap().coalesce(),
+                        expected.as_slice()
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn test_invalid_header_rejected_before_body() {
+        for (length, corrupt) in [
+            (TAG_SIZE, Some(0)),
+            (TAG_SIZE, Some(V1_HEADER_PLAINTEXT_SIZE)),
+            (0, None),
+            (TAG_SIZE - 1, None),
+            (MAX_MESSAGE_SIZE + TAG_SIZE + 1, None),
+            (u32::MAX, None),
+        ] {
+            deterministic::Runner::default().start(|context| async move {
+                let (mut sink, stream) = mocks::Channel::init();
+                let mut receiver = Receiver {
+                    cipher: RecvCipher::new(TestRng::new(0)),
+                    stream,
+                    max_message_size: MAX_MESSAGE_SIZE,
+                    pool: context.network_buffer_pool().clone(),
+                    version: Version::V1,
+                };
+                let mut cipher = SendCipher::new(TestRng::new(0));
+                let mut header = cipher.send(&length.to_be_bytes()).unwrap();
+                if let Some(offset) = corrupt {
+                    header[offset] ^= 1;
+                }
+                sink.send(header).await.unwrap();
+
+                // Keep the sink open without sending a body: rejection must not wait for it.
+                let result = receiver
+                    .recv()
+                    .now_or_never()
+                    .expect("header rejection must be immediate");
+                if corrupt.is_some() || length < TAG_SIZE {
+                    assert!(matches!(
+                        result,
+                        Err(Error::HandshakeError(HandshakeError::DecryptionFailed))
+                    ));
+                } else {
+                    assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == length as usize));
+                }
+            });
+        }
+    }
 
     #[test]
     fn test_max_message_size_bounds() {
@@ -711,72 +871,75 @@ mod test {
 
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Box<dyn std::error::Error>> {
-        for max_message_size in [0, 1, 100, MAX_MESSAGE_SIZE] {
-            let executor = deterministic::Runner::timed(Duration::from_secs(5));
-            executor.start(move |context| async move {
-                // Authenticate independently of the returned streams' plaintext limit.
-                let dialer_signer = PrivateKey::from_seed(42);
-                let listener_signer = PrivateKey::from_seed(24);
+        for version in [Version::V0, Version::V1] {
+            for max_message_size in [0, 1, 100, MAX_MESSAGE_SIZE] {
+                let executor = deterministic::Runner::timed(Duration::from_secs(5));
+                executor.start(move |context| async move {
+                    // Authenticate independently of the returned streams' plaintext limit.
+                    let dialer_signer = PrivateKey::from_seed(42);
+                    let listener_signer = PrivateKey::from_seed(24);
 
-                let (dialer_sink, listener_stream) = mocks::Channel::init();
-                let (listener_sink, dialer_stream) = mocks::Channel::init();
+                    let (dialer_sink, listener_stream) = mocks::Channel::init();
+                    let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-                let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
-                let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
+                    let dialer_handshake = transport_handshake(dialer_signer.clone(), version);
+                    let listener_handshake = transport_handshake(listener_signer.clone(), version);
 
-                let listener_handle = context.child("listener").spawn(move |context| async move {
-                    Timeout::new(listener_handshake, Duration::from_secs(1))
-                        .listen(
-                            context,
-                            NAMESPACE,
-                            max_message_size,
-                            |_| async { true },
-                            listener_stream,
-                            listener_sink,
-                        )
-                        .await
-                });
+                    let listener_handle =
+                        context.child("listener").spawn(move |context| async move {
+                            Timeout::new(listener_handshake, Duration::from_secs(1))
+                                .listen(
+                                    context,
+                                    NAMESPACE,
+                                    max_message_size,
+                                    |_| async { true },
+                                    listener_stream,
+                                    listener_sink,
+                                )
+                                .await
+                        });
 
-                let (mut dialer_sender, mut dialer_receiver) =
-                    Timeout::new(dialer_handshake, Duration::from_secs(1))
-                        .dial(
-                            context,
-                            NAMESPACE,
-                            max_message_size,
-                            listener_signer.public_key(),
-                            dialer_stream,
-                            dialer_sink,
-                        )
-                        .await?;
+                    let (mut dialer_sender, mut dialer_receiver) =
+                        Timeout::new(dialer_handshake, Duration::from_secs(1))
+                            .dial(
+                                context,
+                                NAMESPACE,
+                                max_message_size,
+                                listener_signer.public_key(),
+                                dialer_stream,
+                                dialer_sink,
+                            )
+                            .await?;
 
-                let (listener_peer, mut listener_sender, mut listener_receiver) =
-                    listener_handle.await.unwrap()?;
-                assert_eq!(listener_peer, dialer_signer.public_key());
+                    let (listener_peer, mut listener_sender, mut listener_receiver) =
+                        listener_handle.await.unwrap()?;
+                    assert_eq!(listener_peer, dialer_signer.public_key());
 
-                // The established streams accept only payloads within the configured limit.
-                let oversized = IoBuf::from(vec![0u8; max_message_size as usize + 1]);
-                assert!(matches!(
-                    dialer_sender.send(oversized.clone()).await,
-                    Err(Error::SendTooLarge(_))
-                ));
-                assert!(matches!(
-                    listener_sender.send(oversized).await,
-                    Err(Error::SendTooLarge(_))
-                ));
-                let messages: [&[u8]; 4] = [b"", b"A", b"B", b"C"];
-                for msg in messages
-                    .iter()
-                    .filter(|msg| msg.len() <= max_message_size as usize)
-                {
-                    dialer_sender.send(&msg[..]).await?;
-                    let syn_ack = listener_receiver.recv().await?;
-                    assert_eq!(syn_ack.coalesce(), *msg);
-                    listener_sender.send(&msg[..]).await?;
-                    let ack = dialer_receiver.recv().await?;
-                    assert_eq!(ack.coalesce(), *msg);
-                }
-                Ok::<_, Box<dyn std::error::Error>>(())
-            })?;
+                    // The established streams accept only payloads within the configured limit.
+                    let oversized = IoBuf::from(vec![0u8; max_message_size as usize + 1]);
+                    assert!(matches!(
+                        dialer_sender.send(oversized.clone()).await,
+                        Err(Error::SendTooLarge(_))
+                    ));
+                    assert!(matches!(
+                        listener_sender.send(oversized).await,
+                        Err(Error::SendTooLarge(_))
+                    ));
+                    let messages: [&[u8]; 4] = [b"", b"A", b"B", b"C"];
+                    for msg in messages
+                        .iter()
+                        .filter(|msg| msg.len() <= max_message_size as usize)
+                    {
+                        dialer_sender.send(&msg[..]).await?;
+                        let syn_ack = listener_receiver.recv().await?;
+                        assert_eq!(syn_ack.coalesce(), *msg);
+                        listener_sender.send(&msg[..]).await?;
+                        let ack = dialer_receiver.recv().await?;
+                        assert_eq!(ack.coalesce(), *msg);
+                    }
+                    Ok::<_, Box<dyn std::error::Error>>(())
+                })?;
+            }
         }
         Ok(())
     }
@@ -834,372 +997,397 @@ mod test {
 
     #[test]
     fn test_versions() {
-        for version in [Version::V0, Version::V1] {
-            handshake_with_versions(version, version).unwrap();
-        }
-        for (dialer, listener) in [(Version::V0, Version::V1), (Version::V1, Version::V0)] {
-            assert!(matches!(
-                handshake_with_versions(dialer, listener),
-                Err(Error::HandshakeError(HandshakeError::HandshakeFailed))
-            ));
+        for dialer in [Version::V0, Version::V1] {
+            for listener in [Version::V0, Version::V1] {
+                let result = handshake_with_versions(dialer, listener);
+                if dialer == listener {
+                    result.unwrap();
+                } else {
+                    assert!(matches!(
+                        result,
+                        Err(Error::HandshakeError(HandshakeError::HandshakeFailed))
+                    ));
+                }
+            }
         }
     }
 
     #[test]
     fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Box<dyn std::error::Error>> {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let dialer_signer = PrivateKey::from_seed(42);
-            let listener_signer = PrivateKey::from_seed(24);
+        for version in [Version::V0, Version::V1] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let dialer_signer = PrivateKey::from_seed(42);
+                let listener_signer = PrivateKey::from_seed(24);
 
-            let (dialer_sink, listener_stream) = mocks::Channel::init();
-            let (listener_sink, dialer_stream) = mocks::Channel::init();
+                let (dialer_sink, listener_stream) = mocks::Channel::init();
+                let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-            let last_alloc = Arc::new(Mutex::new(0..0));
-            let listener_stream = PoolingStream {
-                inner: listener_stream,
-                pool: context.network_buffer_pool().clone(),
-                last_alloc: last_alloc.clone(),
-            };
+                let last_alloc = Arc::new(Mutex::new(0..0));
+                let listener_stream = PoolingStream {
+                    inner: listener_stream,
+                    pool: context.network_buffer_pool().clone(),
+                    last_alloc: last_alloc.clone(),
+                };
 
-            let dialer_handshake = transport_handshake(dialer_signer, Version::V1);
-            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
+                let dialer_handshake = transport_handshake(dialer_signer, version);
+                let listener_handshake = transport_handshake(listener_signer.clone(), version);
 
-            let listener_handle = context.child("listener").spawn(move |context| async move {
-                Timeout::new(listener_handshake, Duration::from_secs(1))
-                    .listen(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        |_| async { true },
-                        listener_stream,
-                        listener_sink,
-                    )
-                    .await
-            });
+                let listener_handle = context.child("listener").spawn(move |context| async move {
+                    Timeout::new(listener_handshake, Duration::from_secs(1))
+                        .listen(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            listener_stream,
+                            listener_sink,
+                        )
+                        .await
+                });
 
-            let (mut dialer_sender, _dialer_receiver) =
-                Timeout::new(dialer_handshake, Duration::from_secs(1))
-                    .dial(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        listener_signer.public_key(),
-                        dialer_stream,
-                        dialer_sink,
-                    )
-                    .await?;
+                let (mut dialer_sender, _dialer_receiver) =
+                    Timeout::new(dialer_handshake, Duration::from_secs(1))
+                        .dial(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            listener_signer.public_key(),
+                            dialer_stream,
+                            dialer_sink,
+                        )
+                        .await?;
 
-            let (_, _, mut listener_receiver) = listener_handle.await.unwrap()?;
+                let (_, _, mut listener_receiver) = listener_handle.await.unwrap()?;
 
-            // Send both messages before receiving so the second frame's varint
-            // is decoded from the peek buffer, exercising in-place decryption
-            // of a sliced frame in addition to a full one.
-            dialer_sender.send(&b"hello"[..]).await?;
-            dialer_sender.send(&b"world"[..]).await?;
+                // Send both messages before receiving so the second legacy frame's varint
+                // is decoded from the peek buffer, exercising in-place decryption
+                // of a sliced frame in addition to a full one.
+                dialer_sender.send(&b"hello"[..]).await?;
+                dialer_sender.send(&b"world"[..]).await?;
 
-            for expected in [&b"hello"[..], &b"world"[..]] {
-                let received = listener_receiver.recv().await?;
-                let plaintext = received.as_single().expect("single buffer expected");
-                let ptr = plaintext.as_ref().as_ptr() as usize;
-                assert!(
-                    last_alloc.lock().contains(&ptr),
-                    "plaintext should reuse the received frame buffer"
-                );
-                assert_eq!(plaintext.as_ref(), expected);
-            }
-            Ok(())
-        })
+                for expected in [&b"hello"[..], &b"world"[..]] {
+                    let received = listener_receiver.recv().await?;
+                    let plaintext = received.as_single().expect("single buffer expected");
+                    let ptr = plaintext.as_ref().as_ptr() as usize;
+                    assert!(
+                        last_alloc.lock().contains(&ptr),
+                        "plaintext should reuse the received frame buffer"
+                    );
+                    assert_eq!(plaintext.as_ref(), expected);
+                }
+                Ok::<_, Box<dyn std::error::Error>>(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
     fn test_send_many_uses_single_runtime_send() -> Result<(), Box<dyn std::error::Error>> {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let dialer_signer = PrivateKey::from_seed(42);
-            let listener_signer = PrivateKey::from_seed(24);
+        for version in [Version::V0, Version::V1] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let dialer_signer = PrivateKey::from_seed(42);
+                let listener_signer = PrivateKey::from_seed(24);
 
-            let (dialer_sink, listener_stream) = mocks::Channel::init();
-            let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
-            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+                let (dialer_sink, listener_stream) = mocks::Channel::init();
+                let (listener_sink, dialer_stream) = mocks::Channel::init();
+                let sends = Arc::new(AtomicUsize::new(0));
+                let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
-            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
+                let dialer_handshake = transport_handshake(dialer_signer.clone(), version);
+                let listener_handshake = transport_handshake(listener_signer.clone(), version);
 
-            let listener_handle = context.child("listener").spawn(move |context| async move {
-                Timeout::new(listener_handshake, Duration::from_secs(1))
-                    .listen(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        |_| async { true },
-                        listener_stream,
-                        listener_sink,
-                    )
-                    .await
-            });
+                let listener_handle = context.child("listener").spawn(move |context| async move {
+                    Timeout::new(listener_handshake, Duration::from_secs(1))
+                        .listen(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            listener_stream,
+                            listener_sink,
+                        )
+                        .await
+                });
 
-            let (mut dialer_sender, _dialer_receiver) =
-                Timeout::new(dialer_handshake, Duration::from_secs(1))
-                    .dial(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        listener_signer.public_key(),
-                        dialer_stream,
-                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
-                    )
+                let (mut dialer_sender, _dialer_receiver) =
+                    Timeout::new(dialer_handshake, Duration::from_secs(1))
+                        .dial(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            listener_signer.public_key(),
+                            dialer_stream,
+                            CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                        )
+                        .await?;
+
+                let (_listener_peer, _listener_sender, mut listener_receiver) =
+                    listener_handle.await.unwrap()?;
+                sends.store(0, Ordering::Relaxed);
+                chunk_counts.lock().clear();
+
+                // Three small messages should fit in one pooled chunk, so `send_many`
+                // still reaches the runtime as a single single-chunk send call.
+                dialer_sender
+                    .send_many(vec![
+                        IoBufs::from(IoBuf::from(b"alpha")),
+                        IoBufs::from(IoBuf::from(b"beta")),
+                        IoBufs::from(IoBuf::from(b"gamma")),
+                    ])
                     .await?;
 
-            let (_listener_peer, _listener_sender, mut listener_receiver) =
-                listener_handle.await.unwrap()?;
-            sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().clear();
-
-            // Three small messages should fit in one pooled chunk, so `send_many`
-            // still reaches the runtime as a single single-chunk send call.
-            dialer_sender
-                .send_many(vec![
-                    IoBufs::from(IoBuf::from(b"alpha")),
-                    IoBufs::from(IoBuf::from(b"beta")),
-                    IoBufs::from(IoBuf::from(b"gamma")),
-                ])
-                .await?;
-
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock(), vec![1]);
-            assert_eq!(
-                listener_receiver.recv().await?.coalesce(),
-                IoBuf::from(b"alpha")
-            );
-            assert_eq!(
-                listener_receiver.recv().await?.coalesce(),
-                IoBuf::from(b"beta")
-            );
-            assert_eq!(
-                listener_receiver.recv().await?.coalesce(),
-                IoBuf::from(b"gamma")
-            );
-            Ok(())
-        })
+                assert_eq!(sends.load(Ordering::Relaxed), 1);
+                assert_eq!(*chunk_counts.lock(), vec![1]);
+                assert_eq!(
+                    listener_receiver.recv().await?.coalesce(),
+                    IoBuf::from(b"alpha")
+                );
+                assert_eq!(
+                    listener_receiver.recv().await?.coalesce(),
+                    IoBuf::from(b"beta")
+                );
+                assert_eq!(
+                    listener_receiver.recv().await?.coalesce(),
+                    IoBuf::from(b"gamma")
+                );
+                Ok::<_, Box<dyn std::error::Error>>(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
     fn test_send_many_flushes_at_network_pool_item_max() -> Result<(), Box<dyn std::error::Error>> {
-        let executor = deterministic::Runner::new(
-            deterministic::Config::new().with_network_buffer_pool_config(
-                BufferPoolConfig::for_network()
-                    .with_pool_min_size(256)
-                    .with_size_class_range(NZUsize!(256), NZUsize!(256), NZU32!(4096)),
-            ),
-        );
-        executor.start(|context| async move {
-            let dialer_signer = PrivateKey::from_seed(42);
-            let listener_signer = PrivateKey::from_seed(24);
+        for version in [Version::V0, Version::V1] {
+            let executor = deterministic::Runner::new(
+                deterministic::Config::new().with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network()
+                        .with_pool_min_size(256)
+                        .with_size_class_range(NZUsize!(256), NZUsize!(256), NZU32!(4096)),
+                ),
+            );
+            executor.start(|context| async move {
+                let dialer_signer = PrivateKey::from_seed(42);
+                let listener_signer = PrivateKey::from_seed(24);
 
-            let (dialer_sink, listener_stream) = mocks::Channel::init();
-            let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
-            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+                let (dialer_sink, listener_stream) = mocks::Channel::init();
+                let (listener_sink, dialer_stream) = mocks::Channel::init();
+                let sends = Arc::new(AtomicUsize::new(0));
+                let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
-            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
+                let dialer_handshake = transport_handshake(dialer_signer.clone(), version);
+                let listener_handshake = transport_handshake(listener_signer.clone(), version);
 
-            let listener_handle = context.child("listener").spawn(move |context| async move {
-                Timeout::new(listener_handshake, Duration::from_secs(1))
-                    .listen(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        |_| async { true },
-                        listener_stream,
-                        listener_sink,
-                    )
-                    .await
-            });
+                let listener_handle = context.child("listener").spawn(move |context| async move {
+                    Timeout::new(listener_handshake, Duration::from_secs(1))
+                        .listen(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            listener_stream,
+                            listener_sink,
+                        )
+                        .await
+                });
 
-            let (mut dialer_sender, _dialer_receiver) =
-                Timeout::new(dialer_handshake, Duration::from_secs(1))
-                    .dial(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        listener_signer.public_key(),
-                        dialer_stream,
-                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
-                    )
-                    .await?;
+                let (mut dialer_sender, _dialer_receiver) =
+                    Timeout::new(dialer_handshake, Duration::from_secs(1))
+                        .dial(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            listener_signer.public_key(),
+                            dialer_stream,
+                            CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                        )
+                        .await?;
 
-            let (_listener_peer, _listener_sender, mut listener_receiver) =
-                listener_handle.await.unwrap()?;
+                let (_listener_peer, _listener_sender, mut listener_receiver) =
+                    listener_handle.await.unwrap()?;
 
-            // Each frame is 117 bytes: 100 payload + 16 tag + 1 length prefix.
-            // Two fit under the 256-byte cap. Zero through nine messages cover
-            // empty, inline, and deque-backed batches with at most one sink call.
-            for count in 0..=9usize {
-                sends.store(0, Ordering::Relaxed);
-                chunk_counts.lock().clear();
-                dialer_sender
-                    .send_many((0..count).map(|index| IoBuf::from(vec![index as u8; 100])))
-                    .await?;
+                // V0 frames are 117 bytes and pack two messages under the 256-byte
+                // cap. V1 frames are 136 bytes and each occupies its own chunk.
+                // Zero through nine messages cover empty, inline, and deque-backed
+                // batches with at most one sink call.
+                for count in 0..=9usize {
+                    sends.store(0, Ordering::Relaxed);
+                    chunk_counts.lock().clear();
+                    dialer_sender
+                        .send_many((0..count).map(|index| IoBuf::from(vec![index as u8; 100])))
+                        .await?;
 
-                if count == 0 {
-                    assert_eq!(sends.load(Ordering::Relaxed), 0);
-                    assert!(chunk_counts.lock().is_empty());
-                } else {
-                    assert_eq!(sends.load(Ordering::Relaxed), 1);
-                    assert_eq!(*chunk_counts.lock(), vec![count.div_ceil(2)]);
+                    if count == 0 {
+                        assert_eq!(sends.load(Ordering::Relaxed), 0);
+                        assert!(chunk_counts.lock().is_empty());
+                    } else {
+                        assert_eq!(sends.load(Ordering::Relaxed), 1);
+                        let expected_chunks = if version == Version::V1 {
+                            count
+                        } else {
+                            count.div_ceil(2)
+                        };
+                        assert_eq!(*chunk_counts.lock(), vec![expected_chunks]);
+                    }
+                    for index in 0..count {
+                        let expected = [index as u8; 100];
+                        assert_eq!(
+                            listener_receiver.recv().await?.coalesce(),
+                            expected.as_slice()
+                        );
+                    }
                 }
-                for index in 0..count {
-                    let expected = [index as u8; 100];
-                    assert_eq!(
-                        listener_receiver.recv().await?.coalesce(),
-                        expected.as_slice()
-                    );
-                }
-            }
-            Ok(())
-        })
+                Ok::<_, Box<dyn std::error::Error>>(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
     fn test_send_many_sends_oversized_single_message_alone()
     -> Result<(), Box<dyn std::error::Error>> {
-        let executor = deterministic::Runner::new(
-            deterministic::Config::new().with_network_buffer_pool_config(
-                BufferPoolConfig::for_network()
-                    .with_pool_min_size(128)
-                    .with_size_class_range(NZUsize!(128), NZUsize!(128), NZU32!(4096)),
-            ),
-        );
-        executor.start(|context| async move {
-            let dialer_signer = PrivateKey::from_seed(42);
-            let listener_signer = PrivateKey::from_seed(24);
+        for version in [Version::V0, Version::V1] {
+            let executor = deterministic::Runner::new(
+                deterministic::Config::new().with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network()
+                        .with_pool_min_size(128)
+                        .with_size_class_range(NZUsize!(128), NZUsize!(128), NZU32!(4096)),
+                ),
+            );
+            executor.start(|context| async move {
+                let dialer_signer = PrivateKey::from_seed(42);
+                let listener_signer = PrivateKey::from_seed(24);
 
-            let (dialer_sink, listener_stream) = mocks::Channel::init();
-            let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
-            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+                let (dialer_sink, listener_stream) = mocks::Channel::init();
+                let (listener_sink, dialer_stream) = mocks::Channel::init();
+                let sends = Arc::new(AtomicUsize::new(0));
+                let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
-            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
+                let dialer_handshake = transport_handshake(dialer_signer.clone(), version);
+                let listener_handshake = transport_handshake(listener_signer.clone(), version);
 
-            let listener_handle = context.child("listener").spawn(move |context| async move {
-                Timeout::new(listener_handshake, Duration::from_secs(1))
-                    .listen(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        |_| async { true },
-                        listener_stream,
-                        listener_sink,
-                    )
-                    .await
-            });
+                let listener_handle = context.child("listener").spawn(move |context| async move {
+                    Timeout::new(listener_handshake, Duration::from_secs(1))
+                        .listen(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            listener_stream,
+                            listener_sink,
+                        )
+                        .await
+                });
 
-            let (mut dialer_sender, _dialer_receiver) =
-                Timeout::new(dialer_handshake, Duration::from_secs(1))
-                    .dial(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        listener_signer.public_key(),
-                        dialer_stream,
-                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
-                    )
+                let (mut dialer_sender, _dialer_receiver) =
+                    Timeout::new(dialer_handshake, Duration::from_secs(1))
+                        .dial(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            listener_signer.public_key(),
+                            dialer_stream,
+                            CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                        )
+                        .await?;
+
+                let (_listener_peer, _listener_sender, mut listener_receiver) =
+                    listener_handle.await.unwrap()?;
+                sends.store(0, Ordering::Relaxed);
+                chunk_counts.lock().clear();
+
+                // A single framed message larger than the cap still goes out, but it
+                // must occupy its own chunk instead of being rejected or merged.
+                let large = vec![3u8; 200];
+                let small = vec![9u8; 16];
+                dialer_sender
+                    .send_many(vec![
+                        IoBufs::from(IoBuf::from(large.clone())),
+                        IoBufs::from(IoBuf::from(small.clone())),
+                    ])
                     .await?;
 
-            let (_listener_peer, _listener_sender, mut listener_receiver) =
-                listener_handle.await.unwrap()?;
-            sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().clear();
-
-            // A single framed message larger than the cap still goes out, but it
-            // must occupy its own chunk instead of being rejected or merged.
-            let large = vec![3u8; 200];
-            let small = vec![9u8; 16];
-            dialer_sender
-                .send_many(vec![
-                    IoBufs::from(IoBuf::from(large.clone())),
-                    IoBufs::from(IoBuf::from(small.clone())),
-                ])
-                .await?;
-
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock(), vec![2]);
-            assert_eq!(listener_receiver.recv().await?.coalesce(), large.as_slice());
-            assert_eq!(listener_receiver.recv().await?.coalesce(), small.as_slice());
-            Ok(())
-        })
+                assert_eq!(sends.load(Ordering::Relaxed), 1);
+                assert_eq!(*chunk_counts.lock(), vec![2]);
+                assert_eq!(listener_receiver.recv().await?.coalesce(), large.as_slice());
+                assert_eq!(listener_receiver.recv().await?.coalesce(), small.as_slice());
+                Ok::<_, Box<dyn std::error::Error>>(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
     fn test_send_many_too_large_preserves_sender_state() -> Result<(), Box<dyn std::error::Error>> {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let dialer_signer = PrivateKey::from_seed(42);
-            let listener_signer = PrivateKey::from_seed(24);
+        for version in [Version::V0, Version::V1] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let dialer_signer = PrivateKey::from_seed(42);
+                let listener_signer = PrivateKey::from_seed(24);
 
-            let (dialer_sink, listener_stream) = mocks::Channel::init();
-            let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
-            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+                let (dialer_sink, listener_stream) = mocks::Channel::init();
+                let (listener_sink, dialer_stream) = mocks::Channel::init();
+                let sends = Arc::new(AtomicUsize::new(0));
+                let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
-            let dialer_handshake = transport_handshake(dialer_signer.clone(), Version::V1);
-            let listener_handshake = transport_handshake(listener_signer.clone(), Version::V1);
+                let dialer_handshake = transport_handshake(dialer_signer.clone(), version);
+                let listener_handshake = transport_handshake(listener_signer.clone(), version);
 
-            let listener_handle = context.child("listener").spawn(move |context| async move {
-                Timeout::new(listener_handshake, Duration::from_secs(1))
-                    .listen(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        |_| async { true },
-                        listener_stream,
-                        listener_sink,
-                    )
-                    .await
-            });
+                let listener_handle = context.child("listener").spawn(move |context| async move {
+                    Timeout::new(listener_handshake, Duration::from_secs(1))
+                        .listen(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            listener_stream,
+                            listener_sink,
+                        )
+                        .await
+                });
 
-            let (mut dialer_sender, _dialer_receiver) =
-                Timeout::new(dialer_handshake, Duration::from_secs(1))
-                    .dial(
-                        context,
-                        NAMESPACE,
-                        MAX_MESSAGE_SIZE,
-                        listener_signer.public_key(),
-                        dialer_stream,
-                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
-                    )
-                    .await?;
+                let (mut dialer_sender, _dialer_receiver) =
+                    Timeout::new(dialer_handshake, Duration::from_secs(1))
+                        .dial(
+                            context,
+                            NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            listener_signer.public_key(),
+                            dialer_stream,
+                            CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                        )
+                        .await?;
 
-            let (_listener_peer, _listener_sender, mut listener_receiver) =
-                listener_handle.await.unwrap()?;
-            sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().clear();
+                let (_listener_peer, _listener_sender, mut listener_receiver) =
+                    listener_handle.await.unwrap()?;
+                sends.store(0, Ordering::Relaxed);
+                chunk_counts.lock().clear();
 
-            let valid = vec![7u8; 32];
-            let oversized = vec![9u8; MAX_MESSAGE_SIZE as usize + 1];
-            assert!(matches!(
-                dialer_sender
-                    .send_many(vec![
-                        IoBufs::from(IoBuf::from(valid)),
-                        IoBufs::from(IoBuf::from(oversized)),
-                    ])
-                    .await,
-                Err(Error::SendTooLarge(_))
-            ));
+                let valid = vec![7u8; 32];
+                let oversized = vec![9u8; MAX_MESSAGE_SIZE as usize + 1];
+                assert!(matches!(
+                    dialer_sender
+                        .send_many(vec![
+                            IoBufs::from(IoBuf::from(valid)),
+                            IoBufs::from(IoBuf::from(oversized)),
+                        ])
+                        .await,
+                    Err(Error::SendTooLarge(_))
+                ));
 
-            assert_eq!(sends.load(Ordering::Relaxed), 0);
-            assert!(chunk_counts.lock().is_empty());
+                assert_eq!(sends.load(Ordering::Relaxed), 0);
+                assert!(chunk_counts.lock().is_empty());
 
-            let recovered = b"recovered";
-            dialer_sender.send(&recovered[..]).await?;
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(listener_receiver.recv().await?.coalesce(), recovered);
-            Ok(())
-        })
+                let recovered = b"recovered";
+                dialer_sender.send(&recovered[..]).await?;
+                assert_eq!(sends.load(Ordering::Relaxed), 1);
+                assert_eq!(listener_receiver.recv().await?.coalesce(), recovered);
+                Ok::<_, Box<dyn std::error::Error>>(())
+            })?;
+        }
+        Ok(())
     }
 
     #[test]
