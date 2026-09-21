@@ -229,7 +229,7 @@ mod tests {
     use super::{Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
         Application, Input, Proposed,
-        actor::syncer::{StateSyncMetadata, init_databases_from_marshal},
+        actor::syncer::{StateSyncMetadata, SyncPlan, init_databases_from_marshal},
         db::{Anchor, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
@@ -246,7 +246,7 @@ mod tests {
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
-        ed25519,
+        Digestible as _, ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_runtime::{
@@ -444,6 +444,123 @@ mod tests {
             .await;
             assert_eq!(resolved.anchor.height, Height::new(1));
             assert_eq!(resolved.targets, 1);
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::selected_successor_within_section(3, 3, 3)]
+    #[case::selected_successor_at_section_boundary(4, 4, 4)]
+    #[case::selected_predecessor(4, 3, 3)]
+    #[case::selected_older(4, 2, 3)]
+    fn resolved_floor_selects_only_matching_retained_successor(
+        #[case] height: u64,
+        #[case] selected_height: u64,
+        #[case] expected_height: u64,
+    ) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let fixture = fixtures::single_validator(b"_COMMONWARE_GLUE_RETAINED_FLOOR_ANCHOR");
+            let mut blocks = vec![TestBlock::new(0, 0)];
+            for height in 1..=height {
+                blocks.push(TestBlock::child(
+                    blocks.last().unwrap(),
+                    height.try_into().unwrap(),
+                ));
+            }
+
+            let first = fixtures::prunable_marshal_fixture(
+                context.child("first"),
+                "retained-floor-anchor",
+                fixture.schemes[0].clone(),
+                None,
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let mut marshal = first.mailbox.clone();
+            for block in &blocks[1..blocks.len() - 1] {
+                let finalization =
+                    fixtures::finalization(&fixture, block.height().get(), block.digest());
+                assert!(marshal.verified(finalization.round(), block.clone()).await);
+                marshal.report(Activity::Finalization(finalization));
+                while marshal.get_processed_height().await != Some(block.height()) {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            }
+            first.abort().await;
+            drop(marshal);
+
+            let block = blocks.last().unwrap();
+            let installed = fixtures::finalization(&fixture, height, block.digest());
+            let predecessor = Height::new(height - 1);
+            let second = fixtures::prunable_marshal_fixture(
+                context.child("second"),
+                "retained-floor-anchor",
+                fixture.schemes[0].clone(),
+                Some(block),
+                Some(installed.clone()),
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            while second.mailbox.get_processed_height().await != Some(predecessor) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            second.abort().await;
+
+            let third = fixtures::prunable_marshal_fixture(
+                context.child("third"),
+                "retained-floor-anchor",
+                fixture.schemes[0].clone(),
+                None,
+                Some(installed.clone()),
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            assert_eq!(third.floor.height(), Some(predecessor));
+            assert_eq!(third.floor.round(), installed.round());
+            assert!(third.mailbox.get_block(predecessor).await.is_some());
+            assert!(third.mailbox.get_block(block.height()).await.is_some());
+
+            let selected_block = &blocks[selected_height as usize];
+            let selected =
+                fixtures::finalization(&fixture, selected_height, selected_block.digest());
+            let selected = if selected_height == height {
+                let prior_height = selected_height - 1;
+                let prior = fixtures::finalization(
+                    &fixture,
+                    prior_height,
+                    blocks[prior_height as usize].digest(),
+                );
+                let partition = format!("retained-floor-plan-{height}");
+                let metadata =
+                    StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, &partition)
+                        .await
+                        .begin_sync(prior)
+                        .await;
+                drop(metadata);
+
+                let plan = SyncPlan::<_, TestScheme, TestVariant>::init(&context, &partition)
+                    .await
+                    .with_floor(selected)
+                    .await;
+                assert!(plan.requires_state_sync_floor());
+                plan.floor().expect("newer selected floor").clone()
+            } else {
+                selected
+            };
+
+            let resolved = resolve_state_sync_floor::<
+                deterministic::Context,
+                WedgeApp,
+                TestScheme,
+                TestVariant,
+            >(&third.mailbox, third.floor, &selected)
+            .await;
+            assert_eq!(resolved.anchor.height, Height::new(expected_height));
+            assert_eq!(resolved.targets, expected_height);
+            third.abort().await;
         });
     }
 
