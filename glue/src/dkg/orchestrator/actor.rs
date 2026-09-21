@@ -5,6 +5,7 @@ use crate::dkg::{
     fence::Gate,
     network::{Directory, Manager},
     orchestrator::{Mailbox, mailbox::Message},
+    probe,
     state_sync::{self, Plan as StateSyncPlan},
     types::{EpochInfo, Payload},
 };
@@ -35,7 +36,7 @@ use commonware_runtime::{
     spawn_cell,
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc, vec::NonEmptyVec};
+use commonware_utils::{Acknowledgement, acknowledgement::Exact, channel::mpsc};
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
@@ -163,6 +164,9 @@ where
     /// Marshal mailbox used to report consensus output and read finalized blocks.
     pub marshal: MarshalMailbox<P::Scheme, MV>,
 
+    /// Probe mailbox used to discover authenticated epoch boundaries during catchup.
+    pub probe: probe::Mailbox<P::Scheme, MV>,
+
     /// Application automaton and relay used by each epoch consensus engine.
     pub application: A,
 
@@ -230,6 +234,7 @@ where
     manager: M,
     provider: P,
     marshal: MarshalMailbox<P::Scheme, MV>,
+    probe: probe::Mailbox<P::Scheme, MV>,
     application: A,
     strategy: T,
     simplex: SimplexConfig<L>,
@@ -299,6 +304,7 @@ where
                 manager: config.manager,
                 provider: config.provider,
                 marshal: config.marshal,
+                probe: config.probe,
                 application: config.application,
                 strategy: config.strategy,
                 simplex: config.simplex,
@@ -336,8 +342,8 @@ where
     ///
     /// The loop owns one active Simplex engine at a time. It listens for
     /// finalized boundary blocks from marshal and for backup vote and
-    /// certificate traffic from future epochs, which is used only to ask
-    /// marshal for the missing boundary finalization.
+    /// certificate traffic from future epochs, which asks the probe to discover
+    /// the missing boundary certificate.
     async fn run<S, R>(
         mut self,
         (vote_sender, vote_receiver): (S, R),
@@ -593,7 +599,7 @@ where
     ///
     /// Messages from past or current epochs are ignored. A future-epoch
     /// message is evidence that peers have crossed an epoch boundary locally,
-    /// so the actor hints marshal to fetch the current epoch's boundary
+    /// so the actor asks the probe to discover the current epoch's boundary
     /// finalization from the sender.
     fn handle_backup(
         &self,
@@ -618,8 +624,7 @@ where
             %boundary_height,
             "received backup message from future epoch, ensuring boundary finalization"
         );
-        self.marshal
-            .hint_finalized(boundary_height, NonEmptyVec::new(from));
+        self.probe.catch_up(our_epoch, from);
     }
 
     /// Handle one finalized block delivered by marshal.
