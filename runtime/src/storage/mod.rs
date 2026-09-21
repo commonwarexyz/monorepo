@@ -17,8 +17,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
     /// - **macOS**: best-effort `sync(2)` for contents, followed by a crash-durable storage
     ///   directory sync. Existing partition directories are synchronized on first access.
-    /// - **BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
-    ///   crash-durable.
     ///
     /// The Linux guarantee assumes storage lives on one filesystem; reliable error detection needs
     /// kernel >= 5.8.
