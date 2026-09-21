@@ -51,7 +51,7 @@ where
     /// Local database used to serve incoming requests when available.
     pub database: Option<Shared<DB>>,
 
-    /// Capacity of resolver mailboxes and maximum concurrent database reads.
+    /// Capacity of resolver mailboxes.
     pub mailbox_size: NonZeroUsize,
 
     /// Local node identity if available.
@@ -90,7 +90,7 @@ where
     mailbox_rx: actor_mailbox::Receiver<SyncMessage<F, DB>>,
     metrics: ResolverMetrics,
     next_id: u64,
-    /// Outstanding database reads for peers, bounded by the mailbox capacity.
+    /// Outstanding database reads for peers.
     serves: FuturesPool<'static, ()>,
     /// Outstanding fanout verdicts and subscriber cancellations.
     work: FuturesPool<'static, ()>,
@@ -325,10 +325,6 @@ where
 
     /// Serve a peer's request by querying the local database.
     fn handle_produce(&mut self, key: Request<F>, response_tx: oneshot::Sender<bytes::Bytes>) {
-        if self.serves.len() >= self.config.mailbox_size.get() {
-            self.metrics.serve_requests.inc(status::Status::Dropped);
-            return;
-        }
         let Some(database) = &self.config.database else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
@@ -1377,87 +1373,6 @@ mod tests {
     }
 
     #[test]
-    fn serve_admission_is_bounded_and_reopens() {
-        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let db = init_seeded_db(context.child("resolver_db"), "bounded-serves").await;
-            let request = test_request_at(db.read().await.bounds().end);
-            let expected = expected_payload(&db, request).await;
-            let mut config = test_config(Some(db.clone()));
-            config.mailbox_size = NZUsize!(2);
-            let (mut actor, mailbox) = TestActor::new(context.child("actor"), config);
-
-            // A pending fetch's cancellation waiter must not consume a database read slot.
-            let mut resolver = RecordingResolver::default();
-            let mut fetch = Box::pin(mailbox.serve(request));
-            assert!(futures::poll!(fetch.as_mut()).is_pending());
-            let message = actor.mailbox_rx.recv().await.unwrap();
-            actor.handle_mailbox_message(&mut resolver, message);
-
-            // Hold the writer while admitting two reads and checking one excess request.
-            let (slot, database) = db.write().await;
-            let mut responses = [request; 2].map(|request| {
-                let (response, receiver) = oneshot::channel();
-                actor.handle_produce(request, response);
-                receiver
-            });
-            let reads_pending = actor.serves.next_completed().now_or_never().is_none();
-            let replies_pending = responses.iter_mut().all(|response| {
-                matches!(
-                    response.try_recv(),
-                    Err(oneshot::error::TryRecvError::Empty)
-                )
-            });
-            let (response, mut excess) = oneshot::channel();
-            actor.handle_produce(request, response);
-            let excess_closed =
-                matches!(excess.try_recv(), Err(oneshot::error::TryRecvError::Closed));
-
-            // Restore the database before asserting either admission or rejection.
-            slot.put(database);
-            assert!(
-                reads_pending && replies_pending,
-                "two reads must remain admitted"
-            );
-            assert!(
-                excess_closed,
-                "capacity-plus-one read must be rejected immediately"
-            );
-            assert_eq!(actor.serves.len(), 2);
-            assert_eq!(actor.work.len(), 1);
-            assert!(
-                context
-                    .encode()
-                    .contains("actor_serve_requests_total{status=\"Dropped\"} 1")
-            );
-            for _ in 0..2 {
-                actor.serves.next_completed().await;
-            }
-            for response in responses {
-                assert_eq!(response.await.unwrap(), expected);
-            }
-
-            // Completed reads release capacity while unrelated cancellation work remains.
-            let (slot, database) = db.write().await;
-            let (response, mut reopened) = oneshot::channel();
-            actor.handle_produce(request, response);
-            let admitted = matches!(
-                reopened.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            );
-            slot.put(database);
-            assert!(admitted, "completed reads must release a serve slot");
-            actor.serves.next_completed().await;
-            assert_eq!(reopened.await.unwrap(), expected);
-            assert!(actor.serves.is_empty());
-            assert_eq!(actor.work.len(), 1);
-
-            drop(fetch);
-            actor.work.next_completed().await;
-            assert!(actor.work.is_empty());
-        });
-    }
-
-    #[test]
     fn concurrent_serves_complete_after_database_is_available() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             // Distinct response sizes identify the request each reply belongs to.
@@ -1477,10 +1392,10 @@ mod tests {
             assert_ne!(expected[0], expected[1]);
 
             // Block both reads so the second request arrives while the first is still pending.
-            let actor_db = db.clone();
+            let mut config = test_config(Some(db.clone()));
+            config.mailbox_size = NZUsize!(1);
             let (slot, database) = db.write().await;
-            let (mut actor, _mailbox) =
-                TestActor::new(context.child("actor"), test_config(Some(actor_db)));
+            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), config);
             let mut responses = requests.map(|request| {
                 let (response, receiver) = oneshot::channel();
                 actor.handle_produce(request, response);
