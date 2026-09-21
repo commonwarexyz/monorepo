@@ -18,7 +18,7 @@ use super::{
     batch,
 };
 #[cfg(not(feature = "std"))]
-use alloc::{vec, vec::Vec};
+use alloc::vec::Vec;
 use commonware_codec::Encode;
 use commonware_parallel::Strategy;
 use commonware_utils::{Participant, iter::NonEmpty, non_empty, ordered::Map, union_unique};
