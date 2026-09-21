@@ -8,7 +8,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{Digest, ed25519::PublicKey};
 use commonware_utils::channel::oneshot;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 pub enum Message<D: Digest> {
     Propose { response: oneshot::Sender<D> },
@@ -42,6 +42,7 @@ impl<D: Digest> Au for Mailbox<D> {
     async fn propose(
         &mut self,
         _: Context<Self::Digest, PublicKey>,
+        _: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<Self::Digest> {
         // If we linked payloads to their parent, we would include
         // the parent in the `Context` in the payload.
@@ -59,6 +60,7 @@ impl<D: Digest> Au for Mailbox<D> {
         &mut self,
         _: Context<Self::Digest, PublicKey>,
         _: Self::Digest,
+        _: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         // Digests are already verified by consensus, so we don't need to check they are valid.
         //
