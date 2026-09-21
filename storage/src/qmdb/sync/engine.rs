@@ -594,8 +594,8 @@ where
                 let Some(root) = self.verification_root(size) else {
                     return Ok(());
                 };
-                let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-                if !proof.verify_range_inclusion(&self.hasher, &elements, start_loc, root) {
+                if !proof.verify_range_inclusion_encoded(&self.hasher, &operations, start_loc, root)
+                {
                     return Self::reject_response(feedback_tx);
                 }
                 if let Some(feedback_tx) = feedback_tx {

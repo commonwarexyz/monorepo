@@ -18,6 +18,7 @@ use crate::merkle::{
     storage::Storage,
 };
 use ahash::AHashMap;
+use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use core::ops::Range;
 use std::collections::BTreeSet;
@@ -61,9 +62,49 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         H: Hasher<F, Digest = D>,
         E: AsRef<[u8]>,
     {
+        Self::new_with(hasher, proof, elements, start_loc, root, |pos, element| {
+            hasher.leaf_digest(pos, element.as_ref())
+        })
+    }
+
+    /// Like [`Self::new`], but encodes each element into a reusable scratch buffer.
+    /// Temporary encoding storage is proportional to the largest encoded element.
+    pub fn new_encoded<H, E>(
+        hasher: &H,
+        proof: &Proof<F, D>,
+        elements: &[E],
+        start_loc: Location<F>,
+        root: &D,
+    ) -> Result<Self, Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+        E: Write,
+    {
+        Self::new_with(
+            hasher,
+            proof,
+            elements,
+            start_loc,
+            root,
+            merkle_proof::encode_leaf(hasher),
+        )
+    }
+
+    fn new_with<H, E>(
+        hasher: &H,
+        proof: &Proof<F, D>,
+        elements: &[E],
+        start_loc: Location<F>,
+        root: &D,
+        leaf: impl FnMut(Position<F>, &E) -> D,
+    ) -> Result<Self, Error<F>>
+    where
+        H: Hasher<F, Digest = D>,
+    {
         let bagging = hasher.root_bagging();
-        let digests =
-            proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
+        let digests = proof.verify_range_inclusion_and_extract_digests_with(
+            hasher, elements, start_loc, root, leaf,
+        )?;
         let map: AHashMap<Position<F>, D> = digests.into_iter().collect();
 
         let size = Position::try_from(proof.leaves)?;

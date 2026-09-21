@@ -21,8 +21,7 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion(&hasher, &elements, start_loc, target_root)
+    proof.verify_range_inclusion_encoded(&hasher, operations, start_loc, target_root)
 }
 
 /// Verify that both a [Proof] and a set of pinned nodes are valid with respect to a target root.
@@ -39,8 +38,13 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_proof_and_pinned_nodes(&hasher, &elements, start_loc, pinned_nodes, target_root)
+    proof.verify_proof_and_pinned_nodes_encoded(
+        &hasher,
+        operations,
+        start_loc,
+        pinned_nodes,
+        target_root,
+    )
 }
 
 /// Verify that a [Proof] is valid for a range of operations and extract all digests (and their
@@ -57,8 +61,12 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    proof.verify_range_inclusion_and_extract_digests(&hasher, &elements, start_loc, target_root)
+    proof.verify_range_inclusion_and_extract_digests_encoded(
+        &hasher,
+        operations,
+        start_loc,
+        target_root,
+    )
 }
 
 /// Verify a [Proof] and convert it into a [ProofStore].
@@ -74,8 +82,7 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-    ProofStore::new(&hasher, proof, &elements, start_loc, root)
+    ProofStore::new_encoded(&hasher, proof, operations, start_loc, root)
 }
 
 /// Create a Multi-Proof for specific operations (identified by location) from a [ProofStore].
@@ -111,11 +118,7 @@ where
     H: Hasher,
 {
     let hasher = qmdb::hasher::<H>();
-    let elements = operations
-        .iter()
-        .map(|(loc, op)| (op.encode(), *loc))
-        .collect::<Vec<_>>();
-    proof.verify_multi_inclusion(&hasher, &elements, target_root)
+    proof.verify_multi_inclusion_encoded(&hasher, operations, target_root)
 }
 
 #[cfg(test)]
