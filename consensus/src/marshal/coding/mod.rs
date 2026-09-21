@@ -1366,6 +1366,11 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_blocks_forward_range() {
+        harness::blocks_forward_range::<CodingHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_finalize_same_height_different_views() {
         harness::finalize_same_height_different_views::<CodingHarness>();
     }

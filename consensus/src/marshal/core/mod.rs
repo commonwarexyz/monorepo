@@ -46,6 +46,7 @@ mod actor;
 pub use actor::Actor;
 
 mod acks;
+mod acquisition;
 pub(crate) mod cache;
 mod certified;
 pub(crate) mod durability;

@@ -1,6 +1,8 @@
 //! Bounded forward access to a selected branch and its finalized prefix.
 
+use super::core::{Mailbox, Variant};
 use crate::{Block, types::Height};
+use commonware_cryptography::certificate::Scheme;
 use commonware_utils::channel::oneshot;
 use futures::{Stream, future::BoxFuture, stream::FuturesOrdered};
 use std::{
@@ -66,6 +68,69 @@ impl<B: Block> Clone for Blocks<B> {
             demand: self.demand.clone(),
             prefetch: self.prefetch,
         }
+    }
+}
+
+impl<S: Scheme, V: Variant> Mailbox<S, V> {
+    /// Provides forward access to a selected branch ending at `parent_height`.
+    ///
+    /// `commitments` is the consensus-supplied suffix in increasing height order.
+    /// Consecutive re-proposals occupy one entry. The suffix is shared without
+    /// copying; older heights are supplied by canonical finalized storage.
+    pub fn blocks(
+        &self,
+        parent_height: Height,
+        commitments: Arc<[V::Commitment]>,
+    ) -> Blocks<V::ApplicationBlock> {
+        let first = commitments
+            .len()
+            .checked_sub(1)
+            .and_then(|distance| u64::try_from(distance).ok())
+            .and_then(|distance| parent_height.get().checked_sub(distance));
+        let valid = commitments.is_empty() || first.is_some();
+        let requested = commitments.clone();
+        let commitment_at = move |height: Height| {
+            let index = usize::try_from(height.get().checked_sub(first?)?).ok()?;
+            commitments.get(index).copied()
+        };
+        let digest_at = commitment_at.clone();
+        let marshal = self.clone();
+        let mut blocks = Blocks::new(
+            parent_height,
+            self.max_repair,
+            move |height| digest_at(height).map(V::commitment_to_inner),
+            move |height| {
+                let commitment = commitment_at(height);
+                let marshal = marshal.clone();
+                async move {
+                    if !valid {
+                        return None;
+                    }
+                    let block = match commitment {
+                        Some(commitment) => marshal.acquire(commitment).await.ok()?,
+                        None => marshal.finalized(height).await.ok()?,
+                    };
+                    Some(V::into_shared(block))
+                }
+            },
+        );
+        let marshal = self.clone();
+        blocks.demand = Some(Arc::new(move |heights| {
+            let range = first
+                .and_then(|first| {
+                    let start = heights.start().get().max(first);
+                    let end = heights.end().get().min(parent_height.get());
+                    if start > end {
+                        return None;
+                    }
+                    let start = usize::try_from(start - first).ok()?;
+                    let end = usize::try_from(end - first).ok()?.checked_add(1)?;
+                    Some(start..end)
+                })
+                .unwrap_or(0..0);
+            marshal.prefetch(requested.clone(), range)
+        }));
+        blocks
     }
 }
 
@@ -210,7 +275,14 @@ impl<B: Block> Stream for BlockRange<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Heightable, marshal::mocks::block::EmptyBlock};
+    use crate::{
+        Heightable,
+        marshal::{
+            core::mailbox::Message,
+            mocks::{block::EmptyBlock, harness},
+            standard::Standard,
+        },
+    };
     use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_cryptography::{Digestible, sha256::Sha256};
     use commonware_runtime::{Runner as _, deterministic};
@@ -424,6 +496,41 @@ mod tests {
             assert_eq!(
                 source_clone.digest(Height::new(11)),
                 Some(blocks[11].digest())
+            );
+        });
+    }
+
+    #[test]
+    fn selected_range_shares_commitments_and_scopes_prefetch_to_its_lifetime() {
+        deterministic::Runner::default().start(|context| async move {
+            type TestMessage = Message<harness::S, Standard<TestBlock>>;
+            let (sender, mut receiver) =
+                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(16));
+            let marshal = Mailbox::new(sender, NZUsize!(1), NZUsize!(8));
+            let blocks = chain(10);
+            let commitments: Arc<[_]> = blocks[4..].iter().map(Digestible::digest).collect();
+            let source = marshal.blocks(Height::new(9), commitments.clone());
+            let source_clone = source.clone();
+            let mut range = source.range(Height::new(2)..=Height::new(7));
+            assert!(receiver.recv().now_or_never().is_none());
+            assert!(range.next().now_or_never().is_none());
+            let TestMessage::Prefetch {
+                commitments: observed,
+                range: selected,
+                lease,
+                ..
+            } = receiver.recv().await.unwrap()
+            else {
+                panic!("range demand must precede body acquisition");
+            };
+            assert!(Arc::ptr_eq(&commitments, &observed));
+            assert_eq!(selected, 0..4);
+            assert!(!lease.is_closed());
+            drop(range);
+            assert!(lease.is_closed());
+            assert_eq!(
+                source_clone.digest(Height::new(7)),
+                Some(blocks[7].digest())
             );
         });
     }
