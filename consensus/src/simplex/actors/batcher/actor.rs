@@ -87,7 +87,7 @@ where
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
     added: Counter,
-    verified: Counter,
+    processed: Counter,
     inbound_messages: CounterFamily<Inbound>,
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     batch_size: Histogram,
@@ -109,7 +109,8 @@ where
         let scheme = Arc::new(cfg.scheme);
         let participants = scheme.participants();
         let added = context.counter("added", "number of messages added to the verifier");
-        let verified = context.counter("verified", "number of messages processed by the verifier");
+        let processed =
+            context.counter("processed", "number of messages processed by the verifier");
         let inbound_messages = context.family("inbound_messages", "number of inbound messages");
         let latest_vote: GaugeFamily<Peer<S::PublicKey>> =
             context.family("latest_vote", "view of latest vote received per peer");
@@ -162,7 +163,7 @@ where
                 mailbox_receiver: receiver,
 
                 added,
-                verified,
+                processed,
                 inbound_messages,
                 latest_vote,
                 batch_size,
@@ -360,7 +361,7 @@ where
             // Count processed pending votes, including rejected inputs.
             if processed != 0 {
                 trace!(%view, batch = processed, "processed votes");
-                self.verified.inc_by(processed as u64);
+                self.processed.inc_by(processed as u64);
                 self.batch_size.observe(processed as f64);
             }
         }
