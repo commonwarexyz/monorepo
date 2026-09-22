@@ -1888,26 +1888,14 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
             .try_collect()
             .expect("players are unique");
 
-        // Extract dealers before consuming selected
-        let dealers: Set<P> = selected
-            .keys()
-            .iter()
-            .cloned()
-            .try_collect()
-            .expect("selected dealers are unique");
-
         // Recover the public polynomial
-        let (public, weights) = if let Some(previous) = info.previous.as_ref() {
+        let (dealers, public, weights) = if let Some(previous) = info.previous.as_ref() {
             let weights = previous
                 .public()
                 .mode()
                 .subset_interpolator(previous.players(), selected.keys())
                 .expect("the result of select should produce a valid subset");
-            let commitments = selected
-                .into_iter()
-                .map(|(dealer, log)| (dealer, log.pub_msg.commitment))
-                .try_collect::<Map<_, _>>()
-                .expect("Map should have unique keys");
+            let commitments = selected.map_values_into(|_, log| log.pub_msg.commitment);
             let public = weights
                 .interpolate(&commitments, strategy)
                 .expect("select checks that enough points have been provided");
@@ -1919,13 +1907,13 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
                 public.constant(),
                 "selected reshare commitments must preserve the previous public key",
             );
-            (public, Some(weights))
+            (commitments.into_keys(), public, Some(weights))
         } else {
             let mut public = Poly::zero();
             for log in selected.values() {
                 public += &log.pub_msg.commitment;
             }
-            (public, None)
+            (selected.into_keys(), public, None)
         };
         let n = info.players.len() as u32;
         let output = Output {

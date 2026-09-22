@@ -19,7 +19,7 @@ use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    Array, Span, TryCollect, TryFromIterator,
+    Array, Span, TryCollect,
     ordered::{Map, Set},
 };
 use core::{
@@ -255,15 +255,21 @@ impl PrivateKey {
             strategy,
         )
         .expect("proving should succeed");
-        let outputs = Map::try_from_iter(
-            receivers
-                .into_iter()
-                .zip(witness.values())
-                .map(|((receiver, _), output)| (receiver, output.clone())),
-        )
-        .expect("receivers was already deduplicated");
-        let commitments = Map::try_from_iter(outputs.keys().iter().cloned().zip(claim.commitments))
-            .expect("receivers was already deduplicated");
+
+        // Witness values and claim commitments follow the receivers' key order.
+        let mut witness_values = witness.values().iter();
+        let outputs = receivers.map_values_into(|_, _| {
+            witness_values
+                .next()
+                .expect("witness should have one output per receiver")
+                .clone()
+        });
+        let mut claim_commitments = claim.commitments.into_iter();
+        let commitments = outputs.map_values(|_, _| {
+            claim_commitments
+                .next()
+                .expect("claim should have one commitment per output")
+        });
         let pedersen_to_plain = {
             let setup = pedersen_to_plain::Setup {
                 value_generator: *setup.inner().value_generator(),
@@ -764,9 +770,9 @@ mod tests {
 
         let sender_sk = PrivateKey::random(&mut rng);
         let sender_pk = sender_sk.public();
-        let receiver_pks: Vec<PublicKey> = (0..3)
-            .map(|_| PrivateKey::random(&mut rng).public())
-            .collect();
+        let mut receivers: Vec<_> = (0..3).map(|_| PrivateKey::random(&mut rng)).collect();
+        receivers.sort_by_key(PrivateKey::public);
+        let receiver_pks: Vec<_> = receivers.iter().rev().map(PrivateKey::public).collect();
 
         let nonce = Summary::random(&mut rng);
         let msg = Bytes::copy_from_slice(nonce.as_ref());
@@ -778,7 +784,7 @@ mod tests {
 
         let mut prover_t = outer_transcript.fork(b"dealer vrf");
         prover_t.commit(sender_pk.encode());
-        let (_outputs, commitments) = sender_sk.vrf_batch_checked(
+        let (outputs, commitments) = sender_sk.vrf_batch_checked(
             &mut rng,
             &TEST_SETUP,
             &mut prover_t,
@@ -788,6 +794,14 @@ mod tests {
         );
 
         let players: Set<PublicKey> = receiver_pks.iter().cloned().try_collect().unwrap();
+        assert_eq!(outputs.keys(), &players);
+        assert_eq!(commitments.commitments.keys(), &players);
+        for receiver in &receivers {
+            assert_eq!(
+                outputs.get_value(&receiver.public()),
+                Some(&receiver.vrf_recv(&nonce, &sender_pk)),
+            );
+        }
         let result = VrfCommitments::check_batch(
             &mut rng,
             &TEST_SETUP,
