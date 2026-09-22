@@ -388,12 +388,12 @@ impl<O: Sink> Sender<O> {
         let max_batch_size = self.pool.config().max_size().get();
         let mut chunks = IoBufs::default();
         let mut messages = messages.into_iter();
-        while let Some((_, first_len)) = messages.as_slice().first() {
+        while let [(_, first_len), rest @ ..] = messages.as_slice() {
             // Size one chunk before allocating it. An oversized first frame
             // occupies its own chunk.
             let mut total_len = *first_len;
             let mut message_count = 1;
-            for (_, frame_len) in &messages.as_slice()[1..] {
+            for (_, frame_len) in rest {
                 let Some(next_len) = total_len
                     .checked_add(*frame_len)
                     .filter(|&len| len <= max_batch_size)
