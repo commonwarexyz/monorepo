@@ -427,15 +427,14 @@ impl<D: Digest> CheckingData<D> {
         &self,
         commitment: &Summary,
         index: u16,
-        weak_shard: &WeakShard<D>,
+        shard: Matrix<F>,
+        inclusion_proof: &Proof<D>,
     ) -> Result<CheckedShard, Error> {
         if self.commitment != *commitment {
             return Err(Error::InvalidShard);
         }
         self.topology.check_index(index)?;
-        if weak_shard.shard.rows() != self.topology.samples
-            || weak_shard.shard.cols() != self.topology.data_cols
-        {
+        if shard.rows() != self.topology.samples || shard.cols() != self.topology.data_cols {
             return Err(Error::InvalidWeakShard);
         }
         let index = index as usize;
@@ -446,20 +445,19 @@ impl<D: Digest> CheckingData<D> {
         // computed indices for this shard
         let proof_elements: Vec<(H::Digest, u32)> = these_shuffled_indices
             .iter()
-            .zip(weak_shard.shard.iter())
+            .zip(shard.iter())
             .map(|(&i, row)| (row_digest::<H>(row), i))
             .collect();
 
         // Verify the multi-proof
-        if weak_shard
-            .inclusion_proof
+        if inclusion_proof
             .verify_multi_inclusion::<H>(&proof_elements, &self.root)
             .is_err()
         {
             return Err(Error::InvalidWeakShard);
         }
 
-        let shard_checksum = weak_shard.shard.mul(&self.checking_matrix);
+        let shard_checksum = shard.mul(&self.checking_matrix);
         // Check that the shard checksum rows match the encoded checksums
         for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
             if row != &self.encoded_checksum[i as usize] {
@@ -468,7 +466,7 @@ impl<D: Digest> CheckingData<D> {
         }
         Ok(CheckedShard {
             index,
-            shard: weak_shard.shard.clone(),
+            shard,
             commitment: *commitment,
         })
     }
@@ -603,10 +601,6 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         index: u16,
         shard: Self::StrongShard,
     ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error> {
-        let weak_shard = WeakShard {
-            inclusion_proof: shard.inclusion_proof,
-            shard: shard.rows,
-        };
         let checking_data = CheckingData::reckon(
             namespace,
             config,
@@ -615,7 +609,12 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
             shard.root,
             shard.checksum.as_ref(),
         )?;
-        let checked_shard = checking_data.check::<H>(commitment, index, &weak_shard)?;
+        let checked_shard =
+            checking_data.check::<H>(commitment, index, shard.rows, &shard.inclusion_proof)?;
+        let weak_shard = WeakShard {
+            inclusion_proof: shard.inclusion_proof,
+            shard: checked_shard.shard.clone(),
+        };
         Ok((checking_data, checked_shard, weak_shard))
     }
 
@@ -626,7 +625,12 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         index: u16,
         weak_shard: Self::WeakShard,
     ) -> Result<Self::CheckedShard, Self::Error> {
-        checking_data.check::<H>(commitment, index, &weak_shard)
+        checking_data.check::<H>(
+            commitment,
+            index,
+            weak_shard.shard,
+            &weak_shard.inclusion_proof,
+        )
     }
 
     fn decode<'a>(
