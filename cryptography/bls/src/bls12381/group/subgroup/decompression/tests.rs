@@ -45,6 +45,7 @@ fn affine(point: G1) -> Affine {
     }
 }
 
+#[inline(never)]
 pub(super) fn encode(points: &[Affine], format: Format) -> Vec<u8> {
     struct Encode<'a>(&'a [Affine], Format);
     impl WithBackend for Encode<'_> {
@@ -67,6 +68,15 @@ pub(super) fn encode(points: &[Affine], format: Format) -> Vec<u8> {
         }
     }
     with_backend(Encode(points, format))
+}
+
+#[inline(never)]
+fn decode(bytes: &[u8], format: Format) -> Option<Vec<Affine>> {
+    with_backend(Decode {
+        bytes,
+        format,
+        roots: RootWidth::Four,
+    })
 }
 
 fn receive(bytes: &[u8], format: Format, rng: &mut impl CryptoRng) -> Option<Vec<G1>> {
@@ -218,7 +228,7 @@ fn exceptional_fibers_and_canonical_mutations() {
             for x in a.roots(base.x) {
                 for y in [base.y, a.fp_neg(&base.y)] {
                     let triple = vec![base, Affine { x, y }, base];
-                    assert_eq!(a.encode_triples(&triple)[48] & 0x80, 0x80);
+                    assert_eq!(encode(&triple, Format::Triple)[48] & 0x80, 0x80);
                     cases.push(triple);
                 }
             }
@@ -244,44 +254,28 @@ fn exceptional_fibers_and_canonical_mutations() {
                     base,
                 ];
                 assert!(triple.iter().all(|point| a.valid_affine(point)));
-                assert_eq!(a.encode_triples(&triple)[48] & 0x80, 0x80);
+                assert_eq!(encode(&triple, Format::Triple)[48] & 0x80, 0x80);
                 cases.push(triple);
             }
             for points in &cases {
                 for format in [Format::Pair, Format::Triple] {
-                    let bytes = match format {
-                        Format::Pair => a.encode_pairs(points),
-                        _ => a.encode_triples(points),
-                    };
-                    let decoded = match format {
-                        Format::Pair => a.decode_pairs(&bytes),
-                        _ => a.decode_triples(&bytes),
-                    }
-                    .unwrap();
+                    let bytes = encode(points, format);
+                    let decoded = decode(&bytes, format).unwrap();
                     assert_eq!(public_points(&decoded), public_points(points));
                 }
             }
             let mut rng = TestRng::new(7);
             for points in &cases[..2] {
                 for format in [Format::Pair, Format::Triple] {
-                    let bytes = match format {
-                        Format::Pair => a.encode_pairs(points),
-                        _ => a.encode_triples(points),
-                    };
+                    let bytes = encode(points, format);
                     for _ in 0..64 {
                         let mut changed = bytes.clone();
                         let offset = rng.next_u32() as usize % changed.len();
                         changed[offset] ^= 1 << (rng.next_u32() % 8);
-                        let result = match format {
-                            Format::Pair => a.decode_pairs(&changed),
-                            _ => a.decode_triples(&changed),
-                        };
+                        let result = decode(&changed, format);
                         if let Some(points) = result {
                             assert!(points.iter().all(|p| a.valid_affine(p)));
-                            let canonical = match format {
-                                Format::Pair => a.encode_pairs(&points),
-                                _ => a.encode_triples(&points),
-                            };
+                            let canonical = encode(&points, format);
                             assert_eq!(changed, canonical);
                         }
                     }
@@ -294,26 +288,17 @@ fn exceptional_fibers_and_canonical_mutations() {
             let mut alias = Vec::from(field_bytes(&a.fp_sub(&left, &right)));
             alias.extend(field_bytes(&a.fp_add(&left, &right)));
             alias.extend(field_bytes(&base.x));
-            assert!(a.decode_triples(&alias).is_none());
-            let mut false_fallback = a.encode_pairs(&cases[0][..2]);
+            assert!(decode(&alias, Format::Triple).is_none());
+            let mut false_fallback = encode(&cases[0][..2], Format::Pair);
             false_fallback[48] |= 0x80;
             false_fallback.extend(a.encode_standard(&base));
-            assert!(a.decode_triples(&false_fallback).is_none());
+            assert!(decode(&false_fallback, Format::Triple).is_none());
             for format in [Format::Pair, Format::Triple] {
-                let bytes = match format {
-                    Format::Pair => a.encode_pairs(&cases[0]),
-                    _ => a.encode_triples(&cases[0]),
-                };
+                let bytes = encode(&cases[0], format);
                 for offset in (0..bytes.len()).step_by(48) {
                     let mut changed = bytes.clone();
                     changed[offset..offset + 48].fill(0xff);
-                    assert!(
-                        match format {
-                            Format::Pair => a.decode_pairs(&changed),
-                            _ => a.decode_triples(&changed),
-                        }
-                        .is_none()
-                    );
+                    assert!(decode(&changed, format).is_none());
                 }
                 let modulus = commonware_formatting::from_hex(
                     "1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab",
@@ -323,18 +308,12 @@ fn exceptional_fibers_and_canonical_mutations() {
                     let flags = changed[offset] & 0xe0;
                     changed[offset..offset + 48].copy_from_slice(&modulus);
                     changed[offset] |= flags;
-                    assert!(
-                        match format {
-                            Format::Pair => a.decode_pairs(&changed),
-                            _ => a.decode_triples(&changed),
-                        }
-                        .is_none()
-                    );
+                    assert!(decode(&changed, format).is_none());
                 }
                 let mut infinity = [0; 48];
                 infinity[0] = 0xc0;
-                assert!(a.decode_pairs(&infinity).is_none());
-                assert!(a.decode_triples(&infinity).is_none());
+                assert!(decode(&infinity, Format::Pair).is_none());
+                assert!(decode(&infinity, Format::Triple).is_none());
             }
         }
     }
