@@ -1,6 +1,6 @@
 //! Core sync engine components that are shared across sync clients.
 use crate::{
-    merkle::{Family, Location, hasher::Standard as StandardHasher},
+    merkle::{Family, Location},
     qmdb::{
         self,
         sync::{
@@ -8,21 +8,23 @@ use crate::{
             database::Config as _,
             error::EngineError,
             requests::{Id as RequestId, Requests},
-            source::{FeedbackTx, Request, Response, Source},
+            source::{Request, Response, Source},
         },
     },
 };
 use commonware_codec::Encode;
-use commonware_cryptography::Digest;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::{boxed, select};
 use commonware_runtime::Supervisor as _;
-use commonware_utils::channel::{
-    fallible::{AsyncFallibleExt, OneshotExt as _},
-    mpsc,
-};
+use commonware_utils::channel::{fallible::AsyncFallibleExt, mpsc};
 use futures::future::{Aborted, Either, pending};
 use mpsc::error::TryRecvError;
-use std::{collections::BTreeMap, fmt::Debug, num::NonZeroU64, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Debug,
+    num::NonZeroU64,
+    sync::Arc,
+};
 
 /// Type alias for sync engine errors
 type Error<DB, S> =
@@ -58,7 +60,50 @@ pub(super) struct IndexedFetchResult<F: Family, Op, D: Digest, E> {
     /// Unique ID assigned when the request was scheduled.
     pub id: RequestId,
     /// The result of the fetch operation.
-    pub result: Result<(Response<F, Op, D>, FeedbackTx), E>,
+    pub result: Result<Option<Response<F, Op, D>>, E>,
+}
+
+/// Verifies one response against the exact request and trusted root that scheduled it.
+fn verify_response<F, Op, H>(
+    request: Request<F>,
+    root: &H::Digest,
+    response: &Response<F, Op, H::Digest>,
+) -> bool
+where
+    F: Family,
+    Op: Encode,
+    H: Hasher,
+{
+    if response.proof().leaves != request.size() {
+        return false;
+    }
+
+    let hasher = qmdb::hasher::<H>();
+    match (&request, response) {
+        (
+            Request::Operations { start, max_ops, .. },
+            Response::Operations { proof, operations },
+        ) => {
+            let operations_len = operations.len() as u64;
+            if operations_len == 0 || operations_len > max_ops.get() {
+                false
+            } else {
+                let elements = operations.iter().map(Encode::encode).collect::<Vec<_>>();
+                proof.verify_range_inclusion(&hasher, &elements, *start, root)
+            }
+        }
+        (
+            Request::Boundary { start, .. },
+            Response::Boundary {
+                proof,
+                op,
+                pinned_nodes,
+            },
+        ) => {
+            proof.verify_proof_and_pinned_nodes(&hasher, &[op.encode()], *start, pinned_nodes, root)
+        }
+        _ => false,
+    }
 }
 
 /// Wait for the next synchronization event.
@@ -135,9 +180,8 @@ where
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
     pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
-    /// Maximum number of previous roots to retain for verifying in-flight
-    /// requests after target updates. Set to 0 to disable (all retained
-    /// requests will be re-fetched).
+    /// Maximum number of previous targets whose pending operation requests may be reused
+    /// after a target update. Set to 0 to cancel all pending requests on each target update.
     pub max_retained_roots: usize,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
@@ -160,15 +204,11 @@ where
     /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
-    /// Historical roots from superseded sync targets, keyed by database size
-    /// (target.range.end()). Keys strictly increase across target updates
-    /// (non-advancing updates are discarded), so each size maps to a unique
-    /// root and the smallest key is the oldest. Eviction drops it first.
-    /// When a retained request completes, its requested size selects the
-    /// historical root to verify against.
-    retained_roots: BTreeMap<Location<DB::Family>, DB::Digest>,
+    /// Superseded target sizes whose in-flight requests remain eligible.
+    /// Each fetch owns the root it authenticates against.
+    retained_sizes: BTreeSet<Location<DB::Family>>,
 
-    /// Maximum number of historical roots to retain
+    /// Maximum number of previous targets eligible for operation request reuse.
     max_retained_roots: usize,
 
     /// The current sync target (root digest and operation bounds)
@@ -188,9 +228,6 @@ where
 
     /// Source of operations and proofs, shared with in-flight requests
     source: Arc<S>,
-
-    /// Hasher used for proof verification
-    hasher: StandardHasher<DB::Hasher>,
 
     /// Runtime context for database operations
     context: DB::Context,
@@ -250,7 +287,6 @@ where
             }));
         }
 
-        // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
             config.db_config.journal_config(),
@@ -281,7 +317,7 @@ where
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
             pinned_nodes,
-            retained_roots: BTreeMap::new(),
+            retained_sizes: BTreeSet::new(),
             max_retained_roots: config.max_retained_roots,
             target: config.target.clone(),
             max_outstanding_requests: config.max_outstanding_requests,
@@ -289,7 +325,6 @@ where
             apply_batch_size: config.apply_batch_size,
             journal,
             source: Arc::new(config.source),
-            hasher: qmdb::hasher::<DB::Hasher>(),
             context: config.context,
             config: config.db_config,
             update_rx: config.update_rx,
@@ -299,7 +334,7 @@ where
             reached_current_target_reported: false,
             metrics,
         };
-        engine.schedule_requests()?;
+        engine.schedule_requests();
         engine.record_progress();
         Ok(engine)
     }
@@ -307,15 +342,38 @@ where
     /// Track `request` and spawn its fetch against the shared source.
     fn spawn_fetch(&mut self, request: Request<DB::Family>) {
         let source = Arc::clone(&self.source);
+        let root = self.target.root;
         self.outstanding_requests
             .insert(request, move |id| async move {
-                let result = source.serve(request).await;
+                let result: Result<_, S::Error> = async {
+                    let (mut response, mut feedback) = source.serve(request).await?;
+                    loop {
+                        if verify_response::<DB::Family, DB::Op, DB::Hasher>(
+                            request, &root, &response,
+                        ) {
+                            if let Some(feedback) = feedback {
+                                feedback.accept();
+                            }
+                            return Ok(Some(response));
+                        }
+
+                        let Some(current) = feedback else {
+                            return Ok(None);
+                        };
+                        let Some((next_response, next_feedback)) = current.reject().await else {
+                            return Ok(None);
+                        };
+                        response = next_response;
+                        feedback = Some(next_feedback);
+                    }
+                }
+                .await;
                 IndexedFetchResult { id, result }
             });
     }
 
     /// Schedule new fetch requests for operations in the sync range that we haven't yet fetched.
-    fn schedule_requests(&mut self) -> Result<(), Error<DB, S>> {
+    fn schedule_requests(&mut self) {
         let target_size = self.target.range.end();
 
         // Schedule a boundary request at the lower sync bound if pinned nodes are still
@@ -365,37 +423,35 @@ where
             };
             self.spawn_fetch(request);
         }
-
-        Ok(())
     }
 
     /// Reset sync state for a target update.
     ///
-    /// Only cancels requests that cover ranges before the new target range
-    /// start. Requests at or after the new start are retained; their proofs
-    /// will be verified against the saved historical root (see
-    /// `retained_roots`) so the fetched operations can still be used.
+    /// Retains only operation requests beyond the new lower bound whose captured verification
+    /// roots are still covered by the configured retention window.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
         self.journal = self.journal.resize(new_target.range.start()).await?;
-        // Remove requests at or before the new start. The request at start
-        // must be re-issued as a boundary request with the new target size.
-        self.outstanding_requests
-            .remove_before(new_target.range.start().checked_add(1).unwrap());
         self.fetched_operations.clear();
         self.pinned_nodes = None;
 
-        // Save the current root keyed by its database size for verifying
-        // retained requests that were issued against this target.
+        // Retain the prior target size so its fetches stay eligible until eviction.
         if self.max_retained_roots > 0 {
-            self.retained_roots
-                .insert(self.target.range.end(), self.target.root);
-            while self.retained_roots.len() > self.max_retained_roots {
-                self.retained_roots.pop_first();
+            self.retained_sizes.insert(self.target.range.end());
+            if self.retained_sizes.len() > self.max_retained_roots {
+                self.retained_sizes.pop_first();
             }
         }
+
+        // Preserve operation fetches for retained targets beyond the new lower bound.
+        // The lower bound never decreases, so this cancels old boundary requests and
+        // leaves the new boundary free for fetching pinned nodes.
+        let new_start = new_target.range.start();
+        self.outstanding_requests.retain(|request| {
+            request.start() > new_start && self.retained_sizes.contains(&request.size())
+        });
 
         self.target = new_target;
         self.reached_current_target_reported = false;
@@ -546,118 +602,36 @@ where
         Ok(self.is_at_target()? && self.pinned_nodes_ready())
     }
 
-    /// Handle a response that failed validation.
-    ///
-    /// A source that accepts feedback is told the response failed, and the request is
-    /// retried. A source that is not listening cannot change its answer, so the failure
-    /// is terminal.
-    fn reject_response(feedback_tx: FeedbackTx) -> Result<(), Error<DB, S>> {
-        feedback_tx.map_or_else(
-            || Err(SyncError::Engine(EngineError::InvalidResponse)),
-            |feedback_tx| {
-                feedback_tx.send_lossy(false);
-                Ok(())
-            },
-        )
-    }
-
     /// Handle the result of a fetch operation.
-    ///
-    /// Verifies the proof against the current root first, then falls back
-    /// to a matching historical root from `retained_roots` if available.
     fn handle_fetch_result(
         &mut self,
         fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, S::Error>,
     ) -> Result<(), Error<DB, S>> {
-        // Removal aborts a request's future, so a result for an untracked ID should
-        // be unreachable.
+        // A target update can retire a request before its completed result is handled.
         let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
             return Ok(());
         };
 
-        let (response, feedback_tx) = fetch_result.result.map_err(SyncError::Source)?;
+        let response = fetch_result
+            .result
+            .map_err(SyncError::Source)?
+            .ok_or(SyncError::Engine(EngineError::InvalidResponse))?;
 
         let start_loc = request.start();
-        let size = request.size();
-
-        // The proof must cover exactly the requested size.
-        if response.proof().leaves != size {
-            return Self::reject_response(feedback_tx);
-        }
-        // A response must match the shape of its request.
-        match (request, response) {
-            (Request::Operations { max_ops, .. }, Response::Operations { proof, operations }) => {
-                let operations_len = operations.len() as u64;
-                if operations_len == 0 || operations_len > max_ops.get() {
-                    return Self::reject_response(feedback_tx);
-                }
-                let Some(root) = self.verification_root(size) else {
-                    return Ok(());
-                };
-                let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
-                if !proof.verify_range_inclusion(&self.hasher, &elements, start_loc, root) {
-                    return Self::reject_response(feedback_tx);
-                }
-                if let Some(feedback_tx) = feedback_tx {
-                    feedback_tx.send_lossy(true);
-                }
+        match response {
+            Response::Operations { operations, .. } => {
                 self.store_operations(start_loc, operations);
             }
-            (
-                Request::Boundary { .. },
-                Response::Boundary {
-                    proof,
-                    op,
-                    pinned_nodes,
-                },
-            ) => {
-                // Use the pinned nodes only if the current target still needs them. Otherwise
-                // keep the operation and drop the pinned nodes.
-                let need_pinned = size == self.target.range.end()
-                    && self.pinned_nodes.is_none()
-                    && start_loc == self.target.range.start();
-                let element = [op.encode()];
-                let valid = if need_pinned {
-                    proof.verify_proof_and_pinned_nodes(
-                        &self.hasher,
-                        &element,
-                        start_loc,
-                        &pinned_nodes,
-                        &self.target.root,
-                    )
-                } else {
-                    let Some(root) = self.verification_root(size) else {
-                        return Ok(());
-                    };
-                    proof.verify_range_inclusion(&self.hasher, &element, start_loc, root)
-                };
-                if !valid {
-                    if need_pinned {
-                        tracing::warn!("boundary response failed verification");
-                    }
-                    return Self::reject_response(feedback_tx);
-                }
-                if let Some(feedback_tx) = feedback_tx {
-                    feedback_tx.send_lossy(true);
-                }
-                if need_pinned {
-                    self.pinned_nodes = Some(pinned_nodes);
-                }
+            Response::Boundary {
+                op, pinned_nodes, ..
+            } => {
+                // A tracked boundary request belongs to the current target.
+                self.pinned_nodes = Some(pinned_nodes);
                 self.store_operations(start_loc, vec![op]);
             }
-            _ => return Self::reject_response(feedback_tx),
         }
 
         Ok(())
-    }
-
-    /// The root to verify a response against at a given size.
-    fn verification_root(&self, size: Location<DB::Family>) -> Option<&DB::Digest> {
-        if size == self.target.range.end() {
-            Some(&self.target.root)
-        } else {
-            self.retained_roots.get(&size)
-        }
     }
 
     /// Handle a sync event and return the next engine state.
@@ -679,7 +653,7 @@ where
 
                 let mut updated_self = self.reset_for_target_update(new_target).await?;
                 updated_self.record_progress();
-                updated_self.schedule_requests()?;
+                updated_self.schedule_requests();
                 Ok(NextStep::Continue(updated_self))
             }
             Event::UpdateChannelClosed => {
@@ -697,7 +671,7 @@ where
                 if let Ok(fetch_result) = fetch_result {
                     self.handle_fetch_result(fetch_result)?;
                 }
-                self.schedule_requests()?;
+                self.schedule_requests();
                 let mut engine = self.apply_operations().await?;
                 engine.record_progress();
                 Ok(NextStep::Continue(engine))
@@ -812,7 +786,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::mmr::{Family as MmrFamily, Proof};
+    use crate::{
+        merkle::mmr::{Family as MmrFamily, Proof},
+        qmdb::sync::source,
+    };
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
     use commonware_utils::{NZU64, non_empty_range};
@@ -925,11 +902,7 @@ mod tests {
         type Family = MmrFamily;
         type Op = i32;
 
-        async fn serve(
-            &self,
-            _request: Request<MmrFamily>,
-        ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>
-        {
+        async fn serve(&self, _request: Request<MmrFamily>) -> source::Result<Self> {
             Ok((
                 Response::Operations {
                     proof: Proof {
@@ -968,6 +941,142 @@ mod tests {
             reached_target_tx: None,
             max_retained_roots: 0,
         }
+    }
+
+    fn insert_pending_request(
+        engine: &mut Engine<TestDb, TestSource>,
+        request: Request<MmrFamily>,
+    ) -> RequestId {
+        engine
+            .outstanding_requests
+            .insert(request, |_| std::future::pending())
+    }
+
+    fn stale_fetch_result(
+        id: RequestId,
+    ) -> IndexedFetchResult<MmrFamily, i32, sha256::Digest, Infallible> {
+        IndexedFetchResult {
+            id,
+            result: Ok(Some(Response::Operations {
+                proof: Proof {
+                    leaves: Location::new(10),
+                    inactive_peaks: 0,
+                    digests: vec![],
+                },
+                operations: vec![99],
+            })),
+        }
+    }
+
+    #[test]
+    fn target_update_with_zero_retention_cancels_old_requests_and_queued_result() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            config.max_outstanding_requests = 0;
+            let mut engine = Engine::new(config).await.unwrap();
+            assert!(engine.outstanding_requests.contains(&Location::new(5)));
+            let request = Request::Operations {
+                size: Location::new(10),
+                start: Location::new(6),
+                max_ops: NZU64!(1),
+            };
+            let old_id = insert_pending_request(&mut engine, request);
+            let queued_result = stale_fetch_result(old_id);
+            assert_eq!(engine.outstanding_requests.len(), 2);
+
+            let new_target = Target {
+                root: sha256::Digest::from([2u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            let mut engine = engine.reset_for_target_update(new_target).await.unwrap();
+
+            assert!(engine.retained_sizes.is_empty());
+            assert_eq!(engine.outstanding_requests.len(), 0);
+            assert!(engine.outstanding_requests.remove(old_id).is_none());
+            engine.handle_fetch_result(queued_result).unwrap();
+            assert!(engine.fetched_operations.is_empty());
+            assert!(engine.pinned_nodes.is_none());
+            assert!(matches!(
+                engine.outstanding_requests.next_completed().await,
+                Err(Aborted)
+            ));
+            assert!(matches!(
+                engine.outstanding_requests.next_completed().await,
+                Err(Aborted)
+            ));
+            assert_eq!(engine.outstanding_requests.len(), 0);
+        });
+    }
+
+    #[test]
+    fn target_update_retains_useful_operation_then_cancels_it_on_root_eviction() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut config = test_engine_config(context, 5, Arc::new(AtomicUsize::new(0)));
+            config.max_outstanding_requests = 0;
+            config.max_retained_roots = 1;
+            let mut engine = Engine::new(config).await.unwrap();
+
+            assert!(engine.outstanding_requests.contains(&Location::new(5)));
+            let old_operation_id = insert_pending_request(
+                &mut engine,
+                Request::Operations {
+                    size: Location::new(10),
+                    start: Location::new(6),
+                    max_ops: NZU64!(1),
+                },
+            );
+            assert_eq!(engine.outstanding_requests.len(), 2);
+
+            let target_2 = Target {
+                root: sha256::Digest::from([2u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(12)),
+            };
+            let mut engine = engine.reset_for_target_update(target_2).await.unwrap();
+
+            assert_eq!(engine.retained_sizes, BTreeSet::from([Location::new(10)]));
+            assert!(!engine.outstanding_requests.contains(&Location::new(5)));
+            assert!(engine.outstanding_requests.contains(&Location::new(6)));
+            assert_eq!(engine.outstanding_requests.len(), 1);
+
+            insert_pending_request(
+                &mut engine,
+                Request::Operations {
+                    size: Location::new(12),
+                    start: Location::new(7),
+                    max_ops: NZU64!(1),
+                },
+            );
+            assert_eq!(engine.outstanding_requests.len(), 2);
+            let queued_old_result = stale_fetch_result(old_operation_id);
+            let target_3 = Target {
+                root: sha256::Digest::from([3u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(14)),
+            };
+            let mut engine = engine.reset_for_target_update(target_3).await.unwrap();
+
+            assert_eq!(engine.retained_sizes, BTreeSet::from([Location::new(12)]));
+            assert!(
+                engine
+                    .outstanding_requests
+                    .remove(old_operation_id)
+                    .is_none()
+            );
+            assert!(engine.outstanding_requests.contains(&Location::new(7)));
+            assert_eq!(engine.outstanding_requests.len(), 1);
+            engine.handle_fetch_result(queued_old_result).unwrap();
+            assert!(engine.fetched_operations.is_empty());
+            assert!(engine.pinned_nodes.is_none());
+            assert!(matches!(
+                engine.outstanding_requests.next_completed().await,
+                Err(Aborted)
+            ));
+            assert!(matches!(
+                engine.outstanding_requests.next_completed().await,
+                Err(Aborted)
+            ));
+            assert!(engine.outstanding_requests.contains(&Location::new(7)));
+            assert_eq!(engine.outstanding_requests.len(), 1);
+        });
     }
 
     #[test]
@@ -1065,17 +1174,14 @@ mod tests {
     fn dummy_result(id: RequestId) -> IndexedFetchResult<MmrFamily, i32, sha256::Digest, ()> {
         IndexedFetchResult {
             id,
-            result: Ok((
-                Response::Operations {
-                    proof: Proof {
-                        leaves: Location::new(0),
-                        inactive_peaks: 0,
-                        digests: vec![],
-                    },
-                    operations: vec![],
+            result: Ok(Some(Response::Operations {
+                proof: Proof {
+                    leaves: Location::new(0),
+                    inactive_peaks: 0,
+                    digests: vec![],
                 },
-                None,
-            )),
+                operations: vec![],
+            })),
         }
     }
 
@@ -1106,7 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_before() {
+    fn test_retain_matching() {
         let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         add(&mut requests, 5);
@@ -1115,7 +1221,7 @@ mod tests {
         add(&mut requests, 20);
         assert_eq!(requests.len(), 4);
 
-        requests.remove_before(Location::new(10));
+        requests.retain(|request| request.start() >= Location::new(10));
         assert_eq!(requests.len(), 3);
         assert!(!requests.contains(&Location::new(5)));
         assert!(requests.contains(&Location::new(10)));
@@ -1124,33 +1230,33 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_before_all() {
+    fn test_retain_none() {
         let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         add(&mut requests, 5);
         add(&mut requests, 10);
         assert_eq!(requests.len(), 2);
 
-        requests.remove_before(Location::new(100));
+        requests.retain(|_| false);
         assert_eq!(requests.len(), 0);
     }
 
     #[test]
-    fn test_remove_before_empty() {
+    fn test_retain_empty() {
         let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
-        requests.remove_before(Location::new(10));
+        requests.retain(|_| true);
         assert_eq!(requests.len(), 0);
     }
 
     #[test]
-    fn test_remove_before_none() {
+    fn test_retain_all() {
         let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         add(&mut requests, 10);
         add(&mut requests, 20);
         assert_eq!(requests.len(), 2);
 
-        requests.remove_before(Location::new(5));
+        requests.retain(|_| true);
         assert_eq!(requests.len(), 2);
         assert!(requests.contains(&Location::new(10)));
         assert!(requests.contains(&Location::new(20)));
@@ -1178,15 +1284,16 @@ mod tests {
     }
 
     #[test]
-    fn test_stale_id_after_remove_before() {
+    fn test_stale_completion_after_retain() {
         let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
 
         let old_id = add(&mut requests, 5);
+        let queued_result = dummy_result(old_id);
         add(&mut requests, 15);
-        requests.remove_before(Location::new(10));
+        requests.retain(|request| request.start() >= Location::new(10));
 
-        // Old ID at location 5 was discarded by remove_before
-        assert!(requests.remove(old_id).is_none());
+        // The queued completion no longer resolves to a tracked request.
+        assert!(requests.remove(queued_result.id).is_none());
 
         // New request at the same location gets a different ID
         let new_id = add(&mut requests, 5);
@@ -1195,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_before_aborts_future() {
+    fn test_retain_aborts_future() {
         deterministic::Runner::default().start(|_context| async move {
             let mut requests: Requests<MmrFamily, i32, sha256::Digest, ()> = Requests::new();
             requests.insert(
@@ -1206,7 +1313,7 @@ mod tests {
                 },
                 |_| std::future::pending(),
             );
-            requests.remove_before(Location::new(10));
+            requests.retain(|_| false);
             assert!(matches!(requests.next_completed().await, Err(Aborted)));
         });
     }

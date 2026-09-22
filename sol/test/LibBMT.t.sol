@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity ^0.8.15;
 
-import { HashSelection, HashTest } from "./Common.t.sol";
+import { HashSelection, HashTest, ProofKind, InputLocation, GenerationMode } from "./Common.t.sol";
 import { LibBMT } from "../src/merkle/LibBMT.sol";
 
 /// @dev External entry points isolate gas measurements and expose calldata slices.
-contract BMTHarness is HashSelection {
+abstract contract BMTHarness is HashSelection {
     /// @dev Verify a memory single proof.
     function single(bytes32 root, uint256 leaves, uint256 index, bytes32 element, bytes32[] memory proof)
         external
@@ -67,7 +67,7 @@ contract BMTHarness is HashSelection {
     }
 }
 
-contract LibBMTTest is HashTest {
+abstract contract LibBMTTest is HashTest {
     struct Case {
         bytes32 root;
         uint256 leaves;
@@ -77,7 +77,7 @@ contract LibBMTTest is HashTest {
         bytes32[] proof;
     }
 
-    BMTHarness internal harness = new BMTHarness();
+    BMTHarness internal harness;
 
     /// @dev Build an independent complete tree and collect missing siblings by level.
     function fixture(uint256 size, uint256[] memory indices, bytes32 seed) internal pure returns (Case memory c) {
@@ -121,11 +121,11 @@ contract LibBMTTest is HashTest {
     }
 
     /// @dev Exercise memory and calldata variants with identical arguments.
-    function verifyCase(Case memory c, uint256 mode) internal view returns (bool result) {
-        if (mode == 0) {
+    function verifyCase(Case memory c, ProofKind mode) internal view returns (bool result) {
+        if (mode == ProofKind.Single) {
             result = harness.single(c.root, c.leaves, c.start, c.elements[0], c.proof);
             assertEq(result, harness.singleCalldata(c.root, c.leaves, c.start, c.elements[0], c.proof));
-        } else if (mode == 1) {
+        } else if (mode == ProofKind.Range) {
             result = harness.range(c.root, c.leaves, c.start, c.elements, c.proof);
             assertEq(result, harness.rangeCalldata(c.root, c.leaves, c.start, c.elements, c.proof));
         } else {
@@ -143,23 +143,23 @@ contract LibBMTTest is HashTest {
                 ? bytes32(0x784a1ebc13dd1197cb82f60cccc7608f891abcef018f1a85e484ebcb61a31d73)
                 : sha256(abi.encodePacked(uint32(0), sha256("")))
         );
-        assertTrue(verifyCase(c, 1));
-        assertTrue(verifyCase(c, 2));
+        assertTrue(verifyCase(c, ProofKind.Range));
+        assertTrue(verifyCase(c, ProofKind.Multi));
         c.start = 1;
-        assertFalse(verifyCase(c, 1));
+        assertFalse(verifyCase(c, ProofKind.Range));
         c.start = 0;
         c.root ^= bytes32(uint256(1));
-        assertFalse(verifyCase(c, 1));
-        assertFalse(verifyCase(c, 2));
+        assertFalse(verifyCase(c, ProofKind.Range));
+        assertFalse(verifyCase(c, ProofKind.Multi));
         c = fixture(1, new uint256[](0), 0);
-        assertFalse(verifyCase(c, 1));
-        assertFalse(verifyCase(c, 2));
+        assertFalse(verifyCase(c, ProofKind.Range));
+        assertFalse(verifyCase(c, ProofKind.Multi));
         assertFalse(harness.single(c.root, 0, 0, 0, c.proof));
         assertFalse(harness.singleCalldata(c.root, 0, 0, 0, c.proof));
         c = fixture(0, new uint256[](0), 0);
         c.proof = new bytes32[](1);
-        assertFalse(verifyCase(c, 1));
-        assertFalse(verifyCase(c, 2));
+        assertFalse(verifyCase(c, ProofKind.Range));
+        assertFalse(verifyCase(c, ProofKind.Multi));
     }
 
     /// @dev Assert literal single-leaf hashing and odd duplication without a witness.
@@ -175,9 +175,9 @@ contract LibBMTTest is HashTest {
         assertTrue(harness.single(root, 1, 0, element, new bytes32[](0)));
         for (uint256 n = 1; n <= 17; ++n) {
             Case memory c = fixture(n, consecutive(n - 1, 1), 0);
-            assertTrue(verifyCase(c, 0));
-            assertTrue(verifyCase(c, 1));
-            assertTrue(verifyCase(c, 2));
+            assertTrue(verifyCase(c, ProofKind.Single));
+            assertTrue(verifyCase(c, ProofKind.Range));
+            assertTrue(verifyCase(c, ProofKind.Multi));
             if (n == 3 || n == 5 || n == 9 || n == 17) assertEq(c.proof.length, 1);
         }
     }
@@ -188,8 +188,8 @@ contract LibBMTTest is HashTest {
             for (uint256 start; start < n; ++start) {
                 for (uint256 count = 1; count <= n - start; ++count) {
                     Case memory c = fixture(n, consecutive(start, count), 0);
-                    assertTrue(verifyCase(c, 1));
-                    assertTrue(verifyCase(c, 2));
+                    assertTrue(verifyCase(c, ProofKind.Range));
+                    assertTrue(verifyCase(c, ProofKind.Multi));
                 }
             }
         }
@@ -201,8 +201,8 @@ contract LibBMTTest is HashTest {
         uint256 start = uint256(s) % size;
         uint256 count = 1 + uint256(len) % (size - start);
         Case memory c = fixture(size, consecutive(start, count), seed);
-        assertTrue(verifyCase(c, 1));
-        assertTrue(verifyCase(c, 2));
+        assertTrue(verifyCase(c, ProofKind.Range));
+        assertTrue(verifyCase(c, ProofKind.Multi));
     }
 
     /// @dev Fuzz unsorted sparse pairs while preserving each element's index.
@@ -213,17 +213,18 @@ contract LibBMTTest is HashTest {
             indices[i] = (indices.length - 1 - i) * 3;
         }
         Case memory c = fixture(size, indices, seed);
-        assertTrue(verifyCase(c, 2));
+        assertTrue(verifyCase(c, ProofKind.Multi));
         if (indices.length > 1) {
             c.indices[1] = c.indices[0];
-            assertFalse(verifyCase(c, 2));
+            assertFalse(verifyCase(c, ProofKind.Multi));
         }
     }
 
     /// @dev Reject oversized counts, overflowed bounds, mismatched pairs and invalid positions.
     function test_MalformedBounds() public view {
         Case memory c = fixture(3, consecutive(1, 1), 0);
-        for (uint256 mode; mode < 3; ++mode) {
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+            ProofKind mode = ProofKind(proofIndex);
             c.leaves = uint256(type(uint32).max) + 1;
             assertFalse(verifyCase(c, mode));
             c.leaves = type(uint256).max;
@@ -239,15 +240,16 @@ contract LibBMTTest is HashTest {
             c.indices[0] = 1;
         }
         c.indices = new uint256[](0);
-        assertFalse(verifyCase(c, 2));
+        assertFalse(verifyCase(c, ProofKind.Multi));
         c = fixture(3, consecutive(0, 3), 0);
         c.start = 1;
-        assertFalse(verifyCase(c, 1));
+        assertFalse(verifyCase(c, ProofKind.Range));
     }
 
     /// @dev Reject missing, extra, reordered and corrupted witnesses in every mode.
     function test_ProofMutations() public view {
-        for (uint256 mode; mode < 3; ++mode) {
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+            ProofKind mode = ProofKind(proofIndex);
             Case memory c = fixture(13, consecutive(3, 1), 0);
             assertTrue(verifyCase(c, mode));
             bytes32 saved = c.proof[0];
@@ -277,7 +279,7 @@ contract LibBMTTest is HashTest {
     }
 
     /// @dev Check input immutability, zero slot, private scratch cleanup and subsequent allocations.
-    function checked(Case calldata c, uint256 mode, bool cd) external view returns (bool result) {
+    function checked(Case calldata c, ProofKind mode, InputLocation inputLocation) external view returns (bool result) {
         uint256[] memory indices = c.indices;
         bytes32[] memory elements = c.elements;
         bytes32[] memory proof = c.proof;
@@ -285,19 +287,22 @@ contract LibBMTTest is HashTest {
         uint256 beforePointer;
         assembly ("memory-safe") { beforePointer := mload(0x40) }
         uint256 scratchEnd = beforePointer;
-        if (mode == 1 && c.leaves <= type(uint32).max && c.start <= c.leaves && elements.length <= c.leaves - c.start) {
+        if (
+            mode == ProofKind.Range && c.leaves <= type(uint32).max && c.start <= c.leaves
+                && elements.length <= c.leaves - c.start
+        ) {
             scratchEnd += elements.length * 32;
         }
-        if (mode == 0) {
-            result = cd
+        if (mode == ProofKind.Single) {
+            result = inputLocation == InputLocation.Calldata
                 ? LibBMT.verifyCalldata(c.root, c.leaves, c.start, elements[0], c.proof, _hasher())
                 : LibBMT.verify(c.root, c.leaves, c.start, elements[0], proof, _hasher());
-        } else if (mode == 1) {
-            result = cd
+        } else if (mode == ProofKind.Range) {
+            result = inputLocation == InputLocation.Calldata
                 ? LibBMT.verifyRangeCalldata(c.root, c.leaves, c.start, c.elements, c.proof, _hasher())
                 : LibBMT.verifyRange(c.root, c.leaves, c.start, elements, proof, _hasher());
         } else {
-            result = cd
+            result = inputLocation == InputLocation.Calldata
                 ? LibBMT.verifyMultiCalldata(c.root, c.leaves, c.indices, c.elements, c.proof, _hasher())
                 : LibBMT.verifyMulti(c.root, c.leaves, indices, elements, proof, _hasher());
         }
@@ -319,27 +324,29 @@ contract LibBMTTest is HashTest {
 
     /// @dev Cover success and failure exits after partial reconstruction or sorting.
     function test_MemoryExitPaths() public view {
-        for (uint256 mode; mode < 3; ++mode) {
-            for (uint256 location; location < 2; ++location) {
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+            ProofKind mode = ProofKind(proofIndex);
+            for (uint256 locationIndex; locationIndex <= uint256(InputLocation.Calldata); ++locationIndex) {
+                InputLocation inputLocation = InputLocation(locationIndex);
                 Case memory c = fixture(7, consecutive(2, 1), 0);
-                assertTrue(this.checked(c, mode, location != 0));
+                assertTrue(this.checked(c, mode, inputLocation));
                 c.proof = new bytes32[](0);
-                assertFalse(this.checked(c, mode, location != 0));
+                assertFalse(this.checked(c, mode, inputLocation));
                 c = fixture(7, consecutive(2, 1), 0);
                 c.root = 0;
-                assertFalse(this.checked(c, mode, location != 0));
+                assertFalse(this.checked(c, mode, inputLocation));
                 c.leaves = type(uint256).max;
-                assertFalse(this.checked(c, mode, location != 0));
+                assertFalse(this.checked(c, mode, inputLocation));
             }
         }
         Case memory sparse = fixture(7, consecutive(1, 4), 0);
         (sparse.indices[0], sparse.indices[3]) = (sparse.indices[3], sparse.indices[0]);
         (sparse.elements[0], sparse.elements[3]) = (sparse.elements[3], sparse.elements[0]);
-        assertTrue(this.checked(sparse, 2, false));
-        assertTrue(this.checked(sparse, 2, true));
+        assertTrue(this.checked(sparse, ProofKind.Multi, InputLocation.Memory));
+        assertTrue(this.checked(sparse, ProofKind.Multi, InputLocation.Calldata));
         sparse.indices[1] = sparse.indices[0];
-        assertFalse(this.checked(sparse, 2, false));
-        assertFalse(this.checked(sparse, 2, true));
+        assertFalse(this.checked(sparse, ProofKind.Multi, InputLocation.Memory));
+        assertFalse(this.checked(sparse, ProofKind.Multi, InputLocation.Calldata));
     }
 
     /// @dev Shared element and proof arrays remain readable and unchanged.
@@ -360,33 +367,35 @@ contract LibBMTTest is HashTest {
     function testFuzz_MemorySafety(uint8 n, uint8 s, uint8 len, bytes32 seed, bool malformed) public view {
         uint256 size = uint256(n) + 1;
         uint256 start = uint256(s) % size;
-        for (uint256 mode; mode < 3; ++mode) {
-            uint256 count = mode == 0 ? 1 : 1 + uint256(len) % (size - start);
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+            ProofKind mode = ProofKind(proofIndex);
+            uint256 count = mode == ProofKind.Single ? 1 : 1 + uint256(len) % (size - start);
             Case memory c = fixture(size, consecutive(start, count), seed);
-            if (mode == 2 && count > 1) {
+            if (mode == ProofKind.Multi && count > 1) {
                 (c.indices[0], c.indices[count - 1]) = (c.indices[count - 1], c.indices[0]);
                 (c.elements[0], c.elements[count - 1]) = (c.elements[count - 1], c.elements[0]);
             }
             if (malformed) c.root ^= bytes32(uint256(1));
-            assertEq(this.checked(c, mode, false), !malformed);
-            assertEq(this.checked(c, mode, true), !malformed);
+            assertEq(this.checked(c, mode, InputLocation.Memory), !malformed);
+            assertEq(this.checked(c, mode, InputLocation.Calldata), !malformed);
         }
     }
 
     /// @dev Exercise empty and invalid sparse-index exits in the memory harness.
     function test_MemoryEmptyAndBounds() public view {
         Case memory c = fixture(0, new uint256[](0), 0);
-        for (uint256 mode = 1; mode < 3; ++mode) {
-            assertTrue(this.checked(c, mode, false));
-            assertTrue(this.checked(c, mode, true));
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); proofIndex += 2) {
+            ProofKind mode = ProofKind(proofIndex);
+            assertTrue(this.checked(c, mode, InputLocation.Memory));
+            assertTrue(this.checked(c, mode, InputLocation.Calldata));
         }
         c = fixture(5, consecutive(1, 2), 0);
         c.indices[1] = 5;
-        assertFalse(this.checked(c, 2, false));
-        assertFalse(this.checked(c, 2, true));
+        assertFalse(this.checked(c, ProofKind.Multi, InputLocation.Memory));
+        assertFalse(this.checked(c, ProofKind.Multi, InputLocation.Calldata));
         c.indices = new uint256[](0);
-        assertFalse(this.checked(c, 2, false));
-        assertFalse(this.checked(c, 2, true));
+        assertFalse(this.checked(c, ProofKind.Multi, InputLocation.Memory));
+        assertFalse(this.checked(c, ProofKind.Multi, InputLocation.Calldata));
     }
 
     /// @dev Verify arrays whose calldata offsets begin after unrelated sentinels.
@@ -430,12 +439,12 @@ contract LibBMTTest is HashTest {
     function testGas_Verification() public {
         Case memory c = fixture(256, consecutive(127, 1), 0);
         assertTrue(harness.single(c.root, c.leaves, c.start, c.elements[0], c.proof));
-        vm.snapshotGasLastFrame(_group("BMT"), "single-256");
+        vm.snapshotGasLastFrame(_group("BMT"), "single-256-memory");
         assertTrue(harness.singleCalldata(c.root, c.leaves, c.start, c.elements[0], c.proof));
         vm.snapshotGasLastFrame(_group("BMT"), "single-256-calldata");
         c = fixture(256, consecutive(93, 32), 0);
         assertTrue(harness.range(c.root, c.leaves, c.start, c.elements, c.proof));
-        vm.snapshotGasLastFrame(_group("BMT"), "range-256-32");
+        vm.snapshotGasLastFrame(_group("BMT"), "range-256-32-memory");
         assertTrue(harness.rangeCalldata(c.root, c.leaves, c.start, c.elements, c.proof));
         vm.snapshotGasLastFrame(_group("BMT"), "range-256-32-calldata");
         uint256[] memory indices = new uint256[](16);
@@ -444,23 +453,32 @@ contract LibBMTTest is HashTest {
         }
         c = fixture(256, indices, 0);
         assertTrue(harness.multi(c.root, c.leaves, c.indices, c.elements, c.proof));
-        vm.snapshotGasLastFrame(_group("BMT"), "multi-256-16");
+        vm.snapshotGasLastFrame(_group("BMT"), "multi-256-16-memory");
         assertTrue(harness.multiCalldata(c.root, c.leaves, c.indices, c.elements, c.proof));
         vm.snapshotGasLastFrame(_group("BMT"), "multi-256-16-calldata");
     }
 
     /// @dev Invoke Commonware's actual BMT generator.
-    function generate(uint256 leaves, uint256 start, uint256 count, uint64 seed, bool synthetic)
+    function generate(uint256 leaves, uint256 start, uint256 count, uint64 seed, GenerationMode generation)
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](synthetic ? 6 : 7);
+        if (generation == GenerationMode.Synthetic) {
+            assertEq(count, 1, "synthetic BMT proofs contain one element");
+        }
+        string[] memory args = new string[](generation == GenerationMode.Synthetic ? 9 : 11);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "bmt";
-        args[2] = synthetic ? "synthetic" : "generate";
-        args[3] = vm.toString(leaves);
-        args[4] = vm.toString(start);
-        if (!synthetic) args[5] = vm.toString(count);
+        args[2] = generation == GenerationMode.Synthetic ? "synthetic" : "generate";
+        args[3] = "--leaves";
+        args[4] = vm.toString(leaves);
+        args[5] = generation == GenerationMode.Synthetic ? "--index" : "--start";
+        args[6] = vm.toString(start);
+        if (generation == GenerationMode.Materialized) {
+            args[7] = "--count";
+            args[8] = vm.toString(count);
+        }
+        args[args.length - 2] = "--seed";
         args[args.length - 1] = vm.toString(uint256(seed));
         return decodeCase(_ffi(args));
     }
@@ -472,13 +490,15 @@ contract LibBMTTest is HashTest {
     }
 
     /// @dev Compare both Solidity input locations with the Rust verification result.
-    function compare(Case memory c, uint256 mode) internal returns (bool result) {
-        string[] memory args = new string[](5);
+    function compare(Case memory c, ProofKind mode) internal returns (bool result) {
+        string[] memory args = new string[](7);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "bmt";
         args[2] = "check";
-        args[3] = mode == 0 ? "single" : mode == 1 ? "range" : "multi";
-        args[4] = vm.toString(abi.encode(c.root, c.leaves, c.start, c.indices, c.elements, c.proof));
+        args[3] = "--mode";
+        args[4] = mode == ProofKind.Single ? "single" : mode == ProofKind.Range ? "range" : "multi";
+        args[5] = "--abi";
+        args[6] = vm.toString(abi.encode(c.root, c.leaves, c.start, c.indices, c.elements, c.proof));
         result = verifyCase(c, mode);
         assertEq(result, abi.decode(_ffi(args), (bool)), "Rust disagreement");
     }
@@ -487,20 +507,20 @@ contract LibBMTTest is HashTest {
     function testFuzz_DifferentialRange(uint8 n, uint8 s, uint8 len, uint64 seed) public {
         uint256 size = uint256(n) + 1;
         uint256 start = uint256(s) % size;
-        Case memory c = generate(size, start, 1 + uint256(len) % (size - start), seed, false);
-        assertTrue(compare(c, 1));
-        assertTrue(compare(c, 2));
+        Case memory c = generate(size, start, 1 + uint256(len) % (size - start), seed, GenerationMode.Materialized);
+        assertTrue(compare(c, ProofKind.Range));
+        assertTrue(compare(c, ProofKind.Multi));
         c.elements[0] ^= bytes32(uint256(1));
-        assertFalse(compare(c, 1));
+        assertFalse(compare(c, ProofKind.Range));
     }
 
     /// @dev Differentially fuzz single-leaf proofs from bounded complete trees.
     function testFuzz_DifferentialSingle(uint8 n, uint8 index, uint64 seed) public {
         uint256 size = uint256(n) + 1;
-        Case memory c = generate(size, uint256(index) % size, 1, seed, false);
-        assertTrue(compare(c, 0));
+        Case memory c = generate(size, uint256(index) % size, 1, seed, GenerationMode.Materialized);
+        assertTrue(compare(c, ProofKind.Single));
         c.proof = new bytes32[](0);
-        compare(c, 0);
+        compare(c, ProofKind.Single);
     }
 
     /// @dev Differentially fuzz sparse proofs with unsorted indices and duplicate rejection.
@@ -510,29 +530,32 @@ contract LibBMTTest is HashTest {
         for (uint256 i = size - 1; i > 2; i -= 3) {
             csv = string.concat(csv, ",", vm.toString(i - 3));
         }
-        string[] memory args = new string[](6);
+        string[] memory args = new string[](9);
         args[0] = string.concat(vm.projectRoot(), "/../target/release/commonware-sol-fuzz");
         args[1] = "bmt";
         args[2] = "generate-multi";
-        args[3] = vm.toString(size);
-        args[4] = csv;
-        args[5] = vm.toString(uint256(seed));
+        args[3] = "--leaves";
+        args[4] = vm.toString(size);
+        args[5] = "--indices";
+        args[6] = csv;
+        args[7] = "--seed";
+        args[8] = vm.toString(uint256(seed));
         Case memory c = decodeCase(_ffi(args));
-        assertTrue(compare(c, 2));
+        assertTrue(compare(c, ProofKind.Multi));
         if (c.proof.length > 1) {
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
-            assertFalse(compare(c, 2));
+            assertFalse(compare(c, ProofKind.Multi));
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
         }
         if (c.proof.length > 0) {
             bytes32[] memory proof = c.proof;
             assembly ("memory-safe") { mstore(proof, sub(mload(proof), 1)) }
-            assertFalse(compare(c, 2));
+            assertFalse(compare(c, ProofKind.Multi));
             assembly ("memory-safe") { mstore(proof, add(mload(proof), 1)) }
         }
         if (c.indices.length > 1) {
             c.indices[1] = c.indices[0];
-            assertFalse(compare(c, 2));
+            assertFalse(compare(c, ProofKind.Multi));
         }
     }
 
@@ -540,8 +563,9 @@ contract LibBMTTest is HashTest {
     function test_DifferentialMaximumSize() public {
         uint256 size = type(uint32).max;
         for (uint256 i; i < 3; ++i) {
-            Case memory c = generate(size, i == 0 ? 0 : i == 1 ? size / 2 : size - 1, 1, 7, true);
-            for (uint256 mode; mode < 3; ++mode) {
+            Case memory c = generate(size, i == 0 ? 0 : i == 1 ? size / 2 : size - 1, 1, 7, GenerationMode.Synthetic);
+            for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+                ProofKind mode = ProofKind(proofIndex);
                 assertTrue(compare(c, mode));
             }
         }
@@ -549,14 +573,15 @@ contract LibBMTTest is HashTest {
 
     /// @dev Compare empty proofs and out-of-domain integer bounds with Rust.
     function test_DifferentialEmptyAndBounds() public {
-        Case memory c = generate(0, 0, 0, 0, false);
-        assertTrue(compare(c, 1));
-        assertTrue(compare(c, 2));
+        Case memory c = generate(0, 0, 0, 0, GenerationMode.Materialized);
+        assertTrue(compare(c, ProofKind.Range));
+        assertTrue(compare(c, ProofKind.Multi));
         c.start = 1;
-        assertFalse(compare(c, 1));
-        c = generate(3, 1, 1, 0, false);
+        assertFalse(compare(c, ProofKind.Range));
+        c = generate(3, 1, 1, 0, GenerationMode.Materialized);
         c.leaves = type(uint256).max;
-        for (uint256 mode; mode < 3; ++mode) {
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+            ProofKind mode = ProofKind(proofIndex);
             assertFalse(compare(c, mode));
         }
     }
@@ -580,15 +605,16 @@ contract LibBMTTest is HashTest {
         for (uint256 i; i < c.proof.length; ++i) {
             c.proof[i] = keccak256(abi.encode(seed, "proof", i));
         }
-        compare(c, 1);
-        compare(c, 2);
-        if (count == 1) compare(c, 0);
+        compare(c, ProofKind.Range);
+        compare(c, ProofKind.Multi);
+        if (count == 1) compare(c, ProofKind.Single);
     }
 
     /// @dev Compare missing, extra, reordered and malformed bounds against the actual Rust verifier.
     function test_DifferentialMutations() public {
-        for (uint256 mode; mode < 3; ++mode) {
-            Case memory c = generate(13, 3, 1, 9, false);
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+            ProofKind mode = ProofKind(proofIndex);
+            Case memory c = generate(13, 3, 1, 9, GenerationMode.Materialized);
             assertTrue(compare(c, mode));
             (c.proof[0], c.proof[1]) = (c.proof[1], c.proof[0]);
             assertFalse(compare(c, mode));
@@ -596,14 +622,14 @@ contract LibBMTTest is HashTest {
             bytes32[] memory proof = c.proof;
             assembly ("memory-safe") { mstore(proof, sub(mload(proof), 1)) }
             assertFalse(compare(c, mode));
-            c = generate(13, 3, 1, 9, false);
+            c = generate(13, 3, 1, 9, GenerationMode.Materialized);
             bytes32[] memory extra = new bytes32[](c.proof.length + 1);
             for (uint256 i; i < c.proof.length; ++i) {
                 extra[i] = c.proof[i];
             }
             c.proof = extra;
             assertFalse(compare(c, mode));
-            c = generate(13, 3, 1, 9, false);
+            c = generate(13, 3, 1, 9, GenerationMode.Materialized);
             c.start = uint256(type(uint32).max) + 1;
             c.indices[0] = c.start;
             assertFalse(compare(c, mode));
@@ -613,29 +639,41 @@ contract LibBMTTest is HashTest {
     /// @dev Fuzz the 32-bit tree-size domain using bounded synthetic branches.
     function testFuzz_DifferentialDeep(uint32 n, uint32 index, uint64 seed) public {
         uint256 size = n == 0 ? 1 : uint256(n);
-        Case memory c = generate(size, uint256(index) % size, 1, seed, true);
-        for (uint256 mode; mode < 3; ++mode) {
+        Case memory c = generate(size, uint256(index) % size, 1, seed, GenerationMode.Synthetic);
+        for (uint256 proofIndex; proofIndex <= uint256(ProofKind.Multi); ++proofIndex) {
+            ProofKind mode = ProofKind(proofIndex);
             assertTrue(compare(c, mode));
         }
     }
 }
 
-/// @dev SHA-256 specialization keeps the verifier's hasher constant at each call site.
+contract BMTKeccak256Harness is BMTHarness {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
+    }
+}
+
+contract LibBMTKeccak256Test is LibBMTTest {
+    function _hasher() internal pure override returns (address) {
+        return address(0);
+    }
+
+    function setUp() public {
+        harness = new BMTKeccak256Harness();
+    }
+}
+
 contract BMTSha256Harness is BMTHarness {
-    /// @dev Select the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 }
 
-/// @dev Exercise the full BMT suite with SHA-256 and the Rust SHA-256 oracle.
 contract LibBMTSha256Test is LibBMTTest {
-    /// @dev Select the SHA-256 precompile.
     function _hasher() internal pure override returns (address) {
         return address(2);
     }
 
-    /// @dev Install the SHA-256 harness for memory and calldata verification.
     function setUp() public {
         harness = new BMTSha256Harness();
     }

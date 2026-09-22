@@ -161,8 +161,8 @@ fn fuzz(input: FuzzInput) {
         // Generate peer identities
         let mut peer_pks = Vec::new();
         for _ in 0..num_peers {
-            let private_key = ed25519::PrivateKey::from_seed(context.random());
-            peer_pks.push(private_key.public_key());
+            let signer = ed25519::PrivateKey::from_seed(context.random());
+            peer_pks.push(signer.public_key());
         }
 
         // Create the simulated network and oracle for controlling it

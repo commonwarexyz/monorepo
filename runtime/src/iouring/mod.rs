@@ -5,16 +5,16 @@
 //! Their ordinary descendants execute on the runner's calling thread. Task
 //! factories run synchronously on the thread that calls [`crate::Spawner::spawn`].
 //!
-//! Sockets and blobs can move between workers between operations. Ordinary I/O
-//! futures that register requests remain bound to their first polling worker,
-//! including when consuming completed results. Completion handles returned by
-//! [`crate::Blob::start_sync`] can be awaited on another thread, even after the
-//! original runner shuts down.
+//! Sockets, blobs, and pending I/O and sleep futures can move between workers.
+//! Registrations stay on their original worker without keeping it alive. If it
+//! closes, pending I/O futures return errors and pending sleeps panic when polled.
+//! [`crate::Blob::start_sync`] handles can be awaited on another thread, even after
+//! the original runner shuts down.
 //!
 //! # Ownership
 //!
-//! Local tasks, requests, timers, and ordinary results need no shared locks.
-//! Shared state such as mailboxes, task handles, supervision, and metrics is
+//! Worker-local tasks, requests, timers, and results need no shared locks.
+//! Forwarded results, mailboxes, task handles, supervision, and metrics are
 //! synchronized across threads.
 //!
 //! # Requirements and Progress
@@ -51,6 +51,7 @@
 mod driver;
 mod mailbox;
 pub(crate) mod operation;
+mod registration;
 pub(crate) mod request;
 mod runtime;
 mod slab;

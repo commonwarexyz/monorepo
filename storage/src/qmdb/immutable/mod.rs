@@ -81,6 +81,7 @@ use crate::{
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
         Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
+        sync::source,
     },
     translator::Translator,
 };
@@ -129,8 +130,10 @@ where
     C: Contiguous<Item = Operation<F, K, V>>,
     T: Translator,
 {
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
     let stream = log
-        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::default())
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
         .await?;
     pin_mut!(stream);
     while let Some(result) = stream.next().await {
@@ -844,7 +847,7 @@ where
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
-    C::Item: EncodeShared,
+    Operation<F, K, V>: EncodeShared,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -854,16 +857,7 @@ where
     type Op = Operation<F, K, V>;
     type Error = Error<F>;
 
-    async fn serve(
-        &self,
-        request: crate::qmdb::sync::Request<F>,
-    ) -> Result<
-        (
-            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
-            crate::qmdb::sync::FeedbackTx,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: crate::qmdb::sync::Request<F>) -> source::Result<Self> {
         self.journal.serve(request).await
     }
 }

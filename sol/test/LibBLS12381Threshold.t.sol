@@ -2,32 +2,34 @@
 pragma solidity ^0.8.15;
 
 import { Test } from "forge-std/Test.sol";
+import { BLSVariant } from "./Common.t.sol";
+import { LibBLS12381 as BLS } from "../src/certificate/LibBLS12381.sol";
 import { LibBLS12381Threshold as Certificate } from "../src/certificate/LibBLS12381Threshold.sol";
 
 /// @dev External calls exercise ABI boundaries and memory ownership around library calls.
 contract CertificateHarness is Test {
     /// @dev Verify compact signature bytes against a padded key and a namespaced message.
     function verify(
-        bool minSig,
+        BLSVariant variant,
         bytes calldata signature,
         bytes memory key,
         bytes memory namespace,
         bytes memory message
     ) external view returns (bool) {
-        return minSig
-            ? Certificate.verifyMinSig(signature, abi.decode(key, (Certificate.G2Point)), namespace, message)
-            : Certificate.verifyMinPk(signature, abi.decode(key, (Certificate.G1Point)), namespace, message);
+        return variant == BLSVariant.MinSig
+            ? Certificate.verifyMinSig(signature, abi.decode(key, (BLS.G2Point)), namespace, message)
+            : Certificate.verifyMinPk(signature, abi.decode(key, (BLS.G1Point)), namespace, message);
     }
 
     /// @dev Encode a hash point in the same padded format as the reference generator.
-    function hash(bool minSig, bytes memory namespace, bytes memory message) public view returns (bytes memory) {
-        return minSig
-            ? abi.encode(Certificate.hashToG1(namespace, message))
-            : abi.encode(Certificate.hashToG2(namespace, message));
+    function hash(BLSVariant variant, bytes memory namespace, bytes memory message) public view returns (bytes memory) {
+        return variant == BLSVariant.MinSig
+            ? abi.encode(BLS.hashToG1(namespace, message))
+            : abi.encode(BLS.hashToG2(namespace, message));
     }
 
     /// @dev Exercise hashing after dirty scratch, then allocate and hash again.
-    function checkedHash(bool minSig, bytes memory namespace, bytes memory message)
+    function checkedHash(BLSVariant variant, bytes memory namespace, bytes memory message)
         external
         view
         returns (bytes memory point)
@@ -40,7 +42,7 @@ contract CertificateHarness is Test {
             mstore(0x20, not(0))
             for { let p := beforeFree } lt(p, add(beforeFree, 0x1000)) { p := add(p, 0x20) } { mstore(p, not(0)) }
         }
-        point = hash(minSig, namespace, message);
+        point = hash(variant, namespace, message);
         uint256 afterFree;
         uint256 zero;
         assembly ("memory-safe") {
@@ -56,7 +58,7 @@ contract CertificateHarness is Test {
             assertEq(fresh[i], bytes1(0), "dirty fresh allocation");
         }
         bytes32 freshHash = keccak256(fresh);
-        assertEq(hash(minSig, namespace, message), point, "hash changed after allocation");
+        assertEq(hash(variant, namespace, message), point, "hash changed after allocation");
         assertEq(keccak256(fresh), freshHash, "later call changed allocation");
         assertEq(keccak256(abi.encode(namespace, message)), beforeInput, "later call changed inputs");
     }
@@ -77,25 +79,25 @@ contract LibBLS12381ThresholdTest is Test {
     }
 
     function test_EncodeMessage() public pure {
-        assertEq(Certificate.encodeMessage("", ""), hex"00");
-        assertEq(Certificate.encodeMessage(hex"0102", hex"0304"), hex"0201020304");
-        assertNotEq(Certificate.encodeMessage("a", "bc"), Certificate.encodeMessage("ab", "c"));
-        assertEq(Certificate.encodeMessage(new bytes(127), hex"01"), bytes.concat(hex"7f", new bytes(127), hex"01"));
-        assertEq(Certificate.encodeMessage(new bytes(128), hex"01"), bytes.concat(hex"8001", new bytes(128), hex"01"));
+        assertEq(BLS.encodeMessage("", ""), hex"00");
+        assertEq(BLS.encodeMessage(hex"0102", hex"0304"), hex"0201020304");
+        assertNotEq(BLS.encodeMessage("a", "bc"), BLS.encodeMessage("ab", "c"));
+        assertEq(BLS.encodeMessage(new bytes(127), hex"01"), bytes.concat(hex"7f", new bytes(127), hex"01"));
+        assertEq(BLS.encodeMessage(new bytes(128), hex"01"), bytes.concat(hex"8001", new bytes(128), hex"01"));
     }
 
     /// @dev Signature size checks must reject truncated and extended encodings.
     function test_InvalidLengths() public view {
-        assertFalse(harness.verify(true, new bytes(95), new bytes(256), "", "message"));
-        assertFalse(harness.verify(true, new bytes(97), new bytes(256), "", "message"));
-        assertFalse(harness.verify(false, new bytes(191), new bytes(128), "", "message"));
-        assertFalse(harness.verify(false, new bytes(193), new bytes(128), "", "message"));
+        assertFalse(harness.verify(BLSVariant.MinSig, new bytes(95), new bytes(256), "", "message"));
+        assertFalse(harness.verify(BLSVariant.MinSig, new bytes(97), new bytes(256), "", "message"));
+        assertFalse(harness.verify(BLSVariant.MinPk, new bytes(191), new bytes(128), "", "message"));
+        assertFalse(harness.verify(BLSVariant.MinPk, new bytes(193), new bytes(128), "", "message"));
     }
 
     /// @dev Pairing identity inputs cannot authenticate a message.
     function test_IdentityRejected() public view {
-        assertFalse(harness.verify(true, new bytes(96), new bytes(256), "", "message"));
-        assertFalse(harness.verify(false, new bytes(192), new bytes(128), "", "message"));
+        assertFalse(harness.verify(BLSVariant.MinSig, new bytes(96), new bytes(256), "", "message"));
+        assertFalse(harness.verify(BLSVariant.MinPk, new bytes(192), new bytes(128), "", "message"));
     }
 
     /// @dev Cover block boundaries and long inputs with dirty scratch and later allocations.
@@ -106,75 +108,81 @@ contract LibBLS12381ThresholdTest is Test {
             for (uint256 j = 0; j < input.length; ++j) {
                 input[j] = bytes1(uint8(j & 0xff));
             }
-            harness.checkedHash(true, input, input);
-            harness.checkedHash(false, input, input);
+            harness.checkedHash(BLSVariant.MinSig, input, input);
+            harness.checkedHash(BLSVariant.MinPk, input, input);
         }
     }
 
     /// @dev Compare namespaced hash-to-curve points for arbitrary namespace/message boundaries.
-    function testFuzz_DifferentialHash(bool minSig, bytes memory namespace, bytes memory message) public {
-        string[] memory args = new string[](6);
+    function testFuzz_DifferentialHash(BLSVariant variant, bytes memory namespace, bytes memory message) public {
+        string[] memory args = new string[](9);
         args[0] = _binary();
         args[1] = "certificate";
         args[2] = "hash";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(namespace);
-        args[5] = vm.toString(message);
+        args[3] = "--variant";
+        args[4] = variant == BLSVariant.MinSig ? "minsig" : "minpk";
+        args[5] = "--namespace";
+        args[6] = vm.toString(namespace);
+        args[7] = "--message";
+        args[8] = vm.toString(message);
         bytes memory expected = abi.decode(vm.ffi(args), (bytes));
-        assertEq(harness.checkedHash(minSig, namespace, message), expected);
+        assertEq(harness.checkedHash(variant, namespace, message), expected);
     }
 
     /// @dev Recovered certificates bind the namespace and encoded subject independently.
-    function testFuzz_DifferentialCertificate(bool minSig, bytes memory namespace, bytes memory message, uint64 seed)
-        public
-    {
-        Case memory c = _generate(minSig, namespace, message, seed);
-        assertEq(Certificate.encodeMessage(namespace, message), c.message, "signing transcript mismatch");
-        assertEq(harness.hash(minSig, namespace, message), c.point, "hash point mismatch");
-        _compare(minSig, namespace, message, c, true);
-        _compare(minSig, namespace, bytes.concat(message, hex"01"), c, false);
-        _compare(minSig, bytes.concat(namespace, hex"01"), message, c, false);
+    function testFuzz_DifferentialCertificate(
+        BLSVariant variant,
+        bytes memory namespace,
+        bytes memory message,
+        uint64 seed
+    ) public {
+        Case memory c = _generate(variant, namespace, message, seed);
+        assertEq(BLS.encodeMessage(namespace, message), c.message, "signing transcript mismatch");
+        assertEq(harness.hash(variant, namespace, message), c.point, "hash point mismatch");
+        _compare(variant, namespace, message, c, true);
+        _compare(variant, namespace, bytes.concat(message, hex"01"), c, false);
+        _compare(variant, bytes.concat(namespace, hex"01"), message, c, false);
     }
 
     function test_DifferentialNamespaceFraming() public {
-        for (uint256 family; family != 2; ++family) {
-            bool minSig = family == 0;
-            Case memory c = _generate(minSig, "", "", 9);
-            _compare(minSig, "", "", c, true);
-            c = _generate(minSig, "a", "bc", 9);
-            _compare(minSig, "a", "bc", c, true);
-            _compare(minSig, "ab", "c", c, false);
+        for (uint256 variantIndex; variantIndex <= uint256(BLSVariant.MinPk); ++variantIndex) {
+            BLSVariant variant = BLSVariant(variantIndex);
+            Case memory c = _generate(variant, "", "", 9);
+            _compare(variant, "", "", c, true);
+            c = _generate(variant, "a", "bc", 9);
+            _compare(variant, "a", "bc", c, true);
+            _compare(variant, "ab", "c", c, false);
         }
     }
 
     /// @dev Reject invalid lengths, coordinate encodings, and identities using bounded external calls.
     function test_DifferentialMalformedPoints() public {
-        for (uint256 family = 0; family != 2; ++family) {
-            bool minSig = family == 0;
+        for (uint256 variantIndex; variantIndex <= uint256(BLSVariant.MinPk); ++variantIndex) {
+            BLSVariant variant = BLSVariant(variantIndex);
             bytes memory namespace = bytes("certificate");
             bytes memory message = abi.encodePacked(bytes32(uint256(7)));
-            Case memory c = _generate(minSig, namespace, message, 9);
-            _compare(minSig, namespace, message, c, true);
+            Case memory c = _generate(variant, namespace, message, 9);
+            _compare(variant, namespace, message, c, true);
             bytes memory signature = c.signature;
             c.signature = new bytes(signature.length - 1);
             for (uint256 i = 0; i != c.signature.length; ++i) {
                 c.signature[i] = signature[i];
             }
-            _compare(minSig, namespace, message, c, false);
+            _compare(variant, namespace, message, c, false);
             c.signature = bytes.concat(signature, hex"00");
-            _compare(minSig, namespace, message, c, false);
+            _compare(variant, namespace, message, c, false);
             c.signature = new bytes(signature.length);
-            _compare(minSig, namespace, message, c, false);
+            _compare(variant, namespace, message, c, false);
             c.signature = bytes.concat(signature);
             c.signature[0] = 0xff;
-            _compare(minSig, namespace, message, c, false);
+            _compare(variant, namespace, message, c, false);
             c.signature = signature;
             bytes memory key = c.key;
             c.key = new bytes(key.length);
-            _compare(minSig, namespace, message, c, false);
+            _compare(variant, namespace, message, c, false);
             c.key = bytes.concat(key);
             c.key[0] = 0xff;
-            _compare(minSig, namespace, message, c, false);
+            _compare(variant, namespace, message, c, false);
         }
     }
 
@@ -182,45 +190,56 @@ contract LibBLS12381ThresholdTest is Test {
     function test_DifferentialGas() public {
         bytes memory namespace = bytes("certificate");
         bytes memory message = abi.encodePacked(bytes32(uint256(7)));
-        for (uint256 family; family != 2; ++family) {
-            bool minSig = family == 0;
-            Case memory c = _generate(minSig, namespace, message, 9);
-            assertTrue(harness.verify(minSig, c.signature, c.key, namespace, message));
-            vm.snapshotGasLastFrame("BLS12381Threshold", minSig ? "minsig" : "minpk");
+        for (uint256 variantIndex; variantIndex <= uint256(BLSVariant.MinPk); ++variantIndex) {
+            BLSVariant variant = BLSVariant(variantIndex);
+            Case memory c = _generate(variant, namespace, message, 9);
+            assertTrue(harness.verify(variant, c.signature, c.key, namespace, message));
+            vm.snapshotGasLastFrame("BLS12381Threshold", variant == BLSVariant.MinSig ? "minsig" : "minpk");
         }
     }
 
-    function _generate(bool minSig, bytes memory namespace, bytes memory message, uint64 seed)
+    function _generate(BLSVariant variant, bytes memory namespace, bytes memory message, uint64 seed)
         internal
         returns (Case memory c)
     {
-        string[] memory args = new string[](7);
+        string[] memory args = new string[](12);
         args[0] = _binary();
         args[1] = "certificate";
-        args[2] = "generate";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(namespace);
-        args[5] = vm.toString(message);
-        args[6] = vm.toString(uint256(seed));
+        args[2] = "threshold";
+        args[3] = "generate";
+        args[4] = "--variant";
+        args[5] = variant == BLSVariant.MinSig ? "minsig" : "minpk";
+        args[6] = "--namespace";
+        args[7] = vm.toString(namespace);
+        args[8] = "--message";
+        args[9] = vm.toString(message);
+        args[10] = "--seed";
+        args[11] = vm.toString(uint256(seed));
         (c.signature, c.key, c.message, c.point) = abi.decode(vm.ffi(args), (bytes, bytes, bytes, bytes));
     }
 
     /// @dev Invalid precompile inputs get a bounded budget so every rejection case can complete.
-    function _compare(bool minSig, bytes memory namespace, bytes memory message, Case memory c, bool expected)
+    function _compare(BLSVariant variant, bytes memory namespace, bytes memory message, Case memory c, bool expected)
         internal
     {
-        string[] memory args = new string[](8);
+        string[] memory args = new string[](14);
         args[0] = _binary();
         args[1] = "certificate";
-        args[2] = "check";
-        args[3] = minSig ? "minsig" : "minpk";
-        args[4] = vm.toString(c.key);
-        args[5] = vm.toString(namespace);
-        args[6] = vm.toString(message);
-        args[7] = vm.toString(c.signature);
+        args[2] = "threshold";
+        args[3] = "check";
+        args[4] = "--variant";
+        args[5] = variant == BLSVariant.MinSig ? "minsig" : "minpk";
+        args[6] = "--public-key";
+        args[7] = vm.toString(c.key);
+        args[8] = "--namespace";
+        args[9] = vm.toString(namespace);
+        args[10] = "--message";
+        args[11] = vm.toString(message);
+        args[12] = "--signature";
+        args[13] = vm.toString(c.signature);
         assertEq(abi.decode(vm.ffi(args), (bool)), expected, "Commonware result");
         (bool ok, bytes memory result) = address(harness).staticcall{ gas: 1_000_000 }(
-            abi.encodeCall(harness.verify, (minSig, c.signature, c.key, namespace, message))
+            abi.encodeCall(harness.verify, (variant, c.signature, c.key, namespace, message))
         );
         assertTrue(ok, "verifier reverted");
         assertEq(abi.decode(result, (bool)), expected, "Solidity result");
