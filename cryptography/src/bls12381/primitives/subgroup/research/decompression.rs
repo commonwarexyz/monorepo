@@ -10,6 +10,9 @@ use std::hint::black_box;
 #[path = "decompression/batch.rs"]
 mod batch;
 
+#[path = "decompression/triple.rs"]
+mod triple;
+
 // A primitive ninth root of unity, 2^((p - 1) / 9), in Montgomery form.
 const ROOT_NINE: blst_fp = blst_fp {
     l: [

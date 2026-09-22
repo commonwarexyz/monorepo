@@ -42,7 +42,7 @@ fn extract<const N: usize>(inputs: &[blst_fp; N]) -> Option<[blst_fp; N]> {
     Some(roots)
 }
 
-fn run<const N: usize>(inputs: &[blst_fp]) -> Option<Vec<blst_fp>> {
+pub(super) fn run<const N: usize>(inputs: &[blst_fp]) -> Option<Vec<blst_fp>> {
     assert!(N > 0);
     let mut output = Vec::with_capacity(inputs.len());
     for chunk in inputs.chunks(N) {

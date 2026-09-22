@@ -2,10 +2,10 @@
 
 The test-only prototype in
 [`decompression.rs`](src/bls12381/primitives/subgroup/research/decompression.rs)
-reduces measured serial decoding plus 128-bit subgroup checking by **41% at
-100,000 points (1.70x faster)** without increasing the encoded size. Joint
-encoding alone initially saved 27%; interleaving the remaining roots saves
-another 20.5% in the latest side-by-side comparison below. It changes the batch
+reduces measured serial decoding plus 128-bit subgroup checking by **54% at
+100,000 points (2.17x faster)** without increasing the encoded size. The latest
+three-point representation saves another 22% over the interleaved pair decoder.
+Decoding alone is 2.78x faster than standard compression. It changes the batch
 encoding; it cannot accelerate already serialized standard compressed points.
 No production codec or public API is changed.
 
@@ -91,15 +91,56 @@ one. A regression test rejects both even though the product has a root.
 Knowing a product of roots also does not provide the factors needed to recover
 each one, unlike inversion where the original inputs are those factors.
 
-There is a separate algebraic next step: Koshelev's later
-[batch-compression construction](https://eprint.iacr.org/2021/1446.pdf)
-encodes two points with one cube root, then combines that with a third point's
-square root. It recovers three points with one sixth root while retaining three
-field elements plus selector bits. This reduces the generic exponentiation
-count from one per pair to one per triple. It needs a different encoding and
-exception handling; it has not been implemented or benchmarked here.
+## Three points per sixth root
 
-## Measurements
+[`triple.rs`](src/bls12381/primitives/subgroup/research/decompression/triple.rs)
+implements Koshelev's later
+[batch-compression construction](https://eprint.iacr.org/2021/1446.pdf)
+specialized to BLS12-381 G1. A rational change of coordinates represents the
+first two points by two fields `z0, z1` and a cube-root selector. Store the third
+point's `x2` as the third field. Recover
+
+```text
+t  = (z1^2 - 4)/z0^2 = x0/x1
+y0 = z1 - 2(z0 - z1)t - z0 t^2
+y1 = z1 - 2z0 + (2z1 - z0)/t
+A  = x2^3 + 4       = y2^2
+B  = y1^2 - 4       = x1^3
+R  = A^3 B^2        = (y2 x1)^6
+```
+
+One sixth root `r` gives `x1 = AB/r^2` and `y2 = r^3/(AB)`, then `x0 = tx1`.
+Three selector bits choose the cube-root rank of `x1` and the sign of `y2`.
+Generic triples occupy exactly 144 bytes and use one exponentiation, with four
+independent roots interleaved. Both inversion stages use batch inversion.
+
+Exceptional first pairs (`y0^2 = y1^2`, or the forward map's `z0` numerator is
+zero) use the pair format plus one standard compressed point, also 144 bytes.
+Bit 7 of the second field marks this fallback. The decoder only accepts this
+mode for exceptional pairs and rejects generic encodings of same-orbit pairs,
+preventing alternate representations. Tests include both exceptional conics,
+all six same-orbit cases, mixtures, incomplete triples, and deliberate aliases.
+One or two trailing points use the pair format. Every decoded point passes its
+curve equation before subgroup checking.
+
+The same five-run methodology, comparing all three formats in one run:
+
+| Points | Standard decode + check | Pair decode + check | Triple decode + check | Triple speedup over standard |
+| ---: | ---: | ---: | ---: | ---: |
+| 1,000 | 12.667 ms | 9.132 ms | 7.861 ms | 1.61x |
+| 6,000 | 59.156 ms | 37.448 ms | 30.378 ms | 1.95x |
+| 100,000 | 866.752 ms | 512.035 ms | 399.257 ms | 2.17x |
+
+At 100,000 points, decoding alone takes 730.491 ms with standard compression,
+376.390 ms with pairs, and 262.711 ms with triples. Triples save 30.2% of pair
+decoding time and 22.0% of pair decoding plus subgroup-check time.
+
+```sh
+just test -p commonware-cryptography --release \
+  decompression::triple::measure_triple_decoding --run-ignored only --no-capture
+```
+
+## Earlier pair measurements
 
 Local arm64 macOS, Rust 1.97.1, optimized release build. Times are medians of
 five serial runs, with method order rotated each repetition. Point generation
@@ -147,14 +188,15 @@ infinity, and off-curve points. Tests cover all six same-orbit cases, odd
 tails, mutations, and order-eleven nonmembers, including a nonmember mixed into
 a 1,000-point batch. Accepted mutated encodings must re-encode identically.
 
-Validation on this machine: all 754 tests selected by the crate's default
-nextest profile passed (55 skipped), including eight focused decoding/root
+Validation on this machine: all 758 tests selected by the crate's default
+nextest profile passed (56 skipped), including twelve focused decoding/root
 tests. Clippy and formatting checks passed. The initial prototype's Miri run
 passed the integer exponent test but could not execute field/group tests
 because blst's foreign functions and generator static are unsupported. The
 WASM build was attempted with the installed nightly WASM target, but the local
 C compiler cannot compile blst for `wasm32-unknown-unknown`. These environment
-limitations remain; the interleaved path introduces no additional unsafe code.
+limitations remain; the interleaved and triple paths introduce no additional
+unsafe code.
 
 Decoding alone establishes curve membership. The full subgroup check still
 follows it, with its existing soundness bound. Production use would require
@@ -163,7 +205,7 @@ benchmarks.
 
 Adoption requires a separately identified batch format and enclosing message
 length limits. Individual point bytes differ from the standard codec, and
-random access requires decoding the containing pair. The current G1 codec
+random access requires decoding the containing pair or triple. The current G1 codec
 remains unchanged. New public encoded types would also need codec conformance
 fixtures and the appropriate stability annotation.
 
