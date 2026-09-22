@@ -175,12 +175,9 @@ impl<B: Backend> Arithmetic<B> {
         }
         let extracted = self.root_batch(&radicands)?;
         inverses.clear();
-        inverses.extend(
-            coordinates
-                .iter()
-                .zip(&extracted)
-                .map(|(&(_, _, _, ab), root)| self.fp_mul(&self.fp_sqr(root), &ab)),
-        );
+        for (&(_, _, _, ab), root) in coordinates.iter().zip(&extracted) {
+            inverses.push(self.fp_mul(&self.fp_sqr(root), &ab));
+        }
         self.batch_invert(&mut inverses, &mut scratch)?;
         for (((&(index, _, _, x2, _, selector), &(t, y0, y1, ab)), root), inverse) in records
             .iter()

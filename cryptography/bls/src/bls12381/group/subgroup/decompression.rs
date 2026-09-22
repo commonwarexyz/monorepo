@@ -8,7 +8,7 @@ use super::{G1, check, filled, homogeneous};
 use crate::bls12381::Fp;
 use commonware_cryptography_vroom::{
     Backend, Bls12381, WithBackend,
-    rns::{Ring, Standard},
+    rns::{Ready, Ring, Standard},
     with_backend,
 };
 use rand_core::CryptoRng;
@@ -132,36 +132,54 @@ impl<B: Backend> Arithmetic<B> {
 
     #[inline(always)]
     fn valid_points<const N: usize>(&self, points: &[Affine; N]) -> bool {
+        const { assert!(N > 0) };
         let x = points.map(|point| point.x);
         let squared = self.products(&x, &x);
-        let ring = &self.ring;
         // Each residual is y^2 - x^3 - 4. Signed wide products share one
         // reduction without ever assuming any curve equation from the input.
-        let checks = core::array::from_fn(|i| {
-            ring.ready::<800>(
-                ring.prep_left(points[i].y) * points[i].y
-                    + ring.prep_left(squared[i]) * ring.negate(points[i].x)
-                    + ring.prep_left(self.four()) * ring.negate(Field::ONE),
-            )
-        });
-        let residuals: [Field; N] = ring.batch_reduce_expand(&checks);
-        points.iter().zip(residuals).all(|(point, residual)| {
-            !self.fp_is_zero(&point.x) && !self.fp_is_zero(&point.y) && self.fp_is_zero(&residual)
-        })
+        let mut checks = [self.curve_residual(&points[0], squared[0]); N];
+        for i in 1..N {
+            checks[i] = self.curve_residual(&points[i], squared[i]);
+        }
+        let residuals = self.ring.batch_reduce_expand(&checks);
+        for (point, residual) in points.iter().zip(residuals) {
+            if self.fp_is_zero(&point.x) || self.fp_is_zero(&point.y) || !self.fp_is_zero(&residual)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[inline(always)]
+    fn curve_residual(&self, point: &Affine, squared: Field) -> Ready<Bls12381> {
+        let ring = &self.ring;
+        ring.ready(
+            ring.prep_left(point.y) * point.y
+                + ring.prep_left(squared) * ring.negate(point.x)
+                + ring.prep_left(self.four()) * ring.negate(Field::ONE),
+        )
     }
 
     #[inline(always)]
     fn products<const N: usize>(&self, a: &[Field; N], b: &[Field; N]) -> [Field; N] {
-        let pending =
-            core::array::from_fn(|i| self.ring.ready::<800>(self.ring.prep_left(a[i]) * b[i]));
+        const { assert!(N > 0) };
+        // Arithmetic must stay in the backend entry: an outlined array closure
+        // loses its target features and calls a wrapper for every intrinsic.
+        let mut pending = [self.ring.ready::<800>(self.ring.prep_left(a[0]) * b[0]); N];
+        for i in 1..N {
+            pending[i] = self.ring.ready(self.ring.prep_left(a[i]) * b[i]);
+        }
         self.ring.batch_reduce_expand(&pending)
     }
 
     // Keep independent chains in the same RNS reduction batch and backend entry.
     #[inline(always)]
     fn extract<const N: usize>(&self, inputs: &[Field; N]) -> Option<[Field; N]> {
-        if inputs.iter().any(|a| self.fp_is_zero(a)) {
-            return None;
+        for input in inputs {
+            if self.fp_is_zero(input) {
+                return None;
+            }
         }
         let squares = self.products(inputs, inputs);
         let mut powers = [*inputs; 16];
@@ -341,12 +359,9 @@ impl<B: Backend> Arithmetic<B> {
         }
         let extracted = self.root_batch(&radicands)?;
         inverses.clear();
-        inverses.extend(
-            products
-                .iter()
-                .zip(&extracted)
-                .map(|(uv, r)| self.fp_mul(&self.fp_sqr(r), uv)),
-        );
+        for (uv, r) in products.iter().zip(&extracted) {
+            inverses.push(self.fp_mul(&self.fp_sqr(r), uv));
+        }
         self.batch_invert(&mut inverses, &mut scratch)?;
         let mut generic = products.iter().zip(&extracted).zip(&inverses);
         let mut decoded = reserved(bytes.len() / 48)?;

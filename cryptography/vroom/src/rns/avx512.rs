@@ -279,7 +279,8 @@ unsafe fn change_base<const B: usize>(
             // 2^64. This preserves the scalar quotient exactly.
             let fraction = load(&conversion.fraction);
             let upper = _mm512_srli_epi64::<WORD>(fraction);
-            let quotient: [u64; B] = core::array::from_fn(|batch| {
+            let mut quotient = [0; B];
+            for batch in 0..B {
                 let residues = load(&input[batch]);
                 let low = _mm512_madd52lo_epu64(zero, residues, fraction);
                 let middle = _mm512_madd52hi_epu64(zero, residues, fraction);
@@ -288,8 +289,9 @@ unsafe fn change_base<const B: usize>(
                 let low = _mm512_reduce_add_epi64(low) as u64;
                 let middle = _mm512_reduce_add_epi64(middle) as u64;
                 let high = _mm512_reduce_add_epi64(high) as u64;
-                ((middle + (low >> WORD)) >> (64 - WORD)) + (high << (2 * WORD - 64))
-            });
+                quotient[batch] =
+                    ((middle + (low >> WORD)) >> (64 - WORD)) + (high << (2 * WORD - 64));
+            }
             for (row, coefficients) in conversion.matrix.iter().enumerate() {
                 let coefficients = load(coefficients);
                 for batch in 0..B {
