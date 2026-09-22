@@ -589,6 +589,36 @@ macro_rules! impl_certificate_ed25519 {
                     .verify_attestations::<_, _, D, _>(rng, subject, attestations, strategy)
             }
 
+            fn optimistic_assemble<'a, R, D, I, J>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                pending: I,
+                verified: J,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> Result<Self::Certificate, $crate::certificate::Verification<Self>>
+            where
+                R: rand_core::CryptoRng,
+                D: $crate::Digest,
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                I::IntoIter: ExactSizeIterator + Clone + Send,
+                J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
+                J::IntoIter: Send,
+            {
+                // These certificates retain individual signatures, so only pending votes need
+                // authentication. Keep rejected signer evidence even if the valid votes could certify.
+                let result = self.verify_attestations::<_, D, _>(rng, subject, pending, strategy);
+                if result.invalid.is_empty()
+                    && let Some(attestations) = commonware_utils::iter::NonEmpty::try_new(
+                        result.verified.iter().cloned().chain(verified.into_iter().cloned()),
+                    )
+                    && let Ok(certificate) = self.assemble(attestations, strategy)
+                {
+                    return Ok(certificate);
+                }
+                Err(result)
+            }
+
             fn assemble<I>(
                 &self,
                 attestations: commonware_utils::iter::NonEmpty<I>,
@@ -617,10 +647,16 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
+    #[cfg(feature = "std")]
+    use commonware_parallel::Rayon;
     use commonware_parallel::Sequential;
     use commonware_utils::{
         Faults, N3f1, Participant, TryCollect, non_empty, ordered::Set, test_rng,
     };
+    #[cfg(feature = "std")]
+    use commonware_utils::{NZUsize, TestRng};
+    #[cfg(feature = "std")]
+    use rand_core::Rng;
 
     const NAMESPACE: &[u8] = b"test-ed25519";
     const MESSAGE: &[u8] = b"test message";
@@ -674,6 +710,71 @@ mod tests {
     fn test_is_batchable() {
         assert!(Generic::<Vec<u8>>::is_batchable());
         assert!(Scheme::is_batchable());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_optimistic_assemble_reuses_verified_attestations() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers(&mut rng, 5);
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let subject = TestSubject {
+            message: Bytes::from_static(MESSAGE),
+        };
+        let attestations: Vec<_> = schemes
+            .iter()
+            .take(quorum)
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject.clone()).unwrap())
+            .collect();
+
+        // One seed per signature makes RNG consumption expose the size of the
+        // verification batch, even when the single worker executes it serially.
+        let strategy = Rayon::new(NZUsize!(1))
+            .unwrap()
+            .with_parallelism(NZUsize!(quorum));
+        for pending_len in [quorum, 1, 0] {
+            let (prior, pending) = attestations.split_at(quorum - pending_len);
+            let verified = verifier.verify_attestations::<_, Sha256Digest, _>(
+                &mut rng,
+                subject.clone(),
+                prior.iter().cloned(),
+                &Sequential,
+            );
+            assert!(verified.invalid.is_empty());
+
+            // Construction must do only the verification needed for fresh votes,
+            // including when every vote was already authenticated.
+            let mut expected_rng = TestRng::new(0);
+            let expected = verifier.verify_attestations::<_, Sha256Digest, _>(
+                &mut expected_rng,
+                subject.clone(),
+                pending.iter().cloned(),
+                &strategy,
+            );
+            assert!(expected.invalid.is_empty());
+            let mut actual_rng = TestRng::new(0);
+            let certificate = verifier
+                .optimistic_assemble::<_, Sha256Digest, _, _>(
+                    &mut actual_rng,
+                    subject.clone(),
+                    pending.iter().cloned(),
+                    &verified.verified,
+                    &strategy,
+                )
+                .ok()
+                .expect("verified quorum must certify");
+            assert_eq!(
+                actual_rng.next_u64(),
+                expected_rng.next_u64(),
+                "retained votes must not enter the verification batch"
+            );
+            assert!(verifier.verify_certificate::<_, Sha256Digest>(
+                &mut rng,
+                subject.clone(),
+                &certificate,
+                &Sequential,
+            ));
+        }
     }
 
     #[test]

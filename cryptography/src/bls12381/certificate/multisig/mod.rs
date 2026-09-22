@@ -10,6 +10,11 @@
 //! to rogue-key attacks. Verify each PoP during participant registration with
 //! [`verify_proof_of_possession`](crate::bls12381::primitives::ops::verify_proof_of_possession),
 //! then construct schemes only from the validated participant set.
+//!
+//! The [verified quorum guarantee](Scheme::assemble) assumes independently generated honest
+//! signing keys and the configured fault bound. PoPs do not establish independent key generation.
+//! Outside those assumptions, individually valid attestations can aggregate to the identity,
+//! which certificate verification rejects.
 
 #[cfg(feature = "mocks")]
 pub mod mocks;

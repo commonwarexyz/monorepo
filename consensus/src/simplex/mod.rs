@@ -329,10 +329,12 @@
 //! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
 //! arrive since there is no batching benefit.
 //!
-//! When buffered votes of one kind reach quorum, the `Batcher` first assembles and verifies
-//! the certificate. Success authenticates the certificate without establishing individual input validity.
-//! A failed attempt bisects pending votes for verification, retains valid votes for subsequent assembly,
-//! and blocks identified invalid senders via [commonware_p2p::Blocker].
+//! When buffered votes of one kind reach quorum, the `Batcher` asks the scheme to construct an
+//! authenticated certificate. BLS schemes first assemble and verify the certificate, falling back to
+//! verification of pending halves on failure. Ed25519 and secp256r1 verify only pending votes before
+//! assembling them with retained verified votes. Successful construction does not guarantee individual
+//! input validity. Failed attempts retain valid votes and block identified invalid senders via
+//! [commonware_p2p::Blocker].
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._

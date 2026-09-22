@@ -128,7 +128,7 @@ where
         );
         let verify_fallback = context.counter(
             "verify_fallback",
-            "number of fallbacks to vote verification after failed optimistic assembly",
+            "number of optimistic assembly attempts returning attestation verification results",
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;

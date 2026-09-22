@@ -43,9 +43,9 @@ pub struct Batch<C> {
     /// An empty result does not mean every input vote was individually verified:
     /// successful optimistic assembly returns no per-vote results.
     pub invalid: Vec<Participant>,
-    /// A certificate constructed and verified from the buffered votes.
+    /// A certificate authenticated from the buffered votes.
     pub certificate: Option<C>,
-    /// Whether optimistic assembly failed and required attestation verification.
+    /// Whether `optimistic_assemble` returned pending attestation verification results.
     pub fallback: bool,
 }
 

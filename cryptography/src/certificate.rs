@@ -408,14 +408,14 @@ pub trait Scheme: Verifier {
         Verification::new(verified.collect(), invalid.into_iter().collect())
     }
 
-    /// Attempts to assemble and authenticate a certificate before verifying pending attestations.
+    /// Attempts to construct an authenticated certificate from pending and verified attestations.
     ///
     /// `verified` must already be valid for this exact scheme configuration and `subject`.
     /// Signers must be unique across both inputs. Only pending attestations undergo fallback
     /// verification.
     ///
-    /// `Ok` authenticates the certificate for `subject`, without establishing the validity of
-    /// each pending attestation. Callers requiring individual correctness should use
+    /// `Ok` authenticates the certificate for `subject`, but does not guarantee that each pending
+    /// attestation was individually verified. Callers requiring individual correctness should use
     /// [`Self::verify_attestations`] followed by [`Self::assemble`].
     ///
     /// On failure, `Err` contains the verification results for `pending`. Accepted attestations
@@ -468,8 +468,10 @@ pub trait Scheme: Verifier {
     /// callers using such inputs must call [`Verifier::verify_certificate`] for the intended subject.
     ///
     /// Insufficient input returns [`AssemblyError::InsufficientAttestations`].
-    /// A signer-unique quorum already verified for one subject must assemble successfully into
-    /// a certificate that verifies for that subject.
+    ///
+    /// Under the scheme's key setup, fault model, and cryptographic assumptions, a quorum of
+    /// attestations from distinct signers, all verified for this exact scheme configuration and
+    /// one subject, must assemble successfully into a certificate that verifies for that subject.
     fn assemble<I>(
         &self,
         attestations: NonEmpty<I>,
@@ -761,9 +763,9 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
+    use commonware_utils::{N3f1, TryCollect, non_empty, ordered::Set, test_rng};
     #[cfg(feature = "bls12381")]
-    use commonware_utils::{N3f1, NZU32, ordered::BiMap, sync::Mutex};
-    use commonware_utils::{TryCollect, non_empty, ordered::Set, test_rng};
+    use commonware_utils::{NZU32, ordered::BiMap, sync::Mutex};
     #[cfg(feature = "bls12381")]
     use core::sync::atomic::{AtomicUsize, Ordering};
     use ed25519_fixture::{Scheme as Ed25519Scheme, TestSubject};
@@ -1063,11 +1065,9 @@ mod tests {
         impl_certificate_bls12381_multisig!(TestSubject, Vec<u8>, N3f1);
     }
 
-    #[cfg(feature = "bls12381")]
     const SUBJECT: TestSubject = TestSubject {
         message: b"subject",
     };
-    #[cfg(feature = "bls12381")]
     const OTHER_SUBJECT: TestSubject = TestSubject {
         message: b"other-subject",
     };
@@ -1263,16 +1263,10 @@ mod tests {
         multisig_optimistic_assemble_uses_one_certificate_check::<MinSig>();
     }
 
-    #[cfg(feature = "bls12381")]
     #[test]
-    fn test_optimistic_assemble_attributable_inputs() {
+    fn test_optimistic_assemble_individual_inputs() {
         let mut rng = test_rng();
-        let (schemes, inner) = setup_ed25519(5);
-        let calls = Arc::new(RecordingCalls::default());
-        let verifier = Recording {
-            inner,
-            calls: Arc::clone(&calls),
-        };
+        let (schemes, verifier) = setup_ed25519(5);
         let empty = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
@@ -1283,11 +1277,10 @@ mod tests {
         let verification = empty.unwrap_err();
         assert!(verification.verified.is_empty());
         assert!(verification.invalid.is_empty());
-        assert!(calls.attestations.lock().is_empty());
 
         let pending: Vec<_> = schemes
             .iter()
-            .map(|scheme| Recording::outer(scheme.sign::<Sha256Digest>(SUBJECT).unwrap()))
+            .map(|scheme| scheme.sign::<Sha256Digest>(SUBJECT).unwrap())
             .collect();
         let certificate = verifier
             .optimistic_assemble::<_, Sha256Digest, _, _>(
@@ -1299,7 +1292,6 @@ mod tests {
             )
             .ok()
             .expect("valid quorum must certify");
-        assert!(calls.attestations.lock().is_empty());
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             SUBJECT,
@@ -1311,11 +1303,9 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, scheme)| {
-                Recording::outer(
-                    scheme
-                        .sign::<Sha256Digest>(if i == 0 { OTHER_SUBJECT } else { SUBJECT })
-                        .unwrap(),
-                )
+                scheme
+                    .sign::<Sha256Digest>(if i == 0 { OTHER_SUBJECT } else { SUBJECT })
+                    .unwrap()
             })
             .collect();
         let signers: Vec<_> = pending.iter().map(|a| a.signer).collect();
@@ -1327,10 +1317,6 @@ mod tests {
             &Sequential,
         );
         let verification = result.unwrap_err();
-        assert_eq!(
-            *calls.attestations.lock(),
-            vec![signers[..3].to_vec(), signers[3..].to_vec()]
-        );
         assert_eq!(verification.invalid, vec![signers[0]]);
         assert_eq!(
             verification
@@ -1351,48 +1337,45 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "bls12381")]
     #[test]
-    fn test_optimistic_assemble_verified_only() {
+    fn test_optimistic_assemble_individual_quorum() {
         let mut rng = test_rng();
-        let (schemes, inner) = setup_ed25519(5);
+        let (schemes, verifier) = setup_ed25519(5);
         let quorum = N3f1::quorum(schemes.len()) as usize;
-        let prior: Vec<_> = schemes
+        let attestations: Vec<_> = schemes
             .iter()
             .take(quorum)
-            .map(|s| Recording::outer(s.sign::<Sha256Digest>(SUBJECT).unwrap()))
+            .map(|s| s.sign::<Sha256Digest>(SUBJECT).unwrap())
             .collect();
-        let calls = Arc::new(RecordingCalls::default());
-        let verifier = Recording {
-            inner,
-            calls: Arc::clone(&calls),
-        };
-        for count in [quorum - 1, quorum] {
-            let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
-                &mut rng,
-                SUBJECT,
-                Vec::new(),
-                &prior[..count],
-                &Sequential,
-            );
-            assert_eq!(result.is_ok(), count == quorum);
-            assert!(calls.attestations.lock().is_empty());
-            match result {
-                Ok(certificate) => assert!(verifier.verify_certificate::<_, Sha256Digest>(
+
+        // Both pending-only and verified-only inputs require quorum. On failure,
+        // the result contains only pending attestations, never retained inputs.
+        for count in [0, quorum - 1, quorum] {
+            for pending in [0, count] {
+                let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
                     &mut rng,
                     SUBJECT,
-                    &certificate,
+                    attestations[..pending].iter().cloned(),
+                    &attestations[pending..count],
                     &Sequential,
-                )),
-                Err(verification) => {
-                    assert!(verification.verified.is_empty());
-                    assert!(verification.invalid.is_empty());
+                );
+                assert_eq!(result.is_ok(), count == quorum);
+                match result {
+                    Ok(certificate) => assert!(verifier.verify_certificate::<_, Sha256Digest>(
+                        &mut rng,
+                        SUBJECT,
+                        &certificate,
+                        &Sequential,
+                    )),
+                    Err(verification) => {
+                        assert_eq!(verification.verified, attestations[..pending]);
+                        assert!(verification.invalid.is_empty());
+                    }
                 }
             }
         }
     }
 
-    #[cfg(feature = "bls12381")]
     #[test]
     fn test_optimistic_assemble_empty_committee() {
         let mut rng = test_rng();
