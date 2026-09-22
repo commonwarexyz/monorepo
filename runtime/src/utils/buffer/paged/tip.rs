@@ -4,15 +4,21 @@ use commonware_codec::{FixedSize, Write};
 
 /// Append-only buffering for the page-oriented writer.
 ///
-/// Complete allocations are frozen into `prefix`. The uniquely owned `tail` begins at a page
-/// boundary and is the only allocation that can be mutated. Prefix chunks and the writable part
-/// of the tail are restricted to whole pages, so extension never copies initialized prefix bytes.
+/// The immutable `prefix` contains complete logical pages. The uniquely owned `tail` follows it
+/// and can contain a final partial page. Writable capacity is restricted to whole pages, so a full
+/// tail can join the prefix without copying bytes.
 pub(super) struct Buffer {
+    /// Frozen chunks, each containing a whole number of logical pages.
     prefix: IoBufs,
+    /// The only mutable allocation, immediately following the prefix.
     tail: IoBufMut,
+    /// Combined logical length of the prefix and tail, independent of backing capacity.
     len: usize,
+    /// Logical blob offset of the first buffered byte.
     pub(super) offset: u64,
+    /// Logical flush threshold. Backing is allocated as bytes arrive.
     pub(super) capacity: usize,
+    /// Logical payload bytes per page, excluding on-disk checksums.
     page_size: usize,
     pool: BufferPool,
 }
@@ -71,7 +77,7 @@ impl Buffer {
         (&self.prefix, self.tail.as_ref())
     }
 
-    /// Appends borrowed bytes and reports whether the logical flush guide was exceeded.
+    /// Appends borrowed bytes and reports whether the flush threshold was exceeded.
     pub(super) fn append(&mut self, data: &[u8]) -> bool {
         let end = self
             .len
@@ -85,6 +91,8 @@ impl Buffer {
             return end > self.capacity;
         }
 
+        // Fill the current tail to a page boundary and put the remainder in a new allocation.
+        // Existing bytes stay in their original owners throughout the extension.
         let mut next = self.allocate_growth(data.len(), spare);
         {
             let mut dst = (&mut self.tail)
@@ -99,6 +107,8 @@ impl Buffer {
 
     /// Encodes one fixed-size value directly across the current and next allocations.
     pub(super) fn append_value<T: FixedSize + Write>(&mut self, value: &T) {
+        // Limit the encoder to the declared size and reject short encodings before updating
+        // the logical length. The same bound applies when the value spans allocations.
         let end = self
             .len
             .checked_add(T::SIZE)
@@ -112,6 +122,8 @@ impl Buffer {
             return;
         }
 
+        // Chaining writable regions lets the encoder cross an allocation boundary without
+        // staging the value in a temporary buffer.
         let mut next = self.allocate_growth(T::SIZE, spare);
         {
             let mut dst = (&mut self.tail)
@@ -126,11 +138,14 @@ impl Buffer {
 
     /// Transfers every full logical page and retains at most one detached partial page.
     pub(super) fn drain_full_pages(&mut self) -> IoBufs {
+        // With no full pages, the tail already fits in a page-sized allocation and can be reused.
         let full_len = self.len / self.page_size * self.page_size;
         if full_len == 0 {
             return IoBufs::default();
         }
 
+        // Give the partial page independent backing so flushed allocations can return to the
+        // pool once their I/O completes.
         let partial_len = self.tail.len() % self.page_size;
         let tail_full_len = self.tail.len() - partial_len;
         let mut retained = Self::allocate_page(&self.pool, self.page_size, partial_len);
@@ -138,16 +153,23 @@ impl Buffer {
             retained.put_slice(&self.tail.as_ref()[tail_full_len..]);
         }
 
+        // Transfer whole pages without copying. The replacement tail is the only allocation
+        // this buffer can mutate while the drained pages are in flight.
         let mut drained = std::mem::take(&mut self.prefix);
         let mut old_tail = std::mem::replace(&mut self.tail, retained);
         old_tail.truncate(tail_full_len);
         drained.append(old_tail.freeze());
 
-        debug_assert_eq!(drained.len(), full_len);
-        debug_assert!(
+        assert_eq!(
+            drained.len(),
+            full_len,
+            "drained pages must match the buffered length"
+        );
+        assert!(
             drained
                 .iter()
-                .all(|chunk| chunk.len().is_multiple_of(self.page_size))
+                .all(|chunk| chunk.len().is_multiple_of(self.page_size)),
+            "drained chunks must contain whole pages"
         );
         self.len = partial_len;
         self.offset = self
@@ -178,12 +200,14 @@ impl Buffer {
         self.len = 0;
     }
 
-    /// Allocates a page without allowing sparse pool classes or aligned fallbacks to retain a
-    /// larger owner. An exact eligible class is reused when available.
+    /// Allocates at most one page of backing, staying detached when no bytes are needed.
     fn allocate_page(pool: &BufferPool, page_size: usize, needed: usize) -> IoBufMut {
         if needed == 0 {
             return IoBufMut::default();
         }
+
+        // A larger pool class or aligned fallback could retain more than one page for a tiny
+        // tail. Reuse only an exact eligible class, with exact native backing as the fallback.
         let config = pool.config();
         let has_exact_eligible_class = page_size >= config.pool_min_size()
             && config
@@ -199,6 +223,8 @@ impl Buffer {
 
     /// Returns writable space in the whole-page portion of the current allocation.
     const fn tail_spare(&self) -> usize {
+        // Pool classes need not be multiples of the logical page size. Leave any fractional
+        // page of capacity unused so a completed tail can join the prefix as whole pages.
         let usable = self.tail.capacity() / self.page_size * self.page_size;
         usable
             .checked_sub(self.tail.len())
@@ -207,13 +233,25 @@ impl Buffer {
 
     /// Allocates a geometrically sized, page-aligned logical extension.
     fn allocate_growth(&self, additional: usize, spare: usize) -> IoBufMut {
-        debug_assert!(additional > spare);
+        assert!(
+            additional > spare,
+            "growth must exceed the tail's spare capacity"
+        );
+
+        // After filling the current tail, use the buffered length as the next chunk's growth
+        // target, capped by the remaining flush budget. A single append may exceed that budget.
         let filled = self.len.checked_add(spare).expect("buffer growth overflow");
-        debug_assert!(filled.is_multiple_of(self.page_size));
+        assert!(
+            filled.is_multiple_of(self.page_size),
+            "a filled tail must end on a page boundary"
+        );
         let needed = additional - spare;
         let remaining_guide = self.capacity.saturating_sub(filled);
         let base = self.page_size.max(filled.min(remaining_guide));
         let target = needed.max(base);
+
+        // Round up before consulting the pool so ignoring a fractional final page still leaves
+        // room for the complete append.
         let remainder = target % self.page_size;
         let request = if remainder == 0 {
             target
@@ -232,7 +270,10 @@ impl Buffer {
     /// Freezes a completed page-aligned tail and installs the new unique tail.
     fn retire_tail(&mut self, next: IoBufMut, len: usize) {
         let old = std::mem::replace(&mut self.tail, next).freeze();
-        debug_assert!(old.len().is_multiple_of(self.page_size));
+        assert!(
+            old.len().is_multiple_of(self.page_size),
+            "prefix chunks must contain whole pages"
+        );
         self.prefix.append(old);
         self.len = len;
     }
@@ -251,6 +292,7 @@ mod tests {
         )
     }
 
+    /// Provides reusable backing for each geometric growth step.
     fn growth_pool() -> BufferPool {
         BufferPool::new(
             BufferPoolConfig::for_storage()
@@ -267,6 +309,7 @@ mod tests {
         )
     }
 
+    /// Pools the first page and forces larger chunks onto native backing.
     fn native_growth_pool() -> BufferPool {
         BufferPool::new(
             BufferPoolConfig::for_storage()
@@ -289,6 +332,8 @@ mod tests {
 
     #[test]
     fn extension_preserves_prior_allocation_pointers() {
+        // Each extension keeps earlier owners live, so their addresses must remain unchanged
+        // whether subsequent allocations come from the pool or native backing.
         for pool in [growth_pool(), native_growth_pool()] {
             let mut buffer = Buffer::from(0, &[], 512, 8, pool);
             let mut prior = Vec::new();
@@ -341,6 +386,8 @@ mod tests {
 
     #[test]
     fn typed_append_crosses_allocations_and_pages() {
+        // The value fills the original tail and crosses page boundaries in the new allocation.
+        // The original tail must join the prefix without a copy.
         let mut buffer = Buffer::from(10, &[], 64, 8, test_pool());
         assert!(!buffer.append(&[1; 7]));
         let tail_ptr = buffer.parts().1.as_ptr();
@@ -349,6 +396,7 @@ mod tests {
         assert_eq!(contents(&buffer), [vec![1; 7], vec![2; 18]].concat());
         assert_eq!(buffer.size(), 35);
 
+        // Three complete pages transfer to the writer, leaving one byte at the new offset.
         let drained = buffer.drain_full_pages();
         assert_eq!(drained.len(), 24);
         assert_eq!(
@@ -397,6 +445,8 @@ mod tests {
 
     #[test]
     fn drain_keeps_chunks_and_detaches_mutable_suffix() {
+        // Sparse classes make the growing tail much larger than one page. Its final partial
+        // page must detach from that backing when full pages are drained.
         let pool = BufferPool::new(
             BufferPoolConfig::for_storage()
                 .with_size_classes([(NZUsize!(64), NZU32!(8)), (NZUsize!(128), NZU32!(8))])
@@ -420,6 +470,8 @@ mod tests {
         assert_eq!(buffer.tail.capacity(), 8);
         assert_ne!(buffer.tail.as_ref().as_ptr(), sparse_tail_ptr);
 
+        // Keep the drained owners live while mutating the replacement tail to check that the
+        // bytes handed to the writer remain unchanged.
         let before = drained
             .iter()
             .flat_map(|chunk| chunk.as_ref().iter().copied())
@@ -444,6 +496,8 @@ mod tests {
                 .with_thread_cache_disabled(),
             &mut Registry::default(),
         );
+
+        // Hold the only page-sized lease to force an exact-sized native allocation for the tail.
         let lease = pool.try_alloc(8).unwrap();
         let mut buffer = Buffer::from(0, &[1], 16, 8, pool);
         assert_eq!(buffer.tail.capacity(), 8);
