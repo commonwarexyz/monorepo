@@ -1259,16 +1259,6 @@ impl G1 {
             Self::from_blst_p1,
         )
     }
-}
-
-impl Write for G1 {
-    fn write(&self, buf: &mut impl BufMut) {
-        let slice = self.as_slice();
-        buf.put_slice(&slice);
-    }
-}
-
-impl G1 {
     /// Return whether this point lies in the prime-order subgroup G1.
     ///
     /// This is the exact per-point test (blst's endomorphism-based check). When
@@ -1329,6 +1319,13 @@ impl G1 {
             }
         }
         Ok(Self(ret))
+    }
+}
+
+impl Write for G1 {
+    fn write(&self, buf: &mut impl BufMut) {
+        let slice = self.as_slice();
+        buf.put_slice(&slice);
     }
 }
 

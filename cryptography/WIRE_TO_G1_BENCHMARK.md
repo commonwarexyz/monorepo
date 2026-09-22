@@ -1,5 +1,8 @@
 # From received bytes to validated G1 points
 
+The [native Vroom port](bls/BATCH_DECODE.md) carries these experiments onto PR
+#4811. Timings in this document use the original blst backend.
+
 The complete optimized receiver takes **368.174 ms for 100,000 BLS12-381 G1
 points**, versus **884.159 ms** with standard decoding and the existing batch
 subgroup checker, and **2976.020 ms** with standard per-point checked decoding.

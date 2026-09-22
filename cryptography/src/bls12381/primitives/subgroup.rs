@@ -1979,8 +1979,8 @@ mod tests {
         // A decoded point is normalized, so the conversion's fast path applies.
         let mut rng = test_rng();
         let point = in_subgroup_point(&mut rng);
-        let bytes = point.encode();
-        let decoded = G1::read_unchecked(&mut bytes.clone()).expect("decodes");
+        let mut bytes = point.encode();
+        let decoded = G1::read_unchecked(&mut bytes).expect("decodes");
         assert!(fp_is_one(&decoded.as_blst_p1().z));
     }
 
@@ -2979,7 +2979,10 @@ mod tests {
     #[ignore = "manual benchmark"]
     fn measure_scheme() {
         use commonware_parallel::Rayon;
-        use std::{thread::available_parallelism, time::Duration, time::Instant};
+        use std::{
+            thread::available_parallelism,
+            time::{Duration, Instant},
+        };
 
         /// Best of three, which on a shared machine is the estimate least
         /// contaminated by whatever else is running.

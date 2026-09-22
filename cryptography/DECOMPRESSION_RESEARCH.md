@@ -1,5 +1,8 @@
 # Joint G1 decoding and interleaved root extraction
 
+The [native Vroom port](bls/BATCH_DECODE.md) carries these experiments onto PR
+#4811. Timings in this document use the original blst backend.
+
 The subsequent [complete receiver benchmark](WIRE_TO_G1_BENCHMARK.md) connects
 triple decoding to the certified recursive subgroup checker. At 100,000 points
 it measures **368.174 ms from bytes to validated points**, versus 884.159 ms

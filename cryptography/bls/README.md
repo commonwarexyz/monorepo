@@ -19,6 +19,9 @@ The [batch subgroup soundness note](src/bls12381/group/subgroup.md) explains the
 python3 cryptography/bls/scripts/subgroup.py
 ```
 
+The private [joint G1 decoding experiments](BATCH_DECODE.md) combine pair/triple
+wire encodings with this checker and benchmark the complete receiver pipeline.
+
 ## References
 
 - [VROOM](https://eprint.iacr.org/2026/393), the residue arithmetic design.

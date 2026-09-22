@@ -19,6 +19,9 @@ use alloc::vec::Vec;
 use commonware_cryptography_vroom::{Backend, Bls12381, WithBackend, rns::Ring, with_backend};
 use rand_core::CryptoRng;
 
+#[cfg(test)]
+mod decompression;
+
 const DIRECT_MAX: usize = 81;
 const GRAPH_MIN: usize = 65_536;
 const OUTER_Q: u32 = 47;

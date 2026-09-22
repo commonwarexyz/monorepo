@@ -509,3 +509,21 @@ fn measure_joint_decoding() {
         }
     }
 }
+
+#[test]
+fn joint_wire_vectors_match_vroom() {
+    let mut points = vec![G1::generator()];
+    points.extend(benchmark_points(6));
+    for (triple, hex) in [
+        (false, include_str!("decompression/pair.hex")),
+        (true, include_str!("decompression/triple.hex")),
+    ] {
+        let expected = commonware_formatting::from_hex(hex.trim()).unwrap();
+        let bytes = if triple {
+            triple::encode(&points)
+        } else {
+            encode_pairs(&points)
+        };
+        assert_eq!(bytes, expected);
+    }
+}
