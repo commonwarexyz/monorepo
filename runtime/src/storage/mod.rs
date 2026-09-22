@@ -40,7 +40,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 // Make inherited storage-directory entries durable.
                 #[cfg(target_os = "macos")]
                 File::open(dir)?.sync_all()?;
-
                 tracing::debug!(
                     storage_directory = %dir.display(),
                     "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
