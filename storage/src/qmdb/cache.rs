@@ -104,7 +104,7 @@ impl<K> Cache<K> {
     }
 
     /// Removes the entry at `slot`, returned by [`Self::get`] with no intervening cache mutations.
-    pub(crate) fn remove_slot(&mut self, slot: usize) {
+    pub(crate) fn remove(&mut self, slot: usize) {
         self.locations[slot] = EMPTY;
         self.keys[slot] = None;
     }
@@ -145,7 +145,7 @@ mod tests {
         cache.put(7, "b");
         assert_eq!(cache.get(7), Some((slot, &"b")));
         let (slot, _) = cache.get(7).unwrap();
-        cache.remove_slot(slot);
+        cache.remove(slot);
         assert!(cache.get(7).is_none());
     }
 
@@ -157,11 +157,11 @@ mod tests {
             cache.put(loc, loc);
         }
         let (slot, _) = cache.get(0).unwrap();
-        cache.remove_slot(slot);
+        cache.remove(slot);
         cache.put(5, 500);
         let (slot, key) = cache.get(5).unwrap();
         assert_eq!(*key, 500);
-        cache.remove_slot(slot);
+        cache.remove(slot);
         assert!(cache.get(5).is_none());
         assert_eq!(present(&cache, 0..16), 14);
     }
@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove_slot_in_second_set() {
+    fn test_remove_in_second_set() {
         let mut cache = Cache::new(NZUsize!(2 * WAYS));
         let (first, second): (Vec<_>, Vec<_>) =
             (0..(4 * WAYS) as u64).partition(|&loc| cache.set_start(loc) == 0);
@@ -209,7 +209,7 @@ mod tests {
         let (slot, key) = cache.get(removed).unwrap();
         assert!(slot >= WAYS);
         assert_eq!(*key, removed);
-        cache.remove_slot(slot);
+        cache.remove(slot);
         assert!(cache.get(removed).is_none());
 
         let replacement = second[WAYS];
@@ -229,7 +229,7 @@ mod tests {
             cache.put(loc, loc);
         }
         let (slot, _) = cache.get(3).unwrap();
-        cache.remove_slot(slot);
+        cache.remove(slot);
         cache.put(100, 100);
         assert_eq!(cache.get(0).map(|(_, key)| key), Some(&0));
         assert!(cache.get(3).is_none());

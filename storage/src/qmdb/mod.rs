@@ -372,8 +372,8 @@ where
     // Cache entries mirror current snapshot locations, so invalidate the matched location with
     // the authoritative deletion.
     cursor.delete();
-    if let Some(slot) = slot {
-        cache.unwrap().remove_slot(slot);
+    if let (Some(cache), Some(slot)) = (cache, slot) {
+        cache.remove(slot);
     }
 
     Ok(Some(loc))
@@ -426,8 +426,8 @@ where
         // slot for `new_loc` instead of evicting another live entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
-        if let Some(slot) = slot {
-            cache.unwrap().remove_slot(slot);
+        if let (Some(cache), Some(slot)) = (cache, slot) {
+            cache.remove(slot);
         }
         return Ok(Some(loc));
     }
