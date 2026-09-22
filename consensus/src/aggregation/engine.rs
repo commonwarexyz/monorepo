@@ -37,7 +37,7 @@ use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use std::{
     cmp::max,
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map::Entry},
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::{Duration, SystemTime},
@@ -368,7 +368,7 @@ impl<
                 };
 
                 // Update the tip manager
-                if self.safe_tip.update(sender.clone(), tip).is_some() {
+                if self.safe_tip.update(&sender, tip).is_some() {
                     // Fast-forward our tip if needed
                     let safe_tip = self.safe_tip.get();
                     if safe_tip > self.tip {
@@ -435,17 +435,19 @@ impl<
         >,
     ) -> Self {
         // Entry must be `Pending::Unverified`, or return early
-        if !matches!(self.pending.get(&height), Some(Pending::Unverified(_))) {
-            debug!(%height, "digest height not pending");
-            return self;
+        let mut entry = match self.pending.entry(height) {
+            Entry::Occupied(entry) if matches!(entry.get(), Pending::Unverified(_)) => entry,
+            _ => {
+                debug!(%height, "digest height not pending");
+                return self;
+            }
         };
 
         // Move the entry to `Pending::Verified`
-        let Some(Pending::Unverified(acks)) = self.pending.remove(&height) else {
-            panic!("Pending::Unverified entry not found");
+        let Pending::Unverified(acks) = entry.insert(Pending::Verified(digest, BTreeMap::new()))
+        else {
+            unreachable!("entry checked above");
         };
-        self.pending
-            .insert(height, Pending::Verified(digest, BTreeMap::new()));
 
         // Handle each `ack` as if it was received over the network. This inserts the values into
         // the new map, and may form a certificate if enough acks are present. Only process acks
@@ -524,10 +526,10 @@ impl<
 
         // Add the attestation (if not already present)
         let acks = acks_by_epoch.entry(ack.epoch).or_default();
-        if acks.contains_key(&ack.attestation.signer) {
+        let Entry::Vacant(slot) = acks.entry(ack.attestation.signer) else {
             return (self, true);
-        }
-        acks.insert(ack.attestation.signer, ack.clone());
+        };
+        slot.insert(ack.clone());
 
         // If there exists a quorum of acks with the same digest (or for the verified digest if it exists), form a certificate
         let filtered = acks
@@ -551,16 +553,16 @@ impl<
     async fn handle_certificate(mut self, certificate: Certificate<P::Scheme, D>) -> Self {
         // Check if we already have the certificate
         let height = certificate.item.height;
-        if self.confirmed.contains_key(&height) {
+        let Entry::Vacant(slot) = self.confirmed.entry(height) else {
             return self;
-        }
+        };
 
         // Store the certificate
-        self.confirmed.insert(height, certificate.clone());
+        slot.insert(certificate.clone());
 
         // Journal and notify the automaton
         let certified = Activity::Certified(certificate);
-        self = self.record(certified.clone()).await.sync(height).await;
+        self = self.record(&certified).await.sync(height).await;
         self.reporter.report(certified);
 
         // Increase the tip if needed
@@ -750,7 +752,7 @@ impl<
 
         // Journal the ack
         self = self
-            .record(Activity::Ack(ack.clone()))
+            .record(&Activity::Ack(ack.clone()))
             .await
             .sync(height)
             .await;
@@ -806,7 +808,7 @@ impl<
             .retain(|height, _| *height >= activity_threshold);
 
         // Add tip to journal
-        self = self.record(Activity::Tip(tip)).await.sync(tip).await;
+        self = self.record(&Activity::Tip(tip)).await.sync(tip).await;
         self.reporter.report(Activity::Tip(tip));
 
         // Prune journal with buffer
@@ -868,11 +870,10 @@ impl<
 
         // Add certified items
         certified
-            .iter()
+            .into_iter()
             .filter(|certificate| certificate.item.height >= activity_threshold)
             .for_each(|certificate| {
-                self.confirmed
-                    .insert(certificate.item.height, certificate.clone());
+                self.confirmed.insert(certificate.item.height, certificate);
             });
 
         // Group acks by height
@@ -936,14 +937,16 @@ impl<
         // to handle the case where we restart and some heights have no acks yet
         let next = self.next();
         for height in Height::range(self.tip, next) {
-            // If we already have the height in pending or confirmed, skip
-            if self.pending.contains_key(&height) || self.confirmed.contains_key(&height) {
+            // If we already have the height in confirmed or pending, skip
+            if self.confirmed.contains_key(&height) {
                 continue;
             }
+            let Entry::Vacant(slot) = self.pending.entry(height) else {
+                continue;
+            };
 
             // Add missing height to pending
-            self.pending
-                .insert(height, Pending::Unverified(BTreeMap::new()));
+            slot.insert(Pending::Unverified(BTreeMap::new()));
             unverified.push(height);
         }
         info!(tip = %self.tip, %next, ?unverified, "replayed journal");
@@ -952,15 +955,15 @@ impl<
     }
 
     /// Appends an activity to the journal.
-    async fn record(mut self, activity: Activity<P::Scheme, D>) -> Self {
-        let height = match activity {
+    async fn record(mut self, activity: &Activity<P::Scheme, D>) -> Self {
+        let height = match *activity {
             Activity::Ack(ref ack) => ack.item.height,
             Activity::Certified(ref certificate) => certificate.item.height,
             Activity::Tip(h) => h,
         };
         let section = self.get_journal_section(height);
         rebind(&mut self.journal, |journal| {
-            journal.append(section, &activity)
+            journal.append(section, activity)
         })
         .await
         .expect("unable to append to journal");

@@ -15,7 +15,7 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     marker::PhantomData,
     mem,
     time::{Duration, SystemTime},
@@ -218,11 +218,11 @@ where
     /// Update a participant's throughput estimate (higher is better) using an
     /// exponential moving average.
     fn update_performance(&mut self, participant: &P, throughput: u128) {
-        let Some(Reverse(past)) = self.participants.get(participant) else {
+        let Some(Reverse(next)) = self.participants.update(participant, |Reverse(past)| {
+            Reverse(past.saturating_add(throughput) / 2)
+        }) else {
             return;
         };
-        let next = past.saturating_add(throughput) / 2;
-        self.participants.put(participant.clone(), Reverse(next));
         let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
@@ -354,18 +354,10 @@ where
         });
     }
 
-    /// Retains only the fetches with keys greater than the given key.
+    /// Retains only the fetches whose keys satisfy the predicate.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
-        // Collect IDs to remove based on key predicate
-        let ids_to_remove: Vec<ID> = self
-            .requests
-            .iter()
-            .filter(|(_, req)| !predicate(&req.key))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids_to_remove {
+        for (id, _) in self.requests.extract_if(|_, req| !predicate(&req.key)) {
             self.active.remove(&id);
-            self.requests.remove(&id);
         }
         self.key_to_id.retain(|k, _| predicate(k));
         self.pending.retain(&predicate);
@@ -376,26 +368,26 @@ where
     }
 
     /// Adds a key to the front of the pending queue.
+    ///
+    /// Panics if the key is already pending.
     pub fn add_ready(&mut self, key: Key) {
-        assert!(!self.pending.contains(&key));
+        assert!(self.pending.insert(key, (false, self.context.current())));
         // A previous pending key may have pushed the waiter far into the future
         // because no eligible peer could serve it. A new ready key can still be
         // fetchable, so wake pending processing immediately.
         self.waiter = None;
-        self.pending.put(key, (false, self.context.current()));
     }
 
     /// Adds a key to the pending queue.
     ///
     /// Panics if the key is already pending.
     pub fn add_retry(&mut self, key: Key) {
-        assert!(!self.pending.contains(&key));
+        let deadline = self.context.current() + self.retry_timeout;
+        assert!(self.pending.insert(key, (true, deadline)));
         // A previous pending key may have pushed the waiter far into the future
         // because no eligible peer could serve it. Clear the stale global waiter
         // so this retry can drive pending processing again.
         self.waiter = None;
-        let deadline = self.context.current() + self.retry_timeout;
-        self.pending.put(key, (true, deadline));
     }
 
     /// Returns the deadline for the next pending retry.
@@ -432,12 +424,10 @@ where
 
     /// Remove the active request matching `id` and `peer`.
     fn pop_request(&mut self, id: ID, peer: &P) -> Option<ActiveRequest<P, Key>> {
-        let req = self.requests.get(&id)?;
-        if &req.peer != peer {
-            return None;
-        }
-
-        let req = self.requests.remove(&id)?;
+        let req = match self.requests.entry(id) {
+            Entry::Occupied(entry) if &entry.get().peer == peer => entry.remove(),
+            _ => return None,
+        };
         self.active.remove(&id);
         self.key_to_id.remove(&req.key);
         Some(req)
@@ -820,6 +810,8 @@ mod tests {
             assert!(fetcher.key_to_id.contains_key(&MockKey(10)));
             assert!(!fetcher.key_to_id.contains_key(&MockKey(20)));
             assert!(!fetcher.key_to_id.contains_key(&MockKey(30)));
+            assert_eq!(fetcher.active.len(), 1);
+            assert!(fetcher.active.contains(&100));
         });
     }
 
@@ -1081,13 +1073,20 @@ mod tests {
             add_test_active(&mut fetcher, 100, MockKey(10));
 
             assert!(fetcher.pop_response(999, &peer).is_none());
+            let other_peer = PrivateKey::from_seed(2).public_key();
+            assert!(fetcher.pop_response(100, &other_peer).is_none());
             assert_eq!(fetcher.len_active(), 1);
+            assert!(fetcher.active.contains(&100));
+            assert_eq!(fetcher.key_to_id.get(&MockKey(10)), Some(&100));
 
             fetcher.context.sleep(Duration::from_millis(20)).await;
             let (key, elapsed) = fetcher.pop_response(100, &peer).expect("matching response");
             assert_eq!(key, MockKey(10));
             assert_eq!(elapsed, Duration::from_millis(20));
             assert_eq!(fetcher.len_active(), 0);
+            assert!(fetcher.active.is_empty());
+            assert!(!fetcher.key_to_id.contains_key(&key));
+            assert!(fetcher.pop_response(100, &peer).is_none());
 
             // Receiving bytes is not enough to score the peer: the consumer may
             // decide the key became obsolete before inspecting the response.

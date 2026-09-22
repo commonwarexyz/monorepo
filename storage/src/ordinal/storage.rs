@@ -13,6 +13,7 @@ use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
+    mem,
 };
 use tracing::{debug, warn};
 
@@ -295,25 +296,27 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
 
-        // Check if blob exists
+        // Get the blob, creating it if it doesn't exist
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
-        if let Entry::Vacant(entry) = self.blobs.entry(section) {
-            let (blob, len) = self
-                .context
-                .open(&self.config.partition, &section.to_be_bytes())
-                .await?;
-            entry.insert(Write::from_pooler(
-                &self.context,
-                blob,
-                len,
-                self.config.write_buffer,
-            ));
-            debug!(section, "created blob");
-        }
+        let blob = match self.blobs.entry(section) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let (blob, len) = self
+                    .context
+                    .open(&self.config.partition, &section.to_be_bytes())
+                    .await?;
+                debug!(section, "created blob");
+                entry.insert(Write::from_pooler(
+                    &self.context,
+                    blob,
+                    len,
+                    self.config.write_buffer,
+                ))
+            }
+        };
 
         // Write the value to the blob
-        let blob = self.blobs.get_mut(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         blob.write_at(offset, Record::encode(&value)).await?;
         self.pending.insert(section);
@@ -384,37 +387,31 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
 
     /// See [Ordinal::prune].
     async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Collect sections to remove
+        // Detach sections below `min_section`
         let items_per_blob = self.config.items_per_blob.get();
         let min_section = min / items_per_blob;
-        let sections_to_remove: Vec<u64> = self
-            .blobs
-            .keys()
-            .filter(|&&section| section < min_section)
-            .copied()
-            .collect();
+        let retained = self.blobs.split_off(&min_section);
+        let pruned = mem::replace(&mut self.blobs, retained);
 
-        // Remove the collected sections
-        for section in sections_to_remove {
-            if let Some(blob) = self.blobs.remove(&section) {
-                drop(blob);
-                self.context
-                    .remove(&self.config.partition, Some(&section.to_be_bytes()))
-                    .await?;
+        // Remove each detached section's blob
+        for (section, blob) in pruned {
+            drop(blob);
+            self.context
+                .remove(&self.config.partition, Some(&section.to_be_bytes()))
+                .await?;
 
-                // Remove the corresponding index range from intervals
-                let start_index = section * items_per_blob;
-                let end_index = (section + 1) * items_per_blob - 1;
-                self.intervals.remove(start_index, end_index);
-                debug!(section, start_index, end_index, "pruned blob");
-            }
+            // Remove the corresponding index range from intervals
+            let start_index = section * items_per_blob;
+            let end_index = (section + 1) * items_per_blob - 1;
+            self.intervals.remove(start_index, end_index);
+            debug!(section, start_index, end_index, "pruned blob");
 
             // Update metrics
             self.pruned.inc();
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending.retain(|&section| section >= min_section);
+        self.pending = self.pending.split_off(&min_section);
 
         Ok(())
     }

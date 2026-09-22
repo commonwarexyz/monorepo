@@ -20,6 +20,14 @@ enum FuzzInput {
     Get {
         item: Item,
     },
+    Insert {
+        item: Item,
+        priority: Priority,
+    },
+    Update {
+        item: Item,
+        priority: Priority,
+    },
     Remove {
         item: Item,
     },
@@ -49,6 +57,7 @@ enum FuzzInput {
 fn fuzz(input: Vec<FuzzInput>) {
     let mut set: PrioritySet<Item, Priority> = PrioritySet::new();
     let mut expected_items: HashSet<Item> = HashSet::new();
+    let mut seen_items: HashSet<Item> = HashSet::new();
 
     for op in input {
         match op {
@@ -67,6 +76,24 @@ fn fuzz(input: Vec<FuzzInput>) {
                 } else {
                     assert!(result.is_none());
                 }
+            }
+
+            FuzzInput::Insert { item, priority } => {
+                let current = set.get(&item);
+                let inserted = set.insert(item.clone(), priority);
+                assert_eq!(inserted, expected_items.insert(item.clone()));
+                assert_eq!(inserted, current.is_none());
+                assert_eq!(set.get(&item), current.or(Some(priority)));
+            }
+
+            FuzzInput::Update { item, priority } => {
+                let current = set.get(&item);
+                let updated = set.update(&item, |old| {
+                    assert_eq!(Some(old), current);
+                    priority
+                });
+                assert_eq!(updated, current.map(|_| priority));
+                assert_eq!(set.get(&item), updated);
             }
 
             FuzzInput::Retain { item } => {
@@ -178,8 +205,16 @@ fn fuzz(input: Vec<FuzzInput>) {
         let iter_count = set.iter().count();
         assert_eq!(iter_count, set.len());
 
-        for (item, _) in set.iter() {
+        // `len` reads the ordered entries and `contains` reads the keys of every item ever held
+        assert_eq!(set.len(), expected_items.len());
+        seen_items.extend(expected_items.iter().cloned());
+        for item in &seen_items {
+            assert_eq!(set.contains(item), expected_items.contains(item));
+        }
+
+        for (item, priority) in set.iter() {
             assert!(expected_items.contains(item));
+            assert_eq!(set.get(item), Some(*priority));
         }
     }
 

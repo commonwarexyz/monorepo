@@ -57,69 +57,23 @@ impl RMap {
     /// assert_eq!(map.get(&3), Some((0, 5)));
     /// ```
     pub fn insert(&mut self, value: u64) {
-        let prev_opt = self
-            .ranges
-            .range(..=value)
-            .next_back()
-            .map(|(&s, &e)| (s, e));
-        let next_opt = match value {
-            u64::MAX => None,
-            _ => self.ranges.range(value + 1..).next().map(|(&s, &e)| (s, e)),
-        };
+        // Adjacent ranges are always merged, so only a range starting at `value + 1` can join
+        // `value` from above, and no such range exists if `value` is already covered.
+        let end = value
+            .checked_add(1)
+            .and_then(|next| self.ranges.remove(&next))
+            .unwrap_or(value);
 
-        match (prev_opt, next_opt) {
-            (Some((p_start, p_end)), Some((n_start, n_end))) => {
-                if value <= p_end {
-                    // Value is within prev range
-                    return;
-                }
-                if value == p_end + 1 && value + 1 == n_start {
-                    // Value bridges prev and next
-                    self.ranges.remove(&p_start);
-                    self.ranges.remove(&n_start);
-                    self.ranges.insert(p_start, n_end);
-                } else if value == p_end + 1 {
-                    // Value is adjacent to prev's end
-                    self.ranges.remove(&p_start);
-                    self.ranges.insert(p_start, value);
-                } else if value + 1 == n_start {
-                    // Value is adjacent to next's start
-                    self.ranges.remove(&n_start);
-                    self.ranges.insert(value, n_end);
-                } else {
-                    // New isolated range
-                    self.ranges.insert(value, value);
-                }
-            }
-            (Some((p_start, p_end)), None) => {
-                if value <= p_end {
-                    // Value is within prev range
-                    return;
-                }
-                if value == p_end + 1 {
-                    // Value is adjacent to prev's end
-                    self.ranges.remove(&p_start);
-                    self.ranges.insert(p_start, value);
-                } else {
-                    // New isolated range
-                    self.ranges.insert(value, value);
-                }
-            }
-            (None, Some((n_start, n_end))) => {
-                if value + 1 == n_start {
-                    // Value is adjacent to next's start
-                    self.ranges.remove(&n_start);
-                    self.ranges.insert(value, n_end);
-                } else {
-                    // New isolated range
-                    self.ranges.insert(value, value);
-                }
-            }
-            (None, None) => {
-                // Map is empty or value is isolated
-                self.ranges.insert(value, value);
-            }
+        // Extend the preceding range if it covers or touches `value`
+        if let Some((_, prev_end)) = self.ranges.range_mut(..=value).next_back()
+            && prev_end.saturating_add(1) >= value
+        {
+            *prev_end = (*prev_end).max(end);
+            return;
         }
+
+        // Otherwise, start a new range
+        self.ranges.insert(value, end);
     }
 
     /// Returns the range that contains the given value.
@@ -148,8 +102,8 @@ impl RMap {
     /// # Complexity
     ///
     /// O((M + 1) log N), where N is the number of ranges in the map and M is the number of ranges
-    /// overlapping the removal range. Each overlapping range costs one removal, plus at most two
-    /// insertions in total for the pieces that stick out.
+    /// overlapping the removal range. Each overlapping range costs one removal, or one in-place
+    /// update if it starts before `start`, plus at most one insertion for the piece past `end`.
     ///
     /// # Example
     ///
@@ -178,11 +132,13 @@ impl RMap {
             .map(|(&r_start, &r_end)| (r_start, r_end))
             .collect();
 
-        // Remove each overlapping range and re-add whatever sticks out on either side.
+        // Remove each overlapping range, keeping whatever sticks out on either side.
         for (r_start, r_end) in overlapping {
-            self.ranges.remove(&r_start);
             if r_start < start {
+                // Truncate in place (only the first overlapping range can start before `start`)
                 self.ranges.insert(r_start, start - 1);
+            } else {
+                self.ranges.remove(&r_start);
             }
             if r_end > end {
                 self.ranges.insert(end + 1, r_end);
