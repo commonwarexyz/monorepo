@@ -1,4 +1,4 @@
-use super::{Config, Mailbox, Message, Round};
+use super::{Config, Mailbox, Message, Round, verifier::Batch};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
@@ -324,7 +324,12 @@ where
     ) {
         loop {
             let timer = self.verify_latency.timer(self.context.as_ref());
-            let Some(verification) = round
+            let Some(Batch {
+                processed,
+                invalid,
+                certificate,
+                fallback,
+            }) = round
                 .try_construct(self.context.as_mut(), &self.strategy)
                 .await
             else {
@@ -334,30 +339,29 @@ where
 
             // Record completed work even when no certificate was produced.
             timer.observe(self.context.as_ref());
-            if verification.fallback {
+            if fallback {
                 self.verify_fallback.inc();
             }
 
             // Block invalid signers even when the remaining votes produced a certificate.
-            for invalid in verification.invalid {
-                if let Some(signer) = self.scheme.participants().key(invalid) {
+            for participant in invalid {
+                if let Some(signer) = self.scheme.participants().key(participant) {
                     commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
                 }
             }
 
             // Forward the certificate already recorded by the round.
-            if let Some(certificate) = verification.certificate {
+            if let Some(certificate) = certificate {
                 let kind = certificate.kind();
                 debug!(%view, %kind, "recovered certificate, forwarding to voter");
                 voter.recovered(certificate);
             }
 
             // Count processed pending votes, including rejected inputs.
-            let batch = verification.batch;
-            if batch != 0 {
-                trace!(%view, batch, "processed votes");
-                self.verified.inc_by(batch as u64);
-                self.batch_size.observe(batch as f64);
+            if processed != 0 {
+                trace!(%view, batch = processed, "processed votes");
+                self.verified.inc_by(processed as u64);
+                self.batch_size.observe(processed as f64);
             }
         }
     }

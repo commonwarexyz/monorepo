@@ -8,6 +8,7 @@ use commonware_cryptography::{
 use commonware_parallel::Sequential;
 use commonware_utils::{Participant, TestRng, non_empty};
 use criterion::{BatchSize, Criterion};
+use rand_core::CryptoRng;
 use std::hint::black_box;
 
 const MESSAGE: &[u8] = b"hello";
@@ -62,48 +63,50 @@ fn fixture<S: Scheme>(
     case: Case,
 ) -> (Vec<Attestation<S>>, Vec<Participant>) {
     assert_eq!(attestations.len(), quorum + 1);
-    if matches!(case, Case::Valid) {
-        return (attestations[..quorum].to_vec(), Vec::new());
+    match case {
+        Case::Valid => (attestations[..quorum].to_vec(), Vec::new()),
+        Case::Split => {
+            let mut pending = attestations[..quorum].to_vec();
+            let chunk = pending.len().div_ceil(2);
+
+            // The excluded spare's valid signature is well-formed but invalid for both
+            // claimed signers.
+            let replacement = attestations[quorum].signature.clone();
+            pending[0].signature = replacement.clone();
+            pending[chunk].signature = replacement;
+            let mut invalid = vec![pending[0].signer, pending[chunk].signer];
+            invalid.sort_unstable();
+            (pending, invalid)
+        }
+        Case::Bad | Case::Spare => {
+            // Corrupt the minimum signer so threshold recovery's quorum always includes it.
+            let mut pending = attestations.to_vec();
+            let invalid_position = pending
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, attestation)| attestation.signer)
+                .map(|(position, _)| position)
+                .unwrap();
+            let invalid = pending[invalid_position].signer;
+            let replacement = pending
+                .iter()
+                .find(|attestation| attestation.signer != invalid)
+                .unwrap()
+                .signature
+                .clone();
+            pending[invalid_position].signature = replacement;
+
+            if matches!(case, Case::Bad) {
+                let removed = pending
+                    .iter()
+                    .rposition(|attestation| attestation.signer != invalid)
+                    .unwrap();
+                pending.remove(removed);
+            }
+
+            (pending, vec![invalid])
+        }
     }
-    if matches!(case, Case::Split) {
-        let mut pending = attestations[..quorum].to_vec();
-        let chunk = pending.len().div_ceil(2);
-
-        // The excluded spare's valid signature is well-formed but invalid for both claimed signers.
-        let replacement = attestations[quorum].signature.clone();
-        pending[0].signature = replacement.clone();
-        pending[chunk].signature = replacement;
-        let mut invalid = vec![pending[0].signer, pending[chunk].signer];
-        invalid.sort_unstable();
-        return (pending, invalid);
-    }
-
-    // Corrupt the minimum signer so threshold recovery's quorum always includes it.
-    let mut pending = attestations.to_vec();
-    let invalid_position = pending
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, attestation)| attestation.signer)
-        .map(|(position, _)| position)
-        .unwrap();
-    let invalid = pending[invalid_position].signer;
-    let replacement = pending
-        .iter()
-        .find(|attestation| attestation.signer != invalid)
-        .unwrap()
-        .signature
-        .clone();
-    pending[invalid_position].signature = replacement;
-
-    if matches!(case, Case::Bad) {
-        let removed = pending
-            .iter()
-            .rposition(|attestation| attestation.signer != invalid)
-            .unwrap();
-        pending.remove(removed);
-    }
-
-    (pending, vec![invalid])
 }
 
 /// Attempt optimistic assembly, then assemble any verified quorum retained on failure.
@@ -116,7 +119,7 @@ fn assemble_with_fallback<S, R, D>(
 ) -> (Verification<S>, Option<S::Certificate>)
 where
     S: Scheme,
-    R: rand_core::CryptoRng,
+    R: CryptoRng,
     D: Digest,
 {
     let mut result = match scheme.optimistic_assemble::<_, D, _, _>(
@@ -174,15 +177,11 @@ pub fn bench_case<S, D>(
     D: Digest,
 {
     let (pending, expected_invalid) = fixture(attestations, quorum, case);
-    let expected_pending = if matches!(case, Case::Spare) {
-        quorum + 1
-    } else {
-        quorum
-    };
-    let expected_failures = match case {
-        Case::Valid => 0,
-        Case::Bad | Case::Spare => 1,
-        Case::Split => 2,
+    let (expected_pending, expected_failures) = match case {
+        Case::Valid => (quorum, 0),
+        Case::Bad => (quorum, 1),
+        Case::Spare => (quorum + 1, 1),
+        Case::Split => (quorum, 2),
     };
     assert_eq!(pending.len(), expected_pending);
     assert_eq!(expected_invalid.len(), expected_failures);
@@ -200,10 +199,9 @@ pub fn bench_case<S, D>(
     let candidate = scheme
         .assemble(non_empty![@pending.clone().into_iter()], &Sequential)
         .expect("signer-unique quorum must assemble structurally");
-    let mut candidate_rng = TestRng::new(RNG_SEED);
     assert_eq!(
         scheme.verify_certificate::<_, D>(
-            &mut candidate_rng,
+            &mut TestRng::new(RNG_SEED),
             subject.clone(),
             &candidate,
             &Sequential,
@@ -229,10 +227,7 @@ pub fn bench_case<S, D>(
             &Sequential,
         ));
     } else {
-        let verification = match direct {
-            Ok(_) => panic!("invalid candidate must enter fallback"),
-            Err(verification) => verification,
-        };
+        let verification = direct.expect_err("invalid candidate must enter fallback");
         assert_verification(&verification, &expected_verified, &expected_invalid);
     }
 
@@ -264,17 +259,17 @@ pub fn bench_case<S, D>(
     }
 
     // Verify the final certificate or retained fallback evidence before timing.
-    let result = assemble_with_fallback(
+    let (verification, certificate) = assemble_with_fallback(
         scheme,
         &mut TestRng::new(RNG_SEED),
         subject.clone(),
         pending.clone(),
         quorum,
     );
-    assert_eq!(result.1.is_some(), case.expects_certificate());
-    if let Some(certificate) = &result.1 {
-        assert_invalid(&result.0.invalid, &expected_invalid);
-        assert!(result.0.verified.is_empty());
+    assert_eq!(certificate.is_some(), case.expects_certificate());
+    if let Some(certificate) = &certificate {
+        assert_invalid(&verification.invalid, &expected_invalid);
+        assert!(verification.verified.is_empty());
         assert!(scheme.verify_certificate::<_, D>(
             &mut TestRng::new(RNG_SEED),
             subject.clone(),
@@ -282,7 +277,7 @@ pub fn bench_case<S, D>(
             &Sequential,
         ));
     } else {
-        assert_verification(&result.0, &expected_verified, &expected_invalid);
+        assert_verification(&verification, &expected_verified, &expected_invalid);
     }
 
     let mut rng = TestRng::new(RNG_SEED);

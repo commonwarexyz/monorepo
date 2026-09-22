@@ -60,18 +60,14 @@ fn bench_variant<V: Variant>(c: &mut Criterion, variant: &str) {
         for (n, quorum) in [(100, 67), (298, 199)] {
             assert_eq!(N3f1::quorum(n), quorum);
             let (scheme, attestations) = setup::<V>(mode, n);
-            let mode_name = match mode {
-                Mode::NonZeroCounter => "counter",
-                Mode::RootsOfUnity => "roots",
-            };
             for case in [Case::Valid, Case::Bad, Case::Spare, Case::Split] {
                 bench_case::<_, Sha256Digest>(
                     c,
                     &format!(
-                        "{}/variant={} mode={} n={} case={}",
+                        "{}/variant={} mode={:?} n={} case={}",
                         module_path!(),
                         variant,
-                        mode_name,
+                        mode,
                         n,
                         case.name(),
                     ),

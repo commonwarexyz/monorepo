@@ -37,7 +37,7 @@ where
 /// The outcome of processing one vote kind.
 pub struct Batch<C> {
     /// Pending votes processed, whether individually or through a certificate.
-    pub batch: usize,
+    pub processed: usize,
     /// Signers identified as invalid by attestation verification.
     ///
     /// An empty result does not mean every input vote was individually verified:
@@ -114,7 +114,8 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         matches!(&self.state, State::Incomplete { verified, .. } if verified.len() >= self.quorum)
     }
 
-    /// Whether to attempt construction or verify pending votes toward a quorum.
+    /// Whether to attempt construction: a verified quorum exists, or pending
+    /// votes exist and (for batchable schemes) the buffers together could reach one.
     fn should_construct(&self) -> bool {
         match &self.state {
             State::Incomplete { pending, verified } => {
@@ -160,8 +161,8 @@ impl<C, S: CertificateScheme> Certification<C, S> {
         }
 
         // Move the inputs into one worker for assembly and any fallback verification.
-        let batch = pending.len();
-        let len = batch + verified.len();
+        let processed = pending.len();
+        let len = processed + verified.len();
         let quorum = self.quorum;
         let (pending, mut verified) = (mem::take(pending), mem::take(verified));
         let scheme = Arc::clone(scheme);
@@ -177,7 +178,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
             // A candidate quorum can authenticate the certificate without establishing
             // individual vote validity. Failure returns verification results for pending votes.
             // Below quorum, non-batchable schemes verify pending votes directly.
-            let (mut result, fallback) = if len >= quorum {
+            let (result, fallback) = if len >= quorum {
                 match scheme.optimistic_assemble::<_, D, _, _>(
                     &mut rng,
                     subject(&context),
@@ -189,7 +190,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                         return (
                             Vec::new(),
                             Batch {
-                                batch,
+                                processed,
                                 invalid: Vec::new(),
                                 certificate: Some(wrap(context, certificate)),
                                 fallback: false,
@@ -215,10 +216,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
             let certificate = if verified.len() + result.verified.len() >= quorum {
                 let prior = verified.drain(..).map(|(_, attestation)| attestation);
                 let certificate = scheme
-                    .assemble(
-                        non_empty![@prior.chain(result.verified.drain(..))],
-                        &strategy,
-                    )
+                    .assemble(non_empty![@prior.chain(result.verified)], &strategy)
                     .expect("verified quorum must assemble");
                 Some(wrap(context, certificate))
             } else {
@@ -233,7 +231,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
             (
                 verified,
                 Batch {
-                    batch,
+                    processed,
                     invalid: result.invalid,
                     certificate,
                     fallback,
@@ -334,8 +332,8 @@ impl<D: Digest> ProposalState<D> {
 /// Candidate quorums use [optimistic assembly](CertificateScheme::optimistic_assemble). Verified
 /// votes are retained between attempts, and a verified quorum skips pending vote verification.
 ///
-/// Once polled, async verification moves the pending batch and accumulated verified votes into
-/// the worker. Do not cancel an in-flight verification unless the verifier will also be discarded.
+/// Once polled, async construction moves the pending batch and accumulated verified votes into
+/// the worker. Do not cancel an in-flight construction unless the verifier will also be discarded.
 ///
 /// [ed25519]: crate::simplex::scheme::ed25519
 /// [bls12381_multisig]: crate::simplex::scheme::bls12381_multisig
@@ -656,13 +654,16 @@ mod tests {
 
     const NAMESPACE: &[u8] = b"test";
 
+    /// Asserts that `result` processed `expected` pending votes with no invalid
+    /// signers and no fallback, returning any certificate it produced.
     fn assert_valid<S: Scheme<D>, D: Digest>(
         result: Batch<Certificate<S, D>>,
-        expected_batch: usize,
-    ) {
-        assert_eq!(result.batch, expected_batch);
+        expected: usize,
+    ) -> Option<Certificate<S, D>> {
+        assert_eq!(result.processed, expected);
         assert!(result.invalid.is_empty());
         assert!(!result.fallback);
+        result.certificate
     }
 
     impl<C, S: CertificateScheme> Certification<C, S> {
@@ -731,7 +732,7 @@ mod tests {
             .try_construct_nullification(&mut rng, &Sequential)
             .await
             .unwrap();
-        assert_eq!(result.batch, 1);
+        assert_eq!(result.processed, 1);
         assert!(result.certificate.is_none());
         assert!(result.invalid.is_empty());
 
@@ -760,7 +761,7 @@ mod tests {
             .try_construct_nullification(&mut rng, &Sequential)
             .await
             .unwrap();
-        assert_eq!(result.batch, quorum as usize);
+        assert_eq!(result.processed, quorum as usize);
         assert_eq!(result.invalid, vec![Participant::new(quorum - 1)]);
         assert!(result.certificate.is_none());
 
@@ -1043,14 +1044,14 @@ mod tests {
         assert!(verifier2.notarize.should_construct());
 
         let Batch {
-            batch,
+            processed,
             invalid: failed_second,
             ..
         } = verifier2
             .try_construct_notarization(&mut rng, &Sequential)
             .await
             .unwrap();
-        assert_eq!(batch, quorum as usize);
+        assert_eq!(processed, quorum as usize);
         assert!(
             verifier2
                 .notarize
@@ -1749,7 +1750,7 @@ mod tests {
     }
 
     #[test]
-    fn test_notarizes_empty_pending() {
+    fn test_verify_notarizes_empty_pending() {
         verify_notarizes_empty(bls12381_threshold_vrf::fixture::<MinSig, _>);
         verify_notarizes_empty(bls12381_threshold_vrf::fixture::<MinPk, _>);
         verify_notarizes_empty(bls12381_threshold_std::fixture::<MinSig, _>);
@@ -2173,7 +2174,7 @@ mod tests {
             .try_construct_nullification(&mut rng, &Sequential)
             .await
             .unwrap();
-        assert_eq!(result.batch, 3);
+        assert_eq!(result.processed, 3);
         assert_eq!(result.invalid, vec![Participant::new(3)]);
         assert!(result.certificate.is_none());
         assert!(verifier.nullify.pending().is_empty());
@@ -2185,15 +2186,8 @@ mod tests {
             .try_construct_nullification(&mut rng, &Sequential)
             .await
             .unwrap();
-        assert_eq!(result.batch, 0);
-        assert!(result.invalid.is_empty());
-        assert!(!result.fallback);
-        assert!(
-            result
-                .certificate
-                .unwrap()
-                .verify(&mut rng, &schemes[0], &Sequential)
-        );
+        let certificate = assert_valid(result, 0).unwrap();
+        assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
         assert!(verifier.nullify.is_complete());
         assert!(verifier.nullify.verified().is_empty());
 
@@ -2327,11 +2321,7 @@ mod tests {
                     .await,
             ),
         ] {
-            let result = result.unwrap();
-            assert_eq!(result.batch, 0);
-            assert!(result.invalid.is_empty());
-            assert!(!result.fallback);
-            let certificate = result.certificate.unwrap();
+            let certificate = assert_valid(result.unwrap(), 0).unwrap();
             assert_eq!(certificate.kind(), kind);
             assert!(certificate.verify(&mut rng, &schemes[0], &Sequential));
         }

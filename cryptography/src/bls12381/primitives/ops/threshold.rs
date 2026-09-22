@@ -250,7 +250,7 @@ where
 
 /// Interpolates a candidate signature from partial signatures.
 ///
-/// Requires at least [`Sharing::required`] distinct indices and uses the lowest ones; any
+/// Requires at least [`Sharing::required`] distinct indices and uses the lowest ones. Any
 /// remaining partials are ignored. Input indices must be unique.
 ///
 /// Recovery does not verify the partials or the result. When using unverified partials, callers

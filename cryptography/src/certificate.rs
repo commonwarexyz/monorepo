@@ -439,8 +439,8 @@ pub trait Scheme: Verifier {
 
     /// Assembles a non-empty stream of attestations into a candidate certificate.
     ///
-    /// Inputs may be unverified. `Ok` does not authenticate them or the resulting certificate;
-    /// callers using such inputs must call [`Verifier::verify_certificate`] for the intended subject.
+    /// Inputs may be unverified. `Ok` does not authenticate them or the resulting certificate.
+    /// Callers using such inputs must call [`Verifier::verify_certificate`] for the intended subject.
     ///
     /// Insufficient input returns [`AssemblyError::InsufficientAttestations`].
     /// A signer-unique quorum already verified for one subject must assemble successfully into a
@@ -463,7 +463,7 @@ pub trait Scheme: Verifier {
 /// Verifies pending attestations before assembling them with verified attestations.
 ///
 /// Inputs must satisfy [`Scheme::optimistic_assemble`]'s requirements.
-/// Rejected attestations return `Err` even if the remaining votes could certify,
+/// Rejected attestations return `Err` even if the remaining attestations could certify,
 /// preserving fault evidence for the caller. Assembly failure also returns the pending results.
 pub fn verify_then_assemble<'a, S, R, D, I, J>(
     scheme: &S,
@@ -483,7 +483,7 @@ where
     J::IntoIter: Send,
 {
     // Empty input already has a known verification result. Preserve rejected signer
-    // evidence for nonempty input even when the accepted votes could certify.
+    // evidence for non-empty input even when the accepted attestations could certify.
     let result = NonEmpty::try_new(pending.into_iter()).map_or_else(
         || Verification::new(Vec::new(), Vec::new()),
         |pending| scheme.verify_attestations::<_, D, _>(rng, subject, pending, strategy),
@@ -507,7 +507,7 @@ where
     scheme.assemble(attestations, strategy).map_err(|_| result)
 }
 
-/// Attempts aggregate certificate authentication before verifying pending attestations on failure.
+/// Authenticates a candidate certificate first, verifying pending attestations only on failure.
 ///
 /// Implements [`Scheme::optimistic_assemble`]'s input and result contract. A quorum consisting
 /// entirely of verified attestations is assembled without another certificate check.
@@ -1159,6 +1159,9 @@ mod tests {
     };
 
     #[cfg(feature = "bls12381")]
+    const THRESHOLD_NAMESPACE: &[u8] =
+        b"_COMMONWARE_CRYPTOGRAPHY_CERTIFICATE_THRESHOLD_OPTIMISTIC_ASSEMBLE";
+    #[cfg(feature = "bls12381")]
     const MULTISIG_NAMESPACE: &[u8] =
         b"_COMMONWARE_CRYPTOGRAPHY_CERTIFICATE_MULTISIG_OPTIMISTIC_ASSEMBLE";
     #[cfg(feature = "bls12381")]
@@ -1170,10 +1173,8 @@ mod tests {
         rng: &mut impl CryptoRng,
         n: u32,
     ) -> Vec<threshold::Scheme<crate::ed25519::PublicKey, V>> {
-        let identity_keys: Vec<_> = (0..n).map(|_| PrivateKey::random(&mut *rng)).collect();
-        let participants: Set<crate::ed25519::PublicKey> = identity_keys
-            .iter()
-            .map(|key| key.public_key())
+        let participants: Set<crate::ed25519::PublicKey> = (0..n)
+            .map(|_| PrivateKey::random(&mut *rng).public_key())
             .try_collect()
             .unwrap();
         let (polynomial, shares) =
@@ -1182,7 +1183,7 @@ mod tests {
             .into_iter()
             .map(|share| {
                 threshold::Scheme::signer(
-                    b"certificate-recovery",
+                    THRESHOLD_NAMESPACE,
                     participants.clone(),
                     polynomial.clone(),
                     share,
@@ -1582,15 +1583,8 @@ mod tests {
                 .attestations
                 .lock()
                 .push(vec![attestation.signer]);
-            self.inner.verify_attestation(
-                rng,
-                subject,
-                &Attestation {
-                    signer: attestation.signer,
-                    signature: attestation.signature.clone(),
-                },
-                strategy,
-            )
+            self.inner
+                .verify_attestation(rng, subject, &Self::inner(attestation.clone()), strategy)
         }
 
         fn verify_attestations<R, D, I>(

@@ -367,7 +367,8 @@ impl<
     /// Attempts to construct a certificate from the first ready kind (notarizes,
     /// nullifies, then finalizes), recording it before returning it to the caller.
     ///
-    /// Do not cancel unless the round will also be discarded.
+    /// Once polled, construction moves the buffered votes into the worker. Do not
+    /// cancel unless the round will also be discarded.
     pub async fn try_construct<E: CryptoRng>(
         &mut self,
         rng: &mut E,

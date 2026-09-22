@@ -460,7 +460,7 @@ mod tests {
             .try_construct(&mut rng, &strategy)
             .await
             .expect("quorum of notarizes must be ready");
-        assert_eq!(verification.batch, schemes.len());
+        assert_eq!(verification.processed, schemes.len());
         assert!(verification.invalid.is_empty());
         assert!(!verification.fallback);
         let certificate = verification.certificate.expect("quorum must certify");
@@ -541,7 +541,7 @@ mod tests {
                 .try_construct(&mut rng, &Sequential)
                 .await
                 .expect("mixed trusted and pending quorum must be ready");
-            assert_eq!(verification.batch, quorum - 1);
+            assert_eq!(verification.processed, quorum - 1);
             assert!(verification.invalid.is_empty());
             assert!(!verification.fallback);
             let certificate = verification.certificate.expect("quorum must certify");
@@ -653,13 +653,13 @@ mod tests {
                 .try_construct(&mut rng, &Sequential)
                 .await
                 .expect("candidate quorum must be ready");
-            assert_eq!(result.batch, batch);
+            assert_eq!(result.processed, batch);
             assert_eq!(result.invalid, vec![Participant::from_usize(0)]);
             assert!(result.fallback);
             assert_eq!(tracked.has_certificate(kind), valid_quorum);
 
             // Each replacement joins the retained valid votes to form another
-            // candidate quorum. The first replacement is invalid; the next is valid.
+            // candidate quorum. The first replacement is invalid. The next is valid.
             if !valid_quorum {
                 assert!(result.certificate.is_none());
                 for i in quorum..schemes.len() {
@@ -669,7 +669,7 @@ mod tests {
                         .try_construct(&mut rng, &Sequential)
                         .await
                         .expect("replacement vote must be processed");
-                    assert_eq!(result.batch, 1);
+                    assert_eq!(result.processed, 1);
                     if i == quorum {
                         assert!(result.fallback);
                         assert_eq!(result.invalid, vec![Participant::from_usize(i)]);
@@ -776,6 +776,30 @@ mod tests {
         assert!(tracked.has_certificate(Kind::Nullification));
     }
 
+    /// Replaces the seed signature of `vote` with the one from `other`, a notarize
+    /// by the same signer for another round, while keeping the vote signature valid.
+    fn corrupt_seed<V: Variant>(
+        vote: &mut Notarize<bls12381_threshold_vrf::Scheme<PublicKey, V>, Sha256Digest>,
+        other: &Notarize<bls12381_threshold_vrf::Scheme<PublicKey, V>, Sha256Digest>,
+    ) {
+        let valid = vote
+            .attestation
+            .signature
+            .get()
+            .expect("locally created signature decodes");
+        let wrong_seed = other
+            .attestation
+            .signature
+            .get()
+            .expect("locally created signature decodes")
+            .seed_signature;
+        vote.attestation.signature = bls12381_threshold_vrf::Signature {
+            vote_signature: valid.vote_signature,
+            seed_signature: wrong_seed,
+        }
+        .into();
+    }
+
     /// A valid vote signature cannot hide an invalid VRF seed contribution.
     async fn vrf_seed_only_corruption<V: Variant>() {
         let mut rng = test_rng();
@@ -801,22 +825,7 @@ mod tests {
             Sha256::hash(&[b"other"]),
         );
         let other = Notarize::sign(&schemes[0], other_proposal).unwrap();
-        let valid = votes[0]
-            .attestation
-            .signature
-            .get()
-            .expect("locally created signature decodes");
-        let wrong_seed = other
-            .attestation
-            .signature
-            .get()
-            .expect("locally created signature decodes")
-            .seed_signature;
-        votes[0].attestation.signature = bls12381_threshold_vrf::Signature {
-            vote_signature: valid.vote_signature,
-            seed_signature: wrong_seed,
-        }
-        .into();
+        corrupt_seed(&mut votes[0], &other);
 
         let mut tracked = super::Round::new(
             round_id,
@@ -839,7 +848,6 @@ mod tests {
             .await
             .expect("candidate quorum must be processed");
         assert!(fallback);
-
         assert_eq!(invalid, vec![Participant::from_usize(0)]);
     }
 
@@ -882,7 +890,7 @@ mod tests {
             .try_construct(&mut rng, &Sequential)
             .await
             .expect("a constructed quorum must complete before the leader update");
-        assert_eq!(result.batch, 0);
+        assert_eq!(result.processed, 0);
         assert!(result.invalid.is_empty());
         assert!(!result.fallback);
         let Some(Certificate::Notarization(certificate)) = result.certificate else {
@@ -945,7 +953,7 @@ mod tests {
         let vote = Notarize::sign(&schemes[quorum - 1], proposal).unwrap();
         assert!(round.add_network(participants[quorum - 1].clone(), Vote::Notarize(vote)));
         let Batch {
-            batch: processed,
+            processed,
             invalid,
             fallback,
             certificate,
@@ -955,7 +963,6 @@ mod tests {
             .expect("unique signer quorum must be ready");
         assert_eq!(processed, quorum - 1);
         assert!(invalid.is_empty());
-
         assert!(!fallback);
         assert!(matches!(certificate, Some(Certificate::Notarization(_))));
     }
@@ -1455,7 +1462,7 @@ mod tests {
             }
 
             let Batch {
-                batch: processed,
+                processed,
                 invalid,
                 fallback,
                 certificate,
@@ -1465,7 +1472,6 @@ mod tests {
                 .expect("certificate quorum must be ready");
             assert_eq!(processed, quorum_size);
             assert!(invalid.is_empty());
-
             assert!(!fallback);
             let certificate = certificate.expect("verified quorum must construct a certificate");
             assert_eq!(certificate.kind(), kind);
@@ -1535,7 +1541,7 @@ mod tests {
 
         // Only the network votes require verification.
         let Batch {
-            batch: processed,
+            processed,
             invalid,
             fallback,
             certificate,
@@ -1545,7 +1551,6 @@ mod tests {
             .expect("restored finalize quorum must be ready");
         assert_eq!(processed, quorum_size - 1);
         assert!(invalid.is_empty());
-
         assert!(!fallback);
         let certificate =
             certificate.expect("restored finalize quorum must construct a certificate");
@@ -1600,7 +1605,7 @@ mod tests {
         let notarization = build_notarization(&schemes, &proposal, quorum_size);
         assert!(round.record_certificate(&Certificate::Notarization(notarization)));
         let Batch {
-            batch: processed,
+            processed,
             invalid,
             fallback,
             certificate,
@@ -1610,7 +1615,6 @@ mod tests {
             .expect("restored finalize quorum must be ready");
         assert_eq!(processed, quorum_size);
         assert!(invalid.is_empty());
-
         assert!(!fallback);
         let certificate =
             certificate.expect("restored finalize quorum must construct a certificate");
@@ -1651,13 +1655,9 @@ mod tests {
         round.set_leader(Participant::from_usize(0));
 
         // Notarizes verify first, then nullifies, then nothing
-        let Batch {
-            batch: processed, ..
-        } = round.try_construct(&mut rng, &Sequential).await.unwrap();
+        let Batch { processed, .. } = round.try_construct(&mut rng, &Sequential).await.unwrap();
         assert_eq!(processed, quorum);
-        let Batch {
-            batch: processed, ..
-        } = round.try_construct(&mut rng, &Sequential).await.unwrap();
+        let Batch { processed, .. } = round.try_construct(&mut rng, &Sequential).await.unwrap();
         assert_eq!(processed, schemes.len());
         assert!(round.try_construct(&mut rng, &Sequential).await.is_none());
     }
@@ -3226,22 +3226,7 @@ mod tests {
                 ),
             )
             .unwrap();
-            let valid = leader_vote
-                .attestation
-                .signature
-                .get()
-                .expect("locally created signature decodes");
-            let wrong_seed = other
-                .attestation
-                .signature
-                .get()
-                .expect("locally created signature decodes")
-                .seed_signature;
-            leader_vote.attestation.signature = bls12381_threshold_vrf::Signature {
-                vote_signature: valid.vote_signature,
-                seed_signature: wrong_seed,
-            }
-            .into();
+            corrupt_seed(&mut leader_vote, &other);
 
             // The candidate quorum combines network votes with our trusted local
             // vote. Rejecting the leader's seed leaves only three valid votes.
