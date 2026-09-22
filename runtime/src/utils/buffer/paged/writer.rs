@@ -46,14 +46,14 @@
 use super::{
     Sealed,
     read::{PageReader, Replay},
-    view::View,
+    tip::Buffer,
+    view::{Tail, View},
 };
 use crate::{
     Blob, Error, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions, WriteOptions,
     buffer::{
         SyncState,
         paged::{ActiveChecksum, CHECKSUM_SIZE, CacheRef, Checksum, Slot},
-        tip::Buffer,
     },
 };
 use bytes::BufMut;
@@ -198,8 +198,9 @@ impl<B: Blob> Recovery<B> {
 
         let buffer = Buffer::from(
             current_page * page_size,
-            partial_data.unwrap_or_default(),
+            partial_data.unwrap_or_default().as_ref(),
             capacity,
+            page_size as usize,
             cache_ref.pool().clone(),
         );
 
@@ -375,10 +376,8 @@ impl<B: Blob> Recovery<B> {
             return Err(Error::InvalidChecksum);
         }
 
-        self.buffer.clear();
         let new_data = &page_data.as_ref()[..partial_bytes as usize];
-        let over_capacity = self.buffer.append(new_data);
-        assert!(!over_capacity);
+        self.buffer.replace(tail_offset, new_data);
 
         let final_record = self
             .sync_shrunk_page(
@@ -653,10 +652,11 @@ impl<B: Blob> Writer<B> {
             Some(self.buffer.offset),
             "flushed page count is inconsistent with the buffer offset"
         );
+        // Readers own their partial page so appends can reuse the writer's unique mutable tail.
         let partial_page = if self.buffer.is_empty() {
             None
         } else {
-            Some(self.buffer.slice(..))
+            Some(IoBuf::copy_from_slice(self.buffer.parts().1))
         };
         Sealed::new(
             self.blob.clone(),
@@ -766,7 +766,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         let bulk_len = (buf.len() - fill) / page_size * page_size;
         let bulk = buf.slice(fill..fill + bulk_len);
         let mut physical_pages = IoBufs::default();
-        self.append_full_pages(&bulk, None, &mut physical_pages);
+        self.append_full_pages(std::iter::once(&bulk), None, &mut physical_pages);
 
         assert!(
             self.partial_page_state.is_none(),
@@ -789,19 +789,10 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         }
 
         // Update state before writing, seeding the tip with the partial-page suffix of `buf`.
-        // The suffix (less than one page) is copied: a sub-page tip is never drained by flush,
-        // so seeding it with a view of `buf` would pin the entire backing allocation until the
-        // next append to this blob (or forever, if there is none).
+        // The independent tail owns at most one page, even when the input has large backing.
         self.current_page += (bulk_len / page_size) as u64;
-        let suffix = buf.slice(fill + bulk_len..);
-        let suffix = if suffix.is_empty() {
-            suffix
-        } else {
-            let mut copied = self.cache_ref.pool().alloc(suffix.len());
-            copied.put_slice(suffix.as_ref());
-            copied.freeze()
-        };
-        self.buffer.replace(boundary + bulk_len as u64, suffix);
+        self.buffer
+            .replace(boundary + bulk_len as u64, &buf.as_ref()[fill + bulk_len..]);
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         let page_size: u64 = self.cache_ref.page_size().widen();
@@ -881,12 +872,19 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             self.durable_page_state = self.partial_page_state;
         }
 
-        // Prepare the *physical* pages corresponding to the data in the buffer. Rewrites
-        // preserve the durable checksum, not merely the last flushed one: an unsynced flush
-        // (replay, snapshot) may have rewritten the partial page with no barrier, and a torn
-        // later rewrite must still leave the durable contents recoverable.
+        // Capture the full pages' original range before draining advances the tip. Their backing
+        // moves into the flush, and the partial page is detached from any larger allocation.
+        let page_size: usize = self.cache_ref.page_size().widen();
+        let pages_to_cache = self.buffer.len() / page_size;
+        let cache_offset = self.buffer.offset;
+        let full_pages = self.buffer.drain_full_pages();
+        let new_offset = self.buffer.offset;
+
+        // Rewrites preserve the durable checksum, not merely the last flushed one: an unsynced
+        // flush may have rewritten the partial page without making its checksum durable.
         let (physical_pages, partial_page_state) = self.to_physical_pages(
-            &self.buffer,
+            &full_pages,
+            self.buffer.parts().1,
             write_partial_page,
             self.partial_page_state.as_ref(),
             self.durable_page_state.as_ref(),
@@ -896,37 +894,17 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             "flush work predicate must match physical page construction"
         );
 
-        // Split buffered bytes into full logical pages to hand off now, leaving any trailing
-        // partial page in tip for continued buffering.
-        let page_size: usize = self.cache_ref.page_size().widen();
-        let pages_to_cache = self.buffer.len() / page_size;
-        let bytes_to_drain = pages_to_cache * page_size;
-
-        // Remember the logical start offset and page bytes for caching of flushed full pages.
-        let cache_pages = if pages_to_cache > 0 {
-            Some((self.buffer.offset, self.buffer.slice(..bytes_to_drain)))
-        } else {
-            None
-        };
-
-        // Drain full pages from the buffered logical data. If the tip is fully drained, detach its
-        // backing so empty append buffers don't retain pooled storage.
-        if bytes_to_drain == self.buffer.len() && bytes_to_drain != 0 {
-            let _ = self
-                .buffer
-                .take()
-                .expect("take must succeed when flush drains all buffered bytes");
-        } else if bytes_to_drain != 0 {
-            self.buffer.drop_prefix(bytes_to_drain);
-            self.buffer.offset += bytes_to_drain as u64;
-        }
-        let new_offset = self.buffer.offset;
-
         // Cache full pages before publishing the new blob state so reads don't observe stale
         // persisted bytes during the handoff from tip to cache.
-        if let Some((cache_offset, pages)) = cache_pages {
-            let remaining = self.cache_ref.cache(self.id, pages.as_ref(), cache_offset);
-            assert_eq!(remaining, 0, "cached full-page prefix must be page-aligned");
+        if pages_to_cache > 0 {
+            let cached = self.cache_ref.cache_pages(
+                self.id,
+                full_pages
+                    .iter()
+                    .flat_map(|chunk| chunk.as_ref().chunks_exact(page_size)),
+                cache_offset,
+            );
+            assert_eq!(cached, pages_to_cache * page_size);
         }
 
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
@@ -981,14 +959,14 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     }
 
     /// Returns a borrowed view over this blob.
-    fn view(&self) -> View<'_, B> {
+    const fn view(&self) -> View<'_, B> {
         View {
             blob: &self.blob,
             cache_ref: &self.cache_ref,
             id: self.id,
             size: self.buffer.size(),
             tail_offset: self.buffer.offset,
-            tail: self.buffer.as_ref(),
+            tail: Tail::Buffered(&self.buffer),
         }
     }
 
@@ -1062,7 +1040,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     ///
     /// # Arguments
     ///
-    /// * `buffer` - The buffer containing logical page data
+    /// * `full_pages` - Page-aligned chunks containing complete logical pages
+    /// * `partial_page` - The trailing bytes that do not fill a page
     /// * `include_partial_page` - Whether to include a partial page if one exists
     /// * `flushed` - The active checksum of the last flushed partial page, if any. Used only to
     ///   detect a partial page with nothing new to write.
@@ -1074,30 +1053,25 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// checksum.
     fn to_physical_pages(
         &self,
-        buffer: &Buffer,
+        full_pages: &IoBufs,
+        partial_page: &[u8],
         include_partial_page: bool,
         flushed: Option<&ActiveChecksum>,
         durable: Option<&ActiveChecksum>,
     ) -> (IoBufs, Option<ActiveChecksum>) {
         let page_size: usize = self.cache_ref.page_size().widen();
         let physical_page_size = page_size + CHECKSUM_SIZE as usize;
-        let pages_to_write = buffer.len() / page_size;
+        let pages_to_write = full_pages.len() / page_size;
         let mut write_buffer = IoBufs::default();
-        let buffer_data = buffer.as_ref();
 
         if pages_to_write > 0 {
-            self.append_full_pages(
-                &buffer.slice(..pages_to_write * page_size),
-                durable,
-                &mut write_buffer,
-            );
+            self.append_full_pages(full_pages.iter(), durable, &mut write_buffer);
         }
 
         if !include_partial_page {
             return (write_buffer, None);
         }
 
-        let partial_page = &buffer_data[pages_to_write * page_size..];
         if !Self::partial_page_dirty(pages_to_write, partial_page.len(), flushed) {
             return (write_buffer, None);
         }
@@ -1124,50 +1098,47 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         (write_buffer, Some(active_checksum))
     }
 
-    /// Appends each page of `data` to `write_buffer` in on-disk format: its payload (a zero-copy
-    /// slice of `data`) followed by a CRC record.
-    ///
-    /// `data.len()` must be a non-zero multiple of the page size. When `old_checksum` is present,
-    /// the first page's record preserves it in its original slot.
-    fn append_full_pages(
+    /// Append page-aligned chunks in on-disk format, with one payload slice and CRC per page.
+    /// The first page preserves `old_checksum` in its original slot when present.
+    fn append_full_pages<'a>(
         &self,
-        data: &IoBuf,
+        data: impl Iterator<Item = &'a IoBuf> + Clone,
         old_checksum: Option<&ActiveChecksum>,
         write_buffer: &mut IoBufs,
     ) {
         let page_size: usize = self.cache_ref.page_size().widen();
-        let pages = data.len() / page_size;
+        let pages = data
+            .clone()
+            .map(|chunk| {
+                assert!(chunk.len().is_multiple_of(page_size));
+                chunk.len() / page_size
+            })
+            .sum::<usize>();
         debug_assert!(pages > 0);
-        debug_assert_eq!(data.len() % page_size, 0);
         let page_size_u16 =
             u16::try_from(page_size).expect("page size must fit in u16 for CRC record");
 
-        // Build CRC bytes for full pages once. Full-page payload bytes are appended below as
-        // slices from `data`, so we avoid copying logical payload here.
+        // One CRC allocation serves the entire batch. Payload slices retain their original owners.
         let mut crcs = self.cache_ref.pool().alloc(CHECKSUM_SIZE as usize * pages);
-        let data_bytes = data.as_ref();
-        for page in 0..pages {
-            let start_read_idx = page * page_size;
-            let end_read_idx = start_read_idx + page_size;
-            let logical_page = &data_bytes[start_read_idx..end_read_idx];
+        for (page, logical_page) in data
+            .clone()
+            .flat_map(|chunk| chunk.as_ref().chunks_exact(page_size))
+            .enumerate()
+        {
             let crc = Crc32::checksum(logical_page);
-
-            // For the first page, if there's an old partial page CRC, construct the record
-            // to preserve the old CRC in its original slot.
             let old_checksum = if page == 0 { old_checksum } else { None };
             let (crc_record, _) = Self::build_crc_record(page_size_u16, crc, old_checksum);
             crcs.put_slice(&crc_record.to_bytes());
         }
         let crc_blob = crcs.freeze();
 
-        // Physical full-page layout is [logical_page_bytes, crc_record_bytes].
-        for page in 0..pages {
-            let start_read_idx = page * page_size;
-            let end_read_idx = start_read_idx + page_size;
-            write_buffer.append(data.slice(start_read_idx..end_read_idx));
-
-            let crc_start = page * CHECKSUM_SIZE as usize;
-            write_buffer.append(crc_blob.slice(crc_start..crc_start + CHECKSUM_SIZE as usize));
+        let mut crc_start = 0;
+        for chunk in data {
+            for start in (0..chunk.len()).step_by(page_size) {
+                write_buffer.append(chunk.slice(start..start + page_size));
+                write_buffer.append(crc_blob.slice(crc_start..crc_start + CHECKSUM_SIZE as usize));
+                crc_start += CHECKSUM_SIZE as usize;
+            }
         }
     }
 
@@ -2565,7 +2536,7 @@ mod tests {
             assert_eq!(append.size(), 500);
 
             // The buffered suffix is a copy, not a view that would pin the input allocation.
-            let tip_ptr = append.buffer.as_ref().as_ptr() as usize;
+            let tip_ptr = append.buffer.parts().1.as_ptr() as usize;
             assert!(!src_range.contains(&tip_ptr));
 
             // The directly written pages populate the page cache, exactly as a buffered flush
@@ -2861,13 +2832,16 @@ mod tests {
 
     #[test_traced("DEBUG")]
     fn test_sync_releases_tip_pool_slot_after_full_drain() {
+        const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+        const BUFFER_SIZE: usize = 8192;
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let mut registry = Registry::default();
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
+                    .with_size_class_range(NZUsize!(4096), NZUsize!(32768), NZU32!(2))
                     .with_pool_min_size(PAGE_SIZE.get() as usize)
-                    .with_max_per_class(NZU32!(2)),
+                    .with_thread_cache_disabled(),
                 &mut registry,
             );
             let cache_ref = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
@@ -2890,7 +2864,7 @@ mod tests {
             // One pooled slot backs the page cache and one backs the mutable tip.
             assert!(
                 matches!(
-                    pool.try_alloc(BUFFER_SIZE),
+                    pool.try_alloc(PAGE_SIZE.get() as usize),
                     Err(crate::iobuf::PoolError::Exhausted)
                 ),
                 "full-page tip should occupy the remaining pooled slot before sync"
@@ -2900,8 +2874,93 @@ mod tests {
 
             // After a full drain, the tip should no longer pin that slot.
             assert!(
-                pool.try_alloc(BUFFER_SIZE).is_ok(),
+                pool.try_alloc(PAGE_SIZE.get() as usize).is_ok(),
                 "sync should release pooled backing when no partial tail remains"
+            );
+        });
+    }
+
+    #[test]
+    fn test_seal_releases_partial_tip_pool_slot() {
+        const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
+        const BUFFER_SIZE: usize = 8192;
+        deterministic::Runner::default().start(|context| async move {
+            let pool = BufferPool::new(
+                BufferPoolConfig::for_storage()
+                    .with_size_class_range(NZUsize!(4096), NZUsize!(32768), NZU32!(2))
+                    .with_thread_cache_disabled(),
+                &mut Registry::default(),
+            );
+            let cache = CacheRef::new(pool.clone(), PAGE_SIZE, NZUsize!(1));
+            let (blob, size) = context
+                .open("test_partition", b"partial_seal")
+                .await
+                .unwrap();
+            let mut writer = Writer::new(blob, size, BUFFER_SIZE, cache).await.unwrap();
+            writer.append(&[7; 16]).await.unwrap();
+            let ptr = writer.buffer.parts().1.as_ptr();
+
+            // Active partial-page syncs preserve the reusable write allocation.
+            writer.sync().await.unwrap();
+            assert!(matches!(
+                pool.try_alloc(PAGE_SIZE.get() as usize),
+                Err(crate::iobuf::PoolError::Exhausted)
+            ));
+            writer.append(&[7; 16]).await.unwrap();
+            assert_eq!(writer.buffer.parts().1.as_ptr(), ptr);
+
+            let (sealed, sync) = writer.seal().await.unwrap();
+            assert!(pool.try_alloc(PAGE_SIZE.get() as usize).is_ok());
+            assert_eq!(
+                sealed.read_at(0, 32).await.unwrap().coalesce().as_ref(),
+                &[7; 32]
+            );
+            sync.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_recovery_sync_preserves_truncate_and_append() {
+        deterministic::Runner::default().start(|context| async move {
+            let page_size = NZU16!(64);
+            let cache = CacheRef::from_pooler(&context, page_size, NZUsize!(4));
+            let (blob, size) = context
+                .open("test_partition", b"compact_recovery")
+                .await
+                .unwrap();
+            let mut recovery = Recovery::open(blob, size, 256, cache.clone())
+                .await
+                .unwrap();
+            let mut expected: Vec<u8> = (0..129).collect();
+            recovery.append(&expected).await.unwrap();
+            recovery.sync().await.unwrap();
+            assert_eq!(recovery.buffer.len(), 1);
+            assert_eq!(recovery.buffer.capacity, 256);
+
+            // The earlier partial page is larger than the compacted tail.
+            recovery.truncate(95).await.unwrap();
+            expected.truncate(95);
+            let suffix = [7; 80];
+            recovery.append(&suffix).await.unwrap();
+            expected.extend_from_slice(&suffix);
+            recovery.sync().await.unwrap();
+            assert_eq!(recovery.buffer.capacity, 256);
+            drop(recovery);
+
+            let (blob, size) = context
+                .open("test_partition", b"compact_recovery")
+                .await
+                .unwrap();
+            let writer = Writer::new(blob, size, 256, cache).await.unwrap();
+            assert_eq!(writer.size(), expected.len() as u64);
+            assert_eq!(
+                writer
+                    .read_at(0, expected.len())
+                    .await
+                    .unwrap()
+                    .coalesce()
+                    .as_ref(),
+                expected
             );
         });
     }
@@ -4095,98 +4154,69 @@ mod tests {
     /// Format: [len_hi=0, len_lo=0, 0xDE, 0xAD, 0xBE, 0xEF]
     const DUMMY_MARKER: [u8; 6] = [0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
 
-    /// Test that `to_physical_pages` emits full pages zero-copy while still materializing the
-    /// trailing partial page into one padded physical page.
-    #[test_traced("DEBUG")]
-    fn test_to_physical_pages_zero_copy_full_pages_and_materialized_partial() {
-        // Build a tip buffer containing two full logical pages plus a trailing partial
-        // page, convert it with `to_physical_pages`, then verify:
-        // - the result is chunked rather than one contiguous buffer for the full-page portion
-        // - the logical payload bytes for the first two pages are preserved in order
-        // - the partial page is padded with zeros up to one full logical page
-        // - all three resulting physical pages validate their CRC records
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            // Open a new blob.
-            let (blob, blob_size) = context
-                .open("test_partition", b"to_physical_pages_zero_copy")
+    #[rstest::rstest]
+    #[case(103)]
+    #[case(4084)]
+    #[case(4096)]
+    fn test_to_physical_pages_preserves_chunk_owners(#[case] page_size: u16) {
+        deterministic::Runner::default().start(|context| async move {
+            let pool = BufferPool::new(
+                BufferPoolConfig::for_storage()
+                    .with_size_classes([(NZUsize!(8), NZU32!(1))])
+                    .with_alignment(NZUsize!(1))
+                    .with_pool_min_size(0),
+                &mut Registry::default(),
+            );
+            let page_size = NonZeroU16::new(page_size).unwrap();
+            let cache = CacheRef::new(pool.clone(), page_size, NZUsize!(4));
+            let (blob, size) = context
+                .open("test_partition", b"physical_chunks")
                 .await
                 .unwrap();
-            assert_eq!(blob_size, 0);
-
-            // Create a page cache reference.
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-
-            // Create a Writer.
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
-                .await
-                .unwrap();
-
-            // Build logical data with exactly two full pages followed by one trailing partial page.
-            // This lets us verify that only the partial page is materialized.
-            let page_size = PAGE_SIZE.get() as usize;
-            let partial_len = 17usize;
-            let data: Vec<u8> = (0..(page_size * 2 + partial_len))
-                .map(|i| (i % 251) as u8)
+            let page_size = usize::from(page_size.get());
+            let capacity = page_size * 32;
+            let writer = Writer::new(blob, size, capacity, cache).await.unwrap();
+            let data: Vec<_> = (0..page_size * 17 + 17).map(|i| (i % 251) as u8).collect();
+            let mut buffer = Buffer::from(0, &[], capacity, page_size, pool);
+            for chunk in data.chunks(page_size) {
+                assert!(!buffer.append(chunk));
+            }
+            assert!(buffer.parts().0.chunk_count() >= 4);
+            let (prefix, tail) = buffer.parts();
+            let pointers: Vec<_> = prefix
+                .iter()
+                .map(AsRef::as_ref)
+                .chain(std::iter::once(tail))
+                .flat_map(|chunk| chunk.chunks_exact(page_size))
+                .map(|page| page.as_ptr())
                 .collect();
+            let full_pages = buffer.drain_full_pages();
+            let durable = ActiveChecksum::new(Slot::Second, 7, Crc32::checksum(&data[..7]));
+            let (physical, partial) =
+                writer.to_physical_pages(&full_pages, buffer.parts().1, true, None, Some(&durable));
+            assert_eq!(physical.chunk_count(), 17 * 2 + 1);
+            assert_eq!(partial.unwrap().len, 17);
+            for (page, ptr) in pointers.into_iter().enumerate() {
+                assert_eq!(physical.chunk_at(page * 2).unwrap().as_ptr(), ptr);
+            }
 
-            // Seed a tip buffer with the logical bytes exactly as flush_internal would see them.
-            let mut buffer = Buffer::new(0, data.len(), cache_ref.pool().clone());
-            let over_capacity = buffer.append(&data);
-            assert!(!over_capacity);
-
-            // Convert buffered logical bytes into physical-page writes.
-            let (physical_pages, partial_page_state) =
-                append.to_physical_pages(&buffer, true, None, None);
-
-            // Two full pages should each contribute a logical slice and a CRC slice, and the
-            // trailing partial page should contribute one materialized padded physical page.
-            assert_eq!(physical_pages.chunk_count(), 5);
-
-            // The returned partial-page CRC state must describe the exact trailing logical length.
-            let checksum = partial_page_state.expect("partial page state must be returned");
-            assert_eq!(checksum.len as usize, partial_len);
-
-            // Coalesce for easier content inspection. The assembled bytes should still form three
-            // full physical pages on disk.
-            let physical_page_size = page_size + CHECKSUM_SIZE as usize;
-            let coalesced = physical_pages.coalesce();
-            assert_eq!(coalesced.len(), physical_page_size * 3);
-
-            // The first two physical pages must preserve the two full logical pages verbatim.
-            assert_eq!(&coalesced.as_ref()[..page_size], &data[..page_size]);
-            assert_eq!(
-                &coalesced.as_ref()[physical_page_size..physical_page_size + page_size],
-                &data[page_size..page_size * 2],
-            );
-
-            // The trailing partial page must contain the remaining logical bytes followed by zero
-            // padding up to one full logical page.
-            let partial_start = physical_page_size * 2;
-            assert_eq!(
-                &coalesced.as_ref()[partial_start..partial_start + partial_len],
-                &data[page_size * 2..],
-            );
-            assert!(
-                coalesced.as_ref()[partial_start + partial_len..partial_start + page_size]
-                    .iter()
-                    .all(|byte| *byte == 0)
-            );
-
-            // Each assembled physical page must carry a valid CRC record.
-            assert!(Checksum::validate_page(&coalesced.as_ref()[..physical_page_size]).is_some());
-            assert!(
-                Checksum::validate_page(
-                    &coalesced.as_ref()[physical_page_size..physical_page_size * 2]
-                )
-                .is_some()
-            );
-            assert!(
-                Checksum::validate_page(
-                    &coalesced.as_ref()[physical_page_size * 2..physical_page_size * 3]
-                )
-                .is_some()
-            );
+            let physical = physical.coalesce();
+            let physical_size = page_size + CHECKSUM_SIZE as usize;
+            for (idx, page) in physical.as_ref().chunks_exact(physical_size).enumerate() {
+                let logical = &data[idx * page_size..data.len().min((idx + 1) * page_size)];
+                assert_eq!(&page[..logical.len()], logical);
+                assert!(page[logical.len()..page_size].iter().all(|byte| *byte == 0));
+                assert_eq!(
+                    Checksum::validate_page(page).unwrap().len as usize,
+                    logical.len()
+                );
+                let record = read_crc_record_from_page(page);
+                if idx == 0 {
+                    assert_eq!(record.get_slot(Slot::Second), (durable.len, durable.crc));
+                } else {
+                    assert_eq!(record.get_slot(Slot::Second), (0, 0));
+                }
+            }
         });
     }
 
@@ -5290,6 +5320,7 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
+            let tail_ptr = append.buffer.parts().1.as_ptr();
             let snapshot = append.snapshot().await.unwrap();
             let snapshot_clone = snapshot.clone();
             let snapshot_size = snapshot.size();
@@ -5300,6 +5331,7 @@ mod tests {
             // Growing appends after the snapshot's frozen range, so it cannot invalidate it.
             append.append(&[0; 3]).await.unwrap();
             assert_eq!(append.size(), snapshot_size + 3);
+            assert_eq!(append.buffer.parts().1.as_ptr(), tail_ptr);
 
             let original = snapshot_clone
                 .read_at(0, data.len())

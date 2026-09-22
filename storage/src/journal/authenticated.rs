@@ -883,6 +883,15 @@ where
 
     /// Persist the selected operations before the Merkle state acknowledging them.
     pub(crate) async fn finish(self) -> Result<Journal<F, E, C, H, S>, Error<F>> {
+        let bounds = self.journal.bounds();
+        if self.selected_end < bounds.end {
+            warn!(
+                journal_size = bounds.end,
+                rewound_items = bounds.end - self.selected_end,
+                "rewinding journal items"
+            );
+        }
+
         // Publish and fully sync the selected operations before finalizing Merkle state that
         // acknowledges them.
         let journal = self.journal.finish(self.selected_end).await?;
@@ -1255,7 +1264,7 @@ mod tests {
     };
     use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{Sha256, sha256::Digest};
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_collect_traces, test_traced};
     use commonware_parallel::{Manual, Rayon, Sequential};
     use commonware_runtime::{
         BufferPooler, Runner as _, Spawner as _, Strategizer as _, Supervisor as _,
@@ -1266,6 +1275,7 @@ mod tests {
             fail_pending_syncs, next_pending_sync,
         },
         reschedule,
+        telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use futures::StreamExt as _;
@@ -1842,12 +1852,10 @@ mod tests {
             assert_eq!(loc, Location::<F>::new(i as u64));
         }
 
-        // Don't sync - these are uncommitted
-        // After alignment, they should be discarded
         let size_before = journal.size();
         assert_eq!(size_before, 20);
 
-        // Drop and recreate to simulate restart (which calls align internally)
+        // A persisted suffix without a commit must be discarded on restart.
         journal.sync().await.unwrap();
         let journal = create_empty_journal::<F>(context.child("second"), "mismatched").await;
 
@@ -1855,12 +1863,21 @@ mod tests {
         assert_eq!(journal.size(), 0);
     }
 
-    #[test_traced("INFO")]
-    fn test_align_with_mismatched_committed_ops_mmr() {
+    #[test_collect_traces("INFO")]
+    fn test_align_with_mismatched_committed_ops_mmr(traces: TraceStorage) {
         let executor = deterministic::Runner::default();
         executor.start(|context| {
             test_align_with_mismatched_committed_ops_inner::<mmr::Family>(context)
         });
+        traces
+            .get_by_level(tracing::Level::WARN)
+            .expect_event(|event| {
+                let metadata = &event.metadata;
+                metadata.content == "rewinding journal items"
+                    && metadata.expect_field_exact("journal_size", "20").is_ok()
+                    && metadata.expect_field_exact("rewound_items", "20").is_ok()
+            })
+            .unwrap();
     }
 
     #[test_traced("INFO")]

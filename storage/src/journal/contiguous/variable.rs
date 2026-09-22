@@ -2655,7 +2655,9 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{checkpoint::Checkpoint, tests::run_contiguous_tests},
         },
-        utils::codec::View,
+        utils::{
+            RESOURCE_TEST_PAGE_SIZE, codec::View, pooled_bytes_in_use, resource_test_pool_config,
+        },
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -3099,6 +3101,99 @@ mod tests {
                 (journal, _) = journal.append(&Counted(99)).await.unwrap();
                 assert_eq!(journal.read(size).await.unwrap().0, 99);
             });
+        }
+    }
+
+    #[test]
+    fn test_offset_rebuild_bounds_pooled_backing() {
+        const SECTIONS: u64 = 16;
+        const CACHE_PAGES: usize = 4;
+        const ACTIVE_WRITERS: usize = 2;
+        const RECOVERY_WRITERS: usize = 2 * SECTIONS as usize;
+        const RECOVERY_CHECKPOINT_PAGES: usize = 1;
+
+        fn config(context: &deterministic::Context, items_per_section: u64) -> Config<()> {
+            Config {
+                partition: "offset-rebuild-buffers".into(),
+                items_per_section: NonZeroU64::new(items_per_section).unwrap(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(
+                    context,
+                    NZU16!(RESOURCE_TEST_PAGE_SIZE as u16),
+                    NZUsize!(CACHE_PAGES),
+                ),
+                write_buffer: NZUsize!(131072),
+                replay_buffer: NZUsize!(RESOURCE_TEST_PAGE_SIZE),
+            }
+        }
+
+        // Exercise both page-aligned sections and sections with a final partial page.
+        for items_per_section in [8192, 8193] {
+            let size = SECTIONS * items_per_section;
+            let runtime = deterministic::Config::default()
+                .with_storage_buffer_pool_config(resource_test_pool_config());
+            let (live_bytes, checkpoint) =
+                deterministic::Runner::new(runtime).start_and_recover(move |context| async move {
+                    let mut pool_metrics = context.encode();
+                    let mut journal = Journal::<_, u64>::init(
+                        context.child("seed"),
+                        config(&context, items_per_section),
+                    )
+                    .await
+                    .unwrap();
+                    for value in 0..size {
+                        (journal, _) = journal.append(&value).await.unwrap();
+                    }
+                    let journal = journal.commit().await.unwrap();
+                    let live_bytes = pooled_bytes_in_use(&context, &mut pool_metrics);
+                    drop(journal);
+                    live_bytes
+                });
+            // The live journal owns one data and one offsets tail. Each may retain one partial
+            // page, and the shared cache owns at most four pages.
+            assert!(
+                live_bytes <= (ACTIVE_WRITERS + CACHE_PAGES) * RESOURCE_TEST_PAGE_SIZE,
+                "live journal retains too much pooled backing: items_per_section={items_per_section}, \
+                 live_bytes={live_bytes}"
+            );
+
+            // A fresh pool prevents allocations from the original writes from masking retention.
+            let recovery_bytes =
+                deterministic::Runner::from(checkpoint).start(move |context| async move {
+                    let mut pool_metrics = context.encode();
+                    let pending = Recovery::<_, u64>::open(
+                        context.child("recover"),
+                        config(&context, items_per_section),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(pending.bounds, 0..size);
+                    assert_eq!(pending.offsets.recovery_watermark(), 0);
+                    let recovery_bytes = pooled_bytes_in_use(&context, &mut pool_metrics);
+
+                    let journal = Journal(Box::new(pending.publish(size).await.unwrap()));
+                    for section in 0..SECTIONS {
+                        for pos in [
+                            section * items_per_section,
+                            (section + 1) * items_per_section - 1,
+                        ] {
+                            assert_eq!(journal.read(pos).await.unwrap(), pos);
+                        }
+                    }
+                    recovery_bytes
+                });
+            // Recovery owns one data and one offsets writer per item-bearing section. A synced
+            // writer may retain one partial page, the shared cache owns four pages, and the
+            // offsets checkpoint retains its one persisted metadata copy in a pooled page.
+            assert!(
+                recovery_bytes
+                    <= (RECOVERY_WRITERS + RECOVERY_CHECKPOINT_PAGES + CACHE_PAGES)
+                        * RESOURCE_TEST_PAGE_SIZE,
+                "recovery retains too much pooled backing: items_per_section={items_per_section}, \
+                 recovery_bytes={recovery_bytes}"
+            );
         }
     }
 

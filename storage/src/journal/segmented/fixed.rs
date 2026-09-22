@@ -1100,7 +1100,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::View;
+    use crate::utils::{
+        RESOURCE_TEST_PAGE_SIZE, codec::View, pooled_bytes_in_use, resource_test_pool_config,
+    };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1478,6 +1480,58 @@ mod tests {
             assert!(matches!(err, Err(Error::SectionOutOfRange(3))));
 
             journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[rstest::rstest]
+    #[case(100)]
+    #[case(8193)]
+    #[case(32769)]
+    fn test_segmented_fixed_synced_sections_bound_pooled_backing(#[case] items: u64) {
+        const WRITE_BUFFER: usize = 131072;
+        const SECTIONS: u64 = 8;
+        const CACHE_PAGES: usize = 4;
+
+        let runtime = deterministic::Config::default()
+            .with_storage_buffer_pool_config(resource_test_pool_config());
+        deterministic::Runner::new(runtime).start(move |context| async move {
+            let mut pool_metrics = context.encode();
+            let cfg = Config {
+                partition: "segmented-fixed-buffers".into(),
+                page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(RESOURCE_TEST_PAGE_SIZE as u16),
+                    NZUsize!(CACHE_PAGES),
+                ),
+                write_buffer: NZUsize!(WRITE_BUFFER),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for section in 0..SECTIONS {
+                for value in 0..items {
+                    (journal, _) = journal.append(section, &value).await.unwrap();
+                }
+                journal = journal.sync_all().await.unwrap();
+            }
+
+            let live_bytes = pooled_bytes_in_use(&context, &mut pool_metrics);
+            // Each live section writer may retain one partial page, and the shared cache owns at
+            // most four pages.
+            assert!(
+                live_bytes <= (SECTIONS as usize + CACHE_PAGES) * RESOURCE_TEST_PAGE_SIZE,
+                "synced sections retain too much pooled backing: items={items}, \
+                 live_bytes={live_bytes}"
+            );
+            for section in 0..SECTIONS {
+                assert_eq!(journal.get(section, 0).await.unwrap(), 0);
+                assert_eq!(journal.get(section, items - 1).await.unwrap(), items - 1);
+                (journal, _) = journal.append(section, &items).await.unwrap();
+            }
+            journal = journal.sync_all().await.unwrap();
+            for section in 0..SECTIONS {
+                assert_eq!(journal.get(section, items).await.unwrap(), items);
+            }
         });
     }
 

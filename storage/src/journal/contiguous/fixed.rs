@@ -658,6 +658,11 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let mut bytes = Vec::with_capacity(A::SIZE);
         item.write(&mut bytes);
         writer.append(&bytes).await?;
+
+        // Release completed write buffers without advancing the recovery watermark.
+        if end.is_multiple_of(self.cfg.items_per_blob.get()) {
+            writer.sync().await?;
+        }
         self.bounds.end = end;
         Ok(self)
     }

@@ -167,6 +167,19 @@ impl IoBufs {
         }
     }
 
+    /// Iterates over the readable buffer owners without coalescing them.
+    pub(crate) fn iter(&self) -> impl ExactSizeIterator<Item = &IoBuf> + Clone {
+        (0..self.chunk_count()).map(|index| match &self.inner {
+            IoBufsInner::Single(buf) => {
+                debug_assert_eq!(index, 0);
+                buf
+            }
+            IoBufsInner::Pair(bufs) => &bufs[index],
+            IoBufsInner::Triple(bufs) => &bufs[index],
+            IoBufsInner::Chunked(bufs) => &bufs[index],
+        })
+    }
+
     /// Whether all buffers are empty.
     #[inline]
     pub const fn is_empty(&self) -> bool {
@@ -2048,6 +2061,26 @@ mod tests {
                 bufs.advance(1);
                 assert_eq!(bufs.chunk_at(0), chunks[1..count].first().copied());
             }
+        }
+    }
+
+    #[test]
+    fn test_iobufs_iter_borrows_every_owner() {
+        let chunks = [b"ab".as_slice(), b"cd", b"ef", b"gh", b"ij"];
+        for count in 0..=chunks.len() {
+            let bufs = IoBufs::from(
+                chunks[..count]
+                    .iter()
+                    .map(|chunk| IoBuf::from(*chunk))
+                    .collect::<Vec<_>>(),
+            );
+            let iter = bufs.iter();
+            assert_eq!(iter.len(), count);
+            assert_eq!(
+                iter.clone().map(AsRef::as_ref).collect::<Vec<_>>(),
+                chunks[..count]
+            );
+            assert_eq!(iter.count(), count);
         }
     }
 
