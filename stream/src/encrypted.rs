@@ -943,29 +943,37 @@ mod test {
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
-            sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().clear();
 
             // Each frame is 128 bytes: 111 payload + 16 tag + 1 length prefix.
-            // Two fill the 256-byte cap exactly; the third spills into a second
-            // chunk. The runtime still receives one chunked `IoBufs` in one sink call.
-            let payload = vec![7u8; 111];
-            dialer_sender
-                .send_many(vec![
-                    IoBufs::from(IoBuf::from(payload.clone())),
-                    IoBufs::from(IoBuf::from(payload.clone())),
-                    IoBufs::from(IoBuf::from(payload.clone())),
-                ])
-                .await?;
+            // Two fill the 256-byte cap. Zero through nine messages cover
+            // empty, inline, and deque-backed batches with at most one sink call.
+            for count in 0..=9usize {
+                sends.store(0, Ordering::Relaxed);
+                chunk_counts.lock().clear();
+                dialer_sender.sink.last_chunk_lengths.clear();
+                dialer_sender
+                    .send_many((0..count).map(|index| IoBuf::from(vec![index as u8; 111])))
+                    .await?;
 
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock(), vec![2]);
-            assert_eq!(dialer_sender.sink.last_chunk_lengths, [256, 128]);
-            for _ in 0..3 {
-                assert_eq!(
-                    listener_receiver.recv().await?.coalesce(),
-                    payload.as_slice()
-                );
+                if count == 0 {
+                    assert_eq!(sends.load(Ordering::Relaxed), 0);
+                    assert!(chunk_counts.lock().is_empty());
+                } else {
+                    assert_eq!(sends.load(Ordering::Relaxed), 1);
+                    assert_eq!(*chunk_counts.lock(), vec![count.div_ceil(2)]);
+                }
+                let mut expected_lengths = vec![256; count / 2];
+                if !count.is_multiple_of(2) {
+                    expected_lengths.push(128);
+                }
+                assert_eq!(dialer_sender.sink.last_chunk_lengths, expected_lengths);
+                for index in 0..count {
+                    let expected = [index as u8; 111];
+                    assert_eq!(
+                        listener_receiver.recv().await?.coalesce(),
+                        expected.as_slice()
+                    );
+                }
             }
             Ok(())
         })

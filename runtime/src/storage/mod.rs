@@ -11,16 +11,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         path::Path,
     };
 
-    /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
-    /// but did not `fsync` are crash-durable before any storage structure reads.
+    /// Flush storage inherited from a prior process at startup.
     ///
     /// Per-platform guarantee:
     /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
-    /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
-    ///   crash-durable.
-    ///
-    /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
-    /// >= 5.8.
+    ///   Assumes storage lives on one filesystem; reliable error detection needs kernel >= 5.8.
+    /// - **macOS**: best-effort `sync(2)` for contents, followed by a crash-durable storage
+    ///   directory sync. Existing partition directories are synchronized on first access.
     pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
@@ -39,6 +36,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             } else {
                 // SAFETY: `sync` takes no arguments and cannot fail.
                 unsafe { libc::sync() };
+
+                // Make inherited storage-directory entries durable.
+                #[cfg(target_os = "macos")]
+                File::open(dir)?.sync_all()?;
                 tracing::debug!(
                     storage_directory = %dir.display(),
                     "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"

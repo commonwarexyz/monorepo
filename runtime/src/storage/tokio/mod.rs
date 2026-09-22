@@ -1,11 +1,13 @@
 use super::{Header, Layout, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
+#[cfg(target_os = "macos")]
+use std::collections::HashSet;
 use std::{
     fs,
     io::{ErrorKind, Seek as _, SeekFrom, Write as _},
     ops::RangeInclusive,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use tokio::sync::Mutex;
@@ -29,10 +31,72 @@ impl Config {
 
 #[derive(Clone)]
 pub struct Storage {
-    lock: Arc<Mutex<()>>,
+    lock: Arc<Mutex<Partitions>>,
     cfg: Config,
     pool: BufferPool,
     hold: Arc<Hold>,
+}
+
+/// Partition directory durability tracked by this storage instance.
+#[derive(Default)]
+struct Partitions {
+    /// Partitions whose inherited directory changes are durable. Creation and removal maintain
+    /// this state under the same lock. Removal retires the entry before unlinking, and a blob
+    /// removal restores it once the partition directory is synced.
+    #[cfg(target_os = "macos")]
+    synced: HashSet<PathBuf>,
+    #[cfg(all(test, target_os = "macos"))]
+    sync_hook: tests::SyncHook,
+}
+
+impl Partitions {
+    /// Makes storage root entry changes durable, with test hooks to pause or fail
+    /// before the filesystem sync.
+    fn sync_root(&mut self, root: &Path) -> Result<(), Error> {
+        #[cfg(all(test, target_os = "macos"))]
+        self.sync_hook.run()?;
+        sync_dir(root)
+    }
+
+    /// Make a partition's directory entries durable before caching it. Supply
+    /// `root` during blob creation to persist the partition's directory entry too.
+    fn sync(
+        &mut self,
+        path: impl AsRef<Path> + Into<PathBuf>,
+        root: Option<&Path>,
+    ) -> Result<(), Error> {
+        #[cfg(all(test, target_os = "macos"))]
+        self.sync_hook.run()?;
+        sync_dir(path.as_ref())?;
+        if let Some(root) = root {
+            self.sync_root(root)?;
+        }
+
+        #[cfg(target_os = "macos")]
+        self.synced.insert(path.into());
+        Ok(())
+    }
+
+    /// Retire a partition's durability record before changing its directory entries.
+    #[allow(clippy::missing_const_for_fn)]
+    fn invalidate(&mut self, _path: &Path) {
+        #[cfg(target_os = "macos")]
+        self.synced.remove(_path);
+    }
+
+    /// Make a partition's inherited directory entries durable on first access.
+    #[allow(clippy::missing_const_for_fn)]
+    fn sync_once(&mut self, _path: &Path) -> Result<(), Error> {
+        #[cfg(target_os = "macos")]
+        {
+            if self.synced.contains(_path) {
+                return Ok(());
+            }
+
+            self.sync(_path, None)?;
+        }
+        Ok(())
+    }
 }
 
 impl Storage {
@@ -51,7 +115,7 @@ impl Storage {
             )
         });
         Self {
-            lock: Arc::new(Mutex::new(())),
+            lock: Arc::new(Mutex::new(Partitions::default())),
             cfg,
             pool,
             hold,
@@ -65,14 +129,14 @@ impl Storage {
     /// runtime shutdown yields [Error::Closed].
     async fn dispatch<T: Send + 'static>(
         &self,
-        f: impl FnOnce() -> Result<T, Error> + Send + 'static,
+        f: impl FnOnce(&mut Partitions) -> Result<T, Error> + Send + 'static,
     ) -> Result<T, Error> {
         let guard = self.lock.clone().lock_owned().await;
         let hold = self.hold.clone();
         let task = tokio::task::spawn_blocking(move || {
             let _hold = hold;
-            let _guard = guard;
-            f()
+            let mut guard = guard;
+            f(&mut guard)
         });
         match task.await {
             Ok(result) => result,
@@ -107,7 +171,7 @@ impl crate::Storage for Storage {
         // must not abandon that sequence half-done (a straggling truncate could
         // clobber a successor's blob) or leave a later open trusting a header
         // whose syncs never ran.
-        self.dispatch(move || {
+        self.dispatch(move |partitions| {
             let parent = match path.parent() {
                 Some(parent) => parent,
                 None => return Err(Error::PartitionCreationFailed(partition)),
@@ -138,15 +202,15 @@ impl crate::Storage for Storage {
                 &name,
             )?;
             let (logical_size, blob_version, data_offset) = match existing {
-                Some(resolved) => resolved,
+                Some(resolved) => {
+                    // Make inherited directory entries durable before exposing the existing blob.
+                    partitions.sync_once(parent)?;
+                    resolved
+                }
                 None => {
-                    // Sync the directories before writing the header so a parseable
-                    // header always implies durable directory entries (an open that
-                    // parses a header never re-runs these). The storage directory is
-                    // synced unconditionally: the partition directory existing in the
-                    // namespace does not imply its entry is durable.
-                    sync_dir(parent)?;
-                    sync_dir(&storage_directory)?;
+                    // Make the blob name and its partition durable before writing a parseable
+                    // header. A visible partition directory does not establish its durability.
+                    partitions.sync(parent, Some(&storage_directory))?;
 
                     // Truncate to zero before writing, per the [Header::create] contract.
                     let (region, blob_version) = Header::create(&blob_layouts, &versions);
@@ -182,15 +246,19 @@ impl crate::Storage for Storage {
         // Run the removal to completion: dropping this future must not abandon
         // the sequence between an unlink and the directory sync that makes it
         // durable.
-        self.dispatch(move || {
-            // Remove all related files
-            if let Some(name) = name {
-                let blob_path = path.join(hex(&name));
-                fs::remove_file(blob_path)
-                    .map_err(|_| Error::BlobMissing(partition, hex(&name)))?;
+        self.dispatch(move |partitions| {
+            // Invalidate before unlinking so a failed removal cannot leave the
+            // partition marked durable.
+            partitions.invalidate(&path);
+
+            // Make the removal durable in its containing directory. Only a
+            // surviving partition regains its cache entry after a successful sync.
+            if let Some(name) = &name {
+                let blob_path = path.join(hex(name));
+                fs::remove_file(blob_path).map_err(|_| Error::BlobMissing(partition, hex(name)))?;
 
                 // Sync the partition directory to ensure the removal is durable.
-                sync_dir(&path)?;
+                partitions.sync(path, None)
             } else {
                 // Distinguish missing partitions from other filesystem failures.
                 fs::remove_dir_all(&path).map_err(|error| match error.kind() {
@@ -199,9 +267,8 @@ impl crate::Storage for Storage {
                 })?;
 
                 // Sync the storage directory to ensure the removal is durable.
-                sync_dir(&storage_directory)?;
+                partitions.sync_root(&storage_directory)
             }
-            Ok(())
         })
         .await
     }
@@ -211,12 +278,15 @@ impl crate::Storage for Storage {
 
         let path = self.cfg.storage_directory.join(partition);
         let partition = partition.to_string();
-        self.dispatch(move || {
+        self.dispatch(move |partitions| {
             // Distinguish missing partitions from other filesystem failures.
-            let entries = fs::read_dir(path).map_err(|error| match error.kind() {
+            let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
                 ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
                 _ => Error::ReadFailed,
             })?;
+
+            // Make inherited directory entries durable before exposing their blob names.
+            partitions.sync_once(&path)?;
             let mut blobs = Vec::new();
             for entry in entries {
                 let entry = entry.map_err(|_| Error::ReadFailed)?;
@@ -256,7 +326,33 @@ mod tests {
     use commonware_utils::sys_rng;
     use futures::FutureExt as _;
     use rand::RngExt as _;
+    #[cfg(target_os = "macos")]
+    use std::sync::mpsc;
     use std::{env, sync::mpsc::RecvTimeoutError};
+
+    /// One-shot pause and failure controls applied before a directory sync.
+    #[cfg(target_os = "macos")]
+    #[derive(Default)]
+    pub(super) struct SyncHook {
+        /// Announces entry and waits for release before the filesystem sync.
+        pause: Option<(tokio::sync::oneshot::Sender<()>, mpsc::Receiver<()>)>,
+        /// Error returned in place of the next filesystem sync.
+        fail: Option<Error>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl SyncHook {
+        pub(super) fn run(&mut self) -> Result<(), Error> {
+            if let Some((entered, released)) = self.pause.take() {
+                let _ = entered.send(());
+                let _ = released.recv();
+            }
+            if let Some(error) = self.fail.take() {
+                return Err(error);
+            }
+            Ok(())
+        }
+    }
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
@@ -897,6 +993,223 @@ mod tests {
             storage.remove("missing", None).await,
             Err(Error::PartitionMissing(_))
         ));
+
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    #[tokio::test]
+    async fn test_partition_scan_waits_for_sync(#[case] cancel: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let directory =
+                env::temp_dir().join(format!("storage_tokio_scan_sync_{}", random_suffix()));
+            let partition = directory.join("partition");
+            let other = directory.join("other");
+            fs::create_dir_all(&partition).unwrap();
+            fs::create_dir_all(&other).unwrap();
+            let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), test_pool());
+            crate::storage::sync(&directory).unwrap();
+
+            // Pause the first directory barrier while it owns the namespace lock.
+            let (entered, entering) = tokio::sync::oneshot::channel();
+            let (release, gate) = mpsc::channel();
+            storage.lock.lock().await.sync_hook.pause = Some((entered, gate));
+            {
+                let mut scan = Box::pin(storage.scan("partition"));
+                assert!((&mut scan).now_or_never().is_none());
+                entering.await.unwrap();
+                assert!((&mut scan).now_or_never().is_none());
+
+                // A queued scan must wait even if the initiating future is dropped.
+                let mut next = Box::pin(storage.scan("partition"));
+                assert!((&mut next).now_or_never().is_none());
+                let scan = if cancel {
+                    drop(scan);
+                    None
+                } else {
+                    Some(scan)
+                };
+                release.send(()).unwrap();
+                if let Some(scan) = scan {
+                    assert!(scan.await.unwrap().is_empty());
+                }
+                assert!(next.await.unwrap().is_empty());
+            }
+            assert!(storage.lock.lock().await.synced.contains(&partition));
+
+            // A cached scan leaves the failure armed for the other partition's first barrier.
+            storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+            assert!(storage.scan("partition").await.unwrap().is_empty());
+            assert!(matches!(
+                storage.scan("other").await,
+                Err(Error::WriteFailed)
+            ));
+            assert!(storage.scan("other").await.unwrap().is_empty());
+            assert!(matches!(
+                storage.scan("missing").await,
+                Err(Error::PartitionMissing(_))
+            ));
+            assert_eq!(storage.lock.lock().await.synced.len(), 2);
+
+            drop(storage);
+            fs::remove_dir_all(directory).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_partition_scan_sync_failure() {
+        let directory =
+            env::temp_dir().join(format!("storage_tokio_scan_fail_{}", random_suffix()));
+        let partition = directory.join("partition");
+        fs::create_dir_all(&partition).unwrap();
+        let storage = Storage::new(Config::new(directory.clone(), Layout::ALL), test_pool());
+        crate::storage::sync(&directory).unwrap();
+        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+
+        assert!(matches!(
+            storage.scan("partition").await,
+            Err(Error::WriteFailed)
+        ));
+        assert!(!storage.lock.lock().await.synced.contains(&partition));
+
+        assert!(storage.scan("partition").await.unwrap().is_empty());
+        assert!(storage.lock.lock().await.synced.contains(&partition));
+
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_partition_open_syncs_once() {
+        let directory =
+            env::temp_dir().join(format!("storage_tokio_open_dir_sync_{}", random_suffix()));
+        let partition = directory.join("partition");
+        let config = Config::new(directory.clone(), Layout::ALL);
+
+        // A fresh storage instance must synchronize the inherited blob's partition on first open.
+        {
+            let storage = Storage::new(config.clone(), test_pool());
+            drop(storage.open("partition", b"blob").await.unwrap());
+        }
+
+        let storage = Storage::new(config, test_pool());
+        crate::storage::sync(&directory).unwrap();
+        let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(size, 0);
+        assert!(storage.lock.lock().await.synced.contains(&partition));
+        drop(blob);
+
+        // A cached reopen must leave the sync failure armed.
+        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+        drop(storage.open("partition", b"blob").await.unwrap());
+        assert!(storage.lock.lock().await.sync_hook.fail.is_some());
+
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_partition_sync_creation_and_removal() {
+        let directory =
+            env::temp_dir().join(format!("storage_tokio_dir_lifecycle_{}", random_suffix()));
+        let created = directory.join("created");
+        let inherited = directory.join("inherited");
+        let retired = directory.join("retired");
+        let missing = directory.join("missing");
+        let config = Config::new(directory.clone(), Layout::ALL);
+        {
+            let storage = Storage::new(config.clone(), test_pool());
+            for partition in ["inherited", "retired"] {
+                drop(storage.open(partition, b"blob").await.unwrap());
+            }
+        }
+
+        let storage = Storage::new(config, test_pool());
+        crate::storage::sync(&directory).unwrap();
+
+        // Creation synchronizes the partition, so its first scan can use the cache.
+        drop(storage.open("created", b"blob").await.unwrap());
+        assert!(storage.lock.lock().await.synced.contains(&created));
+        assert_eq!(
+            storage.scan("created").await.unwrap(),
+            vec![b"blob".to_vec()]
+        );
+
+        // Removing an inherited blob also synchronizes its partition before caching it.
+        storage.remove("inherited", Some(b"blob")).await.unwrap();
+        assert!(storage.lock.lock().await.synced.contains(&inherited));
+        assert!(storage.scan("inherited").await.unwrap().is_empty());
+
+        // Removing a partition retires its cache entry before the name is reused.
+        assert_eq!(
+            storage.scan("retired").await.unwrap(),
+            vec![b"blob".to_vec()]
+        );
+        storage.remove("retired", None).await.unwrap();
+        assert!(matches!(
+            storage.scan("retired").await,
+            Err(Error::PartitionMissing(_))
+        ));
+        assert!(!storage.lock.lock().await.synced.contains(&retired));
+        drop(storage.open("retired", b"new").await.unwrap());
+        assert!(storage.lock.lock().await.synced.contains(&retired));
+        assert_eq!(
+            storage.scan("retired").await.unwrap(),
+            vec![b"new".to_vec()]
+        );
+
+        assert!(matches!(
+            storage.remove("missing", Some(b"blob")).await,
+            Err(Error::BlobMissing(_, _))
+        ));
+        assert!(!storage.lock.lock().await.synced.contains(&missing));
+        drop(storage);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    /// A failed blob-removal directory sync leaves the partition uncached so the next scan
+    /// completes that barrier before reporting the removal.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_blob_remove_sync_failure_retires_partition() {
+        let directory =
+            env::temp_dir().join(format!("storage_tokio_remove_fail_{}", random_suffix()));
+        let partition = directory.join("partition");
+        let config = Config::new(directory.clone(), Layout::ALL);
+        {
+            let storage = Storage::new(config.clone(), test_pool());
+            drop(storage.open("partition", b"blob").await.unwrap());
+        }
+
+        let storage = Storage::new(config, test_pool());
+        crate::storage::sync(&directory).unwrap();
+        assert_eq!(
+            storage.scan("partition").await.unwrap(),
+            vec![b"blob".to_vec()]
+        );
+        assert!(storage.lock.lock().await.synced.contains(&partition));
+
+        // The unlink lands, then the directory sync fails.
+        storage.lock.lock().await.sync_hook.fail = Some(Error::WriteFailed);
+        assert!(matches!(
+            storage.remove("partition", Some(b"blob")).await,
+            Err(Error::WriteFailed)
+        ));
+        assert!(!partition.join(hex(b"blob")).exists());
+        assert!(!storage.lock.lock().await.synced.contains(&partition));
+
+        // A later scan must finish the missing barrier before caching the empty partition.
+        assert!(storage.scan("partition").await.unwrap().is_empty());
+        assert!(storage.lock.lock().await.synced.contains(&partition));
 
         drop(storage);
         fs::remove_dir_all(directory).unwrap();
