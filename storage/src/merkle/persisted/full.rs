@@ -386,14 +386,15 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         mem.add_pinned_nodes(extra_pinned);
 
         // An intact orphan leaf can reconstruct missing parents within the leaf cap.
-        if retained_size != journal_size && max_leaves.is_none_or(|cap| leaves < cap) {
-            if let Ok(leaf) = journal.read(*retained_size).await {
-                let batch = mem
-                    .new_batch()
-                    .add_leaf_digest(leaf)
-                    .merkleize(&mem, hasher);
-                mem.apply_batch(&batch)?;
-            }
+        if retained_size != journal_size
+            && max_leaves.is_none_or(|cap| leaves < cap)
+            && let Ok(leaf) = journal.read(*retained_size).await
+        {
+            let batch = mem
+                .new_batch()
+                .add_leaf_digest(leaf)
+                .merkleize(&mem, hasher);
+            mem.apply_batch(&batch)?;
         }
         Ok(Recovery {
             journal,
