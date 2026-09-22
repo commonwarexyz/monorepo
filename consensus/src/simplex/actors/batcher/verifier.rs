@@ -181,7 +181,7 @@ impl<C, S: CertificateScheme> Certification<C, S> {
                 match scheme.optimistic_assemble::<_, D, _, _>(
                     &mut rng,
                     subject(&context),
-                    pending.iter().map(|(_, attestation)| attestation.clone()),
+                    pending.into_iter().map(|(_, attestation)| attestation),
                     verified.iter().map(|(_, attestation)| attestation),
                     &strategy,
                 ) {

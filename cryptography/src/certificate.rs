@@ -78,7 +78,8 @@ use commonware_codec::{
 use commonware_parallel::Strategy;
 use commonware_utils::{Faults, Participant, bitmap::BitMap, iter::NonEmpty, ordered::Set};
 use core::{fmt::Debug, hash::Hash};
-use rand_core::CryptoRng;
+use rand_chacha::ChaCha20Rng;
+use rand_core::{CryptoRng, SeedableRng};
 #[cfg(feature = "std")]
 use std::{collections::BTreeSet, sync::Arc, vec::Vec};
 use thiserror::Error;
@@ -432,12 +433,35 @@ pub trait Scheme: Verifier {
         R: CryptoRng,
         D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: ExactSizeIterator + Clone + Send,
+        I::IntoIter: ExactSizeIterator + Send,
         J: IntoIterator<Item = &'a Attestation<Self>>,
         J::IntoIter: Send,
     {
-        let mut pending = pending.into_iter();
-        let attestations = pending.clone().chain(verified.into_iter().cloned());
+        let pending = pending.into_iter();
+        let verified = verified.into_iter();
+
+        // Verify the remainder first when at least as many inputs are already trusted,
+        // avoiding assembly just to reject replacement votes. A singleton also has no
+        // cross-signer batching benefit.
+        if pending.len() <= 1 || verified.size_hint().0 >= pending.len() {
+            let result = self.verify_attestations(rng, subject, pending, strategy);
+            if result.invalid.is_empty()
+                && let Some(attestations) =
+                    NonEmpty::try_new(result.verified.iter().cloned().chain(verified.cloned()))
+                && let Ok(certificate) = self.assemble(attestations, strategy)
+            {
+                return Ok(certificate);
+            }
+            return Err(result);
+        }
+
+        // Decode before cloning so assembly and fallback reuse the same decoded values.
+        // The strategy distributes expensive point decoding across its workers.
+        let mut pending = strategy.map_collect_vec(pending, |attestation| {
+            let _ = attestation.signature.get();
+            attestation
+        });
+        let attestations = pending.iter().cloned().chain(verified.cloned());
         if let Some(attestations) = NonEmpty::try_new(attestations)
             && let Ok(certificate) = self.assemble(attestations, strategy)
             && self.verify_certificate(rng, subject.clone(), &certificate, strategy)
@@ -445,20 +469,19 @@ pub trait Scheme: Verifier {
             return Ok(certificate);
         }
 
-        if pending.len() == 0 {
-            return Err(Verification::new(Vec::new(), Vec::new()));
-        }
-
         // Each half needs ordinary verification, including every signed component
-        // of schemes with more than one signature per attestation.
-        let chunk = pending.len().div_ceil(2);
-        let mut result =
-            self.verify_attestations(rng, subject.clone(), pending.by_ref().take(chunk), strategy);
-        if pending.len() != 0 {
-            let rest = self.verify_attestations(rng, subject, pending, strategy);
-            result.verified.extend(rest.verified);
-            result.invalid.extend(rest.invalid);
-        }
+        // of schemes with more than one signature per attestation. Independent RNGs
+        // allow both halves to run concurrently without sharing the caller's RNG.
+        let rest = pending.split_off(pending.len().div_ceil(2));
+        let mut first_rng = ChaCha20Rng::from_rng(&mut *rng);
+        let mut rest_rng = ChaCha20Rng::from_rng(rng);
+        let first_subject = subject.clone();
+        let (mut result, rest) = strategy.join(
+            || self.verify_attestations(&mut first_rng, first_subject, pending, strategy),
+            || self.verify_attestations(&mut rest_rng, subject, rest, strategy),
+        );
+        result.verified.extend(rest.verified);
+        result.invalid.extend(rest.invalid);
         Err(result)
     }
 
@@ -468,10 +491,8 @@ pub trait Scheme: Verifier {
     /// callers using such inputs must call [`Verifier::verify_certificate`] for the intended subject.
     ///
     /// Insufficient input returns [`AssemblyError::InsufficientAttestations`].
-    ///
-    /// Under the scheme's key setup, fault model, and cryptographic assumptions, a quorum of
-    /// attestations from distinct signers, all verified for this exact scheme configuration and
-    /// one subject, must assemble successfully into a certificate that verifies for that subject.
+    /// A signer-unique quorum already verified for one subject must assemble successfully into a
+    /// certificate that verifies for that subject.
     fn assemble<I>(
         &self,
         attestations: NonEmpty<I>,
@@ -1149,7 +1170,7 @@ mod tests {
         let expected = schemes[0]
             .assemble(non_empty![@attestations.clone()], &Sequential)
             .unwrap();
-        let prior: Vec<_> = attestations[2..]
+        let prior: Vec<_> = attestations[..1]
             .iter()
             .cloned()
             .map(Recording::outer)
@@ -1163,7 +1184,7 @@ mod tests {
         let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
             &mut rng,
             SUBJECT,
-            attestations[..2].iter().cloned().map(Recording::outer),
+            attestations[1..].iter().cloned().map(Recording::outer),
             &prior,
             &Sequential,
         );
@@ -1218,7 +1239,7 @@ mod tests {
             .take(quorum)
             .map(|scheme| scheme.sign::<Sha256Digest>(SUBJECT).unwrap())
             .collect();
-        let prior: Vec<_> = attestations[2..]
+        let prior: Vec<_> = attestations[..1]
             .iter()
             .cloned()
             .map(Recording::outer)
@@ -1233,7 +1254,7 @@ mod tests {
             .optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 SUBJECT,
-                attestations[..2].iter().cloned().map(Recording::outer),
+                attestations[1..].iter().cloned().map(Recording::outer),
                 &prior,
                 &Sequential,
             )
@@ -1401,6 +1422,7 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingCalls {
         attestations: Mutex<Vec<Vec<Participant>>>,
+        assemblies: AtomicUsize,
         certificates: AtomicUsize,
     }
 
@@ -1544,6 +1566,7 @@ mod tests {
         where
             I: Iterator<Item = Attestation<Self>> + Send,
         {
+            self.calls.assemblies.fetch_add(1, Ordering::Relaxed);
             self.inner.assemble(
                 non_empty![@attestations.into_iter().map(Self::inner)],
                 strategy,
@@ -1673,7 +1696,7 @@ mod tests {
         assert_eq!(verification.invalid, vec![invalid]);
         assert_eq!(
             *calls.attestations.lock(),
-            vec![vec![accepted.signer], vec![invalid]]
+            vec![vec![accepted.signer, invalid]]
         );
 
         prior.extend(verification.verified);
@@ -1697,6 +1720,202 @@ mod tests {
             &certificate,
             &Sequential,
         ));
+    }
+
+    #[cfg(feature = "bls12381")]
+    #[test]
+    fn test_optimistic_assemble_reuses_verified_quorum() {
+        let mut rng = test_rng();
+        let schemes = threshold_signers::<MinPk>(&mut rng, 5);
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let attestations: Vec<_> = schemes[..quorum]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(SUBJECT).unwrap())
+            .collect();
+
+        for pending_len in [0, 1, 2] {
+            // Retained votes are authenticated for this configuration and subject.
+            // The remaining votes cover empty, singleton, and evenly split inputs.
+            let (prior, pending) = attestations.split_at(quorum - pending_len);
+            let prior = schemes[0].verify_attestations::<_, Sha256Digest, _>(
+                &mut rng,
+                SUBJECT,
+                prior.iter().cloned(),
+                &Sequential,
+            );
+            assert!(prior.invalid.is_empty());
+            let prior: Vec<_> = prior.verified.into_iter().map(Recording::outer).collect();
+            let calls = Arc::new(RecordingCalls::default());
+            let verifier = Recording {
+                inner: schemes[0].clone(),
+                calls: Arc::clone(&calls),
+            };
+            let certificate = verifier
+                .optimistic_assemble::<_, Sha256Digest, _, _>(
+                    &mut rng,
+                    SUBJECT,
+                    pending.iter().cloned().map(Recording::outer),
+                    &prior,
+                    &Sequential,
+                )
+                .ok()
+                .expect("verified quorum must certify");
+
+            // A verified quorum needs one recovery and no aggregate authentication.
+            assert_eq!(calls.assemblies.load(Ordering::Relaxed), 1);
+            assert_eq!(calls.certificates.load(Ordering::Relaxed), 0);
+            let verified: Vec<_> = calls
+                .attestations
+                .lock()
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            assert_eq!(
+                verified,
+                pending.iter().map(|a| a.signer).collect::<Vec<_>>()
+            );
+            assert!(schemes[0].verify_certificate::<_, Sha256Digest>(
+                &mut rng,
+                SUBJECT,
+                &certificate,
+                &Sequential,
+            ));
+
+            // An imprecise lower size hint changes only the strategy, not the result.
+            if pending_len == 2 {
+                calls.attestations.lock().clear();
+                calls.assemblies.store(0, Ordering::Relaxed);
+                calls.certificates.store(0, Ordering::Relaxed);
+                let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
+                    &mut rng,
+                    SUBJECT,
+                    pending.iter().cloned().map(Recording::outer),
+                    prior.iter().filter(|_| true),
+                    &Sequential,
+                );
+                assert_eq!(result.ok(), Some(certificate));
+                assert_eq!(calls.assemblies.load(Ordering::Relaxed), 1);
+                assert_eq!(calls.certificates.load(Ordering::Relaxed), 1);
+                assert!(calls.attestations.lock().is_empty());
+            }
+        }
+    }
+
+    #[cfg(feature = "bls12381")]
+    #[test]
+    fn test_optimistic_assemble_rejects_replacement_before_recovery() {
+        let mut rng = test_rng();
+        let schemes = threshold_signers::<MinPk>(&mut rng, 10);
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+
+        for failures in [1, 2] {
+            let calls = Arc::new(RecordingCalls::default());
+            let verifier = Recording {
+                inner: schemes[0].clone(),
+                calls: Arc::clone(&calls),
+            };
+
+            // Ten participants permit three faulty signers across these attempts.
+            // A failed initial quorum retains the local vote and its valid peer votes.
+            let own = schemes[0].verify_attestations::<_, Sha256Digest, _>(
+                &mut rng,
+                SUBJECT,
+                [schemes[0].sign::<Sha256Digest>(SUBJECT).unwrap()],
+                &Sequential,
+            );
+            assert!(own.invalid.is_empty());
+            let mut prior: Vec<_> = own.verified.into_iter().map(Recording::outer).collect();
+            let pending: Vec<_> = schemes[1..quorum]
+                .iter()
+                .enumerate()
+                .map(|(index, scheme)| {
+                    let subject = if index + 1 >= quorum - failures {
+                        OTHER_SUBJECT
+                    } else {
+                        SUBJECT
+                    };
+                    Recording::outer(scheme.sign::<Sha256Digest>(subject).unwrap())
+                })
+                .collect();
+            let result = verifier
+                .optimistic_assemble::<_, Sha256Digest, _, _>(
+                    &mut rng,
+                    SUBJECT,
+                    pending,
+                    &prior,
+                    &Sequential,
+                )
+                .unwrap_err();
+            assert_eq!(result.invalid.len(), failures);
+            prior.extend(result.verified);
+            assert_eq!(prior.len(), quorum - failures);
+
+            // A new faulty signer is mixed with any honest replacements. Classify
+            // these votes before repeating recovery over retained votes.
+            let pending: Vec<_> = schemes[quorum..quorum + failures]
+                .iter()
+                .enumerate()
+                .map(|(index, scheme)| {
+                    let subject = if index + 1 == failures {
+                        OTHER_SUBJECT
+                    } else {
+                        SUBJECT
+                    };
+                    Recording::outer(scheme.sign::<Sha256Digest>(subject).unwrap())
+                })
+                .collect();
+            let signers: Vec<_> = pending.iter().map(|vote| vote.signer).collect();
+            let invalid = *signers.last().unwrap();
+            calls.attestations.lock().clear();
+            calls.assemblies.store(0, Ordering::Relaxed);
+            calls.certificates.store(0, Ordering::Relaxed);
+            let result = verifier
+                .optimistic_assemble::<_, Sha256Digest, _, _>(
+                    &mut rng,
+                    SUBJECT,
+                    pending,
+                    &prior,
+                    &Sequential,
+                )
+                .unwrap_err();
+            assert_eq!(result.invalid, vec![invalid]);
+            assert_eq!(result.verified.len(), failures - 1);
+            assert_eq!(calls.assemblies.load(Ordering::Relaxed), 0);
+            assert_eq!(calls.certificates.load(Ordering::Relaxed), 0);
+            assert_eq!(*calls.attestations.lock(), vec![signers]);
+            prior.extend(result.verified);
+            assert_eq!(prior.len(), quorum - 1);
+
+            // The last honest replacement completes the same authenticated subject.
+            let replacement = Recording::outer(
+                schemes[quorum + failures]
+                    .sign::<Sha256Digest>(SUBJECT)
+                    .unwrap(),
+            );
+            let certificate = verifier
+                .optimistic_assemble::<_, Sha256Digest, _, _>(
+                    &mut rng,
+                    SUBJECT,
+                    [replacement],
+                    &prior,
+                    &Sequential,
+                )
+                .ok()
+                .expect("valid replacement must certify");
+            assert!(schemes[0].verify_certificate::<_, Sha256Digest>(
+                &mut rng,
+                SUBJECT,
+                &certificate,
+                &Sequential,
+            ));
+            assert!(!schemes[0].verify_certificate::<_, Sha256Digest>(
+                &mut rng,
+                OTHER_SUBJECT,
+                &certificate,
+                &Sequential,
+            ));
+        }
     }
 
     #[cfg(feature = "bls12381")]

@@ -601,7 +601,7 @@ macro_rules! impl_certificate_ed25519 {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                I::IntoIter: ExactSizeIterator + Clone + Send,
+                I::IntoIter: ExactSizeIterator + Send,
                 J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
                 J::IntoIter: Send,
             {
@@ -647,15 +647,10 @@ mod tests {
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
-    #[cfg(feature = "std")]
-    use commonware_parallel::Rayon;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_utils::{
-        Faults, N3f1, Participant, TryCollect, non_empty, ordered::Set, test_rng,
+        Faults, N3f1, NZUsize, Participant, TestRng, TryCollect, non_empty, ordered::Set, test_rng,
     };
-    #[cfg(feature = "std")]
-    use commonware_utils::{NZUsize, TestRng};
-    #[cfg(feature = "std")]
     use rand_core::Rng;
 
     const NAMESPACE: &[u8] = b"test-ed25519";
@@ -712,7 +707,6 @@ mod tests {
         assert!(Scheme::is_batchable());
     }
 
-    #[cfg(feature = "std")]
     #[test]
     fn test_optimistic_assemble_reuses_verified_attestations() {
         let mut rng = test_rng();

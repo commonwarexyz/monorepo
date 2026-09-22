@@ -960,8 +960,8 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_math::algebra::{Additive, CryptoGroup, Random};
-    use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, N5f1, NZU32, test_rng};
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{Faults, N3f1, N5f1, NZU32, NZUsize, test_rng};
     use rand::{SeedableRng, rngs::StdRng};
 
     const NAMESPACE: &[u8] = b"bls-threshold-signing-scheme";
@@ -2141,6 +2141,126 @@ mod tests {
     fn test_verify_attestations_rejects_malleability() {
         verify_attestations_rejects_malleability::<MinPk>();
         verify_attestations_rejects_malleability::<MinSig>();
+    }
+
+    fn optimistic_assemble_verifies_both_components<V: Variant>(strategy: &impl Strategy) {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers::<V>(7, 72);
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let subject = Subject::Nullify {
+            round: Round::new(Epoch::new(0), View::new(30)),
+        };
+        let other_subject = Subject::Nullify {
+            round: Round::new(Epoch::new(0), View::new(31)),
+        };
+        let votes: Vec<_> = schemes[..quorum]
+            .iter()
+            .map(|scheme| scheme.sign::<Sha256Digest>(subject).unwrap())
+            .collect();
+
+        for pending_len in [1, quorum] {
+            // Retained votes authenticate both components before a replacement arrives.
+            let prior_len = quorum - pending_len;
+            let prior = verifier.verify_attestations::<_, Sha256Digest, _>(
+                &mut rng,
+                subject,
+                votes[..prior_len].iter().cloned(),
+                strategy,
+            );
+            assert!(prior.invalid.is_empty());
+
+            for corrupt_vote in [false, true] {
+                let mut pending = votes[prior_len..].to_vec();
+                let positions = if pending_len == 1 {
+                    vec![(0, corrupt_vote)]
+                } else {
+                    vec![(0, corrupt_vote), (pending_len.div_ceil(2), !corrupt_vote)]
+                };
+                let mut invalid = Vec::new();
+
+                // Each invalid vote has one valid component. A larger batch places
+                // distinct invalid components in the two fallback halves.
+                for (position, corrupt_vote) in positions {
+                    let other = schemes[prior_len + position]
+                        .sign::<Sha256Digest>(other_subject)
+                        .unwrap();
+                    let original = pending[position].signature.get().unwrap();
+                    let other = other.signature.get().unwrap();
+                    pending[position].signature = Signature {
+                        vote_signature: if corrupt_vote {
+                            other.vote_signature
+                        } else {
+                            original.vote_signature
+                        },
+                        seed_signature: if corrupt_vote {
+                            original.seed_signature
+                        } else {
+                            other.seed_signature
+                        },
+                    }
+                    .into();
+                    invalid.push(pending[position].signer);
+                }
+                invalid.sort_unstable();
+                let accepted: Vec<_> = votes[prior_len..]
+                    .iter()
+                    .filter(|vote| !invalid.contains(&vote.signer))
+                    .cloned()
+                    .collect();
+
+                // Network inputs retain encoded signature points until the helper processes them.
+                let pending: Vec<_> = pending
+                    .into_iter()
+                    .map(|vote| Attestation::<Scheme<V>>::decode_cfg(vote.encode(), &()).unwrap())
+                    .collect();
+                let result = verifier
+                    .optimistic_assemble::<_, Sha256Digest, _, _>(
+                        &mut rng,
+                        subject,
+                        pending,
+                        &prior.verified,
+                        strategy,
+                    )
+                    .unwrap_err();
+                assert_eq!(result.verified, accepted);
+                let mut rejected = result.invalid;
+                rejected.sort_unstable();
+                assert_eq!(rejected, invalid);
+            }
+
+            // A valid replacement or complete batch still authenticates the intended round.
+            let certificate = verifier
+                .optimistic_assemble::<_, Sha256Digest, _, _>(
+                    &mut rng,
+                    subject,
+                    votes[prior_len..].iter().cloned(),
+                    &prior.verified,
+                    strategy,
+                )
+                .ok()
+                .expect("valid quorum must certify");
+            assert!(verifier.verify_certificate::<_, Sha256Digest>(
+                &mut rng,
+                subject,
+                &certificate,
+                strategy,
+            ));
+            assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+                &mut rng,
+                other_subject,
+                &certificate,
+                strategy,
+            ));
+        }
+    }
+
+    #[test]
+    fn test_optimistic_assemble_verifies_both_components() {
+        optimistic_assemble_verifies_both_components::<MinPk>(&Sequential);
+        optimistic_assemble_verifies_both_components::<MinSig>(&Sequential);
+        let strategy = Rayon::new(NZUsize!(8)).unwrap().manual();
+        optimistic_assemble_verifies_both_components::<MinPk>(&strategy);
+        optimistic_assemble_verifies_both_components::<MinSig>(&strategy);
     }
 
     fn verify_certificate_rejects_malleability<V: Variant>() {

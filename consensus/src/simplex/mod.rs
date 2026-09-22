@@ -330,11 +330,10 @@
 //! arrive since there is no batching benefit.
 //!
 //! When buffered votes of one kind reach quorum, the `Batcher` asks the scheme to construct an
-//! authenticated certificate. BLS schemes first assemble and verify the certificate, falling back to
-//! verification of pending halves on failure. Ed25519 and secp256r1 verify only pending votes before
-//! assembling them with retained verified votes. Successful construction does not guarantee individual
-//! input validity. Failed attempts retain valid votes and block identified invalid senders via
-//! [commonware_p2p::Blocker].
+//! authenticated certificate using
+//! [`Scheme::optimistic_assemble`](commonware_cryptography::certificate::Scheme::optimistic_assemble).
+//! Successful construction does not guarantee individual vote validity. Failed attempts retain valid
+//! votes and block identified invalid senders via [commonware_p2p::Blocker].
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._

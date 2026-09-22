@@ -545,7 +545,7 @@ macro_rules! impl_certificate_secp256r1 {
                 R: rand_core::CryptoRng,
                 D: $crate::Digest,
                 I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
-                I::IntoIter: ExactSizeIterator + Clone + Send,
+                I::IntoIter: ExactSizeIterator + Send,
                 J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
                 J::IntoIter: Send,
             {
@@ -594,6 +594,10 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::{Faults, N3f1, TryCollect, non_empty, ordered::BiMap, test_rng};
     use rand_core::CryptoRng;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     const NAMESPACE: &[u8] = b"test-secp256r1";
     const MESSAGE: &[u8] = b"test message";
@@ -645,13 +649,8 @@ mod tests {
         (signers, verifier)
     }
 
-    mod optimistic {
-        use super::*;
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-
+    #[test]
+    fn test_optimistic_assemble_verifies_pending_once() {
         /// Counts message preparation without changing the signed subject.
         #[derive(Clone, Debug)]
         pub struct CountingSubject {
@@ -674,101 +673,98 @@ mod tests {
 
         impl_certificate_secp256r1!(CountingSubject, Vec<u8>, N3f1);
 
-        #[test]
-        fn test_optimistic_assemble_verifies_pending_once() {
-            let mut rng = test_rng();
-            let (schemes, verifier) = setup_signers(&mut rng, 5);
-            let participants = verifier.generic.participants;
-            let mut schemes: Vec<_> = schemes
-                .into_iter()
-                .map(|scheme| {
-                    Scheme::signer(
-                        NAMESPACE,
-                        participants.clone(),
-                        scheme.generic.signer.unwrap().1,
-                    )
-                    .unwrap()
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_signers(&mut rng, 5);
+        let participants = verifier.generic.participants;
+        let mut schemes: Vec<_> = schemes
+            .into_iter()
+            .map(|scheme| {
+                Scheme::signer(
+                    NAMESPACE,
+                    participants.clone(),
+                    scheme.generic.signer.unwrap().1,
+                )
+                .unwrap()
+            })
+            .collect();
+        schemes.sort_by_key(|scheme| scheme.me());
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let verifier = Scheme::verifier(NAMESPACE, participants);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let subject = CountingSubject {
+            message: Bytes::from_static(MESSAGE),
+            calls: Arc::clone(&calls),
+        };
+        let sign = |scheme: &Scheme<PublicKey>, message| {
+            scheme
+                .sign::<Sha256Digest>(CountingSubject {
+                    message,
+                    calls: Arc::clone(&calls),
                 })
-                .collect();
-            schemes.sort_by_key(|scheme| scheme.me());
-            let quorum = N3f1::quorum(schemes.len()) as usize;
-            let verifier = Scheme::verifier(NAMESPACE, participants);
-            let calls = Arc::new(AtomicUsize::new(0));
-            let subject = CountingSubject {
-                message: Bytes::from_static(MESSAGE),
-                calls: Arc::clone(&calls),
-            };
-            let sign = |scheme: &Scheme<PublicKey>, message| {
-                scheme
-                    .sign::<Sha256Digest>(CountingSubject {
-                        message,
-                        calls: Arc::clone(&calls),
-                    })
-                    .unwrap()
-            };
+                .unwrap()
+        };
 
-            // Retained votes have already passed verification for this exact
-            // configuration and subject before the final candidate arrives.
-            let prior = verifier.verify_attestations::<_, Sha256Digest, _>(
+        // Retained votes have already passed verification for this exact
+        // configuration and subject before the final candidate arrives.
+        let prior = verifier.verify_attestations::<_, Sha256Digest, _>(
+            &mut rng,
+            subject.clone(),
+            schemes[..quorum - 1]
+                .iter()
+                .map(|scheme| sign(scheme, Bytes::from_static(MESSAGE))),
+            &Sequential,
+        );
+        assert!(prior.invalid.is_empty());
+        assert_eq!(prior.verified.len(), quorum - 1);
+
+        // A rejected candidate must verify the new vote once and return its
+        // signer without repeating certificate verification over retained votes.
+        let rejected = sign(
+            schemes.last().unwrap(),
+            Bytes::from_static(b"other subject"),
+        );
+        let invalid = rejected.signer;
+        calls.store(0, Ordering::Relaxed);
+        let result = verifier
+            .optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 subject.clone(),
-                schemes[..quorum - 1]
-                    .iter()
-                    .map(|scheme| sign(scheme, Bytes::from_static(MESSAGE))),
+                [rejected],
+                &prior.verified,
                 &Sequential,
-            );
-            assert!(prior.invalid.is_empty());
-            assert_eq!(prior.verified.len(), quorum - 1);
+            )
+            .expect_err("invalid vote must be reported");
+        assert!(result.verified.is_empty());
+        assert_eq!(result.invalid, vec![invalid]);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
 
-            // A rejected candidate must verify the new vote once and return its
-            // signer without repeating certificate verification over retained votes.
-            let rejected = sign(
-                schemes.last().unwrap(),
-                Bytes::from_static(b"other subject"),
-            );
-            let invalid = rejected.signer;
-            calls.store(0, Ordering::Relaxed);
-            let result = verifier
-                .optimistic_assemble::<_, Sha256Digest, _, _>(
-                    &mut rng,
-                    subject.clone(),
-                    [rejected],
-                    &prior.verified,
-                    &Sequential,
-                )
-                .expect_err("invalid vote must be reported");
-            assert!(result.verified.is_empty());
-            assert_eq!(result.invalid, vec![invalid]);
-            assert_eq!(calls.load(Ordering::Relaxed), 1);
-
-            // A fresh valid replacement completes the same retained quorum.
-            let replacement = sign(&schemes[quorum - 1], Bytes::from_static(MESSAGE));
-            let certificate = verifier
-                .optimistic_assemble::<_, Sha256Digest, _, _>(
-                    &mut rng,
-                    subject.clone(),
-                    [replacement],
-                    &prior.verified,
-                    &Sequential,
-                )
-                .ok()
-                .expect("valid replacement must certify");
-            assert!(verifier.verify_certificate::<_, Sha256Digest>(
+        // A fresh valid replacement completes the same retained quorum.
+        let replacement = sign(&schemes[quorum - 1], Bytes::from_static(MESSAGE));
+        let certificate = verifier
+            .optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 subject.clone(),
-                &certificate,
+                [replacement],
+                &prior.verified,
                 &Sequential,
-            ));
-            assert!(!verifier.verify_certificate::<_, Sha256Digest>(
-                &mut rng,
-                CountingSubject {
-                    message: Bytes::from_static(b"other subject"),
-                    ..subject
-                },
-                &certificate,
-                &Sequential,
-            ));
-        }
+            )
+            .ok()
+            .expect("valid replacement must certify");
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject.clone(),
+            &certificate,
+            &Sequential,
+        ));
+        assert!(!verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            CountingSubject {
+                message: Bytes::from_static(b"other subject"),
+                ..subject
+            },
+            &certificate,
+            &Sequential,
+        ));
     }
 
     #[test]
