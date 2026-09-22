@@ -48,7 +48,7 @@ mod tests {
         qmdb::{
             Error,
             keyless::{self as storage_keyless, fixed, variable},
-            sync,
+            sync::{self, source},
         },
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, channel::mpsc, sequence::U64};
@@ -74,16 +74,7 @@ mod tests {
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
         type Error = <Arc<FixedDb> as sync::Source>::Error;
 
-        async fn serve(
-            &self,
-            request: sync::Request<Self::Family>,
-        ) -> Result<
-            (
-                sync::Response<Self::Family, Self::Op, Self::Digest>,
-                sync::FeedbackTx,
-            ),
-            Self::Error,
-        > {
+        async fn serve(&self, request: sync::Request<Self::Family>) -> source::Result<Self> {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;

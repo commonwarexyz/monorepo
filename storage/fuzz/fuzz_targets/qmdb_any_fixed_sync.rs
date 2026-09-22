@@ -10,10 +10,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{
-            FixedConfig as Config,
-            unordered::fixed::{Db, Operation as FixedOperation},
-        },
+        any::{FixedConfig as Config, unordered::fixed::Db},
         sync,
     },
     translator::TwoCap,
@@ -129,12 +126,7 @@ async fn test_sync<F, R>(
 ) -> bool
 where
     F: MerkleFamily,
-    R: sync::source::Source<
-            Family = F,
-            Digest = commonware_cryptography::sha256::Digest,
-            Op = FixedOperation<F, Key, Value>,
-        > + Clone
-        + 'static,
+    R: sync::SourceFor<FixedDb<F>> + Clone,
 {
     let db_config = test_config(test_name, &context);
     let expected_root = target.root;

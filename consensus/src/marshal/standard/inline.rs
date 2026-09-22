@@ -72,10 +72,7 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::TracedAsyncMutex,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span};
@@ -138,7 +135,7 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
-    context: Arc<TracedAsyncMutex<E>>,
+    context: Arc<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
@@ -209,7 +206,7 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
-            context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
+            context: Arc::new(context),
             application,
             marshal,
             epocher,
@@ -263,8 +260,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("propose")
             .with_attribute("round", consensus_context.round);
         let span = info_span!(
@@ -447,8 +442,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
             .context
-            .lock()
-            .await
             .child("inline_verify")
             .with_attribute("round", round);
         let span = info_span!(
@@ -618,8 +611,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("inline_certify")
             .with_attribute("round", round);
         context.spawn(move |_| {

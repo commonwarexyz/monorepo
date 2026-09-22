@@ -26,8 +26,14 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap, iter::zip_eq};
-use core::{cmp::Ordering, ops::Range};
+use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
+use core::{
+    cmp::Ordering,
+    ops::{
+        Bound::{Excluded, Included},
+        Range,
+    },
+};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, hash_map},
@@ -810,13 +816,19 @@ where
         let read = reader.read_many(&positions).await?;
 
         // Merge read results back in order.
-        for (idx, loc) in committed {
-            // `positions` is sorted and deduped, and `loc` came from it before deduping, so
-            // binary search must find the matching read_many result.
-            let result_idx = positions
-                .binary_search(&loc)
-                .expect("read result missing for requested location");
-            results[idx] = Some(read[result_idx].clone());
+        if presorted {
+            for ((idx, _), op) in zip_eq(committed, read) {
+                results[idx] = Some(op);
+            }
+        } else {
+            for (idx, loc) in committed {
+                // `positions` is sorted and deduped, and `loc` came from it before deduping, so
+                // binary search must find the matching read_many result.
+                let result_idx = positions
+                    .binary_search(&loc)
+                    .expect("read result missing for requested location");
+                results[idx] = Some(read[result_idx].clone());
+            }
         }
         Ok(results
             .into_iter()
@@ -2013,7 +2025,7 @@ where
             StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
         };
         let mut cached = staged_updates.into_iter().peekable();
-        for (op, &old_loc) in results.iter().zip(&locations) {
+        for (op, &old_loc) in zip_eq(results, &locations) {
             while cached
                 .peek()
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
@@ -2022,7 +2034,7 @@ where
                 emit(key, staged_base_old_loc(sloc), mutation);
             }
 
-            let key = op.key().expect("updates should have a key");
+            let key = op.into_key().expect("updates should have a key");
 
             // A key resolved via the ancestor diff must only match at its ancestor-diff
             // location. Without this guard, a stale snapshot collision (the pre-parent DB
@@ -2030,7 +2042,7 @@ where
             // wrong sort position, changing the operation order relative to the committed-state
             // path. When the ancestor diff entry does match, use it to trace `base_old_loc`
             // back to the key's location in the committed DB snapshot.
-            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
+            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key) {
                 if entry.loc() != Some(old_loc) {
                     continue;
                 }
@@ -2039,13 +2051,13 @@ where
                 Some(old_loc)
             };
 
-            let Some(mutation) = mutations.remove(key) else {
+            let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
                 // any mutation key. The mutation will be handled as a create below.
                 continue;
             };
 
-            emit(key.clone(), base_old_loc, mutation);
+            emit(key, base_old_loc, mutation);
         }
         for (key, sloc, (), mutation) in cached {
             emit(key, staged_base_old_loc(sloc), mutation);
@@ -2158,12 +2170,7 @@ where
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
-        for (op, &old_loc) in m
-            .read_ops(&locations, &[], &db.log)
-            .await?
-            .into_iter()
-            .zip(&locations)
-        {
+        for (op, &old_loc) in zip_eq(m.read_ops(&locations, &[], &db.log).await?, &locations) {
             let update::Ordered {
                 key,
                 value,
@@ -2249,7 +2256,7 @@ where
 
         let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
 
-        for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
+        for (op, &old_loc) in zip_eq(prev_results, &prev_locations) {
             let data = match op {
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
@@ -2505,6 +2512,111 @@ where
             db,
         )
         .await
+    }
+}
+
+impl<F, K, V, D, S> MerkleizedBatch<F, D, update::Ordered<K, V>, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    S: Strategy,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Returns the smallest active key strictly greater than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no greater key, without wrapping.
+    pub async fn get_next_key<E, C, I, H, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        if self.total_active_keys == 0 {
+            return Ok(None);
+        }
+        if let Some(next) = self.find_cyclic_neighbor::<true>(key) {
+            return Ok((next > *key).then_some(next));
+        }
+        db.get_next_key(key).await
+    }
+
+    /// Returns the largest active key strictly less than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no smaller key, without wrapping.
+    pub async fn get_prev_key<E, C, I, H, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        if self.total_active_keys == 0 {
+            return Ok(None);
+        }
+        if let Some(prev) = self.find_cyclic_neighbor::<false>(key) {
+            return Ok((prev < *key).then_some(prev));
+        }
+        db.get_prev_key(key).await
+    }
+
+    /// Find a cyclic neighbor from the live batch chain, if it owns the query's span.
+    fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
+        let find = |batch: &Self| {
+            let diff = batch.diff.as_slice();
+            let end = diff.partition_point(|(candidate, _)| {
+                if NEXT {
+                    candidate <= key
+                } else {
+                    candidate < key
+                }
+            });
+
+            // Search below the query first, wrapping only when that side has no active entry.
+            // An earlier key cannot own the span past a later active key in this layer.
+            let loc = diff[..end]
+                .iter()
+                .rev()
+                .chain(diff[end..].iter().rev())
+                .find_map(|(_, entry)| entry.loc())?;
+
+            // Active entries reference operations in their owning batch's journal suffix.
+            let index = (*loc - *batch.bounds.base.size) as usize;
+            let Operation::Update(data) = &batch.journal_batch.items()[index] else {
+                unreachable!("active diff entry must reference an update");
+            };
+
+            // Successor queries use [start, end). Predecessor queries use (start, end].
+            // Match the cyclic owner before the public methods suppress linear wraparound.
+            let bounds = if NEXT {
+                (Included(&data.key), Excluded(&data.next_key))
+            } else {
+                (Excluded(&data.key), Included(&data.next_key))
+            };
+            contains_cyclic(bounds, key).then(|| {
+                if NEXT {
+                    data.next_key.clone()
+                } else {
+                    data.key.clone()
+                }
+            })
+        };
+
+        // Membership changes emit affected predecessors and created keys, so the newest
+        // matching layer owns the query's span in the final batch view.
+        find(self).or_else(|| self.ancestors().find_map(|batch| find(&batch)))
     }
 }
 
@@ -4551,15 +4663,18 @@ mod tests {
 
             let key_db = colliding_digest(0x30, 0);
             let value_db = colliding_digest(0x30, 1);
+            let key_db_second = colliding_digest(0x33, 0);
+            let value_db_second = colliding_digest(0x33, 1);
             let key_parent = colliding_digest(0x31, 0);
             let value_parent = colliding_digest(0x31, 1);
             let key_current = colliding_digest(0x32, 0);
             let value_current = colliding_digest(0x32, 1);
 
-            // Commit one key to the DB so it's on disk.
+            // Commit two keys to the DB so they're on disk.
             let seed = db
                 .new_batch()
                 .write(key_db, Some(value_db))
+                .write(key_db_second, Some(value_db_second))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
@@ -4567,8 +4682,9 @@ mod tests {
             let db = db.commit().await.unwrap();
 
             let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
+            let committed_loc_second = db.snapshot.get(&key_db_second).next().copied().unwrap();
 
-            // Create a parent batch with a second key (in-memory ancestor).
+            // Create a parent batch with an in-memory ancestor key.
             let parent = db
                 .new_batch()
                 .write(key_parent, Some(value_parent))
@@ -4580,7 +4696,7 @@ mod tests {
                 .loc()
                 .unwrap();
 
-            // Create a child batch with a third key (current ops).
+            // Create a child batch with a current-ops key.
             let child = parent
                 .new_batch::<Sha256>()
                 .write(key_current, Some(value_current));
@@ -4591,6 +4707,39 @@ mod tests {
                 key_current,
                 value_current,
             ))];
+
+            // Interleave in-memory sources with a sorted or reversed committed subset.
+            for reverse in [false, true] {
+                let mut committed = [
+                    (committed_loc, key_db, value_db),
+                    (committed_loc_second, key_db_second, value_db_second),
+                ];
+                committed.sort_unstable_by_key(|&(loc, _, _)| loc);
+                if reverse {
+                    committed.reverse();
+                }
+                let [
+                    (first_loc, first_key, first_value),
+                    (second_loc, second_key, second_value),
+                ] = committed;
+                let ops = merkleizer
+                    .read_ops(
+                        &[current_loc, first_loc, parent_loc, second_loc],
+                        &batch_ops,
+                        &db.log,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    ops,
+                    vec![
+                        Operation::Update(update::Unordered(key_current, value_current)),
+                        Operation::Update(update::Unordered(first_key, first_value)),
+                        Operation::Update(update::Unordered(key_parent, value_parent)),
+                        Operation::Update(update::Unordered(second_key, second_value)),
+                    ]
+                );
+            }
 
             // read_ops should resolve all three sources correctly while preserving order and
             // duplicates across the disk-backed subset.

@@ -83,7 +83,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{Error as RuntimeError, Handle, Metrics, Spawner, reschedule};
-use commonware_storage::qmdb::sync::{self, FeedbackTx, Request, Response, Source};
+use commonware_storage::qmdb::sync::{self, Request, Source, source};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, TracedAsyncRwLock},
@@ -280,11 +280,11 @@ where
     type Op = <Inner<DB> as Source>::Op;
     type Error = <Inner<DB> as Source>::Error;
 
-    async fn serve(
+    fn serve(
         &self,
         request: Request<Self::Family>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
-        self.0.serve(request).await
+    ) -> impl Future<Output = source::Result<Self>> + Send {
+        self.0.serve(request)
     }
 }
 

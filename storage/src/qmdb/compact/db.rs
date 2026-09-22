@@ -42,7 +42,7 @@ use crate::{
     qmdb::{
         self, Error,
         chain::{self, Bounds, Commitment},
-        sync::{CompactTarget, FeedbackTx, Request, Response, Source},
+        sync::{CompactTarget, Request, Response, Source, source},
     },
 };
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -817,10 +817,7 @@ where
     type Op = O;
     type Error = qmdb::Error<F>;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), Self::Error> {
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         Ok((self.compact_state(request)?, None))
     }
 }

@@ -2,7 +2,11 @@
 
 use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
-use commonware_stream::encrypted::{Config, Receiver, Sender, dial, listen};
+use commonware_stream::{
+    Handshake as _,
+    encrypted::{Handshake, Receiver, Sender},
+    utils::Timeout,
+};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::{cell::RefCell, time::Duration};
@@ -20,54 +24,58 @@ thread_local! {
         let executor = deterministic::Runner::default();
 
         let transport_pair = executor.start(|context| async move {
-            let dialer_crypto = PrivateKey::from_seed(42);
-            let listener_crypto = PrivateKey::from_seed(24);
+            let dialer_signer = PrivateKey::from_seed(42);
+            let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
 
-            let dialer_config = Config {
-                signing_key: dialer_crypto.clone(),
-                namespace: NAMESPACE.to_vec(),
-                max_message_size: MAX_MESSAGE_SIZE,
-                synchrony_bound: Duration::from_secs(3),
-                max_handshake_age: Duration::from_secs(5),
-                handshake_timeout: Duration::from_secs(2),
-            };
+            let dialer_handshake = Timeout::new(
+                Handshake {
+                    signer: dialer_signer.clone(),
+                    synchrony_bound: Duration::from_secs(3),
+                    max_handshake_age: Duration::from_secs(5),
+                },
+                Duration::from_secs(2),
+            );
 
-            let listener_config = Config {
-                signing_key: listener_crypto.clone(),
-                namespace: NAMESPACE.to_vec(),
-                max_message_size: MAX_MESSAGE_SIZE,
-                synchrony_bound: Duration::from_secs(3),
-                max_handshake_age: Duration::from_secs(5),
-                handshake_timeout: Duration::from_secs(2),
-            };
+            let listener_handshake = Timeout::new(
+                Handshake {
+                    signer: listener_signer.clone(),
+                    synchrony_bound: Duration::from_secs(3),
+                    max_handshake_age: Duration::from_secs(5),
+                },
+                Duration::from_secs(2),
+            );
 
+            let listener_handle = context.child("listener").spawn(move |context| async move {
+                listener_handshake
+                    .listen(
+                        context,
+                        NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        listener_stream,
+                        listener_sink,
+                    )
+                    .await
+            });
 
-        let listener_handle = context.child("listener").spawn(move |context| async move {
-            listen(
-                context,
-                |_| async { true },
-                listener_config,
-                listener_stream,
-                listener_sink,
-            ).await
-        });
+            let (dialer_sender, _) = dialer_handshake
+                .dial(
+                    context.child("dialer"),
+                    NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    listener_signer.public_key(),
+                    dialer_stream,
+                    dialer_sink,
+                )
+                .await
+                .unwrap();
 
-        let (dialer_sender, _) = dial(
-            context.child("dialer"),
-            dialer_config,
-            listener_crypto.public_key(),
-            dialer_stream,
-            dialer_sink,
-        )
-        .await
-        .unwrap();
-
-        let (listener_peer, _, listener_receiver) =
-            listener_handle.await.unwrap().unwrap();
-        assert_eq!(listener_peer, dialer_crypto.public_key());
+            let (listener_peer, _, listener_receiver) =
+                listener_handle.await.unwrap().unwrap();
+            assert_eq!(listener_peer, dialer_signer.public_key());
 
             TransportPair {
                 dialer_sender,

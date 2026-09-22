@@ -1,0 +1,10 @@
+{
+  "range-1024-middle-64-calldata": "93173",
+  "range-1024-middle-64-memory": "87140",
+  "range-2-calldata": "3696",
+  "range-2-memory": "4030",
+  "single-1024-last-calldata": "7686",
+  "single-1024-last-memory": "8610",
+  "single-2-calldata": "2663",
+  "single-2-memory": "2866"
+}

@@ -293,7 +293,7 @@ bench = false
 [[bin]]
 name = "journal_contiguous_recovery"
 path = "fuzz_targets/journal_contiguous_recovery.rs"
-test = false
+test = true
 doc = false
 bench = false
 

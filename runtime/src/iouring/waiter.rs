@@ -2,8 +2,8 @@
 //!
 //! A registration keeps one ID while queued, in flight, and awaiting result
 //! consumption. A pending entry owns the request and its observer. Terminal
-//! completion replaces it with a retained result for an ordinary future, or
-//! recycles the slot for detached and orphaned requests.
+//! completion retains the result for a local observer, or recycles the slot
+//! for forwarded, detached, and orphaned requests.
 //!
 //! Unfinished requests and outstanding operation SQEs are counted separately.
 //! Retained results contribute to neither count, so a slow observer cannot hold
@@ -14,6 +14,7 @@
 //! to [`Deferred`]. The worker invokes callbacks after releasing its local borrow.
 
 use super::{
+    registration::Observation,
     request::{Request, RequestOutput},
     runtime::Deferred,
     slab::{Id, Slab},
@@ -73,11 +74,13 @@ pub enum WaiterState {
 
 /// Destination of a logical request's terminal output.
 pub enum Observer {
-    /// Ordinary future whose result stays in the slot until consumed or dropped.
+    /// Local observer whose result stays in the slot until consumed or dropped.
     ///
     /// The waker is absent until the future first installs one.
     /// Completion retains the result even if it races that installation.
-    Ordinary(Option<Waker>),
+    Local(Option<Waker>),
+    /// Forwarded observer receiving its result through a channel.
+    Forwarded(oneshot::Sender<Result<RequestOutput, Error>>),
     /// Independent sync completion sender, used outside the worker borrow.
     DetachedSync(oneshot::Sender<Result<(), Error>>),
     /// No caller remains, so terminal output is deferred for destruction.
@@ -101,7 +104,7 @@ struct Waiter {
 enum Entry {
     /// Queued or in-flight request that still owns its kernel resources.
     Pending(Waiter),
-    /// Ordinary result retained under the same ID until consumption or drop.
+    /// Local result retained under the same ID until consumption or drop.
     Ready(RequestOutput),
     /// Temporary replacement while [`Waiters::finish`] splits owned state.
     ///
@@ -118,19 +121,9 @@ pub enum CompletionOutcome {
     Complete(WaiterId, Result<(), Error>),
 }
 
-/// Result of inspecting an ordinary future without cloning its waker.
-pub enum Observation {
-    /// Output removed from the slab, with its slot already recycled.
-    Ready(RequestOutput),
-    /// Request is unfinished and its installed waker already matches the caller.
-    Pending,
-    /// The caller must clone its waker outside the worker borrow before installing it.
-    Refresh,
-}
-
 /// Tracks logical requests and the state needed to complete them.
 pub struct Waiters {
-    /// Pending requests and retained ordinary results sharing one identity space.
+    /// Pending requests and retained local results sharing one identity space.
     entries: Slab<Entry>,
     /// Unfinished logical requests, excluding retained results.
     pending: usize,
@@ -168,7 +161,7 @@ impl Waiters {
     /// Insert a request and return its assigned id.
     ///
     /// The driver installs any deadline before staging the request. The slot
-    /// remains occupied until an ordinary result is consumed or dropped.
+    /// remains occupied until a local result is consumed or dropped.
     pub fn insert(&mut self, request: Request, observer: Observer) -> WaiterId {
         let id = self.entries.insert_with(|id| {
             // Reserve the maximum index for cancellation and mailbox wake tokens.
@@ -240,8 +233,8 @@ impl Waiters {
     ///
     /// A ready result is removed and its slot recycled. An unfinished request
     /// remains in place, returning whether its waker needs refreshing. Panics
-    /// if the ID no longer belongs to an ordinary observer.
-    pub fn observe(&mut self, id: WaiterId, waker: &Waker) -> Observation {
+    /// if the ID no longer belongs to a local observer.
+    pub fn observe(&mut self, id: WaiterId, waker: &Waker) -> Observation<RequestOutput> {
         match self.entries.get(id.0).expect("live observer missing") {
             Entry::Ready(_) => {
                 let Some(Entry::Ready(output)) = self.entries.remove(id.0) else {
@@ -250,8 +243,8 @@ impl Waiters {
                 Observation::Ready(output)
             }
             Entry::Pending(waiter) => {
-                let Observer::Ordinary(current) = &waiter.observer else {
-                    panic!("request has no ordinary observer");
+                let Observer::Local(current) = &waiter.observer else {
+                    panic!("request has no local observer");
                 };
                 if current
                     .as_ref()
@@ -269,16 +262,43 @@ impl Waiters {
     /// Install a waker already cloned outside the worker borrow.
     ///
     /// Returns the previous waker for deferred destruction. Panics unless the
-    /// request has a pending ordinary observer.
+    /// request has a pending local observer.
     pub fn set_waker(&mut self, id: WaiterId, waker: Waker) -> Option<Waker> {
         let waiter = self.get_mut(id).expect("observer waiter missing");
-        let Observer::Ordinary(current) = &mut waiter.observer else {
-            panic!("request has no ordinary observer");
+        let Observer::Local(current) = &mut waiter.observer else {
+            panic!("request has no local observer");
         };
         current.replace(waker)
     }
 
-    /// Detach ordinary observation, returning whether cancellation is needed.
+    /// Move local observation to a channel without moving the request.
+    pub fn forward(
+        &mut self,
+        id: WaiterId,
+        sender: oneshot::Sender<Result<RequestOutput, Error>>,
+        deferred: &mut Deferred,
+    ) {
+        // Local cancellation can overtake this mailbox message and recycle the slot.
+        match self.entries.get_mut(id.0) {
+            Some(Entry::Pending(waiter)) if matches!(waiter.observer, Observer::Local(_)) => {
+                let Observer::Local(waker) =
+                    mem::replace(&mut waiter.observer, Observer::Forwarded(sender))
+                else {
+                    panic!("request has no local observer");
+                };
+                deferred.drops.extend(waker);
+            }
+            Some(Entry::Ready(_)) => {
+                let Some(Entry::Ready(output)) = self.entries.remove(id.0) else {
+                    unreachable!()
+                };
+                deferred.results.push((sender, Ok(output)));
+            }
+            _ => deferred.results.push((sender, Err(Error::Closed))),
+        }
+    }
+
+    /// Detach local or forwarded observation, returning whether cancellation is needed.
     ///
     /// Pending writes and syncs keep running without their observer. Other
     /// newly orphaned requests return `true` so the driver can cancel them.
@@ -287,15 +307,17 @@ impl Waiters {
     pub fn orphan(&mut self, id: WaiterId, deferred: &mut Deferred) -> bool {
         match self.entries.get_mut(id.0) {
             Some(Entry::Pending(waiter)) => {
-                if !matches!(waiter.observer, Observer::Ordinary(_)) {
-                    return false;
+                match &waiter.observer {
+                    Observer::Local(_) | Observer::Forwarded(_) => {}
+                    _ => return false,
                 }
-                let Observer::Ordinary(waker) =
-                    mem::replace(&mut waiter.observer, Observer::Orphaned)
-                else {
-                    unreachable!()
-                };
-                deferred.drops.extend(waker);
+                match mem::replace(&mut waiter.observer, Observer::Orphaned) {
+                    Observer::Local(waker) => deferred.drops.extend(waker),
+                    Observer::Forwarded(sender) => {
+                        deferred.results.push((sender, Err(Error::Closed)));
+                    }
+                    _ => unreachable!(),
+                }
 
                 // The driver cancels eligible requests before processing more CQEs.
                 !waiter.request.retains_on_orphan()
@@ -312,16 +334,28 @@ impl Waiters {
         }
     }
 
-    /// Remove ordinary observers and results, returning pending cancellation IDs.
+    /// Remove local and forwarded observers, returning pending cancellation IDs.
     ///
     /// Writes and syncs remain owned until they finish. Detached sync senders
-    /// stay installed. Removed wakers and results go to deferred destruction.
+    /// stay installed. Surviving observers are notified of closure.
     pub fn close(&mut self, deferred: &mut Deferred) -> Vec<WaiterId> {
         let mut cancel = Vec::new();
         for index in 0..self.entries.slots() {
-            if let Some(id) = self.entries.id_at(index).map(WaiterId)
-                && self.orphan(id, deferred)
+            let Some(id) = self.entries.id_at(index).map(WaiterId) else {
+                continue;
+            };
+
+            // Take local wakers before orphaning so shared futures can notify surviving
+            // observers. Callbacks run after the worker borrow is released.
+            if let Some(waiter) = self.get_mut(id)
+                && let Observer::Local(waker) = &mut waiter.observer
             {
+                deferred.wakes.extend(waker.take());
+            }
+
+            // Orphaning reports closure to forwarded observers and releases retained
+            // results. Writes and syncs keep running without requesting cancellation.
+            if self.orphan(id, deferred) {
                 cancel.push(id);
             }
         }
@@ -346,11 +380,11 @@ impl Waiters {
         }
     }
 
-    /// Split terminal ownership and retain an ordinary result in the same slot.
+    /// Split terminal ownership and retain a local result in the same slot.
     ///
     /// `result` is the terminal CQE status or an explicit local failure.
-    /// Ordinary output replaces the pending request. Detached and orphaned
-    /// output leaves the slab, freeing its slot immediately.
+    /// Local output replaces the pending request. Forwarded, detached, and
+    /// orphaned output leaves the slab, freeing its slot immediately.
     ///
     /// Returns any active tick the driver must remove from the wheel. Waking,
     /// detached publication, and resource destruction are deferred. Panics if
@@ -389,7 +423,7 @@ impl Waiters {
         deferred.resources.push(resources);
 
         match waiter.observer {
-            Observer::Ordinary(waker) => {
+            Observer::Local(waker) => {
                 // The future still holds this ID and will consume the result
                 // on a later poll.
                 *entry = Entry::Ready(output);
@@ -402,7 +436,11 @@ impl Waiters {
                     panic!("sync observer received other request");
                 };
                 self.entries.remove(id.0);
-                deferred.sync_results.push((sender, output));
+                deferred.completions.push((sender, output));
+            }
+            Observer::Forwarded(sender) => {
+                self.entries.remove(id.0);
+                deferred.results.push((sender, Ok(output)));
             }
             Observer::Orphaned => {
                 // Nobody will consume the result. Its buffers may run user code
@@ -504,6 +542,7 @@ pub mod tests {
         },
         storage::hold::{Held, Hold},
     };
+    use commonware_utils::channel::oneshot::error::TryRecvError;
     use std::{
         fs::File,
         net::{SocketAddr, TcpListener},
@@ -610,9 +649,9 @@ pub mod tests {
         })
     }
 
-    /// Ordinary observation before the future installs its first waker.
+    /// Local observation before the future installs its first waker.
     fn observer() -> Observer {
-        Observer::Ordinary(None)
+        Observer::Local(None)
     }
 
     /// Apply a terminal simulated CQE and finish its request.
@@ -631,7 +670,7 @@ pub mod tests {
         waiters.finish(id, result, deferred)
     }
 
-    /// Consume an ordinary result, failing if the request is still pending.
+    /// Consume a local result, failing if the request is still pending.
     fn output(waiters: &mut Waiters, id: WaiterId) -> RequestOutput {
         let Observation::Ready(output) = waiters.observe(id, Waker::noop()) else {
             panic!("expected retained output");
@@ -899,7 +938,7 @@ pub mod tests {
             ));
             assert_eq!(waiters.in_flight(), 0);
 
-            // Cancellation still leaves an ordinary result for the waiting future.
+            // Cancellation still leaves a local result for the waiting future.
             waiters.finish(id, Err(Error::Timeout), &mut deferred);
             assert!(waiters.is_empty());
             assert!(matches!(
@@ -1018,6 +1057,43 @@ pub mod tests {
     }
 
     #[test]
+    fn test_close_defers_local_and_forwarded_notifications() {
+        // Register two pending reads and transfer one observer to a channel.
+        // Distinct notification targets identify each shutdown path independently.
+        let mut waiters = Waiters::new(2);
+        let mut deferred = Deferred::default();
+        let counter = Arc::new(Counter::default());
+        let waker = Waker::from(counter.clone());
+        let local = waiters.insert(make_recv_request(), observer());
+        assert!(waiters.set_waker(local, waker.clone()).is_none());
+        let forwarded = waiters.insert(make_recv_request(), observer());
+        let (sender, mut receiver) = oneshot::channel();
+        waiters.forward(forwarded, sender, &mut deferred);
+        assert!(deferred.is_empty());
+
+        // Closure detaches both observers and requests cancellation. Notifications
+        // must remain deferred so callbacks cannot run under the worker borrow.
+        let cancel = waiters.close(&mut deferred);
+        assert_eq!(cancel.len(), 2);
+        assert!(cancel.contains(&local));
+        assert!(cancel.contains(&forwarded));
+        assert_eq!(deferred.wakes.len(), 1);
+        assert!(deferred.wakes[0].will_wake(&waker));
+        assert!(deferred.drops.is_empty());
+        assert_eq!(deferred.results.len(), 1);
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+        assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+
+        // Run the deferred actions and verify each observer receives its notification.
+        deferred.wakes.pop().unwrap().wake();
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        let (sender, result) = deferred.results.pop().unwrap();
+        assert!(sender.send(result).is_ok());
+        assert!(matches!(receiver.try_recv(), Ok(Err(Error::Closed))));
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
     fn test_close_clears_results_and_keeps_unobserved_syncs() {
         let mut waiters = Waiters::new(1);
         let mut deferred = Deferred::default();
@@ -1051,7 +1127,7 @@ pub mod tests {
         assert_eq!(waiters.entries.len(), 0);
 
         // Detached results are published after leaving the worker borrow.
-        let (sender, result) = deferred.sync_results.pop().unwrap();
+        let (sender, result) = deferred.completions.pop().unwrap();
         sender.send(result).unwrap();
         assert!(futures::executor::block_on(receiver).unwrap().is_ok());
     }
