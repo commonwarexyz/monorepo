@@ -18,7 +18,7 @@ impl DefaultEngine {
     /// Creates new [`DefaultEngine`] by choosing and initializing the underlying engine.
     ///
     /// On x86(-64) the engine is chosen in the following order of preference:
-    /// 1. `Avx512`
+    /// 1. `Avx512` (requires GFNI)
     /// 2. `Avx2`
     /// 3. `Ssse3`
     /// 4. [`NoSimd`]

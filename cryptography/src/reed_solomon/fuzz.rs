@@ -23,7 +23,8 @@ macro_rules! selected_engine {
             #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
             2 if std::arch::is_x86_feature_detected!("avx512f")
                 && std::arch::is_x86_feature_detected!("avx512vl")
-                && std::arch::is_x86_feature_detected!("avx512bw") =>
+                && std::arch::is_x86_feature_detected!("avx512bw")
+                && std::arch::is_x86_feature_detected!("gfni") =>
             {
                 $runner::<Avx512>($case_a, $case_b, Avx512::new)
             }
@@ -169,6 +170,7 @@ fn candidate_engines() -> Vec<(&'static str, Box<dyn Engine>)> {
         if std::arch::is_x86_feature_detected!("avx512f")
             && std::arch::is_x86_feature_detected!("avx512vl")
             && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("gfni")
         {
             engines.push(("Avx512", Box::new(Avx512::new())));
         }
@@ -655,6 +657,7 @@ mod tests {
                 if std::arch::is_x86_feature_detected!("avx512f")
                     && std::arch::is_x86_feature_detected!("avx512vl")
                     && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("gfni")
                 {
                     $runner::<Avx512>($case_a, $case_b, Avx512::new);
                 }
@@ -780,6 +783,7 @@ mod tests {
                 if std::arch::is_x86_feature_detected!("avx512f")
                     && std::arch::is_x86_feature_detected!("avx512vl")
                     && std::arch::is_x86_feature_detected!("avx512bw")
+                    && std::arch::is_x86_feature_detected!("gfni")
                 {
                     compare_eval_poly::<Avx512>(&input, truncated_size);
                 }

@@ -20,7 +20,7 @@
 //!     - Optimized engine that takes advantage of the x86(-64) AVX2 SIMD instructions.
 //! - `Avx512`
 //!     - Optimized engine that takes advantage of AVX-512F, AVX-512VL, and AVX-512BW.
-//!       Uses GFNI for field multiplication when available.
+//!       Requires GFNI for field multiplication.
 //! - `Ssse3`
 //!     - Optimized engine that takes advantage of the x86(-64) SSSE3 SIMD instructions.
 //! - `Neon`
@@ -45,9 +45,7 @@
 )]
 mod cpu_features {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    cpufeatures::new!(has_gfni, "gfni");
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    cpufeatures::new!(has_avx512, "avx512f", "avx512vl", "avx512bw");
+    cpufeatures::new!(has_avx512, "avx512f", "avx512vl", "avx512bw", "gfni");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_avx2, "avx2");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -57,8 +55,7 @@ mod cpu_features {
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub(super) use self::{
-        has_avx2::get as avx2, has_avx512::get as avx512, has_gfni::get as gfni,
-        has_ssse3::get as ssse3,
+        has_avx2::get as avx2, has_avx512::get as avx512, has_ssse3::get as ssse3,
     };
     #[cfg(target_arch = "aarch64")]
     pub(super) use has_neon::get as neon;

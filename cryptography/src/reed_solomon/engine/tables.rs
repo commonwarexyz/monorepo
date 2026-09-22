@@ -10,8 +10,8 @@
 //! | [`Log`]      | 128 kiB | yes              | yes              | all                |
 //! | [`LogWalsh`] | 128 kiB | -                | yes              | all                |
 //! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`NoSimd`]         |
-//! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Avx512` `Ssse3` |
-//! | `MulGfni`    | 8 MiB   | yes              | yes              | `Avx512` with GFNI |
+//! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Ssse3` |
+//! | `MulGfni`    | 8 MiB   | yes              | yes              | `Avx512` |
 //! | [`Skew`]     | 128 kiB | yes              | yes              | all                |
 //!
 //! [`NoSimd`]: crate::reed_solomon::engine::NoSimd
