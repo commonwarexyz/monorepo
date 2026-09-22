@@ -418,8 +418,7 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// - Panics if `offset` is not page aligned.
-    /// - If the buffer is not the size of a page.
+    /// Panics if `offset` is not page aligned.
     pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
         let page_size: usize = self.page_size.widen();
         buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)

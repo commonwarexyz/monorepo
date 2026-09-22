@@ -3150,6 +3150,7 @@ mod tests {
                     drop(journal);
                     live_bytes
                 });
+
             // The live journal owns one data and one offsets tail. Each may retain one partial
             // page, and the shared cache owns at most four pages.
             assert!(
@@ -3184,6 +3185,7 @@ mod tests {
                     }
                     recovery_bytes
                 });
+
             // Recovery owns one data and one offsets writer per item-bearing section. A synced
             // writer may retain one partial page, the shared cache owns four pages, and the
             // offsets checkpoint retains its one persisted metadata copy in a pooled page.

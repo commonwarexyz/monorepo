@@ -1483,6 +1483,8 @@ mod tests {
         });
     }
 
+    /// Eight-byte items form a sub-page section, 64 KiB plus one item, or two 128 KiB buffers
+    /// plus one item. Every case leaves a partial page after sync.
     #[rstest::rstest]
     #[case(100)]
     #[case(8193)]
@@ -1516,6 +1518,7 @@ mod tests {
             }
 
             let live_bytes = pooled_bytes_in_use(&context, &mut pool_metrics);
+
             // Each live section writer may retain one partial page, and the shared cache owns at
             // most four pages.
             assert!(

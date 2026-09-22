@@ -1836,7 +1836,7 @@ mod tests {
         executor.start(test_align_replay_parallel_matches_serial_inner::<mmb::Family>);
     }
 
-    /// Verify that align() discards uncommitted operations.
+    /// Initialization discards a persisted suffix that contains no complete commit.
     async fn test_align_with_mismatched_committed_ops_inner<F: Family + PartialEq>(
         context: Context,
     ) {

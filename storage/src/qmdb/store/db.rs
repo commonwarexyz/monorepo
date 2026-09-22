@@ -925,10 +925,7 @@ mod test {
     #[test_collect_traces("WARN")]
     fn test_store_recovery_warns_when_discarding_uncommitted_suffix(traces: TraceStorage) {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_config(&context);
-            let mut db = TestStore::init(context.child("seed"), cfg.clone(), None)
-                .await
-                .unwrap();
+            let mut db = create_test_store(context.child("seed")).await;
             let key = Blake3::hash(&[b"uncommitted"]);
 
             // A crash during apply_batch can persist an update before its trailing commit.
@@ -940,9 +937,7 @@ mod test {
             db.log = db.log.sync().await.unwrap();
             drop(db);
 
-            let db = TestStore::init(context.child("recover"), cfg, None)
-                .await
-                .unwrap();
+            let db = create_test_store(context.child("recover")).await;
             assert_eq!(*db.size(), 1);
             assert_eq!(db.get(&key).await.unwrap(), None);
         });

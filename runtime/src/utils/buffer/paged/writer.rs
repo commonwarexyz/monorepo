@@ -342,8 +342,7 @@ impl<B: Blob> Recovery<B> {
         self.partial_page_state = None;
         self.durable_page_state = None;
         self.current_page = full_pages;
-        self.buffer.offset = tail_offset;
-        self.buffer.clear();
+        self.buffer.replace(tail_offset, &[]);
 
         Ok(())
     }
@@ -356,10 +355,9 @@ impl<B: Blob> Recovery<B> {
         page_size: u64,
         tail_offset: u64,
     ) -> Result<(), Error> {
-        // Update blob state and buffer based on the desired size. The page data is
-        // read with CRC validation, then durably rewritten below with a shorter CRC.
+        // The truncated page becomes the blob's tip. Its data is validated before the shorter
+        // checksum record is published.
         self.current_page = full_pages;
-        self.buffer.offset = tail_offset;
 
         // The retained prefix becomes the authoritative tip buffer, so this
         // page need not remain in the OS page cache.
@@ -652,11 +650,12 @@ impl<B: Blob> Writer<B> {
             Some(self.buffer.offset),
             "flushed page count is inconsistent with the buffer offset"
         );
+
         // Readers own their partial page so appends can reuse the writer's unique mutable tail.
         let partial_page = if self.buffer.is_empty() {
             None
         } else {
-            Some(IoBuf::copy_from_slice(self.buffer.parts().1))
+            Some(IoBuf::copy_from_slice(self.buffer.partial()))
         };
         Sealed::new(
             self.blob.clone(),
@@ -788,8 +787,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
             cache_offset += chunk.len() as u64;
         }
 
-        // Update state before writing, seeding the tip with the partial-page suffix of `buf`.
-        // The independent tail owns at most one page, even when the input has large backing.
+        // Update state before writing. Copy the suffix into at most one page so the tip never
+        // retains the input's larger backing.
         self.current_page += (bulk_len / page_size) as u64;
         self.buffer
             .replace(boundary + bulk_len as u64, &buf.as_ref()[fill + bulk_len..]);
@@ -884,7 +883,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         // flush may have rewritten the partial page without making its checksum durable.
         let (physical_pages, partial_page_state) = self.to_physical_pages(
             &full_pages,
-            self.buffer.parts().1,
+            self.buffer.partial(),
             write_partial_page,
             self.partial_page_state.as_ref(),
             self.durable_page_state.as_ref(),
@@ -5328,7 +5327,8 @@ mod tests {
             let read = snapshot.read_at(0, data.len()).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), data.as_slice());
 
-            // Growing appends after the snapshot's frozen range, so it cannot invalidate it.
+            // The snapshot owns a copied partial page, so appends can reuse the writer's unique
+            // tail while the snapshot continues serving its original bytes.
             append.append(&[0; 3]).await.unwrap();
             assert_eq!(append.size(), snapshot_size + 3);
             assert_eq!(append.buffer.parts().1.as_ptr(), tail_ptr);

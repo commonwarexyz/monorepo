@@ -31,7 +31,7 @@ pub(super) struct Buffer {
     pub(super) offset: u64,
 
     /// The maximum size of the buffer.
-    pub(super) capacity: usize,
+    capacity: usize,
 
     /// Pool used to allocate backing buffers.
     pool: BufferPool,

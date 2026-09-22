@@ -12,13 +12,17 @@ use commonware_utils::Widen;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
+/// Logical bytes served from memory at the end of a paged blob.
 #[derive(Clone, Copy)]
 pub(super) enum Tail<'a> {
+    /// Chunks retained by the writer's tip buffer.
     Buffered(&'a Buffer),
+    /// A copied partial page owned by an immutable reader.
     Sealed(&'a [u8]),
 }
 
 impl<'a> Tail<'a> {
+    /// Copy an in-bounds range relative to the start of the tail.
     fn copy_into(self, mut offset: usize, dst: &mut [u8]) {
         let tail = match self {
             Self::Sealed(tail) => tail,
@@ -44,13 +48,15 @@ impl<'a> Tail<'a> {
             }
             Self::Sealed(tail) => (None, tail),
         };
-        let prefix = prefix.filter(|bufs| !bufs.is_empty());
+
+        // An empty initial chunk lets the cursor enter either representation with the same
+        // forward walk, including when the buffered prefix is empty.
         Cursor {
             chunks: prefix
                 .into_iter()
                 .flat_map(|bufs| bufs.iter().map(AsRef::as_ref))
-                .chain(prefix.is_some().then_some(tail)),
-            chunk: if prefix.is_none() { tail } else { &[] },
+                .chain(std::iter::once(tail)),
+            chunk: &[],
             position: 0,
         }
     }
@@ -58,12 +64,18 @@ impl<'a> Tail<'a> {
 
 /// A forward cursor keeps sorted range reads linear in the number of buffered chunks and ranges.
 struct Cursor<'a, I> {
+    /// Chunks not yet entered.
     chunks: I,
+    /// Unread suffix of the current chunk.
     chunk: &'a [u8],
+    /// End of the last completed range, relative to the tail.
     position: usize,
 }
 
 impl<'a, I: Iterator<Item = &'a [u8]>> Cursor<'a, I> {
+    /// Copy a range at or beyond the previous range's end and advance past it.
+    ///
+    /// The range must fit within the tail. Empty destinations do not advance the cursor.
     fn copy_into(&mut self, offset: usize, mut dst: &mut [u8]) {
         if dst.is_empty() {
             return;
@@ -324,12 +336,13 @@ impl<B: Blob> View<'_, B> {
 /// Partition a batch of variable-length range reads into bytes copied from the in-memory tail
 /// and ranges that need cache/blob reads.
 ///
-/// `buf` holds one slot per range, back to back (validated by [super::validate_read_ranges]). `tail`
-/// holds the logical bytes starting at `tail_offset`; for [super::Writer] this is the
-/// tip buffer, for [super::Sealed] the partial last page. Ranges entirely within `tail` are copied into
-/// place. Ranges fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
-/// pairs for the caller to read from the page cache or blob. `split_at_mut` yields disjoint
-/// per-range slots, so returned slices never alias.
+/// Ranges must be sorted and non-overlapping. `buf` holds one slot per range, back to back.
+/// [super::validate_read_ranges] checks these preconditions and bounds every range by the blob size.
+///
+/// `tail` holds the logical bytes starting at `tail_offset`: the writer's tip buffer or the sealed
+/// blob's partial last page. Tail overlaps are copied into place. Prefixes below `tail_offset` are
+/// returned as `(dest_slice, offset)` pairs for cache/blob reads. `split_at_mut` gives each range a
+/// disjoint output slot, so returned slices never alias.
 fn split_read_ranges<'a>(
     mut buf: &'a mut [u8],
     ranges: impl ExactSizeIterator<Item = (u64, usize)>,
