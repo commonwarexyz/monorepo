@@ -119,7 +119,8 @@
 //!
 //! # Clearing / reset
 //!
-//! Clearing wipes all data and restarts the journal at a new size.
+//! Clearing wipes all data and restarts the journal at a requested size. An open journal can only
+//! clear to a size at or beyond its current end.
 //!
 //! To stay crash-safe, a clear records its target size in the checkpoint *before* deleting any
 //! blob. If a crash interrupts the deletion, reopening sees that recorded target and finishes the
@@ -1481,8 +1482,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         )))
     }
 
-    /// Discard all items and reposition the journal at `new_size`.
-    ///
+    /// Discard all items and reposition the journal at or beyond its current end.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn clear_to_size(mut self, new_size: u64) -> Result<Self, Error> {
         self.0 = self.0.clear_to_size(new_size).await?;
@@ -1512,8 +1512,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// pending, and appends proceed while they fit in the write buffer (a buffer flush or
     /// rollover waits for the in-flight fsync). Dropping the handle does not cancel the sync
     /// or lose its failure. A failed data flush or sync fails the next append that reaches
-    /// the blob and the next commit, sync, or flushing snapshot, and any prune or rewind that
-    /// changes the journal. A failed recovery-watermark sync is not observed by commit and
+    /// the blob and the next commit, sync, or flushing snapshot, and any prune that changes the
+    /// journal. A failed recovery-watermark sync is not observed by commit and
     /// resurfaces on the next sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error> {
         let (inner, handle) = self.0.start_sync().await?;
