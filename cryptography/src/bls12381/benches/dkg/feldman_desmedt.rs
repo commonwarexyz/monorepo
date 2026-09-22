@@ -124,7 +124,7 @@ fn bench_dkg(c: &mut Criterion, reshare: bool) {
     };
     let mut rng = test_rng();
     for &n in CONTRIBUTORS {
-        let t = N3f1::quorum(n);
+        let t = N3f1::quorum(u64::from(n));
         let bench = Bench::new(&mut rng, reshare, n);
         for &concurrency in CONCURRENCY {
             let strategy = Rayon::new(NZUsize!(concurrency)).unwrap();

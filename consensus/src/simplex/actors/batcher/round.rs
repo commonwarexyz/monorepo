@@ -63,7 +63,7 @@ impl<
         reporter: R,
         track_historical_votes: bool,
     ) -> Self {
-        let quorum = scheme.participants().quorum::<N3f1>();
+        let quorum = scheme.participants().quorum_count::<N3f1>();
         let len = scheme.participants().len();
         Self {
             blocker,

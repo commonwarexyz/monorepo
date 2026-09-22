@@ -4,8 +4,9 @@ use core::num::NonZeroU32;
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn bench_interpolator_creation(c: &mut Criterion) {
-    for &n in &[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
-        let t = N3f1::quorum(n);
+    for &n in &[4u32, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
+        let t = u32::try_from(N3f1::quorum(u64::from(n)))
+            .expect("quorum for a u32 participant count must fit in u32");
         let total = NonZeroU32::new(n).unwrap();
         let points = BiMap::try_from_iter((0..t).map(|i| (i, i + 1)))
             .expect("points should be in bijection");

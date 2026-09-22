@@ -200,7 +200,8 @@ impl<P: PublicKey> Participants<P> {
     }
 
     fn required_dealer_logs<V: Variant>(&self, previous: Option<&Output<V, P>>) -> u64 {
-        let dealer_quorum = u64::from(N3f1::quorum(self.dealers.len()));
+        let dealer_quorum =
+            N3f1::quorum(u64::try_from(self.dealers.len()).expect("dealer count exceeds u64::MAX"));
         let previous_quorum = previous
             .map(|previous| u64::from(previous.quorum::<N3f1>()))
             .unwrap_or_default();

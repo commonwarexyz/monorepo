@@ -194,8 +194,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         // Sort the signatures by signer index.
         entries.sort_by_key(|(signer, _)| *signer);
         let (signer, signatures): (Vec<Participant>, Vec<_>) = entries.into_iter().unzip();
-        let signers = Signers::try_from((self.participants.keys(), signer))?
-            .require(self.participants.quorum::<S::Faults>())?;
+        let quorum = self.participants.quorum_count::<S::Faults>();
+        let signers = Signers::try_from((self.participants.keys(), signer))?.require(quorum)?;
         let signatures = signatures.into_iter().map(Lazy::from).collect();
 
         Ok(Certificate {
@@ -228,7 +228,8 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         }
 
         // If the certificate does not meet the quorum, return false.
-        if certificate.signers.count() < self.participants.quorum::<S::Faults>() as usize {
+        let quorum = self.participants.quorum_count::<S::Faults>() as usize;
+        if certificate.signers.count() < quorum {
             return false;
         }
 
@@ -562,7 +563,7 @@ mod tests {
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
-    use commonware_utils::{Faults, N3f1, TryCollect, non_empty, ordered::BiMap, test_rng};
+    use commonware_utils::{N3f1, TryCollect, non_empty, ordered::BiMap, test_rng};
     use rand_core::CryptoRng;
 
     const NAMESPACE: &[u8] = b"test-secp256r1";
@@ -665,7 +666,8 @@ mod tests {
     fn test_verify_attestations_filters_invalid() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 5);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -724,7 +726,8 @@ mod tests {
     fn test_assemble_certificate() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -787,7 +790,8 @@ mod tests {
     fn test_verify_certificate() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -818,7 +822,8 @@ mod tests {
     fn test_verify_certificate_detects_corruption() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -862,7 +867,8 @@ mod tests {
     fn test_certificate_codec_roundtrip() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let attestations: Vec<_> = schemes
             .iter()
@@ -887,7 +893,7 @@ mod tests {
     fn test_certificate_rejects_sub_quorum() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let expected = N3f1::quorum(schemes.len());
+        let expected = u64::from(schemes[0].participants().quorum_count::<N3f1>());
         let found = expected - 1;
         let found_count = usize::try_from(found).expect("quorum exceeds usize::MAX");
 
@@ -912,8 +918,8 @@ mod tests {
     fn test_certificate_rejects_invalid_signer() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let mut attestations: Vec<_> = schemes
             .iter()
@@ -940,8 +946,8 @@ mod tests {
     fn test_assemble_certificate_rejects_malformed_signature() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);
-        let quorum =
-            usize::try_from(N3f1::quorum(schemes.len())).expect("quorum exceeds usize::MAX");
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let mut attestations: Vec<_> = schemes
             .iter()
@@ -1038,7 +1044,8 @@ mod tests {
     fn test_verify_certificates_batch() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice(), b"msg3".as_slice()]
             .into_iter()
@@ -1084,7 +1091,8 @@ mod tests {
     fn test_verify_certificates_batch_detects_failure() {
         let mut rng = test_rng();
         let (schemes, verifier) = setup_signers(&mut rng, 4);
-        let quorum = N3f1::quorum(schemes.len()) as usize;
+        let quorum = usize::try_from(schemes[0].participants().quorum_count::<N3f1>())
+            .expect("quorum exceeds usize::MAX");
 
         let messages: Vec<Bytes> = [b"msg1".as_slice(), b"msg2".as_slice()]
             .into_iter()

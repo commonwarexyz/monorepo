@@ -345,7 +345,8 @@ where
 
         let signers =
             Signers::try_from((&self.participants, signers)).map_err(Self::assembly_error)?;
-        let signers = signers.require(self.participants.quorum::<S::Faults>())?;
+        let quorum = self.participants.quorum_count::<S::Faults>();
+        let signers = signers.require(quorum)?;
 
         let subject = signed_subject.expect("non-empty attestations establish a signed subject");
         let stored_subject = subject.clone();
