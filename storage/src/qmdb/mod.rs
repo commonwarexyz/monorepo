@@ -68,7 +68,7 @@ use crate::{
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
-use cache::Cache;
+use cache::{Cache, Entry, OccupiedEntry};
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
 use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
@@ -354,7 +354,7 @@ async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -363,8 +363,7 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then delete it.
-    let Some((loc, slot)) =
-        find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
+    let Some((loc, entry)) = find_update_op::<F, _, _>(reader, &mut cursor, key, cache).await?
     else {
         return Ok(None);
     };
@@ -372,8 +371,8 @@ where
     // Cache entries mirror current snapshot locations, so invalidate the matched location with
     // the authoritative deletion.
     cursor.delete();
-    if let (Some(cache), Some(slot)) = (cache, slot) {
-        cache.remove(slot);
+    if let Some(entry) = entry {
+        entry.remove();
     }
 
     Ok(Some(loc))
@@ -410,7 +409,7 @@ async fn update_at_cursor<F, C, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -419,15 +418,13 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then update its location.
-    if let Some((loc, slot)) =
-        find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
-    {
+    if let Some((loc, entry)) = find_update_op::<F, _, _>(reader, &mut cursor, key, cache).await? {
         // Removing the superseded cache entry with the snapshot update lets the caller reuse its
         // slot for `new_loc` instead of evicting another live entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
-        if let (Some(cache), Some(slot)) = (cache, slot) {
-            cache.remove(slot);
+        if let Some(entry) = entry {
+            entry.remove();
         }
         return Ok(Some(loc));
     }
@@ -438,39 +435,44 @@ where
     Ok(None)
 }
 
-/// Find and return the location of the update operation for `key` and its cache slot, if present.
+/// Find and return the location of the update operation for `key` and its cache entry, if present.
 /// The cursor is positioned at the matching location, and can be used to update or delete the key.
-/// The cache slot remains valid until the next cache mutation.
-async fn find_update_op<F, R>(
+async fn find_update_op<'a, F, R, K: operation::Key>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
-    key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
-) -> Result<Option<(Location<F>, Option<usize>)>, Error<F>>
+    key: &K,
+    mut cache: Option<&'a mut Cache<K>>,
+) -> Result<Option<(Location<F>, Option<OccupiedEntry<'a, K>>)>, Error<F>>
 where
     F: Family,
     R: Contiguous,
-    R::Item: Operation<F>,
+    R::Item: Operation<F, Key = K>,
 {
     while let Some(&loc) = cursor.next() {
         // Consult the cache first; on a miss, read the log and populate.
-        if let Some((slot, k)) = cache.as_deref().and_then(|c| c.get(*loc)) {
-            if *k == *key {
-                return Ok(Some((loc, Some(slot))));
+        if let Some(c) = cache.take() {
+            match c.entry(*loc) {
+                Entry::Occupied(entry) => {
+                    if *entry.key() == *key {
+                        return Ok(Some((loc, Some(entry))));
+                    }
+                    cache = Some(entry.into_cache());
+                    continue;
+                }
+                Entry::Vacant(c) => cache = Some(c),
             }
-        } else {
-            let op = reader.read(*loc).await?;
-            let k = op.key().expect("operation without key");
-            let matches = *k == *key;
+        }
+        let op = reader.read(*loc).await?;
+        let k = op.key().expect("operation without key");
+        let matches = *k == *key;
 
-            // Every caller immediately mutates a match. Admitting it here could evict a live
-            // candidate before the caller invalidates this location.
-            if !matches && let Some(cache) = cache.as_deref_mut() {
-                cache.put(*loc, op.into_key().expect("operation without key"));
-            }
-            if matches {
-                return Ok(Some((loc, None)));
-            }
+        // Every caller immediately mutates a match. Admitting it here could evict a live
+        // candidate before the caller invalidates this location.
+        if !matches && let Some(cache) = cache.as_deref_mut() {
+            cache.put(*loc, op.into_key().expect("operation without key"));
+        }
+        if matches {
+            return Ok(Some((loc, None)));
         }
     }
 

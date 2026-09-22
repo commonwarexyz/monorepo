@@ -31,6 +31,40 @@ pub(crate) struct Cache<K> {
     ways: usize,
 }
 
+/// A cache lookup that retains exclusive access to the cache.
+pub(crate) enum Entry<'a, K> {
+    /// The location is cached.
+    Occupied(OccupiedEntry<'a, K>),
+    /// The location is not cached.
+    Vacant(&'a mut Cache<K>),
+}
+
+/// An occupied entry that borrows the cache exclusively.
+pub(crate) struct OccupiedEntry<'a, K> {
+    cache: &'a mut Cache<K>,
+    slot: usize,
+}
+
+impl<'a, K> OccupiedEntry<'a, K> {
+    /// Returns the cached key.
+    pub(crate) fn key(&self) -> &K {
+        self.cache.keys[self.slot]
+            .as_ref()
+            .expect("occupied entry without key")
+    }
+
+    /// Removes this entry from the cache.
+    pub(crate) fn remove(self) {
+        self.cache.locations[self.slot] = EMPTY;
+        self.cache.keys[self.slot] = None;
+    }
+
+    /// Returns the cache without removing this entry.
+    pub(crate) const fn into_cache(self) -> &'a mut Cache<K> {
+        self.cache
+    }
+}
+
 impl<K> Cache<K> {
     /// Creates a cache holding at most `capacity` entries, rounded down to whole sets.
     pub(crate) fn new(capacity: NonZeroUsize) -> Self {
@@ -64,10 +98,14 @@ impl<K> Cache<K> {
             .map(|offset| start + offset)
     }
 
-    /// Returns the slot and key cached for `location`.
-    pub(crate) fn get(&self, location: u64) -> Option<(usize, &K)> {
-        self.slot(location)
-            .and_then(|i| self.keys[i].as_ref().map(|key| (i, key)))
+    /// Looks up `location`, retaining exclusive access to the cache.
+    pub(crate) fn entry(&mut self, location: u64) -> Entry<'_, K> {
+        match self.slot(location) {
+            Some(slot) if self.keys[slot].is_some() => {
+                Entry::Occupied(OccupiedEntry { cache: self, slot })
+            }
+            _ => Entry::Vacant(self),
+        }
     }
 
     /// Caches `key` for `location`.
@@ -102,12 +140,6 @@ impl<K> Cache<K> {
         self.locations[i] = location;
         self.keys[i] = Some(key);
     }
-
-    /// Removes the entry at `slot`, returned by [`Self::get`] with no intervening cache mutations.
-    pub(crate) fn remove(&mut self, slot: usize) {
-        self.locations[slot] = EMPTY;
-        self.keys[slot] = None;
-    }
 }
 
 #[cfg(test)]
@@ -115,10 +147,24 @@ mod tests {
     use super::*;
     use commonware_utils::NZUsize;
 
-    fn present(cache: &Cache<u64>, locations: impl IntoIterator<Item = u64>) -> usize {
+    fn get<K: Copy>(cache: &mut Cache<K>, location: u64) -> Option<K> {
+        match cache.entry(location) {
+            Entry::Occupied(entry) => Some(*entry.key()),
+            Entry::Vacant(_) => None,
+        }
+    }
+
+    fn occupied<K>(cache: &mut Cache<K>, location: u64) -> OccupiedEntry<'_, K> {
+        match cache.entry(location) {
+            Entry::Occupied(entry) => entry,
+            Entry::Vacant(_) => panic!("missing entry at {location}"),
+        }
+    }
+
+    fn present(cache: &mut Cache<u64>, locations: impl IntoIterator<Item = u64>) -> usize {
         locations
             .into_iter()
-            .filter(|&loc| cache.get(loc).is_some())
+            .filter(|&loc| get(cache, loc).is_some())
             .count()
     }
 
@@ -131,22 +177,43 @@ mod tests {
             for loc in 0..inserted {
                 cache.put(loc, loc);
             }
-            assert!(present(&cache, 0..inserted) <= capacity);
+            assert!(present(&mut cache, 0..inserted) <= capacity);
         }
     }
 
     #[test]
-    fn test_get_put_remove() {
+    fn test_entry_put_remove() {
         let mut cache = Cache::<&str>::new(NZUsize!(16));
-        assert!(cache.get(7).is_none());
+        assert!(get(&mut cache, 7).is_none());
         cache.put(7, "a");
-        let (slot, key) = cache.get(7).unwrap();
-        assert_eq!(*key, "a");
+        assert_eq!(get(&mut cache, 7), Some("a"));
         cache.put(7, "b");
-        assert_eq!(cache.get(7), Some((slot, &"b")));
-        let (slot, _) = cache.get(7).unwrap();
-        cache.remove(slot);
-        assert!(cache.get(7).is_none());
+        let entry = occupied(&mut cache, 7);
+        assert_eq!(*entry.key(), "b");
+        entry.remove();
+        assert!(get(&mut cache, 7).is_none());
+    }
+
+    #[test]
+    fn test_into_cache_preserves_entry() {
+        let mut cache = Cache::new(NZUsize!(16));
+        cache.put(7, 70);
+        let entry = occupied(&mut cache, 7);
+        let cache = entry.into_cache();
+        cache.put(8, 80);
+        assert_eq!(get(cache, 7), Some(70));
+        assert_eq!(get(cache, 8), Some(80));
+    }
+
+    #[test]
+    fn test_vacant_entry_returns_cache() {
+        let mut cache = Cache::new(NZUsize!(16));
+        let Entry::Vacant(cache) = cache.entry(7) else {
+            panic!("unexpected occupied entry");
+        };
+        cache.put(7, 70);
+        assert_eq!(get(cache, 7), Some(70));
+        assert!(matches!(cache.entry(EMPTY), Entry::Vacant(_)));
     }
 
     #[test]
@@ -156,14 +223,13 @@ mod tests {
         for loc in 0..16 {
             cache.put(loc, loc);
         }
-        let (slot, _) = cache.get(0).unwrap();
-        cache.remove(slot);
+        occupied(&mut cache, 0).remove();
         cache.put(5, 500);
-        let (slot, key) = cache.get(5).unwrap();
-        assert_eq!(*key, 500);
-        cache.remove(slot);
-        assert!(cache.get(5).is_none());
-        assert_eq!(present(&cache, 0..16), 14);
+        let entry = occupied(&mut cache, 5);
+        assert_eq!(*entry.key(), 500);
+        entry.remove();
+        assert!(get(&mut cache, 5).is_none());
+        assert_eq!(present(&mut cache, 0..16), 14);
     }
 
     #[test]
@@ -173,9 +239,9 @@ mod tests {
             cache.put(loc, loc);
         }
         cache.put(100, 100);
-        assert!(cache.get(0).is_none());
-        assert_eq!(present(&cache, 1..16), 15);
-        assert_eq!(cache.get(100).map(|(_, key)| key), Some(&100));
+        assert!(get(&mut cache, 0).is_none());
+        assert_eq!(present(&mut cache, 1..16), 15);
+        assert_eq!(get(&mut cache, 100), Some(100));
     }
 
     #[test]
@@ -190,9 +256,9 @@ mod tests {
         }
         cache.put(second[WAYS], second[WAYS]);
 
-        assert!(cache.get(second[0]).is_none());
+        assert!(get(&mut cache, second[0]).is_none());
         for &loc in first[..WAYS].iter().chain(&second[1..=WAYS]) {
-            assert_eq!(cache.get(loc).map(|(_, key)| key), Some(&loc));
+            assert_eq!(get(&mut cache, loc), Some(loc));
         }
     }
 
@@ -206,18 +272,21 @@ mod tests {
         }
 
         let removed = second[WAYS / 2];
-        let (slot, key) = cache.get(removed).unwrap();
+        let entry = occupied(&mut cache, removed);
+        let slot = entry.slot;
         assert!(slot >= WAYS);
-        assert_eq!(*key, removed);
-        cache.remove(slot);
-        assert!(cache.get(removed).is_none());
+        assert_eq!(*entry.key(), removed);
+        entry.remove();
+        assert!(get(&mut cache, removed).is_none());
 
         let replacement = second[WAYS];
         cache.put(replacement, replacement);
-        assert_eq!(cache.get(replacement), Some((slot, &replacement)));
+        let entry = occupied(&mut cache, replacement);
+        assert_eq!(entry.slot, slot);
+        assert_eq!(*entry.key(), replacement);
         for &loc in first[..WAYS].iter().chain(&second[..WAYS]) {
             if loc != removed {
-                assert_eq!(cache.get(loc).map(|(_, key)| key), Some(&loc));
+                assert_eq!(get(&mut cache, loc), Some(loc));
             }
         }
     }
@@ -228,12 +297,11 @@ mod tests {
         for loc in 0..16 {
             cache.put(loc, loc);
         }
-        let (slot, _) = cache.get(3).unwrap();
-        cache.remove(slot);
+        occupied(&mut cache, 3).remove();
         cache.put(100, 100);
-        assert_eq!(cache.get(0).map(|(_, key)| key), Some(&0));
-        assert!(cache.get(3).is_none());
-        assert_eq!(cache.get(100).map(|(_, key)| key), Some(&100));
+        assert_eq!(get(&mut cache, 0), Some(0));
+        assert!(get(&mut cache, 3).is_none());
+        assert_eq!(get(&mut cache, 100), Some(100));
     }
 
     #[test]
@@ -242,8 +310,8 @@ mod tests {
         assert_eq!(cache.locations.len(), 1);
         cache.put(1, 1);
         cache.put(2, 2);
-        assert!(cache.get(1).is_none());
-        assert_eq!(cache.get(2).map(|(_, key)| key), Some(&2));
+        assert!(get(&mut cache, 1).is_none());
+        assert_eq!(get(&mut cache, 2), Some(2));
     }
 
     #[test]

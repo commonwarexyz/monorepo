@@ -146,7 +146,7 @@ pub(crate) mod test {
                 },
                 unordered::{Update, fixed::Operation},
             },
-            cache::Cache,
+            cache::{Cache, Entry},
             delete_key, update_key, verify_proof,
         },
         translator::{OneCap, TwoCap},
@@ -704,6 +704,12 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_unordered_fixed_init_cache_collision_invalidation() {
         deterministic::Runner::default().start(|context| async move {
+            let cached_keys = |cache: &mut Cache<Digest>| {
+                [0, 1, 2].map(|loc| match cache.entry(loc) {
+                    Entry::Occupied(entry) => Some(*entry.key()),
+                    Entry::Vacant(_) => None,
+                })
+            };
             for cached in [false, true] {
                 let context = context.child(if cached { "cached" } else { "uncached" });
                 let keys = [
@@ -751,12 +757,9 @@ pub(crate) mod test {
                 }
                 .unwrap();
                 assert_eq!(old_loc, Some(Location::new(0)));
-                assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc).map(|(_, key)| key)),
-                    [None, Some(&keys[1]), None]
-                );
+                assert_eq!(cached_keys(&mut cache), [None, Some(keys[1]), None]);
                 cache.put(*new_loc, keys[0]);
-                assert_eq!(cache.get(1).map(|(_, key)| key), Some(&keys[1]));
+                assert_eq!(cached_keys(&mut cache)[1], Some(keys[1]));
 
                 // An absent full key sharing the translated key leaves both candidates live.
                 assert_eq!(
@@ -766,8 +769,8 @@ pub(crate) mod test {
                     None
                 );
                 assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc).map(|(_, key)| key)),
-                    [None, Some(&keys[1]), Some(&keys[0])]
+                    cached_keys(&mut cache),
+                    [None, Some(keys[1]), Some(keys[0])]
                 );
                 assert_eq!(
                     delete_key(&mut index, &log, &keys[0], Some(&mut cache))
@@ -775,10 +778,7 @@ pub(crate) mod test {
                         .unwrap(),
                     Some(new_loc)
                 );
-                assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc).map(|(_, key)| key)),
-                    [None, Some(&keys[1]), None]
-                );
+                assert_eq!(cached_keys(&mut cache), [None, Some(keys[1]), None]);
                 assert_eq!(
                     index.get(&keys[1]).copied().collect::<Vec<_>>(),
                     [Location::new(1)]
