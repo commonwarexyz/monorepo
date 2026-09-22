@@ -362,42 +362,25 @@ impl<O: Sink> Sender<O> {
         Ok(chunk.freeze())
     }
 
-    /// Encrypts and sends a message to the peer.
-    ///
-    /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
-    /// and sends the ciphertext.
-    pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
-        let bufs = bufs.into();
-        let frame_len = self.encrypted_frame_len(bufs.len())?;
-        let chunk = self.build_chunk(std::iter::once(bufs), frame_len)?;
-        self.sink.send(chunk).await.map_err(Error::SendFailed)
-    }
-
-    /// Encrypts and sends multiple messages in a single sink call.
-    ///
-    /// Each message is framed independently so receivers still observe the
-    /// original message boundaries. Aggregate writes are broken into contiguous
-    /// chunks capped to one network buffer-pool item, then submitted together as
-    /// a chunked `IoBufs`. An individual message larger than that cap is still
-    /// sent as its own chunk.
-    pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
+    /// Validates all messages before building encrypted chunks.
+    fn build_chunks<B, I>(&mut self, bufs: I) -> Result<IoBufs, Error>
     where
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
     {
         let mut bufs = bufs.into_iter().map(Into::<IoBufs>::into).peekable();
         let Some(first) = bufs.next() else {
-            return Ok(());
+            return Ok(IoBufs::default());
         };
+        let first_len = self.encrypted_frame_len(first.len())?;
         if bufs.peek().is_none() {
-            drop(bufs);
-            return self.send(first).await;
+            return Ok(self.build_chunk(std::iter::once(first), first_len)?.into());
         }
-        let bufs = std::iter::once(first).chain(bufs);
         // Validate every message before encryption advances nonces. Retain the
         // encoded lengths so chunk sizing does not need to recompute them.
         let (lower, _) = bufs.size_hint();
-        let mut messages = Vec::with_capacity(lower);
+        let mut messages = Vec::with_capacity(lower.saturating_add(1));
+        messages.push((first, first_len));
         for msg in bufs {
             let frame_len = self.encrypted_frame_len(msg.len())?;
             messages.push((msg, frame_len));
@@ -423,7 +406,36 @@ impl<O: Sink> Sender<O> {
             let chunk_messages = messages.by_ref().take(message_count).map(|(msg, _)| msg);
             chunks.append(self.build_chunk(chunk_messages, total_len)?);
         }
-        drop(messages);
+        Ok(chunks)
+    }
+
+    /// Encrypts and sends a message to the peer.
+    ///
+    /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
+    /// and sends the ciphertext.
+    pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let frame_len = self.encrypted_frame_len(bufs.len())?;
+        let chunk = self.build_chunk(std::iter::once(bufs), frame_len)?;
+        self.sink.send(chunk).await.map_err(Error::SendFailed)
+    }
+
+    /// Encrypts and sends multiple messages in a single sink call.
+    ///
+    /// Each message is framed independently so receivers still observe the
+    /// original message boundaries. Aggregate writes are broken into contiguous
+    /// chunks capped to one network buffer-pool item, then submitted together as
+    /// a chunked `IoBufs`. An individual message larger than that cap is still
+    /// sent as its own chunk.
+    pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
+    where
+        B: Into<IoBufs>,
+        I: IntoIterator<Item = B>,
+    {
+        let chunks = self.build_chunks(bufs)?;
+        if chunks.is_empty() {
+            return Ok(());
+        }
         self.sink.send(chunks).await.map_err(Error::SendFailed)
     }
 }
@@ -786,12 +798,23 @@ mod test {
     }
 
     #[test]
-    fn test_send_many_future_is_send_with_non_send_messages() {
+    fn test_send_many_future_is_send() {
         struct LocalMessage(Rc<IoBuf>);
 
         impl From<LocalMessage> for IoBufs {
             fn from(message: LocalMessage) -> Self {
                 message.0.as_ref().clone().into()
+            }
+        }
+
+        struct LocalMessages;
+
+        impl IntoIterator for LocalMessages {
+            type Item = LocalMessage;
+            type IntoIter = std::iter::Once<LocalMessage>;
+
+            fn into_iter(self) -> Self::IntoIter {
+                std::iter::once(LocalMessage(Rc::new(IoBuf::default())))
             }
         }
 
@@ -808,6 +831,8 @@ mod test {
             // The iterator is Send, but creates a non-Send message when polled.
             let messages = std::iter::once_with(|| LocalMessage(Rc::new(IoBuf::default())));
             assert_send(sender.send_many(messages));
+            // A Send input can also construct a non-Send iterator.
+            assert_send(sender.send_many(LocalMessages));
         });
     }
 
@@ -1104,10 +1129,19 @@ mod test {
             sends.store(0, Ordering::Relaxed);
             chunk_counts.lock().clear();
 
-            // A late validation error must not advance nonces for preceding chunks.
             let valid = vec![7u8; 32];
             let large = vec![8u8; 200];
             let oversized = vec![9u8; MAX_MESSAGE_SIZE as usize + 1];
+            let invalid_first =
+                std::iter::once(IoBuf::from(oversized.clone())).chain(std::iter::once_with(|| {
+                    panic!("must reject the first message before reading more")
+                }));
+            assert!(matches!(
+                dialer_sender.send_many(invalid_first).await,
+                Err(Error::SendTooLarge(_))
+            ));
+
+            // A late validation error must not advance nonces for preceding chunks.
             assert!(matches!(
                 dialer_sender
                     .send_many(vec![
