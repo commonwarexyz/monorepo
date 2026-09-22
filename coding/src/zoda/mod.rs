@@ -438,28 +438,22 @@ impl<D: Digest> CheckingData<D> {
             return Err(Error::InvalidWeakShard);
         }
         let index = index as usize;
-        let these_shuffled_indices = &self.shuffled_indices
+        let indices = &self.shuffled_indices
             [index * self.topology.samples..(index + 1) * self.topology.samples];
 
-        // Build elements for BMT multi-proof verification using the deterministically
-        // computed indices for this shard
-        let proof_elements: Vec<(H::Digest, u32)> = these_shuffled_indices
+        // Authenticate the sampled rows at their deterministic indices.
+        let proof_elements: Vec<(H::Digest, u32)> = indices
             .iter()
             .zip(shard.iter())
             .map(|(&i, row)| (row_digest::<H>(row), i))
             .collect();
-
-        // Verify the multi-proof
-        if inclusion_proof
+        inclusion_proof
             .verify_multi_inclusion::<H>(&proof_elements, &self.root)
-            .is_err()
-        {
-            return Err(Error::InvalidWeakShard);
-        }
+            .map_err(|_| Error::InvalidWeakShard)?;
 
         let shard_checksum = shard.mul(&self.checking_matrix);
         // Check that the shard checksum rows match the encoded checksums
-        for (row, &i) in shard_checksum.iter().zip(these_shuffled_indices) {
+        for (row, &i) in shard_checksum.iter().zip(indices) {
             if row != &self.encoded_checksum[i as usize] {
                 return Err(Error::InvalidWeakShard);
             }
