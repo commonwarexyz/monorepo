@@ -91,8 +91,8 @@ where
     inbound_messages: CounterFamily<Inbound>,
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     batch_size: Histogram,
-    verify_latency: histogram::Timed,
-    verify_fallback: Counter,
+    construct_latency: histogram::Timed,
+    construct_fallback: Counter,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
@@ -121,13 +121,13 @@ where
             "number of pending messages processed per batch",
             [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
-        let verify_latency = context.histogram(
-            "verify_latency",
+        let construct_latency = context.histogram(
+            "construct_latency",
             "latency of vote verification and certificate assembly",
             Buckets::CRYPTOGRAPHY,
         );
-        let verify_fallback = context.counter(
-            "verify_fallback",
+        let construct_fallback = context.counter(
+            "construct_fallback",
             "number of optimistic assembly attempts returning attestation verification results",
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
@@ -166,8 +166,8 @@ where
                 inbound_messages,
                 latest_vote,
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency),
-                verify_fallback,
+                construct_latency: histogram::Timed::new(construct_latency),
+                construct_fallback,
             },
             Mailbox::new(sender),
         )
@@ -323,7 +323,7 @@ where
         round: &mut Round<S, B, D, Re>,
     ) {
         loop {
-            let timer = self.verify_latency.timer(self.context.as_ref());
+            let timer = self.construct_latency.timer(self.context.as_ref());
             let Some(Batch {
                 processed,
                 invalid,
@@ -340,7 +340,7 @@ where
             // Record completed work even when no certificate was produced.
             timer.observe(self.context.as_ref());
             if fallback {
-                self.verify_fallback.inc();
+                self.construct_fallback.inc();
             }
 
             // Block invalid signers even when the remaining votes produced a certificate.

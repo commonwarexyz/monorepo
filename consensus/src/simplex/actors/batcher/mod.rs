@@ -1802,7 +1802,7 @@ mod tests {
             assert!(received_finalization);
 
             let metrics = context.encode();
-            assert!(metrics.contains("actor_verify_latency_count 2\n"), "{metrics}");
+            assert!(metrics.contains("actor_construct_latency_count 2\n"), "{metrics}");
         });
     }
 
@@ -3253,11 +3253,11 @@ mod tests {
             assert_eq!(blocked.lock().as_slice(), &[participants[1].clone()]);
             let metrics = context.encode();
             assert!(
-                metrics.contains("verify_fallback_total 1\n"),
+                metrics.contains("construct_fallback_total 1\n"),
                 "optimistic recovery failure must increment the fallback counter: {metrics}"
             );
             assert!(
-                metrics.contains("actor_verify_latency_count 1\n"),
+                metrics.contains("actor_construct_latency_count 1\n"),
                 "{metrics}"
             );
 
@@ -3305,9 +3305,12 @@ mod tests {
             }
             assert_eq!(blocked.lock().as_slice(), &[participants[1].clone()]);
             let metrics = context.encode();
-            assert!(metrics.contains("verify_fallback_total 1\n"), "{metrics}");
             assert!(
-                metrics.contains("actor_verify_latency_count 2\n"),
+                metrics.contains("construct_fallback_total 1\n"),
+                "{metrics}"
+            );
+            assert!(
+                metrics.contains("actor_construct_latency_count 2\n"),
                 "{metrics}"
             );
 
@@ -3346,10 +3349,13 @@ mod tests {
                 }
                 let metrics = context.encode();
                 assert!(
-                    metrics.contains("actor_verify_latency_count 2\n"),
+                    metrics.contains("actor_construct_latency_count 2\n"),
                     "{metrics}"
                 );
-                assert!(metrics.contains("verify_fallback_total 1\n"), "{metrics}");
+                assert!(
+                    metrics.contains("construct_fallback_total 1\n"),
+                    "{metrics}"
+                );
             }
         });
     }

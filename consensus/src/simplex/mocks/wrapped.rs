@@ -7,7 +7,7 @@ use commonware_codec::{Encode, Read, types::lazy::Lazy};
 use commonware_cryptography::{
     Digest, Hasher as _,
     certificate::{
-        AssemblyError, Attestation, Scheme as CertificateScheme, Verification, Verifier,
+        self, AssemblyError, Attestation, Scheme as CertificateScheme, Verification, Verifier,
     },
     sha256::Sha256,
 };
@@ -286,7 +286,7 @@ where
         J: IntoIterator<Item = &'a Attestation<Self>>,
         J::IntoIter: Send,
     {
-        commonware_cryptography::certificate::optimistic_assemble::<Self, _, D, _, _>(
+        certificate::optimistic_assemble::<Self, _, D, _, _>(
             self, rng, subject, pending, verified, strategy,
         )
     }
