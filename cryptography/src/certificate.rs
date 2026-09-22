@@ -482,8 +482,12 @@ where
     J: IntoIterator<Item = &'a Attestation<S>>,
     J::IntoIter: Send,
 {
-    // Preserve rejected signer evidence even when the accepted votes could certify.
-    let result = scheme.verify_attestations::<_, D, _>(rng, subject, pending, strategy);
+    // Empty input already has a known verification result. Preserve rejected signer
+    // evidence for nonempty input even when the accepted votes could certify.
+    let result = NonEmpty::try_new(pending.into_iter()).map_or_else(
+        || Verification::new(Vec::new(), Vec::new()),
+        |pending| scheme.verify_attestations::<_, D, _>(rng, subject, pending, strategy),
+    );
     if !result.invalid.is_empty() {
         return Err(result);
     }
@@ -1850,14 +1854,7 @@ mod tests {
                 calls.certificates.load(Ordering::Relaxed),
                 usize::from(pending_len != 0)
             );
-            let verified: Vec<_> = calls
-                .attestations
-                .lock()
-                .iter()
-                .flatten()
-                .copied()
-                .collect();
-            assert!(verified.is_empty());
+            assert!(calls.attestations.lock().is_empty());
             assert!(schemes[0].verify_certificate::<_, Sha256Digest>(
                 &mut rng,
                 SUBJECT,

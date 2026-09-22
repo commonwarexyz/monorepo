@@ -735,12 +735,34 @@ mod tests {
             .optimistic_assemble::<_, Sha256Digest, _, _>(
                 &mut rng,
                 subject.clone(),
-                [replacement],
+                [replacement.clone()],
                 &prior.verified,
                 &Sequential,
             )
             .ok()
             .expect("valid replacement must certify");
+        assert!(verifier.verify_certificate::<_, Sha256Digest>(
+            &mut rng,
+            subject.clone(),
+            &certificate,
+            &Sequential,
+        ));
+
+        // A verified quorum can assemble without preparing the subject again.
+        let mut prior = prior.verified;
+        prior.push(replacement);
+        calls.store(0, Ordering::Relaxed);
+        let certificate = verifier
+            .optimistic_assemble::<_, Sha256Digest, _, _>(
+                &mut rng,
+                subject.clone(),
+                [],
+                &prior,
+                &Sequential,
+            )
+            .ok()
+            .expect("verified quorum must certify");
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
         assert!(verifier.verify_certificate::<_, Sha256Digest>(
             &mut rng,
             subject.clone(),
