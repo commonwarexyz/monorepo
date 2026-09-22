@@ -274,13 +274,26 @@ unsafe fn change_base<const B: usize>(
             cyclic_step::<6, B>(&mut residues, &mut high, &mut low, &conversion.matrix);
             cyclic_step::<7, B>(&mut residues, &mut high, &mut low, &conversion.matrix);
         } else {
-            let mut quotient = [0u128; B];
+            // Split each 52-by-64-bit product into base-2^52 digits. The sums
+            // of eight low/middle digits fit in u64; carry before dividing by
+            // 2^64. This preserves the scalar quotient exactly.
+            let fraction = load(&conversion.fraction);
+            let upper = _mm512_srli_epi64::<WORD>(fraction);
+            let quotient: [u64; B] = core::array::from_fn(|batch| {
+                let residues = load(&input[batch]);
+                let low = _mm512_madd52lo_epu64(zero, residues, fraction);
+                let middle = _mm512_madd52hi_epu64(zero, residues, fraction);
+                let middle = _mm512_madd52lo_epu64(middle, residues, upper);
+                let high = _mm512_madd52hi_epu64(zero, residues, upper);
+                let low = _mm512_reduce_add_epi64(low) as u64;
+                let middle = _mm512_reduce_add_epi64(middle) as u64;
+                let high = _mm512_reduce_add_epi64(high) as u64;
+                ((middle + (low >> WORD)) >> (64 - WORD)) + (high << (2 * WORD - 64))
+            });
             for (row, coefficients) in conversion.matrix.iter().enumerate() {
                 let coefficients = load(coefficients);
                 for batch in 0..B {
                     let scalar = input[batch][row];
-                    quotient[batch] = quotient[batch]
-                        .wrapping_add(u128::from(scalar) * u128::from(conversion.fraction[row]));
                     let scalar = _mm512_set1_epi64(scalar as i64);
                     high[batch] = _mm512_madd52hi_epu64(high[batch], coefficients, scalar);
                     low[batch] = _mm512_madd52lo_epu64(low[batch], coefficients, scalar);
@@ -290,7 +303,7 @@ unsafe fn change_base<const B: usize>(
             let correction = load(&conversion.correction);
             let correction_shift = load(&conversion.correction_shift);
             for batch in 0..B {
-                let k = (quotient[batch] >> 64) as u64;
+                let k = quotient[batch];
                 let low_digit = _mm512_set1_epi64(k as i64);
                 let high_digit = _mm512_set1_epi64((k >> WORD) as i64);
                 high[batch] = _mm512_madd52hi_epu64(high[batch], correction, low_digit);
@@ -392,9 +405,8 @@ mod tests {
     }
 
     fn check_change_base<const B: usize>(backend: Backend, state: &mut u64) {
-        let input: [Lanes; B] = core::array::from_fn(|_| {
-            core::array::from_fn(|_| generated(state) & ((1 << BITS) - 1))
-        });
+        let input: [Lanes; B] =
+            core::array::from_fn(|_| core::array::from_fn(|_| generated(state) & MASK));
         let accumulator: [RawWide; B] = core::array::from_fn(|_| RawWide {
             high: core::array::from_fn(|_| generated(state) & ((1 << 58) - 1)),
             low: core::array::from_fn(|_| generated(state) & ((1 << 61) - 1)),
@@ -415,6 +427,27 @@ mod tests {
                 &backend.change_base(&input, &accumulator, &conversion, no_k),
                 &Portable.change_base(&input, &accumulator, &conversion, no_k),
             );
+        }
+    }
+
+    #[test]
+    fn conversion_quotient_carries_match_portable() {
+        let Some(backend) = Backend::new() else {
+            return;
+        };
+        for input in [0, 1, MASK] {
+            for fraction in [0, 1, MASK, 1 << WORD, 1 << 63, u64::MAX] {
+                let conversion = Conversion {
+                    matrix: [[0; LANES]; LANES],
+                    fraction: [fraction; LANES],
+                    correction: [MASK; LANES],
+                    correction_shift: [MASK; LANES],
+                };
+                assert_wide_eq(
+                    &backend.change_base(&[[input; LANES]], &[RawWide::ZERO], &conversion, false),
+                    &Portable.change_base(&[[input; LANES]], &[RawWide::ZERO], &conversion, false),
+                );
+            }
         }
     }
 
@@ -479,8 +512,11 @@ mod tests {
 
             check_change_base::<0>(backend, &mut state);
             check_change_base::<1>(backend, &mut state);
+            check_change_base::<2>(backend, &mut state);
             check_change_base::<3>(backend, &mut state);
+            check_change_base::<4>(backend, &mut state);
             check_change_base::<6>(backend, &mut state);
+            check_change_base::<8>(backend, &mut state);
             check_change_base::<12>(backend, &mut state);
         }
     }
