@@ -4,7 +4,7 @@
 
 use super::*;
 
-impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
+impl<B: Backend> Arithmetic<B> {
     #[inline(always)]
     fn double(&self, a: &Field) -> Field {
         self.fp_add(a, a)

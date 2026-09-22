@@ -53,6 +53,7 @@ pub(super) fn encode(points: &[Affine], format: Format) -> Vec<u8> {
         fn call<B: Backend>(self, backend: B) -> Self::Output {
             let a = Arithmetic::<B> {
                 ring: Ring::new(backend),
+                roots: RootWidth::Four,
             };
             match self.1 {
                 Format::Standard => self
@@ -69,7 +70,13 @@ pub(super) fn encode(points: &[Affine], format: Format) -> Vec<u8> {
 }
 
 fn receive(bytes: &[u8], format: Format, rng: &mut impl CryptoRng) -> Option<Vec<G1>> {
-    Receive::<_, 4> { bytes, format, rng }.run()
+    Receive {
+        bytes,
+        format,
+        roots: RootWidth::Four,
+        rng,
+    }
+    .run()
 }
 
 #[test]
@@ -90,24 +97,25 @@ fn exponent_and_batched_roots() {
         fn call<B: Backend>(self, backend: B) {
             let a = Arithmetic::<B> {
                 ring: Ring::new(backend),
+                roots: RootWidth::Four,
             };
             let inputs: [_; 8] =
                 core::array::from_fn(|i| a.cube(&a.fp_sqr(&Fp::from_u64(i as u64 + 1).into())));
-            let roots = a.extract(&inputs).unwrap();
+            let roots = extract_roots::<8>(&inputs).unwrap();
             for (input, root) in inputs.iter().zip(roots) {
                 assert!(a.fp_eq(&a.cube(&a.fp_sqr(&root)), input));
-                assert!(a.fp_eq(&root, &a.extract(&[*input]).unwrap()[0]));
+                assert!(a.fp_eq(&root, &extract_roots::<1>(&[*input]).unwrap()[0]));
             }
             let ninth: Field = ROOT_NINE.into();
             let inverse = a.ring.invert(ninth).unwrap();
             assert!(a.fp_eq(&a.fp_mul(&ninth, &inverse), &Field::ONE));
-            assert!(a.extract(&[Field::ONE]).is_some());
-            assert!(a.extract(&[ninth, inverse]).is_none());
+            assert!(extract_roots::<1>(&[Field::ONE]).is_some());
+            assert!(extract_roots::<2>(&[ninth, inverse]).is_none());
             for lane in 0..4 {
                 for invalid in [Field::ZERO, ninth, a.fp_neg(&Field::ONE)] {
                     let mut values = [Field::ONE; 4];
                     values[lane] = invalid;
-                    assert!(a.extract(&values).is_none());
+                    assert!(extract_roots::<4>(&values).is_none());
                 }
             }
         }
@@ -183,6 +191,7 @@ fn exceptional_fibers_and_canonical_mutations() {
         fn call<B: Backend>(self, backend: B) {
             let a = Arithmetic::<B> {
                 ring: Ring::new(backend),
+                roots: RootWidth::Four,
             };
             let base = self.0[0];
             for i in 0..64u64 {
@@ -218,7 +227,7 @@ fn exceptional_fibers_and_canonical_mutations() {
             let y0 = Fp::from_u64(22).into();
             let y1 = a.fp_mul(&Fp::from_u64(14).into(), &a.ring.invert(t).unwrap());
             let b = a.fp_sub(&a.fp_sqr(&y1), &a.four());
-            let mut x1 = a.extract(&[a.fp_sqr(&b)]).unwrap()[0];
+            let mut x1 = extract_roots::<1>(&[a.fp_sqr(&b)]).unwrap()[0];
             if !a.fp_eq(&a.cube(&x1), &b) {
                 x1 = a.fp_neg(&x1);
             }

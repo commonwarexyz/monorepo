@@ -47,27 +47,15 @@ impl Method {
         match self {
             Self::StandardIndividual => standard.iter().map(G1::from_bytes).collect(),
             Self::StandardBatch => G1::batch_from_bytes(rng, standard),
-            Self::TripleSerial => Receive::<_, 1> {
+            _ => Receive {
                 bytes,
                 format: self.format(),
-                rng,
-            }
-            .run(),
-            Self::TripleTwo => Receive::<_, 2> {
-                bytes,
-                format: self.format(),
-                rng,
-            }
-            .run(),
-            Self::Pair | Self::TripleBatch => Receive::<_, 4> {
-                bytes,
-                format: self.format(),
-                rng,
-            }
-            .run(),
-            Self::TripleEight => Receive::<_, 8> {
-                bytes,
-                format: self.format(),
+                roots: match self {
+                    Self::TripleSerial => RootWidth::One,
+                    Self::TripleTwo => RootWidth::Two,
+                    Self::TripleEight => RootWidth::Eight,
+                    _ => RootWidth::Four,
+                },
                 rng,
             }
             .run(),

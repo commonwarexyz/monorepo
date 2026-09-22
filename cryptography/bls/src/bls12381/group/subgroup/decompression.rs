@@ -57,11 +57,20 @@ fn reserved<T>(len: usize) -> Option<Vec<T>> {
     Some(result)
 }
 
-struct Arithmetic<B: Backend, const LANES: usize = 4> {
-    ring: Ring<Bls12381, B>,
+#[derive(Clone, Copy)]
+enum RootWidth {
+    One,
+    Two,
+    Four,
+    Eight,
 }
 
-impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
+struct Arithmetic<B: Backend> {
+    ring: Ring<Bls12381, B>,
+    roots: RootWidth,
+}
+
+impl<B: Backend> Arithmetic<B> {
     #[inline(always)]
     fn fp_mul(&self, a: &Field, b: &Field) -> Field {
         self.ring.mul(*a, *b)
@@ -186,7 +195,12 @@ impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
     }
 
     fn root_batch(&self, inputs: &[Field]) -> Option<Vec<Field>> {
-        extract_roots::<LANES>(inputs)
+        match self.roots {
+            RootWidth::One => extract_roots::<1>(inputs),
+            RootWidth::Two => extract_roots::<2>(inputs),
+            RootWidth::Four => extract_roots::<4>(inputs),
+            RootWidth::Eight => extract_roots::<8>(inputs),
+        }
     }
 
     #[inline(always)]
@@ -399,8 +413,9 @@ impl<const LANES: usize> WithBackend for RootBatch<'_, LANES> {
         const {
             assert!(LANES > 0);
         }
-        let arithmetic = Arithmetic::<B, LANES> {
+        let arithmetic = Arithmetic::<B> {
             ring: Ring::new(backend),
+            roots: RootWidth::Four,
         };
         let mut output = reserved(self.0.len())?;
         for chunk in self.0.chunks(LANES) {
@@ -419,34 +434,38 @@ enum Format {
     Triple,
 }
 
-struct Receive<'a, R, const LANES: usize> {
+struct Receive<'a, R> {
     bytes: &'a [u8],
     format: Format,
+    roots: RootWidth,
     rng: &'a mut R,
 }
 
-impl<R: CryptoRng, const LANES: usize> Receive<'_, R, LANES> {
+impl<R: CryptoRng> Receive<'_, R> {
     fn run(self) -> Option<Vec<G1>> {
-        let points = with_backend(Decode::<LANES> {
+        let points = with_backend(Decode {
             bytes: self.bytes,
             format: self.format,
+            roots: self.roots,
         })?;
         validate(points, self.rng)
     }
 }
 
-struct Decode<'a, const LANES: usize> {
+struct Decode<'a> {
     bytes: &'a [u8],
     format: Format,
+    roots: RootWidth,
 }
 
-impl<const LANES: usize> WithBackend for Decode<'_, LANES> {
+impl WithBackend for Decode<'_> {
     type Output = Option<Vec<Affine>>;
 
     #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> Self::Output {
-        let arithmetic = Arithmetic::<B, LANES> {
+        let arithmetic = Arithmetic::<B> {
             ring: Ring::new(backend),
+            roots: self.roots,
         };
         match self.format {
             Format::Standard => {
