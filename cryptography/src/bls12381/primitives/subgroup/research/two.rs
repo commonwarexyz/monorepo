@@ -84,6 +84,12 @@ fn two_pass_check<const Q: u32, const SPLIT: bool>(
     })
 }
 
+// Complete subgroup checking with the derived bound from SUBGROUP_CASCADE.md.
+pub(super) fn certified_check(points: &[G1], rng: &mut impl CryptoRng) -> bool {
+    assert!(points.len() <= 3_000_000);
+    graph_check_with::<47, 43, true, _>(points, rng, super::effective::check).0
+}
+
 fn recursive_inner<const SPLIT: bool>(points: &[G1], rng: &mut impl CryptoRng) -> bool {
     assert!(points.len() <= 31u32.pow(4) as usize);
     let affine = to_affine(points);

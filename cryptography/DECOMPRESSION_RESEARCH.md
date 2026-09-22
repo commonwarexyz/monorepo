@@ -1,5 +1,11 @@
 # Joint G1 decoding and interleaved root extraction
 
+The subsequent [complete receiver benchmark](WIRE_TO_G1_BENCHMARK.md) connects
+triple decoding to the certified recursive subgroup checker. At 100,000 points
+it measures **368.174 ms from bytes to validated points**, versus 884.159 ms
+for standard decoding with the existing batch checker (2.40x faster). The
+measurements below isolate the decoding improvements using the existing checker.
+
 The test-only prototype in
 [`decompression.rs`](src/bls12381/primitives/subgroup/research/decompression.rs)
 reduces measured serial decoding plus 128-bit subgroup checking by **54% at
@@ -197,8 +203,8 @@ infinity, and off-curve points. Tests cover all six same-orbit cases, odd
 tails, mutations, and order-eleven nonmembers, including a nonmember mixed into
 a 1,000-point batch. Accepted mutated encodings must re-encode identically.
 
-Validation on this machine: all 758 tests selected by the crate's default
-nextest profile passed (56 skipped), including twelve focused decoding/root
+Validation on this machine: all 760 tests selected by the crate's default
+nextest profile passed (57 skipped), including fourteen focused decoding/root
 tests. Clippy and formatting checks passed. The initial prototype's Miri run
 passed the integer exponent test but could not execute field/group tests
 because blst's foreign functions and generator static are unsupported. The

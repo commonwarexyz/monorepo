@@ -35,7 +35,7 @@ fn exceptional(pair: &[blst_p1_affine]) -> bool {
     fp_is_zero(&z0) || fp_is_zero(&denominator)
 }
 
-fn encode(points: &[G1]) -> Vec<u8> {
+pub(super) fn encode(points: &[G1]) -> Vec<u8> {
     let affine = to_affine(points);
     assert!(affine.iter().all(valid_affine));
     let records: Vec<_> = affine
@@ -86,7 +86,7 @@ fn encode(points: &[G1]) -> Vec<u8> {
     bytes
 }
 
-fn decode(bytes: &[u8]) -> Option<Vec<G1>> {
+pub(super) fn decode(bytes: &[u8]) -> Option<Vec<G1>> {
     if !bytes.len().is_multiple_of(48) {
         return None;
     }

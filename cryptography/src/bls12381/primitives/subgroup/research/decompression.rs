@@ -10,6 +10,9 @@ use std::hint::black_box;
 #[path = "decompression/batch.rs"]
 mod batch;
 
+#[path = "decompression/receive.rs"]
+mod receive;
+
 #[path = "decompression/triple.rs"]
 mod triple;
 
