@@ -270,6 +270,28 @@ where
         )
     }
 
+    fn optimistic_assemble<'a, R, D, I, J>(
+        &self,
+        rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        pending: I,
+        verified: J,
+        strategy: &impl commonware_parallel::Strategy,
+    ) -> Result<Self::Certificate, Verification<Self>>
+    where
+        R: rand_core::CryptoRng,
+        D: Digest,
+        I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: ExactSizeIterator + Send,
+        J: IntoIterator<Item = &'a Attestation<Self>>,
+        J::IntoIter: Send,
+    {
+        // Construction uses this wrapper's assembly hook to apply fault injection.
+        commonware_cryptography::certificate::optimistic_assemble::<Self, _, D, _, _>(
+            self, rng, subject, pending, verified, strategy,
+        )
+    }
+
     fn assemble<I>(
         &self,
         attestations: NonEmpty<I>,

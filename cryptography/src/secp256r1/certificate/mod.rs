@@ -549,18 +549,10 @@ macro_rules! impl_certificate_secp256r1 {
                 J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
                 J::IntoIter: Send,
             {
-                // These certificates retain individual signatures, so only pending votes need
-                // authentication. Keep rejected signer evidence even if the valid votes could certify.
-                let result = self.verify_attestations::<_, D, _>(rng, subject, pending, strategy);
-                if result.invalid.is_empty()
-                    && let Some(attestations) = commonware_utils::iter::NonEmpty::try_new(
-                        result.verified.iter().cloned().chain(verified.into_iter().cloned()),
-                    )
-                    && let Ok(certificate) = self.assemble(attestations, strategy)
-                {
-                    return Ok(certificate);
-                }
-                Err(result)
+                // Certificates retain individual signatures, so authenticate only pending votes.
+                $crate::certificate::verify_then_assemble::<Self, _, D, _, _>(
+                    self, rng, subject, pending, verified, strategy,
+                )
             }
 
             fn assemble<I>(

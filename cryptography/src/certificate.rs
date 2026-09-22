@@ -435,55 +435,7 @@ pub trait Scheme: Verifier {
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: ExactSizeIterator + Send,
         J: IntoIterator<Item = &'a Attestation<Self>>,
-        J::IntoIter: Send,
-    {
-        let pending = pending.into_iter();
-        let verified = verified.into_iter();
-
-        // Verify the remainder first when at least as many inputs are already trusted,
-        // avoiding assembly just to reject replacement votes. A singleton also has no
-        // cross-signer batching benefit.
-        if pending.len() <= 1 || verified.size_hint().0 >= pending.len() {
-            let result = self.verify_attestations(rng, subject, pending, strategy);
-            if result.invalid.is_empty()
-                && let Some(attestations) =
-                    NonEmpty::try_new(result.verified.iter().cloned().chain(verified.cloned()))
-                && let Ok(certificate) = self.assemble(attestations, strategy)
-            {
-                return Ok(certificate);
-            }
-            return Err(result);
-        }
-
-        // Decode before cloning so assembly and fallback reuse the same decoded values.
-        // The strategy distributes expensive point decoding across its workers.
-        let mut pending = strategy.map_collect_vec(pending, |attestation| {
-            let _ = attestation.signature.get();
-            attestation
-        });
-        let attestations = pending.iter().cloned().chain(verified.cloned());
-        if let Some(attestations) = NonEmpty::try_new(attestations)
-            && let Ok(certificate) = self.assemble(attestations, strategy)
-            && self.verify_certificate(rng, subject.clone(), &certificate, strategy)
-        {
-            return Ok(certificate);
-        }
-
-        // Each half needs ordinary verification, including every signed component
-        // of schemes with more than one signature per attestation. Independent RNGs
-        // allow both halves to run concurrently without sharing the caller's RNG.
-        let rest = pending.split_off(pending.len().div_ceil(2));
-        let mut first_rng = ChaCha20Rng::from_rng(&mut *rng);
-        let mut rest_rng = ChaCha20Rng::from_rng(rng);
-        let first_subject = subject.clone();
-        let (mut result, rest) = strategy.join(
-            || self.verify_attestations(&mut first_rng, first_subject, pending, strategy),
-            || self.verify_attestations(&mut rest_rng, subject, rest, strategy),
-        );
-        result.verified.extend(rest.verified);
-        result.invalid.extend(rest.invalid);
-        Err(result)
-    }
+        J::IntoIter: Send;
 
     /// Assembles a non-empty stream of attestations into a candidate certificate.
     ///
@@ -506,6 +458,110 @@ pub trait Scheme: Verifier {
     /// Schemes where individual signatures can be safely reported as fault evidence should
     /// return `true`.
     fn is_attributable() -> bool;
+}
+
+/// Verifies pending attestations before assembling them with verified attestations.
+///
+/// Inputs must satisfy [`Scheme::optimistic_assemble`]'s requirements.
+/// Rejected attestations return `Err` even if the remaining votes could certify,
+/// preserving fault evidence for the caller. Assembly failure also returns the pending results.
+pub fn verify_then_assemble<'a, S, R, D, I, J>(
+    scheme: &S,
+    rng: &mut R,
+    subject: S::Subject<'_, D>,
+    pending: I,
+    verified: J,
+    strategy: &impl Strategy,
+) -> Result<S::Certificate, Verification<S>>
+where
+    S: Scheme,
+    R: CryptoRng,
+    D: Digest,
+    I: IntoIterator<Item = Attestation<S>>,
+    I::IntoIter: Send,
+    J: IntoIterator<Item = &'a Attestation<S>>,
+    J::IntoIter: Send,
+{
+    let result = scheme.verify_attestations::<_, D, _>(rng, subject, pending, strategy);
+    if result.invalid.is_empty()
+        && let Some(attestations) = NonEmpty::try_new(
+            result
+                .verified
+                .iter()
+                .cloned()
+                .chain(verified.into_iter().cloned()),
+        )
+        && let Ok(certificate) = scheme.assemble(attestations, strategy)
+    {
+        return Ok(certificate);
+    }
+    Err(result)
+}
+
+/// Attempts aggregate certificate authentication before verifying pending attestations on failure.
+///
+/// Implements [`Scheme::optimistic_assemble`]'s input and result contract. A quorum consisting
+/// entirely of verified attestations is assembled without another certificate check.
+pub fn optimistic_assemble<'a, S, R, D, I, J>(
+    scheme: &S,
+    rng: &mut R,
+    subject: S::Subject<'_, D>,
+    pending: I,
+    verified: J,
+    strategy: &impl Strategy,
+) -> Result<S::Certificate, Verification<S>>
+where
+    S: Scheme,
+    R: CryptoRng,
+    D: Digest,
+    I: IntoIterator<Item = Attestation<S>>,
+    I::IntoIter: ExactSizeIterator + Send,
+    J: IntoIterator<Item = &'a Attestation<S>>,
+    J::IntoIter: Send,
+{
+    let pending = pending.into_iter();
+    let verified = verified.into_iter();
+
+    // A verified-only quorum needs no further authentication.
+    if pending.len() == 0 {
+        return verify_then_assemble::<_, _, D, _, _>(
+            scheme, rng, subject, pending, verified, strategy,
+        );
+    }
+
+    // Decode before cloning so assembly and fallback reuse the same decoded values.
+    // The strategy distributes expensive point decoding across its workers.
+    let mut pending = strategy.map_collect_vec(pending, |attestation| {
+        let _ = attestation.signature.get();
+        attestation
+    });
+    let attestations = pending.iter().cloned().chain(verified.cloned());
+    if let Some(attestations) = NonEmpty::try_new(attestations)
+        && let Ok(certificate) = scheme.assemble(attestations, strategy)
+        && scheme.verify_certificate::<_, D>(rng, subject.clone(), &certificate, strategy)
+    {
+        return Ok(certificate);
+    }
+
+    // A single pending attestation is the leaf of the fallback search.
+    if pending.len() == 1 {
+        return Err(scheme.verify_attestations::<_, D, _>(rng, subject, pending, strategy));
+    }
+
+    // Each half needs ordinary verification, including every signed component
+    // of schemes with more than one signature per attestation. Independent RNGs
+    // allow both halves to run concurrently without sharing the caller's RNG.
+    let rest = pending.split_off(pending.len().div_ceil(2));
+    let mut first_rng = ChaCha20Rng::from_rng(&mut *rng);
+    let mut rest_rng = ChaCha20Rng::from_rng(rng);
+    let first_subject = subject.clone();
+    let (mut result, rest) = strategy.join(
+        || scheme.verify_attestations::<_, D, _>(&mut first_rng, first_subject, pending, strategy),
+        || scheme.verify_attestations::<_, D, _>(&mut rest_rng, subject, rest, strategy),
+    );
+    result.verified.extend(rest.verified);
+    result.invalid.extend(rest.invalid);
+    Err(result)
 }
 
 /// A scheme handle returned by a [`Provider`] for one scope.
@@ -1558,6 +1614,28 @@ mod tests {
             )
         }
 
+        fn optimistic_assemble<'a, R, D, I, J>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            pending: I,
+            verified: J,
+            strategy: &impl Strategy,
+        ) -> Result<Self::Certificate, Verification<Self>>
+        where
+            R: CryptoRng,
+            D: Digest,
+            I: IntoIterator<Item = Attestation<Self>>,
+            I::IntoIter: ExactSizeIterator + Send,
+            J: IntoIterator<Item = &'a Attestation<Self>>,
+            J::IntoIter: Send,
+        {
+            // Run construction through this wrapper to record verification and assembly work.
+            crate::certificate::optimistic_assemble::<Self, _, D, _, _>(
+                self, rng, subject, pending, verified, strategy,
+            )
+        }
+
         fn assemble<I>(
             &self,
             attestations: NonEmpty<I>,
@@ -1696,7 +1774,7 @@ mod tests {
         assert_eq!(verification.invalid, vec![invalid]);
         assert_eq!(
             *calls.attestations.lock(),
-            vec![vec![accepted.signer, invalid]]
+            vec![vec![accepted.signer], vec![invalid]]
         );
 
         prior.extend(verification.verified);
@@ -1724,7 +1802,7 @@ mod tests {
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_optimistic_assemble_reuses_verified_quorum() {
+    fn test_optimistic_assemble_with_verified_votes() {
         let mut rng = test_rng();
         let schemes = threshold_signers::<MinPk>(&mut rng, 5);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -1761,9 +1839,13 @@ mod tests {
                 .ok()
                 .expect("verified quorum must certify");
 
-            // A verified quorum needs one recovery and no aggregate authentication.
+            // Pending votes require certificate authentication, even when most
+            // inputs are already verified. A verified-only quorum needs assembly alone.
             assert_eq!(calls.assemblies.load(Ordering::Relaxed), 1);
-            assert_eq!(calls.certificates.load(Ordering::Relaxed), 0);
+            assert_eq!(
+                calls.certificates.load(Ordering::Relaxed),
+                usize::from(pending_len != 0)
+            );
             let verified: Vec<_> = calls
                 .attestations
                 .lock()
@@ -1771,40 +1853,19 @@ mod tests {
                 .flatten()
                 .copied()
                 .collect();
-            assert_eq!(
-                verified,
-                pending.iter().map(|a| a.signer).collect::<Vec<_>>()
-            );
+            assert!(verified.is_empty());
             assert!(schemes[0].verify_certificate::<_, Sha256Digest>(
                 &mut rng,
                 SUBJECT,
                 &certificate,
                 &Sequential,
             ));
-
-            // An imprecise lower size hint changes only the strategy, not the result.
-            if pending_len == 2 {
-                calls.attestations.lock().clear();
-                calls.assemblies.store(0, Ordering::Relaxed);
-                calls.certificates.store(0, Ordering::Relaxed);
-                let result = verifier.optimistic_assemble::<_, Sha256Digest, _, _>(
-                    &mut rng,
-                    SUBJECT,
-                    pending.iter().cloned().map(Recording::outer),
-                    prior.iter().filter(|_| true),
-                    &Sequential,
-                );
-                assert_eq!(result.ok(), Some(certificate));
-                assert_eq!(calls.assemblies.load(Ordering::Relaxed), 1);
-                assert_eq!(calls.certificates.load(Ordering::Relaxed), 1);
-                assert!(calls.attestations.lock().is_empty());
-            }
         }
     }
 
     #[cfg(feature = "bls12381")]
     #[test]
-    fn test_optimistic_assemble_rejects_replacement_before_recovery() {
+    fn test_optimistic_assemble_retries_with_replacements() {
         let mut rng = test_rng();
         let schemes = threshold_signers::<MinPk>(&mut rng, 10);
         let quorum = N3f1::quorum(schemes.len()) as usize;
@@ -1851,8 +1912,8 @@ mod tests {
             prior.extend(result.verified);
             assert_eq!(prior.len(), quorum - failures);
 
-            // A new faulty signer is mixed with any honest replacements. Classify
-            // these votes before repeating recovery over retained votes.
+            // A new faulty signer is mixed with any honest replacements. The
+            // candidate fails authentication, so fallback identifies the bad vote.
             let pending: Vec<_> = schemes[quorum..quorum + failures]
                 .iter()
                 .enumerate()
@@ -1881,9 +1942,15 @@ mod tests {
                 .unwrap_err();
             assert_eq!(result.invalid, vec![invalid]);
             assert_eq!(result.verified.len(), failures - 1);
-            assert_eq!(calls.assemblies.load(Ordering::Relaxed), 0);
-            assert_eq!(calls.certificates.load(Ordering::Relaxed), 0);
-            assert_eq!(*calls.attestations.lock(), vec![signers]);
+            assert_eq!(calls.assemblies.load(Ordering::Relaxed), 1);
+            assert_eq!(calls.certificates.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                *calls.attestations.lock(),
+                signers
+                    .into_iter()
+                    .map(|signer| vec![signer])
+                    .collect::<Vec<_>>()
+            );
             prior.extend(result.verified);
             assert_eq!(prior.len(), quorum - 1);
 
@@ -1893,6 +1960,9 @@ mod tests {
                     .sign::<Sha256Digest>(SUBJECT)
                     .unwrap(),
             );
+            calls.attestations.lock().clear();
+            calls.assemblies.store(0, Ordering::Relaxed);
+            calls.certificates.store(0, Ordering::Relaxed);
             let certificate = verifier
                 .optimistic_assemble::<_, Sha256Digest, _, _>(
                     &mut rng,
@@ -1903,6 +1973,9 @@ mod tests {
                 )
                 .ok()
                 .expect("valid replacement must certify");
+            assert_eq!(calls.assemblies.load(Ordering::Relaxed), 1);
+            assert_eq!(calls.certificates.load(Ordering::Relaxed), 1);
+            assert!(calls.attestations.lock().is_empty());
             assert!(schemes[0].verify_certificate::<_, Sha256Digest>(
                 &mut rng,
                 SUBJECT,

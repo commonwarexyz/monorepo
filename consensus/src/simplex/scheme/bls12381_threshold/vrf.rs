@@ -882,6 +882,27 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         Verification::new(verified, invalid.into_iter().collect())
     }
 
+    fn optimistic_assemble<'a, R, D, I, J>(
+        &self,
+        rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        pending: I,
+        verified: J,
+        strategy: &impl Strategy,
+    ) -> Result<Self::Certificate, Verification<Self>>
+    where
+        R: CryptoRng,
+        D: Digest,
+        I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: ExactSizeIterator + Send,
+        J: IntoIterator<Item = &'a Attestation<Self>>,
+        J::IntoIter: Send,
+    {
+        certificate::optimistic_assemble::<Self, _, D, _, _>(
+            self, rng, subject, pending, verified, strategy,
+        )
+    }
+
     fn assemble<I>(
         &self,
         attestations: NonEmpty<I>,
