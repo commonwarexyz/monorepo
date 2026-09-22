@@ -482,20 +482,25 @@ where
     J: IntoIterator<Item = &'a Attestation<S>>,
     J::IntoIter: Send,
 {
+    // Preserve rejected signer evidence even when the accepted votes could certify.
     let result = scheme.verify_attestations::<_, D, _>(rng, subject, pending, strategy);
-    if result.invalid.is_empty()
-        && let Some(attestations) = NonEmpty::try_new(
-            result
-                .verified
-                .iter()
-                .cloned()
-                .chain(verified.into_iter().cloned()),
-        )
-        && let Ok(certificate) = scheme.assemble(attestations, strategy)
-    {
-        return Ok(certificate);
+    if !result.invalid.is_empty() {
+        return Err(result);
     }
-    Err(result)
+
+    // A verified quorum needs no further authentication. Keep the pending results
+    // available if assembly fails.
+    let Some(attestations) = NonEmpty::try_new(
+        result
+            .verified
+            .iter()
+            .cloned()
+            .chain(verified.into_iter().cloned()),
+    ) else {
+        return Err(result);
+    };
+
+    scheme.assemble(attestations, strategy).map_err(|_| result)
 }
 
 /// Attempts aggregate certificate authentication before verifying pending attestations on failure.
@@ -529,8 +534,8 @@ where
         );
     }
 
-    // Decode before cloning so assembly and fallback reuse the same decoded values.
-    // The strategy distributes expensive point decoding across its workers.
+    // Decode through the strategy before cloning so assembly and fallback reuse
+    // the decoded values.
     let mut pending = strategy.map_collect_vec(pending, |attestation| {
         let _ = attestation.signature.get();
         attestation
@@ -1630,7 +1635,6 @@ mod tests {
             J: IntoIterator<Item = &'a Attestation<Self>>,
             J::IntoIter: Send,
         {
-            // Run construction through this wrapper to record verification and assembly work.
             crate::certificate::optimistic_assemble::<Self, _, D, _, _>(
                 self, rng, subject, pending, verified, strategy,
             )

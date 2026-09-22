@@ -286,7 +286,6 @@ where
         J: IntoIterator<Item = &'a Attestation<Self>>,
         J::IntoIter: Send,
     {
-        // Construction uses this wrapper's assembly hook to apply fault injection.
         commonware_cryptography::certificate::optimistic_assemble::<Self, _, D, _, _>(
             self, rng, subject, pending, verified, strategy,
         )

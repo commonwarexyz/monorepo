@@ -605,7 +605,6 @@ macro_rules! impl_certificate_ed25519 {
                 J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
                 J::IntoIter: Send,
             {
-                // Certificates retain individual signatures, so authenticate only pending votes.
                 $crate::certificate::verify_then_assemble::<Self, _, D, _, _>(
                     self, rng, subject, pending, verified, strategy,
                 )
