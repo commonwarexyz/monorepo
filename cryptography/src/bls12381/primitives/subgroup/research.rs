@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 #[path = "research/cycles.rs"]
 mod cycles;
+#[path = "research/decompression.rs"]
+mod decompression;
 #[path = "research/effective.rs"]
 mod effective;
 #[path = "research/moments.rs"]
