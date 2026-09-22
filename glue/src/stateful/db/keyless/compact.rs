@@ -102,7 +102,10 @@ mod tests {
     };
     use commonware_storage::{
         merkle::mmr,
-        qmdb::keyless::{self as storage_keyless, fixed},
+        qmdb::{
+            keyless::{self as storage_keyless, fixed},
+            sync::source,
+        },
     };
     use commonware_utils::{NZU64, channel::mpsc, non_empty_range, sequence::U64};
     use futures::pin_mut;
@@ -125,16 +128,7 @@ mod tests {
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
         type Error = <Arc<FixedDb> as sync::Source>::Error;
 
-        async fn serve(
-            &self,
-            request: sync::Request<Self::Family>,
-        ) -> Result<
-            (
-                sync::Response<Self::Family, Self::Op, Self::Digest>,
-                sync::FeedbackTx,
-            ),
-            Self::Error,
-        > {
+        async fn serve(&self, request: sync::Request<Self::Family>) -> source::Result<Self> {
             if request.size() == self.stale_target.range.end() {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;

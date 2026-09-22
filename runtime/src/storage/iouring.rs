@@ -3,10 +3,12 @@
 //!
 //! ## Architecture
 //!
-//! Reads, writes, and syncs bind to the current worker on their first poll.
-//! Empty reads and writes return without touching the ring. Storage and blob
-//! handles retain no ring identity, so resources can move between workers
-//! between operations. Metadata and resize remain synchronous.
+//! Reads, writes, and syncs register requests with the worker that first polls them.
+//! Requests stay on that worker, with completion forwarded when their futures are
+//! polled elsewhere. Storage and blob handles retain no ring identity and can move
+//! between workers. Moving a future does not keep its original worker alive.
+//! Empty reads and writes return without touching the ring. Metadata and resize
+//! remain synchronous.
 //!
 //! A shared directory hold follows each blob's file into registered requests.
 //! Dropping a caller never releases that hold while the kernel can still access
@@ -47,7 +49,7 @@ use commonware_formatting::{from_hex, hex};
 use commonware_utils::sync::Mutex;
 use std::{
     fs::{self, File},
-    io::{Error as IoError, Seek, SeekFrom, Write},
+    io::{Error as IoError, ErrorKind, Seek, SeekFrom, Write},
     ops::RangeInclusive,
     path::PathBuf,
     sync::{Arc, atomic::AtomicBool},
@@ -62,7 +64,7 @@ pub struct Config {
     pub blob_layouts: RangeInclusive<Layout>,
 }
 
-/// Filesystem storage whose data operations execute on the current worker.
+/// Filesystem storage whose requests execute on the worker that registers them.
 #[derive(Clone)]
 pub struct Storage {
     /// Serialize metadata operations across cloned contexts and workers.
@@ -196,7 +198,11 @@ impl crate::Storage for Storage {
             // Sync the partition directory to ensure the removal is durable.
             sync_dir(&path)?;
         } else {
-            fs::remove_dir_all(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+            // Distinguish missing partitions from other filesystem failures.
+            fs::remove_dir_all(&path).map_err(|error| match error.kind() {
+                ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+                _ => Error::Io(error.into()),
+            })?;
 
             // Sync the storage directory to ensure the removal is durable.
             sync_dir(&self.storage_directory)?;
@@ -212,8 +218,11 @@ impl crate::Storage for Storage {
 
         let path = self.storage_directory.join(partition);
 
-        let entries =
-            std::fs::read_dir(&path).map_err(|_| Error::PartitionMissing(partition.into()))?;
+        // Distinguish missing partitions from other filesystem failures.
+        let entries = fs::read_dir(&path).map_err(|error| match error.kind() {
+            ErrorKind::NotFound => Error::PartitionMissing(partition.into()),
+            _ => Error::ReadFailed,
+        })?;
 
         let mut blobs = Vec::new();
         for entry in entries {
@@ -1164,8 +1173,7 @@ mod tests {
                     blob.write_at(offset, IoBufs::default(), options)
                         .await
                         .unwrap();
-                    let bufs =
-                        IoBufs::from((0..chunks).map(|_| IoBuf::from(b"x")).collect::<Vec<_>>());
+                    let bufs = (0..chunks).map(|_| IoBuf::from(b"x")).collect::<IoBufs>();
                     assert!(matches!(
                         blob.write_at(offset, bufs, options).await,
                         Err(Error::OffsetOverflow)
@@ -1508,6 +1516,38 @@ mod tests {
             assert_eq!(&raw_content[Header::PRELUDE_SIZE..], b"hello world!");
 
             let _ = std::fs::remove_dir_all(&storage_directory);
+        });
+    }
+
+    /// Scan and removal distinguish missing partitions from existing non-directory paths.
+    #[test]
+    fn test_partition_failures_are_not_absence() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            let partition = storage_directory.join("partition");
+            fs::write(&partition, b"not a directory").unwrap();
+
+            assert!(matches!(
+                storage.scan("partition").await,
+                Err(Error::ReadFailed)
+            ));
+            assert!(matches!(
+                storage.scan("missing").await,
+                Err(Error::PartitionMissing(_))
+            ));
+
+            assert!(matches!(
+                storage.remove("partition", None).await,
+                Err(Error::Io(_))
+            ));
+            assert!(partition.exists());
+            assert!(matches!(
+                storage.remove("missing", None).await,
+                Err(Error::PartitionMissing(_))
+            ));
+
+            drop(storage);
+            fs::remove_dir_all(storage_directory).unwrap();
         });
     }
 }

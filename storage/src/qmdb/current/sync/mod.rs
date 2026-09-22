@@ -43,7 +43,7 @@ use crate::{
         bitmap::Shared,
         current::{db, grafting},
         metrics::Metrics as AnyMetrics,
-        sync::{Database, DatabaseConfig as Config, FeedbackTx, Request, Response},
+        sync::{Database, DatabaseConfig as Config, Request, source},
     },
     translator::Translator,
 };
@@ -323,10 +323,7 @@ where
     type Op = Operation<F, U>;
     type Error = qmdb::Error<F>;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), qmdb::Error<F>> {
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         self.any.serve(request).await
     }
 }

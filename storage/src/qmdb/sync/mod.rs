@@ -30,7 +30,7 @@ pub(crate) use database::{Config as DatabaseConfig, journal_covers_range, local_
 pub use database::{Database, MerkleizedBatch};
 
 pub mod source;
-pub use source::{FeedbackTx, Request, Response, Source};
+pub use source::{Feedback, Request, Response, ResponseOf, Source};
 
 mod target;
 pub use target::Target;

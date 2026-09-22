@@ -741,11 +741,14 @@ impl Clock for Context {
         SystemTime::now()
     }
 
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
         tokio::time::sleep(duration)
     }
 
-    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep_until(
+        &self,
+        deadline: SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static + use<> {
         let duration_until_deadline = deadline.duration_since(self.current()).unwrap_or_default();
         tokio::time::sleep(duration_until_deadline)
     }

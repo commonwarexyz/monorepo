@@ -12,9 +12,9 @@ use crate::{
         any::traits::DbAny,
         operation::Operation as OperationTrait,
         sync::{
-            self, Engine, Target,
+            self, Engine, Feedback, Target,
             engine::{Config, NextStep},
-            source::{self, FeedbackTx, Request, Response, Source, tests::dropped_feedback},
+            source::{self, Request, Response, Source},
         },
     },
 };
@@ -22,7 +22,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _, deterministic,
+    BufferPooler, Clock, Metrics as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
 };
 use commonware_utils::{
     NZU64,
@@ -138,7 +138,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
 /// Test that empty operations arrays fetched do not cause panics when stored and applied
 pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -183,8 +183,7 @@ where
 /// Test that source failure is handled correctly
 pub(crate) fn test_sync_source_fails<H: SyncTestHarness>()
 where
-    source::tests::FailSource<H::Family, OpOf<H>, Digest>:
-        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    source::tests::FailSource<H::Family, OpOf<H>, Digest>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -219,7 +218,7 @@ where
 /// Test basic sync functionality with various batch sizes
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -293,7 +292,7 @@ where
 /// Test syncing to a subset of the target database (target has additional ops beyond sync range)
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_ops: usize)
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -359,7 +358,7 @@ where
 /// Tests the scenario where sync_db already has partial data and needs to sync additional ops.
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(original_ops: usize)
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -452,8 +451,7 @@ where
 /// Uses FailSource to verify that no network requests are made since data already exists.
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>(num_ops: usize)
 where
-    source::tests::FailSource<H::Family, OpOf<H>, Digest>:
-        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    source::tests::FailSource<H::Family, OpOf<H>, Digest>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
     JournalOf<H>: Contiguous,
 {
@@ -536,7 +534,7 @@ where
 /// Test that a target update that decreases the lower bound is ignored.
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -608,7 +606,7 @@ where
 /// Test that a target update that decreases the upper bound is ignored.
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -674,7 +672,7 @@ where
 /// Test that the client succeeds when bounds are updated (increased).
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -759,7 +757,7 @@ where
 /// Test that target updates can be sent even after the client is done (no panic).
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -828,7 +826,7 @@ where
 /// Test that prune-only target updates (same end, larger start) are ignored.
 pub(crate) fn test_target_update_prune_only_ignored<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -892,7 +890,7 @@ where
 /// Test that explicit finish control waits for a finish signal even after reaching target.
 pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1010,7 +1008,7 @@ pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_fin
     H: SyncTestHarness,
 >()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1131,7 +1129,7 @@ where
 /// Test that a finish signal received before target completion still allows full sync.
 pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1194,7 +1192,7 @@ where
 /// Test that dropping finish sender without sending is treated as an error.
 pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1243,7 +1241,7 @@ where
 /// Test that dropping reached-target receiver does not fail sync.
 pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1297,7 +1295,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
     initial_ops: usize,
     additional_ops: usize,
 ) where
-    Arc<AsyncRwLock<Option<DbOf<H>>>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<AsyncRwLock<Option<DbOf<H>>>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1408,7 +1406,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 /// Test demonstrating that a synced database can be reopened and retain its state.
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode + Clone,
     JournalOf<H>: Contiguous,
 {
@@ -1502,7 +1500,7 @@ where
 /// Test post-sync usability: after syncing, the database supports normal operations.
 pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1784,10 +1782,32 @@ where
     });
 }
 
-/// A source wrapper that corrupts pinned nodes on the first request, then returns correct
-/// data on subsequent requests.
+/// Returns feedback that fetches at most one later candidate after explicit rejection.
+fn one_retry_feedback<R: Send + 'static>(
+    context: deterministic::Context,
+    next: impl Future<Output = Option<R>> + Send + 'static,
+) -> Feedback<R> {
+    let (candidate_tx, candidate_rx) = mpsc::channel(1);
+    let (verdict_tx, verdict_rx) = oneshot::channel();
+    drop(context.spawn(move |_| async move {
+        if !matches!(verdict_rx.await, Ok(false)) {
+            return;
+        }
+        let Some(response) = next.await else {
+            return;
+        };
+        let (next_verdict_tx, next_verdict_rx) = oneshot::channel();
+        if candidate_tx.send((response, next_verdict_tx)).await.is_ok() {
+            let _ = next_verdict_rx.await;
+        }
+    }));
+    Feedback::new(verdict_tx, candidate_rx)
+}
+
+/// Corrupts the first pinned-node candidate, then offers a valid one in the same request.
 #[derive(Clone)]
 struct CorruptFirstPinnedNodesSource<R> {
+    context: Arc<deterministic::Context>,
     inner: R,
     corrupted: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -1795,18 +1815,18 @@ struct CorruptFirstPinnedNodesSource<R> {
 impl<R, F> Source for CorruptFirstPinnedNodesSource<R>
 where
     F: merkle::Family,
-    R: Source<Family = F, Digest = Digest>,
+    R: Source<Family = F, Digest = Digest> + Clone + 'static,
+    R::Op: Send + 'static,
 {
     type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
-        let (mut response, feedback_tx) = self.inner.serve(request).await?;
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
+        let (mut response, feedback) = self.inner.serve(request).await?;
+        assert!(feedback.is_none(), "test wrapper requires a direct source");
+
         // Corrupt pinned nodes only on the first boundary response.
         if let Response::Boundary { pinned_nodes, .. } = &mut response
             && !self
@@ -1815,17 +1835,29 @@ where
             && !pinned_nodes.is_empty()
         {
             pinned_nodes[0] = Digest::from([0xFFu8; 32]);
-            return Ok((response, dropped_feedback()));
+            let inner = self.inner.clone();
+            let feedback = one_retry_feedback(
+                self.context.child("corrupt_first_pinned_nodes"),
+                async move {
+                    let Ok((response, feedback)) = inner.serve(request).await else {
+                        return None;
+                    };
+                    assert!(feedback.is_none(), "test wrapper requires a direct source");
+                    drop(inner);
+                    Some(response)
+                },
+            );
+            return Ok((response, Some(feedback)));
         }
-        Ok((response, feedback_tx))
+        Ok((response, None))
     }
 }
 
-/// Test that corrupted pinned nodes on the first attempt are rejected and the sync
-/// succeeds on retry when the source returns correct data.
+/// Sync rejects corrupted pinned nodes and accepts a valid candidate from the same request.
 pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1845,6 +1877,7 @@ where
         let db_config = H::config(&context.next_u64().to_string(), &context);
 
         let source = CorruptFirstPinnedNodesSource {
+            context: Arc::new(context.child("source")),
             inner: Arc::new(target_db),
             corrupted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -1866,18 +1899,17 @@ where
             max_retained_roots: 8,
         };
 
-        // Sync should succeed on the second attempt after the first corrupted pinned nodes
-        // are rejected.
         let synced_db: H::Db = sync::sync(config).await.unwrap();
         assert_eq!(synced_db.root(), sync_root);
         synced_db.destroy().await.unwrap();
     });
 }
 
-/// A source wrapper that replays the first fresh boundary request against the retained
-/// historical root, then blocks the retry until the test releases it.
+/// A source wrapper that answers the first fresh boundary candidate against the retained
+/// historical root, then blocks the next candidate in the same request until released.
 #[derive(Clone)]
 struct ReplayFreshBoundarySource<R, F: merkle::Family> {
+    context: Arc<deterministic::Context>,
     inner: R,
     historical_target_size: Location<F>,
     boundary_start: Location<F>,
@@ -1889,17 +1921,15 @@ struct ReplayFreshBoundarySource<R, F: merkle::Family> {
 impl<R, F> Source for ReplayFreshBoundarySource<R, F>
 where
     F: merkle::Family,
-    R: Source<Family = F, Digest = Digest>,
+    R: Source<Family = F, Digest = Digest> + Clone + 'static,
+    R::Op: Send + 'static,
 {
     type Family = R::Family;
     type Digest = Digest;
     type Op = R::Op;
     type Error = R::Error;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
         if request.size() == self.historical_target_size {
             if matches!(request, Request::Boundary { .. }) {
                 // Simulate a source that has not answered the old target's pinned-nodes
@@ -1917,15 +1947,32 @@ where
         if matches!(request, Request::Boundary { .. }) && request.start() == self.boundary_start {
             let attempt = self.boundary_attempts.fetch_add(1, Ordering::Relaxed);
             if attempt == 0 {
-                // Answer the boundary request with an operations response against the
-                // historical size, so the engine has to retry it.
+                // Offer an operations response against the historical size. The request keeps
+                // the same feedback channel while the engine rejects it and waits for the fresh
+                // boundary candidate.
                 let historical = Request::Operations {
                     size: self.historical_target_size,
                     start: request.start(),
                     max_ops: request.max_ops(),
                 };
-                let (response, _) = self.inner.serve(historical).await?;
-                return Ok((response, dropped_feedback()));
+                let (response, feedback) = self.inner.serve(historical).await?;
+                assert!(feedback.is_none(), "test wrapper requires a direct source");
+                let inner = self.inner.clone();
+                let release_boundary_retry = Arc::clone(&self.release_boundary_retry);
+                let feedback =
+                    one_retry_feedback(self.context.child("replay_fresh_boundary"), async move {
+                        let release = release_boundary_retry.lock().take();
+                        if let Some(release) = release {
+                            let _ = release.await;
+                        }
+                        let Ok((response, feedback)) = inner.serve(request).await else {
+                            return None;
+                        };
+                        assert!(feedback.is_none(), "test wrapper requires a direct source");
+                        drop(inner);
+                        Some(response)
+                    });
+                return Ok((response, Some(feedback)));
             }
 
             let release = self.release_boundary_retry.lock().take();
@@ -1942,7 +1989,8 @@ where
 /// boundary retry is still outstanding.
 pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTestHarness>()
 where
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
+    Arc<DbOf<H>>:
+        Source<Family = H::Family, Op = OpOf<H>, Digest = Digest> + sync::SourceFor<DbOf<H>>,
     OpOf<H>: Encode,
     JournalOf<H>: Contiguous,
 {
@@ -1989,6 +2037,7 @@ where
         let (release_boundary_retry_tx, release_boundary_retry_rx) = oneshot::channel();
         let target_db = Arc::new(target_db);
         let source = ReplayFreshBoundarySource {
+            context: Arc::new(context.child("source")),
             inner: target_db.clone(),
             historical_target_size: old_target.range.end(),
             boundary_start: new_target.range.start(),

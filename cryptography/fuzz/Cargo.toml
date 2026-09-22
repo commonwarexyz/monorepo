@@ -159,3 +159,10 @@ path = "fuzz_targets/zk.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "keccak256_hasher"
+path = "fuzz_targets/keccak256_hasher.rs"
+test = false
+doc = false
+bench = false

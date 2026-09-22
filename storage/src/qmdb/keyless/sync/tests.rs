@@ -119,13 +119,13 @@ where
     });
 }
 
-/// Exercises each invalid-response arm of `handle_fetch_result`. A feedback-accepting source is
-/// retried, and a source that accepts no feedback fails terminally with
-/// [`sync::EngineError::InvalidResponse`].
+/// Invalid candidates are retried within the same source call while more candidates remain.
+/// An exhausted source fails with [`sync::EngineError::InvalidResponse`].
 pub(crate) fn test_engine_rejects_invalid_responses<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>
+        + sync::SourceFor<DbOf<H>>,
 {
     fn config_for<H: SyncTestHarness, S>(
         context: &deterministic::Context,
@@ -165,26 +165,27 @@ where
         // holds only while the lower sync bound needs no pinned nodes.
         assert_eq!(*start, 0);
         let max_ops = NZU64!(*size - *start);
-        let (good, _) = target_db
+        let good = target_db
             .serve(sync::Request::Operations {
                 size,
                 start,
                 max_ops,
             })
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         let target = Target {
             root: target_root,
             range: non_empty_range!(start, size),
         };
 
-        // A batch that fails proof verification is terminal without feedback...
+        // Failed proof verification is terminal when no candidate remains.
         let mut bad = good.clone();
         let sync::Response::Operations { proof, .. } = &mut bad else {
             unreachable!("operations request returns an operations response");
         };
         proof.digests.push(sha256::Digest::from([0xee; 32]));
-        let source = SequenceSource::new(vec![(bad.clone(), None)]);
+        let source = SequenceSource::new(vec![bad.clone()]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
             &context,
             "verify_term",
@@ -198,21 +199,18 @@ where
             Err(sync::Error::Engine(sync::EngineError::InvalidResponse))
         ));
 
-        // ...and retried when the source accepts feedback.
-        let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
-        let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
-        let source = SequenceSource::new(vec![(bad, Some(bad_tx)), (good.clone(), Some(good_tx))]);
+        // A valid candidate lets the same source call complete after rejection.
+        let source = SequenceSource::new(vec![bad, good.clone()]);
         let synced: DbOf<H> = sync::sync(config_for::<H, _>(
             &context,
             "verify_retry",
-            source,
+            source.clone(),
             max_ops,
             &target,
         ))
         .await
         .unwrap();
-        assert!(!bad_rx.await.unwrap());
-        assert!(good_rx.await.unwrap());
+        assert_eq!(source.take_verdicts().await, vec![false, true]);
         assert_eq!(H::db_root(&synced), target_root);
         H::destroy(synced).await;
 
@@ -228,7 +226,7 @@ where
             proof: good_proof.clone(),
             operations: vec![],
         };
-        let source = SequenceSource::new(vec![(empty, None)]);
+        let source = SequenceSource::new(vec![empty]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
             &context, "empty", source, max_ops, &target,
         ))
@@ -239,7 +237,7 @@ where
         ));
 
         // A batch larger than the request's max_ops is invalid.
-        let source = SequenceSource::new(vec![(good.clone(), None)]);
+        let source = SequenceSource::new(vec![good.clone()]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
             &context,
             "overflow",
@@ -260,7 +258,7 @@ where
             op: good_ops.into_iter().next().unwrap(),
             pinned_nodes: vec![],
         };
-        let source = SequenceSource::new(vec![(boundary, None)]);
+        let source = SequenceSource::new(vec![boundary]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
             &context, "mismatch", source, max_ops, &target,
         ))
@@ -278,7 +276,7 @@ where
 pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_size: NonZeroU64)
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -341,7 +339,7 @@ where
 pub(crate) fn test_sync_empty_to_nonempty<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -389,7 +387,7 @@ where
 pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
@@ -455,7 +453,7 @@ where
 pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
     JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
@@ -536,7 +534,7 @@ where
 pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -583,7 +581,7 @@ where
 pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -637,7 +635,7 @@ where
 pub(crate) fn test_sync_use_existing_db_exact_match<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -688,7 +686,7 @@ where
 pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -748,7 +746,7 @@ where
 pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -803,7 +801,7 @@ where
 pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -874,7 +872,7 @@ where
 pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
-    Arc<DbOf<H>>: Source<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
+    Arc<DbOf<H>>: sync::SourceFor<DbOf<H>>,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1267,7 +1265,7 @@ where
 
 mod compact_variable_mmr {
     use super::*;
-    use crate::qmdb::sync::source::tests::{SequenceSource, dropped_feedback, fetch_compact_state};
+    use crate::qmdb::sync::source::tests::{SequenceSource, fetch_compact_state};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
 
@@ -1520,10 +1518,7 @@ mod compact_variable_mmr {
                 range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
-            let good_state = fetch_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .0;
+            let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
             let mut bad_state = good_state.clone();
             let sync::Response::Boundary { proof, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
@@ -1534,10 +1529,7 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![
-                    (bad_state, dropped_feedback()),
-                    (good_state, dropped_feedback()),
-                ]),
+                SequenceSource::new(vec![bad_state, good_state]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -1572,10 +1564,7 @@ mod compact_variable_mmr {
                 range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
-            let good_state = fetch_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .0;
+            let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
             let mut bad_state = good_state.clone();
             let sync::Response::Boundary { op, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
@@ -1585,19 +1574,17 @@ mod compact_variable_mmr {
             };
             *op = variable::Operation::Commit(metadata, Location::new(0));
 
-            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
-            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
+            let sequence = SequenceSource::new(vec![bad_state, good_state]);
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![(bad_state, Some(bad_tx)), (good_state, Some(good_tx))]),
+                sequence.clone(),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
             .await
             .unwrap();
 
-            assert!(!bad_rx.await.unwrap());
-            assert!(good_rx.await.unwrap());
+            assert_eq!(sequence.take_verdicts().await, vec![false, true]);
             assert_eq!(client.root(), target.root);
             client.destroy().await.unwrap();
 
@@ -1627,10 +1614,7 @@ mod compact_variable_mmr {
                 range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
-            let good_state = fetch_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .0;
+            let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
             let mut bad_state = good_state.clone();
             let sync::Response::Boundary { proof, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
@@ -1639,10 +1623,7 @@ mod compact_variable_mmr {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![
-                    (bad_state, dropped_feedback()),
-                    (good_state, dropped_feedback()),
-                ]),
+                SequenceSource::new(vec![bad_state, good_state]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -1659,7 +1640,7 @@ mod compact_variable_mmr {
     #[test_traced("WARN")]
     fn test_compact_sync_recovers_after_tampered_pinned_nodes() {
         deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-keyless-feedback-{}", context.next_u64());
+            let suffix = format!("compact-keyless-bad-pinned-nodes-{}", context.next_u64());
             let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
                 .await
                 .unwrap();
@@ -1678,33 +1659,26 @@ mod compact_variable_mmr {
                 range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
-            let good_state = fetch_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .0;
+            let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
             let mut bad_state = good_state.clone();
             let sync::Response::Boundary { pinned_nodes, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
             };
             pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
-            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
-            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
-            let sequence =
-                SequenceSource::new(vec![(bad_state, Some(bad_tx)), (good_state, Some(good_tx))]);
+            let sequence = SequenceSource::new(vec![bad_state, good_state]);
 
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                sequence,
+                sequence.clone(),
                 target.clone(),
                 client_cfg.clone(),
             ))
             .await
             .unwrap();
 
-            assert!(!bad_rx.await.unwrap());
-            assert!(good_rx.await.unwrap());
+            assert_eq!(sequence.take_verdicts().await, vec![false, true]);
             assert_eq!(synced.target(), target);
             assert_eq!(synced.get_metadata(), Some(vec![7]));
 
@@ -1880,7 +1854,7 @@ mod compact_variable_mmr {
             );
             // target2 names a divergent history. The regrown source reaches the same leaf
             // count under a different root, so it serves state the client can never verify.
-            // With no feedback channel, the engine fails instead of retrying.
+            // The direct source has no further candidate, so rejection is terminal.
             let divergent_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("divergent_client"),
                 source.clone(),
@@ -2031,7 +2005,7 @@ mod compact_variable_mmr {
                 range: non_empty_range!(size - 1, size),
             };
             let source = Arc::new(source);
-            let (response, _) = fetch_compact_state(&source, canonical_target)
+            let response = fetch_compact_state(&source, canonical_target)
                 .await
                 .unwrap();
             let sync::Response::Boundary {
@@ -2057,14 +2031,11 @@ mod compact_variable_mmr {
             // The rejected reconstruction must remain provisional.
             let result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![(
-                    sync::Response::Boundary {
-                        proof,
-                        op,
-                        pinned_nodes,
-                    },
-                    None,
-                )]),
+                SequenceSource::new(vec![sync::Response::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                }]),
                 Target {
                     root: noncanonical_root,
                     range: non_empty_range!(size - 1, size),
@@ -2130,7 +2101,7 @@ mod compact_variable_mmr {
             };
             assert_ne!(target_b, target_a);
             let source = Arc::new(source);
-            let (response, _) = fetch_compact_state(&source, target_b.clone())
+            let response = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
             let sync::Response::Boundary {
@@ -2161,7 +2132,7 @@ mod compact_variable_mmr {
             assert!(imported.rewind(target_b.range.end()).await.is_err());
 
             // Prune is likewise rejected while the import is pending; rebuild the import.
-            let (response, _) = fetch_compact_state(&source, target_b.clone())
+            let response = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
             let sync::Response::Boundary {
@@ -2201,7 +2172,7 @@ mod compact_variable_mmb {
     use super::*;
     use crate::{
         merkle::mmb,
-        qmdb::sync::source::tests::{SequenceSource, dropped_feedback, fetch_compact_state},
+        qmdb::sync::source::tests::{SequenceSource, fetch_compact_state},
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
@@ -2352,10 +2323,7 @@ mod compact_variable_mmb {
                 range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
-            let good_state = fetch_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .0;
+            let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
             let mut bad_state = good_state.clone();
             let sync::Response::Boundary { proof, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
@@ -2366,10 +2334,7 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![
-                    (bad_state, dropped_feedback()),
-                    (good_state, dropped_feedback()),
-                ]),
+                SequenceSource::new(vec![bad_state, good_state]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -2404,10 +2369,7 @@ mod compact_variable_mmb {
                 range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
-            let good_state = fetch_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .0;
+            let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
             let mut bad_state = good_state.clone();
             let sync::Response::Boundary { op, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
@@ -2417,19 +2379,17 @@ mod compact_variable_mmb {
             };
             *op = variable::Operation::Commit(metadata, Location::new(0));
 
-            let (bad_tx, bad_rx) = commonware_utils::channel::oneshot::channel();
-            let (good_tx, good_rx) = commonware_utils::channel::oneshot::channel();
+            let sequence = SequenceSource::new(vec![bad_state, good_state]);
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![(bad_state, Some(bad_tx)), (good_state, Some(good_tx))]),
+                sequence.clone(),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
             .await
             .unwrap();
 
-            assert!(!bad_rx.await.unwrap());
-            assert!(good_rx.await.unwrap());
+            assert_eq!(sequence.take_verdicts().await, vec![false, true]);
             assert_eq!(client.root(), target.root);
             client.destroy().await.unwrap();
 
@@ -2463,10 +2423,7 @@ mod compact_variable_mmb {
                 range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
-            let good_state = fetch_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .0;
+            let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
             let mut bad_state = good_state.clone();
             let sync::Response::Boundary { pinned_nodes, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
@@ -2476,10 +2433,7 @@ mod compact_variable_mmb {
             let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![
-                    (bad_state, dropped_feedback()),
-                    (good_state, dropped_feedback()),
-                ]),
+                SequenceSource::new(vec![bad_state, good_state]),
                 target.clone(),
                 client_cfg.clone(),
             ))
@@ -2521,10 +2475,7 @@ mod compact_variable_mmb {
                 range: non_empty_range!(bounds.end - 1, bounds.end),
             };
             let source = Arc::new(source);
-            let good_state = fetch_compact_state(&source, target.clone())
-                .await
-                .unwrap()
-                .0;
+            let good_state = fetch_compact_state(&source, target.clone()).await.unwrap();
             let mut bad_state = good_state.clone();
             let sync::Response::Boundary { proof, .. } = &mut bad_state else {
                 unreachable!("boundary fetch returns a boundary response");
@@ -2533,10 +2484,7 @@ mod compact_variable_mmb {
 
             let client: ClientDb = sync::sync(compact_engine_config(
                 context.child("client"),
-                SequenceSource::new(vec![
-                    (bad_state, dropped_feedback()),
-                    (good_state, dropped_feedback()),
-                ]),
+                SequenceSource::new(vec![bad_state, good_state]),
                 target.clone(),
                 client_config(&suffix, &context),
             ))
@@ -2711,7 +2659,7 @@ mod compact_variable_mmb {
             assert_eq!(source.target(), target3);
             // target2 names a divergent history. The regrown source reaches the same leaf
             // count under a different root, so it serves state the client can never verify.
-            // With no feedback channel, the engine fails instead of retrying.
+            // The direct source has no further candidate, so rejection is terminal.
             let divergent_result: Result<ClientDb, _> = sync::sync(compact_engine_config(
                 context.child("divergent_client"),
                 source.clone(),
