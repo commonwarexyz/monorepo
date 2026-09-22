@@ -203,6 +203,7 @@ impl crate::Storage for Storage {
             )?;
             let (logical_size, blob_version, data_offset) = match existing {
                 Some(resolved) => {
+                    // Make inherited directory entries durable before exposing the existing blob.
                     partitions.sync_once(parent)?;
                     resolved
                 }
@@ -256,6 +257,7 @@ impl crate::Storage for Storage {
                 let blob_path = path.join(hex(name));
                 fs::remove_file(blob_path).map_err(|_| Error::BlobMissing(partition, hex(name)))?;
 
+                // Sync the partition directory to ensure the removal is durable.
                 partitions.sync(path, None)
             } else {
                 // Distinguish missing partitions from other filesystem failures.
@@ -264,6 +266,7 @@ impl crate::Storage for Storage {
                     _ => Error::Io(error.into()),
                 })?;
 
+                // Sync the storage directory to ensure the removal is durable.
                 partitions.sync_root(&storage_directory)
             }
         })
@@ -281,6 +284,8 @@ impl crate::Storage for Storage {
                 ErrorKind::NotFound => Error::PartitionMissing(partition.clone()),
                 _ => Error::ReadFailed,
             })?;
+
+            // Make inherited directory entries durable before exposing their blob names.
             partitions.sync_once(&path)?;
             let mut blobs = Vec::new();
             for entry in entries {
