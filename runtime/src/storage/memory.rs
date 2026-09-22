@@ -282,9 +282,18 @@ impl Blob {
         ))
     }
 
-    fn sync_inner(&self) -> Result<(), crate::Error> {
-        // Create new content for partition
-        let new_content = self.content.read().clone();
+    fn sync_inner(
+        &self,
+        #[cfg(test)] before_publication: impl FnOnce(),
+    ) -> Result<(), crate::Error> {
+        // Hold the live contents until the snapshot is published so a concurrent clone cannot
+        // publish a newer image that this snapshot then overwrites.
+        let live = self.content.read();
+        let new_content = live.clone();
+
+        // Let tests pause between snapshot capture and publication to control competing syncs.
+        #[cfg(test)]
+        before_publication();
 
         // Update partition content
         let generations = self.generations.lock();
@@ -487,7 +496,10 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), crate::Error> {
-        self.sync_inner()
+        self.sync_inner(
+            #[cfg(test)]
+            || {},
+        )
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -512,7 +524,65 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use commonware_utils::{ScriptedRng, probability};
+    use futures::executor::block_on;
     use rstest::rstest;
+    use std::{sync::mpsc, time::Duration};
+
+    #[rstest]
+    #[case::range(true)]
+    #[case::full(false)]
+    fn test_concurrent_sync_preserves_durable_append(#[case] range: bool) {
+        let storage = Storage::new(test_pool());
+        let (blob, _) = block_on(storage.open("partition", b"blob")).unwrap();
+        block_on(blob.write_at(0, b"old", WriteOptions::SYNC)).unwrap();
+        let snapshot = blob.clone();
+        let (entered, entering) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let sync = std::thread::spawn(move || {
+            snapshot.sync_inner(|| {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+            })
+        });
+        entering.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // If publication releases the content guard, complete the newer durable write
+        // before letting the older publication proceed.
+        let protected = blob.content.try_write().is_none();
+        let mut release = Some(release);
+        if protected {
+            release.take().unwrap().send(()).unwrap();
+        }
+        let options = if range {
+            WriteOptions::SYNC
+        } else {
+            WriteOptions::default()
+        };
+        block_on(blob.write_at(3, b"new", options)).unwrap();
+        if !range {
+            block_on(blob.sync()).unwrap();
+        }
+        if let Some(release) = release {
+            release.send(()).unwrap();
+        }
+        sync.join().unwrap().unwrap();
+
+        assert_eq!(
+            block_on(blob.read_at(0, 6, ReadOptions::default()))
+                .unwrap()
+                .coalesce(),
+            b"oldnew"
+        );
+        drop(blob);
+        let (reopened, size) = block_on(storage.open("partition", b"blob")).unwrap();
+        assert_eq!(size, 6);
+        assert_eq!(
+            block_on(reopened.read_at(0, 6, ReadOptions::default()))
+                .unwrap()
+                .coalesce(),
+            b"oldnew"
+        );
+    }
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();

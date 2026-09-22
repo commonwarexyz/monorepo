@@ -14,8 +14,6 @@
 mod actor;
 pub use actor::{Actor, Config};
 
-mod cancel;
-
 mod mailbox;
 pub use mailbox::{Mailbox, ResponseDropped};
 

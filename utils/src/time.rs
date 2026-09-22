@@ -19,6 +19,13 @@ pub const SYSTEM_TIME_PRECISION: Duration = Duration::from_nanos(1);
 
 /// Extension trait providing additional functionality for [`Duration`].
 pub trait DurationExt {
+    /// Returns the number of whole milliseconds as a `u64`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the number of whole milliseconds exceeds `u64::MAX`.
+    fn as_millis_u64(&self) -> u64;
+
     /// Creates a duration from nanoseconds represented as a `u128`. Saturates anything beyond the
     /// representable range.
     fn from_nanos_saturating(ns: u128) -> Duration;
@@ -76,6 +83,10 @@ pub trait DurationExt {
 }
 
 impl DurationExt for Duration {
+    fn as_millis_u64(&self) -> u64 {
+        u64::try_from(self.as_millis()).expect("duration milliseconds should fit in u64")
+    }
+
     fn from_nanos_saturating(ns: u128) -> Duration {
         // Clamp anything beyond the representable range
         if ns > Self::MAX.as_nanos() {
@@ -200,6 +211,32 @@ impl SystemTimeExt for SystemTime {
 mod tests {
     use super::*;
     use crate::test_rng;
+
+    #[test]
+    fn test_as_millis_u64() {
+        for (duration, expected) in [
+            (Duration::ZERO, 0),
+            (Duration::from_nanos(999_999), 0),
+            (Duration::new(1, 234_567_890), 1_234),
+            (Duration::from_millis(u64::MAX), u64::MAX),
+            (
+                Duration::from_millis(u64::MAX) + Duration::from_nanos(999_999),
+                u64::MAX,
+            ),
+        ] {
+            assert_eq!(duration.as_millis_u64(), expected);
+        }
+    }
+
+    #[test]
+    fn test_as_millis_u64_overflow() {
+        for duration in [
+            Duration::from_millis(u64::MAX) + Duration::from_millis(1),
+            Duration::MAX,
+        ] {
+            assert!(std::panic::catch_unwind(|| duration.as_millis_u64()).is_err());
+        }
+    }
 
     #[test]
     fn test_epoch() {

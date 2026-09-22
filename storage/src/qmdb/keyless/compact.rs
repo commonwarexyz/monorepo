@@ -35,7 +35,7 @@ use crate::{
         any::value::ValueEncoding,
         chain::{self, Bounds, Commitment},
         compact::{batch as compact_batch, witness},
-        sync::{CompactTarget, FeedbackTx, Request, Response, Source},
+        sync::{CompactTarget, Request, Source, source},
     },
 };
 use commonware_codec::{Encode, EncodeShared, Read};
@@ -648,15 +648,11 @@ where
     type Op = Operation<F, V>;
     type Error = qmdb::Error<F>;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<(Response<F, Self::Op, H::Digest>, FeedbackTx), Self::Error> {
-        Ok((
-            self.witness
-                .compact_state(&self.commit_codec_config, request)?,
-            None,
-        ))
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
+        let response = self
+            .witness
+            .compact_state(&self.commit_codec_config, request)?;
+        Ok((response, None))
     }
 }
 
@@ -666,7 +662,7 @@ mod tests {
     use crate::{
         merkle::{mmb, mmr},
         qmdb::{
-            any::value::FixedEncoding, compact::witness, verify_proof,
+            any::value::FixedEncoding, compact::witness, sync::Response, verify_proof,
             verify_proof_and_pinned_nodes,
         },
     };
@@ -958,20 +954,20 @@ mod tests {
 
             // Requests without pinned nodes are also served, even when they ask for more operations
             // than the witness holds.
-            let (response, feedback_tx) = db
+            let response = db
                 .serve(Request::Operations {
                     size: n,
                     start: n - 1,
                     max_ops: NZU64!(5),
                 })
                 .await
-                .unwrap();
-            assert!(feedback_tx.is_none());
+                .unwrap()
+                .0;
             let Response::Operations { operations, .. } = response else {
                 panic!("operations request should get an operations response");
             };
             assert_eq!(operations.len(), 1);
-            let (response, _) = db.serve(boundary(n, n - 1)).await.unwrap();
+            let response = db.serve(boundary(n, n - 1)).await.unwrap().0;
             assert!(matches!(response, Response::Boundary { .. }));
         });
     }
@@ -2011,13 +2007,14 @@ mod tests {
                 let (source, _) = source.apply_batch(batch).await.unwrap();
                 let source = source.sync().await.unwrap();
                 let target = source.target();
-                let (response, _) = source
+                let response = source
                     .serve(Request::Boundary {
                         size: target.size,
                         start: target.size - 1,
                     })
                     .await
-                    .unwrap();
+                    .unwrap()
+                    .0;
                 let Response::Boundary { pinned_nodes, .. } = response else {
                     panic!("boundary request should get a boundary response");
                 };

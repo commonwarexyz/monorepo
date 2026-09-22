@@ -506,10 +506,10 @@ stability_scope!(BETA {
         fn current(&self) -> SystemTime;
 
         /// Sleep for the given duration.
-        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<Self>;
 
         /// Sleep until the given deadline.
-        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static + use<Self>;
 
         /// Await a future with a timeout, returning `Error::Timeout` if it expires.
         ///
@@ -682,7 +682,9 @@ stability_scope!(BETA {
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
     /// characters, dashes (`-`), or underscores (`_`). Names containing other
-    /// characters (e.g., `/`, `.`, spaces) will return an error.
+    /// characters (e.g., `/`, `.`, spaces) will return an error. On case-insensitive
+    /// filesystems, partition names that differ only by letter case must not both
+    /// be used.
     pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
@@ -713,7 +715,7 @@ stability_scope!(BETA {
         /// # Versions
         ///
         /// Blobs are versioned. If the blob's version is not in `versions`, returns
-        /// [Error::BlobVersionMismatch].
+        /// [Error::BlobVersionMismatch]. `versions` must be non-empty.
         ///
         /// # Layout
         ///
@@ -1189,6 +1191,60 @@ mod tests {
                 )
                 .await;
             assert!(result.is_ok());
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_clock_futures_move_between_tasks<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            for kind in ["sleep", "sleep_until", "timeout", "stop"] {
+                // Holding a shutdown observer keeps the stop case pending until its timeout.
+                let clock = context.child("clock");
+                let stopped = (kind == "stop").then(|| context.stopped());
+                let duration = Duration::from_millis(50);
+                let deadline = context.current() + duration;
+
+                // Cover direct sleeps and operations that wait on a timer.
+                let mut future = async move {
+                    match kind {
+                        "sleep" => clock.sleep(duration).await,
+                        "sleep_until" => clock.sleep_until(deadline).await,
+                        "timeout" => assert!(matches!(
+                            clock.timeout(duration, pending::<()>()).await,
+                            Err(Error::Timeout)
+                        )),
+                        _ => assert!(matches!(
+                            clock.stop(7, Some(duration)).await,
+                            Err(Error::Timeout)
+                        )),
+                    }
+                }
+                .boxed();
+
+                // Register this task's waker before transferring the pending future.
+                // The destination must receive the eventual wakeup.
+                assert!(futures::poll!(&mut future).is_pending());
+                let moved = context.child("moved").dedicated().spawn(move |_| future);
+
+                // The source task's independent timeout detects a missing destination wakeup.
+                select! {
+                    result = moved => result.unwrap(),
+                    _ = context.sleep(Duration::from_secs(2)) => panic!("moved {kind} did not complete"),
+                }
+
+                // Changing tasks must preserve the operation's deadline.
+                assert!(context.current() >= deadline);
+                drop(stopped);
+            }
         });
     }
 

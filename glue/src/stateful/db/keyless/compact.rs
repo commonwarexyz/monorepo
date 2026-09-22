@@ -22,7 +22,7 @@ use commonware_storage::{
             CompactDb, CompactMerkleizedBatch, CompactUnmerkleizedBatch, Operation, fixed,
             initial_root, variable,
         },
-        sync::{self},
+        sync,
     },
 };
 use commonware_utils::channel::mpsc;
@@ -431,7 +431,7 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
         merkle::{full::Config as MerkleConfig, mmr},
-        qmdb::keyless as storage_keyless,
+        qmdb::{keyless as storage_keyless, sync::source},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
     use futures::pin_mut;
@@ -462,16 +462,7 @@ mod tests {
         type Op = storage_keyless::fixed::Operation<mmr::Family, U64>;
         type Error = <Arc<FixedDb> as sync::Source>::Error;
 
-        async fn serve(
-            &self,
-            request: sync::Request<Self::Family>,
-        ) -> Result<
-            (
-                sync::Response<Self::Family, Self::Op, Self::Digest>,
-                sync::FeedbackTx,
-            ),
-            Self::Error,
-        > {
+        async fn serve(&self, request: sync::Request<Self::Family>) -> source::Result<Self> {
             if request.size() == self.stale_target.size {
                 let _ = self.stale_request_tx.send(()).await;
                 return futures::future::pending().await;

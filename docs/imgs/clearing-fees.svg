@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 420" role="img" aria-labelledby="title description">
+  <title id="title">A fee is another entry in the signed batch</title>
+  <desc id="description">In a fresh epoch, payer a signs a batch paying 20 to b, 7 to c, and the operator's quoted fee of 2 to its designated fee recipient. Sequence 1 and cumulative debit 29 are bound to the epoch and the payment root. The operator countersigns this payer state. Recipient b receives that countersigned state and an opening for its entry, amount 20 and payment count 1. The same acknowledgment binds all three entries, including the fee.</desc>
+  <rect width="1080" height="420" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 22px; font-weight: 700; fill: #111; }
+    .heading { font-size: 18px; font-weight: 700; fill: #111; }
+    .label { font-size: 16px; fill: #333; }
+    .note { font-size: 14px; fill: #666; }
+    .center { text-anchor: middle; }
+    .right { text-anchor: end; }
+    .blue { fill: #2424d4; }
+    .panel { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .record { fill: #fff; stroke: #2424d4; stroke-width: 1.5; }
+    .flow { fill: none; stroke: #2424d4; stroke-width: 2; marker-end: url(#arrow); }
+    .rule { stroke: #dedede; stroke-width: 1; }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="#2424d4"/>
+    </marker>
+  </defs>
+
+  <text class="title" x="36" y="46">Collecting Fees in a Batch</text>
+  <text class="note" x="36" y="78">The quoted fee is another payment covered by the same acknowledgment.</text>
+
+  <rect class="panel" x="36" y="104" width="476" height="286" rx="6"/>
+  <text class="heading" x="58" y="140">Payer a's signed state</text>
+  <text class="note" x="58" y="166">Fresh epoch · sequence 1 · debit 29</text>
+  <rect class="record" x="58" y="184" width="432" height="180" rx="5"/>
+  <text class="label blue" x="80" y="213">ONE PAYMENT ROOT</text>
+  <path class="rule" d="M80 226 H468 M80 266 H468 M80 306 H468"/>
+  <text class="label" x="80" y="253">to b</text>
+  <text class="label right" x="468" y="253">20</text>
+  <text class="label" x="80" y="293">to c</text>
+  <text class="label right" x="468" y="293">7</text>
+  <text class="label blue" x="80" y="333">to designated fee recipient</text>
+  <text class="label right blue" x="468" y="333">2</text>
+
+  <path class="flow" d="M528 247 H568"/>
+
+  <rect class="panel" x="584" y="104" width="460" height="286" rx="6"/>
+  <text class="heading" x="608" y="140">Recipient b's receipt</text>
+  <rect class="record" x="608" y="164" width="412" height="102" rx="5"/>
+  <text class="label center blue" x="814" y="194">Countersigned state R</text>
+  <text class="note center" x="814" y="223">Payer a + operator signatures</text>
+  <text class="note center" x="814" y="249">Epoch · sequence 1 · debit 29 · root</text>
+  <text class="label center" x="814" y="292">+</text>
+  <rect class="record" x="608" y="308" width="412" height="56" rx="5"/>
+  <text class="label center" x="814" y="331">b: amount 20 · payment count 1</text>
+  <text class="note center" x="814" y="354">Opening to the same payment root</text>
+</svg>

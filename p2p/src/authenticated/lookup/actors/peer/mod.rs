@@ -23,15 +23,15 @@ pub struct Config<C: PublicKey> {
 }
 
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum Error<S, R> {
     #[error("peer killed: {0}")]
     PeerKilled(String),
     #[error("send failed: {0}")]
-    SendFailed(commonware_stream::encrypted::Error),
+    SendFailed(S),
     #[error("peer disconnected")]
     PeerDisconnected,
     #[error("receive failed: {0}")]
-    ReceiveFailed(commonware_stream::encrypted::Error),
+    ReceiveFailed(R),
     #[error("decode failed: {0}")]
     DecodeFailed(CodecError),
     #[error("unexpected failure: {0}")]

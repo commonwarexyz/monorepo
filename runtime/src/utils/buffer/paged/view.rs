@@ -8,6 +8,7 @@
 
 use super::CacheRef;
 use crate::{Blob, Error, IoBufMut, IoBufs};
+use commonware_utils::Widen;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::num::NonZeroUsize;
 
@@ -109,7 +110,7 @@ impl<B: Blob> View<'_, B> {
         let uncached_offset = offset + cached as u64;
         let uncached_len = remaining - cached;
         self.cache_ref
-            .read(
+            .read_after_miss(
                 self.blob,
                 self.id,
                 &mut buf[cached..cached + uncached_len],
@@ -141,7 +142,7 @@ impl<B: Blob> View<'_, B> {
             bufs.truncate(0);
             return Ok((bufs, 0));
         }
-        let available = (self.size.saturating_sub(offset) as usize).min(len);
+        let available = self.size.saturating_sub(offset).min(Widen::widen(len)) as usize;
         if available == 0 {
             return Err(Error::BlobInsufficientLength);
         }
@@ -182,7 +183,10 @@ impl<B: Blob> View<'_, B> {
         // Slow path: read remaining ranges from the underlying blob, concurrently.
         let mut reads = cache_ranges
             .iter_mut()
-            .map(|(item_buf, offset)| self.cache_ref.read(self.blob, self.id, item_buf, *offset))
+            .map(|(item_buf, offset)| {
+                self.cache_ref
+                    .read_after_miss(self.blob, self.id, item_buf, *offset)
+            })
             .collect::<FuturesUnordered<_>>();
         while let Some(result) = reads.next().await {
             result?;
@@ -240,9 +244,9 @@ impl<B: Blob> View<'_, B> {
     }
 }
 
-/// Map missed cache reads back to their originating slot indices: each missed read starts at
-/// its slot's `(offset, len)` range, and both lists are sorted. Zero-length slots never miss
-/// but may share an offset with the slot that follows them, so they are skipped.
+/// Map unread suffixes back to their originating slot indices. Each suffix starts inside its
+/// slot's `(offset, len)` range, and both lists are sorted. Zero-length slots never miss but may
+/// share an offset with the slot that follows them, so they are skipped.
 fn map_misses(
     missed: Vec<(&mut [u8], u64)>,
     mut slot: impl FnMut(usize) -> (u64, usize),
@@ -252,7 +256,7 @@ fn map_misses(
     for (_, offset) in missed {
         loop {
             let (slot_offset, slot_len) = slot(idx);
-            if slot_len != 0 && slot_offset == offset {
+            if offset >= slot_offset && offset - slot_offset < slot_len as u64 {
                 break;
             }
             idx += 1;
@@ -265,12 +269,34 @@ fn map_misses(
 
 #[cfg(test)]
 mod tests {
+    use super::map_misses;
     use crate::{Runner as _, Storage as _, buffer::paged::Writer, deterministic};
     use commonware_utils::{NZU16, NZUsize};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    #[test]
+    fn test_map_misses_with_cached_prefixes() {
+        let slots = [
+            (0, 4),
+            (10, 0),
+            (10, 8),
+            (18, 0),
+            (18, 5),
+            (u64::MAX - 4, 4),
+        ];
+        let mut suffix_a = [0; 2];
+        let mut suffix_b = [0; 5];
+        let mut suffix_c = [0; 1];
+        let missed = vec![
+            (suffix_a.as_mut_slice(), 16),
+            (suffix_b.as_mut_slice(), 18),
+            (suffix_c.as_mut_slice(), u64::MAX - 1),
+        ];
+        assert_eq!(map_misses(missed, |idx| slots[idx]), vec![2, 4, 5]);
+    }
 
     /// A read straddling the persisted prefix and the in-memory tail is served synchronously once
     /// the prefix page is cached (the unified `View` serves the prefix from the cache and the
