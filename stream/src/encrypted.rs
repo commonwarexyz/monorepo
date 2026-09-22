@@ -385,7 +385,7 @@ impl<O: Sink> Sender<O> {
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
     {
-        let mut bufs = bufs.into_iter().peekable();
+        let mut bufs = bufs.into_iter().map(Into::<IoBufs>::into).peekable();
         let Some(first) = bufs.next() else {
             return Ok(());
         };
@@ -398,8 +398,7 @@ impl<O: Sink> Sender<O> {
         // encoded lengths so chunk sizing does not need to recompute them.
         let (lower, _) = bufs.size_hint();
         let mut messages = Vec::with_capacity(lower);
-        for buf in bufs {
-            let msg = buf.into();
+        for msg in bufs {
             let frame_len = self.encrypted_frame_len(msg.len())?;
             messages.push((msg, frame_len));
         }
@@ -513,10 +512,11 @@ mod test {
         BufferPoolConfig, Error as RuntimeError, IoBuf, IoBufs, Runner as _, Spawner as _,
         Supervisor as _, deterministic, mocks,
     };
-    use commonware_utils::{NZU32, NZUsize, sync::Mutex};
+    use commonware_utils::{NZU32, NZUsize, sync::Mutex, test_rng};
     use futures::FutureExt as _;
     use std::{
         panic::AssertUnwindSafe,
+        rc::Rc,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -594,6 +594,7 @@ mod test {
         inner: S,
         sends: Arc<AtomicUsize>,
         chunk_counts: Arc<Mutex<Vec<usize>>>,
+        last_chunk_lengths: Vec<usize>,
     }
 
     impl<S> CountingSink<S> {
@@ -602,6 +603,7 @@ mod test {
                 inner,
                 sends,
                 chunk_counts,
+                last_chunk_lengths: Vec::new(),
             }
         }
     }
@@ -611,6 +613,8 @@ mod test {
             let bufs = bufs.into();
             self.sends.fetch_add(1, Ordering::Relaxed);
             self.chunk_counts.lock().push(bufs.chunk_count());
+            self.last_chunk_lengths.clear();
+            bufs.for_each_chunk(|chunk| self.last_chunk_lengths.push(chunk.len()));
             self.inner.send(bufs).await
         }
     }
@@ -782,6 +786,32 @@ mod test {
     }
 
     #[test]
+    fn test_send_many_future_is_send_with_non_send_messages() {
+        struct LocalMessage(Rc<IoBuf>);
+
+        impl From<LocalMessage> for IoBufs {
+            fn from(message: LocalMessage) -> Self {
+                message.0.as_ref().clone().into()
+            }
+        }
+
+        fn assert_send(_: impl Send) {}
+
+        deterministic::Runner::default().start(|context| async move {
+            let (sink, _) = mocks::Channel::init();
+            let mut sender = Sender {
+                cipher: SendCipher::new(test_rng()),
+                sink,
+                max_message_size: MAX_MESSAGE_SIZE,
+                pool: context.network_buffer_pool().clone(),
+            };
+            // The iterator is Send, but creates a non-Send message when polled.
+            let messages = std::iter::once_with(|| LocalMessage(Rc::new(IoBuf::default())));
+            assert_send(sender.send_many(messages));
+        });
+    }
+
+    #[test]
     fn test_send_many_uses_single_runtime_send() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -930,6 +960,7 @@ mod test {
 
             assert_eq!(sends.load(Ordering::Relaxed), 1);
             assert_eq!(*chunk_counts.lock(), vec![2]);
+            assert_eq!(dialer_sender.sink.last_chunk_lengths, [256, 128]);
             for _ in 0..3 {
                 assert_eq!(
                     listener_receiver.recv().await?.coalesce(),
@@ -1006,6 +1037,7 @@ mod test {
 
             assert_eq!(sends.load(Ordering::Relaxed), 1);
             assert_eq!(*chunk_counts.lock(), vec![4]);
+            assert_eq!(dialer_sender.sink.last_chunk_lengths, [66, 218, 218, 66]);
             for message in messages {
                 assert_eq!(listener_receiver.recv().await?.coalesce(), message);
             }
