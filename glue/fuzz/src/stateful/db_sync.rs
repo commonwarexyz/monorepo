@@ -38,18 +38,20 @@ use commonware_glue::stateful::db::{
 };
 use commonware_macros::select;
 use commonware_runtime::{
-    Clock, Runner as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    Clock, Handle, Runner as _, Spawner as _, Supervisor as _, buffer::paged::CacheRef,
+    deterministic,
 };
-use commonware_storage::qmdb::sync::{FeedbackTx, Request, Response, Source};
+use commonware_storage::qmdb::sync::{Feedback, Request, ResponseOf, Source, source};
 use commonware_utils::{
     FuzzRng, NZUsize,
-    channel::{oneshot, ring},
+    channel::{mpsc, oneshot, ring},
     sync::Mutex,
 };
 use rand::RngExt as _;
 use std::{
     fmt,
     marker::PhantomData,
+    mem,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -80,10 +82,12 @@ enum Behaviour {
     Divergent,
 }
 
-/// One answer a peer gave, with the verdict the sync engine sent back for it.
+/// One answer a peer gave, with the verdict the sync engine reported for it.
 struct Answer {
     behaviour: Behaviour,
-    verdict: oneshot::Receiver<bool>,
+    /// `None` until the engine judges the answer. An answer the engine
+    /// abandons because its request's target moved stays unjudged.
+    verdict: Option<bool>,
 }
 
 /// The tape-driven answer policy every peer in a set follows.
@@ -91,6 +95,8 @@ struct Answer {
 struct Policy {
     schedule: Arc<[Behaviour]>,
     answers: Arc<Mutex<Vec<Answer>>>,
+    /// The relays carrying the engine's verdicts on outstanding requests.
+    relays: Arc<Mutex<Vec<Handle<()>>>>,
     failures: Arc<AtomicUsize>,
 }
 
@@ -118,6 +124,7 @@ impl Policy {
         Self {
             schedule: schedule.into(),
             answers: Arc::new(Mutex::new(Vec::new())),
+            relays: Arc::new(Mutex::new(Vec::new())),
             failures: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -131,25 +138,45 @@ impl Policy {
         self.schedule[call % self.schedule.len()]
     }
 
-    /// Register an answer and return the feedback channel the engine reports
-    /// its verdict through.
-    fn answered(&self, behaviour: Behaviour) -> FeedbackTx {
-        let (sender, verdict) = oneshot::channel();
-        self.answers.lock().push(Answer { behaviour, verdict });
-        Some(sender)
+    /// Register an answer and return the index its verdict is recorded under.
+    fn answered(&self, behaviour: Behaviour) -> usize {
+        let mut answers = self.answers.lock();
+        answers.push(Answer {
+            behaviour,
+            verdict: None,
+        });
+        answers.len() - 1
+    }
+
+    /// Record the verdict the engine reported for the answer at `index`.
+    fn judged(&self, index: usize, verdict: bool) {
+        self.answers.lock()[index].verdict = Some(verdict);
+    }
+
+    /// Track a relay so [`Self::verdicts`] can wait for it.
+    fn relaying(&self, relay: Handle<()>) {
+        self.relays.lock().push(relay);
     }
 
     /// What the engine made of every answer: the number of answers, the
     /// number of divergent answers it rejected, and whether it ever rejected
     /// an honest one.
-    fn verdicts(&self) -> (usize, usize, bool) {
-        let mut answers = self.answers.lock();
+    ///
+    /// Every relay has finished by the time this returns, so a verdict the
+    /// engine reported before the sync ended is counted even if its relay
+    /// had not run yet.
+    async fn verdicts(&self) -> (usize, usize, bool) {
+        let relays = mem::take(&mut *self.relays.lock());
+        for relay in relays {
+            let _ = relay.await;
+        }
+        let answers = self.answers.lock();
         let mut rejected_divergent = 0;
         let mut rejected_honest = false;
-        for answer in answers.iter_mut() {
-            let Ok(false) = answer.verdict.try_recv() else {
+        for answer in answers.iter() {
+            if answer.verdict != Some(false) {
                 continue;
-            };
+            }
             match answer.behaviour {
                 Behaviour::Divergent => rejected_divergent += 1,
                 Behaviour::Honest | Behaviour::Delayed => rejected_honest = true,
@@ -167,37 +194,48 @@ impl Policy {
 /// that cannot serve a request, which a compact database cannot once it has
 /// advanced past the requested size, is retried after a delay under the next
 /// scheduled behaviour, until the engine either gets an answer or abandons the
-/// request because its target moved.
+/// request because its target moved. An answer the engine rejects is followed
+/// by another one under the next scheduled behaviour, the way the resolver
+/// moves on to the next peer, until the engine accepts one or abandons the
+/// request.
 struct Peer<S> {
     context: Runtime,
-    honest: S,
-    divergent: S,
-    policy: Policy,
-    calls: AtomicUsize,
+    databases: Databases<S>,
 }
 
 impl<S> Peer<S> {
     fn new(context: Runtime, honest: S, divergent: S, policy: Policy) -> Self {
         Self {
             context,
-            honest,
-            divergent,
-            policy,
-            calls: AtomicUsize::new(0),
+            databases: Databases {
+                honest,
+                divergent,
+                policy,
+                calls: Arc::new(AtomicUsize::new(0)),
+            },
         }
     }
 }
 
-impl<S: Source<Op: Send>> Source for Peer<S> {
-    type Family = S::Family;
-    type Digest = S::Digest;
-    type Op = S::Op;
-    type Error = S::Error;
+/// The databases a peer answers from, with the policy and the schedule
+/// position it answers under. A relay shares them with the peer that spawned
+/// it.
+#[derive(Clone)]
+struct Databases<S> {
+    honest: S,
+    divergent: S,
+    policy: Policy,
+    calls: Arc<AtomicUsize>,
+}
 
-    async fn serve(
+impl<S: Source> Databases<S> {
+    /// Answer `request` under the next scheduled behaviour, retrying a
+    /// database that cannot serve it after a delay.
+    async fn answer(
         &self,
-        request: Request<Self::Family>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
+        context: &Runtime,
+        request: Request<S::Family>,
+    ) -> (Behaviour, ResponseOf<S>) {
         loop {
             let behaviour = self
                 .policy
@@ -205,17 +243,78 @@ impl<S: Source<Op: Send>> Source for Peer<S> {
             let result = match behaviour {
                 Behaviour::Honest => self.honest.serve(request).await,
                 Behaviour::Delayed => {
-                    self.context.sleep(PEER_DELAY).await;
+                    context.sleep(PEER_DELAY).await;
                     self.honest.serve(request).await
                 }
                 Behaviour::Divergent => self.divergent.serve(request).await,
             };
             match result {
-                Ok((response, _)) => return Ok((response, self.policy.answered(behaviour))),
+                Ok((response, _)) => return (behaviour, response),
                 Err(_) => self.policy.failed(),
             }
-            self.context.sleep(PEER_DELAY).await;
+            context.sleep(PEER_DELAY).await;
         }
+    }
+
+    /// Record the engine's verdicts on one request's answers, serving another
+    /// candidate after each rejection until the engine settles the request.
+    ///
+    /// The engine settles a request by accepting an answer or by dropping its
+    /// feedback, which closes `candidates`.
+    async fn relay(
+        self,
+        context: Runtime,
+        request: Request<S::Family>,
+        mut index: usize,
+        mut verdict: oneshot::Receiver<bool>,
+        candidates: mpsc::Sender<(ResponseOf<S>, oneshot::Sender<bool>)>,
+    ) {
+        loop {
+            let Ok(accepted) = verdict.await else {
+                return;
+            };
+            self.policy.judged(index, accepted);
+            if accepted {
+                return;
+            }
+            let answered = select! {
+                answered = self.answer(&context, request) => Some(answered),
+                _ = candidates.closed() => None,
+            };
+            let Some((behaviour, response)) = answered else {
+                return;
+            };
+            index = self.policy.answered(behaviour);
+            let (sender, receiver) = oneshot::channel();
+            if candidates.send((response, sender)).await.is_err() {
+                return;
+            }
+            verdict = receiver;
+        }
+    }
+}
+
+impl<S> Source for Peer<S>
+where
+    S: Source<Op: Send + 'static> + Clone + 'static,
+{
+    type Family = S::Family;
+    type Digest = S::Digest;
+    type Op = S::Op;
+    type Error = S::Error;
+
+    async fn serve(&self, request: Request<Self::Family>) -> source::Result<Self> {
+        let (behaviour, response) = self.databases.answer(&self.context, request).await;
+        let policy = &self.databases.policy;
+        let index = policy.answered(behaviour);
+        let (verdict, verdict_rx) = oneshot::channel();
+        let (candidates, candidate_rx) = mpsc::channel(1);
+        let relay = self.context.child("relay").spawn({
+            let databases = self.databases.clone();
+            move |context| databases.relay(context, request, index, verdict_rx, candidates)
+        });
+        policy.relaying(relay);
+        Ok((response, Some(Feedback::new(verdict, candidate_rx))))
     }
 }
 
@@ -700,7 +799,7 @@ async fn run<S: Shape>(
         "synced set roots differ from the serving set's at height {}",
         anchor.height.get(),
     );
-    let (answers, rejected_divergent, rejected_honest) = policy.verdicts();
+    let (answers, rejected_divergent, rejected_honest) = policy.verdicts().await;
     assert!(
         !rejected_honest,
         "the sync engine rejected an answer served from the serving set"
