@@ -6,6 +6,7 @@ mod batch_to_affine;
 mod batch_verify_same_signer;
 mod combine_public_keys;
 mod combine_signatures;
+mod deserialize;
 mod dkg;
 mod evaluate_point;
 mod hash_to_curve;
@@ -43,6 +44,7 @@ criterion_main!(
     threshold_batch_verify_same_message_pre::benches,
     threshold_batch_verify_same_signer::benches,
     subgroup::benches,
+    deserialize::benches,
     tle_encrypt::benches,
     tle_decrypt::benches,
 );

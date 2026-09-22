@@ -324,6 +324,93 @@ where its smaller L2 wants them. The shape is the same on both: flat below a
 thousand points, still climbing at a hundred thousand, flattening toward the
 pass floor after a million.
 
+### End-to-end deserialization
+
+What a caller decoding a batch of compressed points actually sees is bounded by
+decompression, which batching does not touch. Per point on the M5 Pro,
+`read_unchecked` (one Fp square root) costs 7.6 µs and the exact check 22.8 µs,
+so the check is 75% of a checked `read`, not ~90%, and the serial ceiling is 4×.
+Measured with the `deserialize` bench (checked `read` per point against
+`read_unchecked` followed by `batch_in_g1`; the parallel rows decode in parallel
+too):
+
+| n       | per-point serial | batched serial  | per-point parallel | batched parallel |
+|---------|------------------|-----------------|--------------------|------------------|
+| 100     | 3.00 ms          | 3.41 ms (0.88×) | 391 µs             | 876 µs (0.45×)   |
+| 1 000   | 30.5 ms          | 12.8 ms (2.4×)  | 2.57 ms            | 1.68 ms (1.5×)   |
+| 6 000   | 180 ms           | 59.3 ms (3.0×)  | 14.1 ms            | 5.83 ms (2.4×)   |
+| 100 000 | 3.01 s           | 888 ms (3.4×)   | 220 ms             | 80.1 ms (2.7×)   |
+
+At n = 100 000 the batched path spends 765 ms decoding and 122 ms checking:
+decompression is now 86% of the cost. The n = 100 row is a regression: the
+planner batches there (14 rounds of width 6/5, not the per-point fallback) and
+loses 16% on the check alone (2.66 ms against 2.29 ms in the `subgroup` bench),
+so the crossover sits above 100 points on this machine.
+
+### Speeding up decompression
+
+With the check batched, the remaining lever is decompression itself. Measured
+on the same machine, single-threaded (throwaway prototypes, not in the tree):
+
+- **The square root is all of it.** `blst_fp_sqrt` is 7.0 µs of
+  `blst_p1_uncompress`'s 7.06 µs; byte conversion, `x^3 + 4`, sign handling
+  and our wrapper total well under 100 ns. blst's addition chain is 377
+  squarings and 80 multiplications, and the 379-bit exponent needs at least
+  378 squarings, so a better chain is worth at most ~2%.
+- **Interleaving does not pay here.** Independent Fp multiplications run at
+  14 ns (squarings at 14.2 ns) against 17-19 ns dependent, so blst's serial
+  chain is within ~8% of the core's multiply throughput. A K-lane interleaved
+  sqrt (bit-exact against blst on residues, non-residues and 616 adversarial
+  encodings) measured 1.03x on the sqrt and 1.01x on decompression for K from
+  2 to 16. AVX-512 IFMA (8 lanes, radix 2^52) is the only plausible large
+  per-sqrt win, estimated 3-5x, x86-only and unmeasured.
+- **Algebraic batching is unsound or useless.** `sqrt(ab)` gives one relation
+  for two unknowns; multiplying Legendre symbols across points accepts two
+  non-residues whose product is a residue, and the adversary picks `x`.
+  Deferring the `y^2 = x^3 + 4` check saves 2 of 459 operations and admits
+  points on the quadratic twist, which the batched check's soundness argument
+  does not cover.
+- **Uncompressed encoding.** `blst_p1_deserialize` on 96 bytes (still rejecting
+  off-curve `y`) costs 111 ns: 63x faster decoding, and about 6.6x end to end
+  at n = 100 000 (887 ms to ~134 ms), for 48 more bytes per point.
+
+**A partial-`y` hint.** Since `x` fixes `y` up to sign, a hint carries no
+information, only a cheaper algorithm. For generic hint lengths there is none:
+with `y = H * 2^k + a` and `H` sent, `a` solves a quadratic mod `p`, which needs
+a square root. The exception is when `a < 2^k` with `2^(3k) < p`: then `a^2` is
+also a small integer, and `a * D + a^2 = L (mod p)` (with `D = 2 H 2^k`,
+`L = c - (H 2^k)^2`) is a two-dimensional closest-vector problem. A half
+extended gcd of `(D, p)`, stopped at the weighted crossover, reduces the
+lattice; Babai rounding plus a small neighbourhood search finds `a`; the final
+`y^2 = x^3 + 4` check, range check and sign check make it sound against any
+hint.
+
+| unknown bits `k` | point size | recovered (10 000 honest points) |
+|------------------|------------|----------------------------------|
+| <= 124           | 81 B       | 100%                             |
+| 125              | 80 B       | 99.98% (100% with radius 4)      |
+| 127              | 80 B       | 97.6%                            |
+| 128              | 80 B       | 81%                              |
+| 130              | 80 B       | 0.9%                             |
+
+It breaks exactly where `2^(3k)` reaches `p`. Corrupted hints (bit flips,
+random `H`, another point's `H`, `H +- 1`) were rejected 14 000 of 14 000 at
+every `k`. A Lehmer prototype decodes at k = 125 in **2.6 µs** (2.7x over
+blst; ~2.1x end to end at n = 100 000); with the remaining bignum steps moved
+to fixed-width arithmetic, an estimated ~1.0 µs (~3.8x end to end). Recovery
+is variable-time, which is fine for public data, but any recovery failure must
+fall back to computing the square root and checking the hint against it, so an
+adversarial hint costs no more than today.
+
+Hints shorter than ~254 bits do not help: a higher-dimension Coppersmith
+lattice could in principle recover up to `a < p^(1/2)` (72-byte points), but
+per-point LLL in dimension 10-20 on 400-bit entries costs more than the
+square root. So the trade-off is a cliff, not a slope: 48 B at 7 µs, 80 B at
+~1-2.6 µs, 96 B at 0.11 µs. The hint saves 16 B per point over uncompressed at
+roughly 10-25x its decode cost; a per-batch bitmap selecting which points are
+sent uncompressed gives a linear trade-off with no soundness subtleties and is
+the simpler middle ground.
+
 ## What did not pay
 
 Recorded because each looked like it should, and the measurement is the only
