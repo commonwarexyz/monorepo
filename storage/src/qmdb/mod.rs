@@ -363,7 +363,8 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
+    let Some((loc, slot)) =
+        find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
     else {
         return Ok(None);
     };
@@ -371,8 +372,8 @@ where
     // Cache entries mirror current snapshot locations, so invalidate the matched location with
     // the authoritative deletion.
     cursor.delete();
-    if let Some(cache) = cache {
-        cache.remove(*loc);
+    if let Some(slot) = slot {
+        cache.unwrap().remove_slot(slot);
     }
 
     Ok(Some(loc))
@@ -418,15 +419,15 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) =
+    if let Some((loc, slot)) =
         find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
     {
         // Removing the superseded cache entry with the snapshot update lets the caller reuse its
         // slot for `new_loc` instead of evicting another live entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
-        if let Some(cache) = cache {
-            cache.remove(*loc);
+        if let Some(slot) = slot {
+            cache.unwrap().remove_slot(slot);
         }
         return Ok(Some(loc));
     }
@@ -437,14 +438,15 @@ where
     Ok(None)
 }
 
-/// Find and return the location of the update operation for `key`, if it exists. The cursor is
-/// positioned at the matching location, and can be used to update or delete the key.
+/// Find and return the location of the update operation for `key` and its cache slot, if present.
+/// The cursor is positioned at the matching location, and can be used to update or delete the key.
+/// The cache slot remains valid until the next cache mutation.
 async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
     key: &<R::Item as Operation<F>>::Key,
     mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
-) -> Result<Option<Location<F>>, Error<F>>
+) -> Result<Option<(Location<F>, Option<usize>)>, Error<F>>
 where
     F: Family,
     R: Contiguous,
@@ -452,8 +454,10 @@ where
 {
     while let Some(&loc) = cursor.next() {
         // Consult the cache first; on a miss, read the log and populate.
-        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(*loc)) {
-            *k == *key
+        if let Some((slot, k)) = cache.as_deref().and_then(|c| c.get(*loc)) {
+            if *k == *key {
+                return Ok(Some((loc, Some(slot))));
+            }
         } else {
             let op = reader.read(*loc).await?;
             let k = op.key().expect("operation without key");
@@ -464,10 +468,9 @@ where
             if !matches && let Some(cache) = cache.as_deref_mut() {
                 cache.put(*loc, op.into_key().expect("operation without key"));
             }
-            matches
-        };
-        if matches {
-            return Ok(Some(loc));
+            if matches {
+                return Ok(Some((loc, None)));
+            }
         }
     }
 

@@ -752,11 +752,11 @@ pub(crate) mod test {
                 .unwrap();
                 assert_eq!(old_loc, Some(Location::new(0)));
                 assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc)),
+                    [0, 1, 2].map(|loc| cache.get(loc).map(|(_, key)| key)),
                     [None, Some(&keys[1]), None]
                 );
                 cache.put(*new_loc, keys[0]);
-                assert_eq!(cache.get(1), Some(&keys[1]));
+                assert_eq!(cache.get(1).map(|(_, key)| key), Some(&keys[1]));
 
                 // An absent full key sharing the translated key leaves both candidates live.
                 assert_eq!(
@@ -766,7 +766,7 @@ pub(crate) mod test {
                     None
                 );
                 assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc)),
+                    [0, 1, 2].map(|loc| cache.get(loc).map(|(_, key)| key)),
                     [None, Some(&keys[1]), Some(&keys[0])]
                 );
                 assert_eq!(
@@ -776,7 +776,7 @@ pub(crate) mod test {
                     Some(new_loc)
                 );
                 assert_eq!(
-                    [0, 1, 2].map(|loc| cache.get(loc)),
+                    [0, 1, 2].map(|loc| cache.get(loc).map(|(_, key)| key)),
                     [None, Some(&keys[1]), None]
                 );
                 assert_eq!(
