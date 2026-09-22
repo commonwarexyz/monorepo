@@ -332,6 +332,27 @@ impl<K, V> Default for Map<K, V> {
 }
 
 impl<K, V> Map<K, V> {
+    /// Creates a map from ordered keys and corresponding values, reusing both allocations.
+    ///
+    /// Each value is paired with the key at the same index. Returns `None` if
+    /// the lengths differ.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use commonware_utils::ordered::{Map, Set};
+    ///
+    /// let keys = Set::try_from([3, 1, 2]).unwrap();
+    /// let map = Map::from_parts(keys, vec!["one", "two", "three"]).unwrap();
+    /// assert_eq!(map.get_value(&2), Some(&"two"));
+    /// ```
+    pub fn from_parts(keys: Set<K>, values: Vec<V>) -> Option<Self> {
+        if keys.len() != values.len() {
+            return None;
+        }
+        Some(Self { keys, values })
+    }
+
     /// Returns the number of entries in the map.
     pub const fn len(&self) -> usize {
         self.keys.len()
@@ -1116,6 +1137,39 @@ mod test {
             set.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
             wrapped.keys().iter().copied().collect::<Vec<_>>(),
         );
+    }
+
+    #[test]
+    fn test_map_from_parts_reuses_allocations() {
+        #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+        struct Key(u8);
+        #[derive(Debug, PartialEq, Eq)]
+        struct Value(u8);
+
+        let keys = Set::try_from([Key(3), Key(1), Key(2)]).unwrap();
+        let values = vec![Value(30), Value(10), Value(10)];
+        let keys_ptr = keys.as_ref().as_ptr();
+        let values_ptr = values.as_ptr();
+
+        let map = Map::from_parts(keys, values).unwrap();
+        assert_eq!(map.keys().as_ref().as_ptr(), keys_ptr);
+        assert_eq!(map.values().as_ptr(), values_ptr);
+        assert_eq!(map.keys().as_ref(), &[Key(1), Key(2), Key(3)]);
+        assert_eq!(map.values(), &[Value(30), Value(10), Value(10)]);
+    }
+
+    #[rstest]
+    fn test_map_from_parts_lengths(
+        #[values(0, 1, 3)] keys_len: usize,
+        #[values(0, 1, 3)] values_len: usize,
+    ) {
+        let keys = Set::try_from_iter(0..keys_len).unwrap();
+        let map = Map::from_parts(keys, vec![(); values_len]);
+        assert_eq!(map.is_some(), keys_len == values_len);
+        if let Some(map) = map {
+            assert_eq!(map.len(), keys_len);
+            assert_eq!(map.values().len(), values_len);
+        }
     }
 
     #[test]

@@ -257,19 +257,11 @@ impl PrivateKey {
         .expect("proving should succeed");
 
         // Witness values and claim commitments follow the receivers' key order.
-        let mut witness_values = witness.values().iter();
-        let outputs = receivers.map_values_into(|_, _| {
-            witness_values
-                .next()
-                .expect("witness should have one output per receiver")
-                .clone()
-        });
-        let mut claim_commitments = claim.commitments.into_iter();
-        let commitments = outputs.map_values(|_, _| {
-            claim_commitments
-                .next()
-                .expect("claim should have one commitment per output")
-        });
+        let keys = receivers.into_keys();
+        let outputs = Map::from_parts(keys.clone(), witness.values().to_vec())
+            .expect("witness should have one output per receiver");
+        let commitments = Map::from_parts(keys, claim.commitments)
+            .expect("claim should have one commitment per receiver");
         let pedersen_to_plain = {
             let setup = pedersen_to_plain::Setup {
                 value_generator: *setup.inner().value_generator(),
