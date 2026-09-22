@@ -274,28 +274,13 @@ unsafe fn change_base<const B: usize>(
             cyclic_step::<6, B>(&mut residues, &mut high, &mut low, &conversion.matrix);
             cyclic_step::<7, B>(&mut residues, &mut high, &mut low, &conversion.matrix);
         } else {
-            // Split each 52-by-64-bit product into base-2^52 digits. The sums
-            // of eight low/middle digits fit in u64; carry before dividing by
-            // 2^64. This preserves the scalar quotient exactly.
-            let fraction = load(&conversion.fraction);
-            let upper = _mm512_srli_epi64::<WORD>(fraction);
-            let mut quotient = [0; B];
-            for batch in 0..B {
-                let residues = load(&input[batch]);
-                let low = _mm512_madd52lo_epu64(zero, residues, fraction);
-                let middle = _mm512_madd52hi_epu64(zero, residues, fraction);
-                let middle = _mm512_madd52lo_epu64(middle, residues, upper);
-                let high = _mm512_madd52hi_epu64(zero, residues, upper);
-                let low = _mm512_reduce_add_epi64(low) as u64;
-                let middle = _mm512_reduce_add_epi64(middle) as u64;
-                let high = _mm512_reduce_add_epi64(high) as u64;
-                quotient[batch] =
-                    ((middle + (low >> WORD)) >> (64 - WORD)) + (high << (2 * WORD - 64));
-            }
+            let mut quotient = [0u128; B];
             for (row, coefficients) in conversion.matrix.iter().enumerate() {
                 let coefficients = load(coefficients);
                 for batch in 0..B {
                     let scalar = input[batch][row];
+                    quotient[batch] = quotient[batch]
+                        .wrapping_add(u128::from(scalar) * u128::from(conversion.fraction[row]));
                     let scalar = _mm512_set1_epi64(scalar as i64);
                     high[batch] = _mm512_madd52hi_epu64(high[batch], coefficients, scalar);
                     low[batch] = _mm512_madd52lo_epu64(low[batch], coefficients, scalar);
@@ -305,7 +290,7 @@ unsafe fn change_base<const B: usize>(
             let correction = load(&conversion.correction);
             let correction_shift = load(&conversion.correction_shift);
             for batch in 0..B {
-                let k = quotient[batch];
+                let k = (quotient[batch] >> 64) as u64;
                 let low_digit = _mm512_set1_epi64(k as i64);
                 let high_digit = _mm512_set1_epi64((k >> WORD) as i64);
                 high[batch] = _mm512_madd52hi_epu64(high[batch], correction, low_digit);

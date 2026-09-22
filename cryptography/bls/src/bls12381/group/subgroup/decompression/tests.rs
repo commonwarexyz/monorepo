@@ -121,11 +121,14 @@ fn exponent_and_batched_roots() {
             assert!(a.fp_eq(&a.fp_mul(&ninth, &inverse), &Field::ONE));
             assert!(extract_roots::<1>(&[Field::ONE]).is_some());
             assert!(extract_roots::<2>(&[ninth, inverse]).is_none());
-            for lane in 0..4 {
+            for lane in 0..8 {
                 for invalid in [Field::ZERO, ninth, a.fp_neg(&Field::ONE)] {
-                    let mut values = [Field::ONE; 4];
+                    let mut values = [Field::ONE; 8];
                     values[lane] = invalid;
-                    assert!(extract_roots::<4>(&values).is_none());
+                    assert!(extract_roots::<8>(&values).is_none());
+                    if lane < 4 {
+                        assert!(extract_roots::<4>(&values[..4]).is_none());
+                    }
                 }
             }
         }
@@ -143,10 +146,24 @@ fn receiver_preserves_points_and_checks_subgroups() {
         for len in [0, 1, 2, 3, 4, 11, 12, 13, 81, 82, 97] {
             let bytes = encode(&points[..len], format);
             assert_eq!(bytes.len(), 48 * len);
-            assert_eq!(
-                receive(&bytes, format, &mut TestRng::new(1)).unwrap(),
-                public_points(&points[..len])
-            );
+            for roots in [
+                RootWidth::One,
+                RootWidth::Two,
+                RootWidth::Four,
+                RootWidth::Eight,
+            ] {
+                assert_eq!(
+                    Receive {
+                        bytes: &bytes,
+                        format,
+                        roots,
+                        rng: &mut TestRng::new(1),
+                    }
+                    .run()
+                    .unwrap(),
+                    public_points(&points[..len])
+                );
+            }
             if !bytes.is_empty() {
                 assert!(
                     receive(&bytes[..bytes.len() - 1], format, &mut ScriptedRng::new([])).is_none()
