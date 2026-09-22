@@ -255,7 +255,7 @@ impl<B: Blob> Recovery<B> {
             .write_at(
                 &self.blob,
                 new_slot_offset,
-                staged_slot.to_vec(),
+                IoBuf::copy_from_slice(&staged_slot),
                 WriteOptions::SYNC | WriteOptions::DONT_CACHE,
             )
             .await?;
@@ -267,7 +267,7 @@ impl<B: Blob> Recovery<B> {
             .write_at(
                 &self.blob,
                 new_slot_offset,
-                published_len.to_vec(),
+                IoBuf::copy_from_slice(&published_len),
                 WriteOptions::SYNC | WriteOptions::DONT_CACHE,
             )
             .await?;
@@ -283,7 +283,7 @@ impl<B: Blob> Recovery<B> {
             .write_at(
                 &self.blob,
                 old_slot_offset,
-                Checksum::slot_bytes(0, 0).to_vec(),
+                IoBuf::copy_from_slice(&Checksum::slot_bytes(0, 0)),
                 WriteOptions::SYNC | WriteOptions::DONT_CACHE,
             )
             .await?;

@@ -156,7 +156,7 @@ where
     T: Sink,
 {
     let max_size = u32::try_from(M::SIZE).expect("handshake frame should fit in u32");
-    send_frame(sink, message.encode(), max_size).await
+    send_frame(sink, IoBuf::encode(&message), max_size).await
 }
 
 /// Receives and decodes a handshake message bounded by its fixed encoded size.

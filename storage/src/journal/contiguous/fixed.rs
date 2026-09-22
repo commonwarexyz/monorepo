@@ -150,7 +150,7 @@ use crate::{
 use bytes::Bytes;
 use commonware_codec::{CodecFixedShared, Copying, DecodeExt as _};
 use commonware_runtime::{
-    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
+    Blob as RBlob, Buf, Handle, IoBuf, IoBufMut, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery},
 };
 use commonware_utils::Cached;
@@ -173,7 +173,7 @@ commonware_utils::thread_local_cache!(static PROBE_SCRATCH: Vec<u8>);
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
 pub struct PreparedAppend<A> {
-    buf: Vec<u8>,
+    buf: IoBuf,
     _marker: PhantomData<A>,
 }
 
@@ -1252,7 +1252,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
         // Encode all items into a single contiguous buffer up front.
         // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
-        let mut buf = Vec::with_capacity(items.len() * A::SIZE);
+        let mut buf = IoBufMut::with_capacity(items.len() * A::SIZE);
         match items {
             Many::Flat(items) => {
                 for item in items {
@@ -1268,7 +1268,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
             }
         }
         PreparedAppend {
-            buf,
+            buf: buf.freeze(),
             _marker: PhantomData,
         }
     }
@@ -1290,7 +1290,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         if items_count == 0 {
             return Err(Error::EmptyAppend);
         }
-        let items_buf = IoBuf::from(items_buf);
 
         // Reject the append before writing anything if it would push the size past `u64::MAX`.
         // This keeps the in-loop size arithmetic safe.

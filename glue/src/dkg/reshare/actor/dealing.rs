@@ -8,7 +8,7 @@ use crate::dkg::{
     },
     types::Message,
 };
-use commonware_codec::{Decode, Encode};
+use commonware_codec::Decode;
 use commonware_consensus::{
     marshal::core::Variant as MarshalVariant,
     simplex::scheme::Scheme as SimplexScheme,
@@ -28,7 +28,7 @@ use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Message as NetworkMessage, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    BufferPooler, Clock, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
+    BufferPooler, Clock, IoBuf, Metrics, Spawner, Storage, telemetry::traces::TracedExt as _,
 };
 use commonware_utils::{Acknowledgement, channel::fallible::OneshotExt};
 use rand_core::CryptoRng;
@@ -232,7 +232,7 @@ where
                 info!(?epoch, dealer = ?from, "received dealing");
                 let sent = sender.send(
                     Recipients::One(from.clone()),
-                    Message::<V, C::PublicKey>::Ack(ack).encode(),
+                    IoBuf::encode(&Message::<V, C::PublicKey>::Ack(ack)),
                     true,
                 );
                 if sent.is_empty() {
@@ -296,7 +296,7 @@ where
 
             let sent = sender.send(
                 Recipients::One(recipient.clone()),
-                Message::<V, C::PublicKey>::Dealer(public, private).encode(),
+                IoBuf::encode(&Message::<V, C::PublicKey>::Dealer(public, private)),
                 true,
             );
             if sent.is_empty() {
@@ -318,6 +318,7 @@ mod tests {
         tests::mocks::{self, MemorySecretStore},
     };
     use commonware_actor::Feedback;
+    use commonware_codec::Encode;
     use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
         bls12381::{

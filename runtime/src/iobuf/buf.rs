@@ -13,7 +13,7 @@ use super::{
 };
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{
-    Buf, BufsMut, EncodeSize, Error, Input, RangeCfg, Read, Write, util::at_least,
+    Buf, BufsMut, Encode, EncodeSize, Error, Input, RangeCfg, Read, Write, util::at_least,
 };
 use std::{
     mem::ManuallyDrop,
@@ -100,6 +100,24 @@ impl IoBuf {
     /// header, so the result supports zero-copy [`IoBuf::try_into_mut`].
     pub fn copy_from_slice(data: &[u8]) -> Self {
         IoBufMut::from(data).freeze()
+    }
+
+    /// Create a buffer by encoding `value`.
+    ///
+    /// The encoding lands in one exactly-sized native heap allocation. Prefer
+    /// this over `IoBuf::from(value.encode())`, which also allocates an owner
+    /// for the intermediate [`Bytes`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`EncodeSize::encode_size`] does not match the number of
+    /// bytes written by [`Write::write`].
+    pub fn encode(value: &impl Encode) -> Self {
+        let len = value.encode_size();
+        let mut buf = IoBufMut::with_capacity(len);
+        value.write(&mut buf);
+        assert_eq!(buf.len(), len, "write() did not write expected bytes");
+        buf.freeze()
     }
 
     #[inline]
@@ -1202,6 +1220,36 @@ mod tests {
         assert_eq!(src.slice(6..), b"world");
         assert_eq!(src.slice(3..8), b"lo wo");
         assert!(src.slice(5..5).is_empty());
+    }
+
+    #[test]
+    fn test_iobuf_encode_matches_codec_encode() {
+        let value = vec![1u8, 2, 3, 4, 5, 6];
+        let buf = IoBuf::encode(&value);
+        assert_eq!(buf.as_ref(), value.encode().as_ref());
+        // A native heap buffer, not a wrapped `Bytes`, supports mutable recovery.
+        assert!(buf.try_into_mut().is_ok());
+    }
+
+    /// Claims a larger encoding than `write` produces.
+    struct UnderWriter;
+
+    impl Write for UnderWriter {
+        fn write(&self, buf: &mut impl BufMut) {
+            buf.put_slice(b"ab");
+        }
+    }
+
+    impl EncodeSize for UnderWriter {
+        fn encode_size(&self) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_iobuf_encode_rejects_short_write() {
+        let _ = IoBuf::encode(&UnderWriter);
     }
 
     #[test]

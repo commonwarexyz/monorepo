@@ -33,7 +33,7 @@ use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
-use commonware_runtime::{BufMut, Error as RError, Handle};
+use commonware_runtime::{BufMut, Error as RError, Handle, IoBuf, IoBufMut};
 use std::{collections::BTreeMap, io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
@@ -96,15 +96,15 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?;
             let checksum = Crc32::checksum(&compressed);
             compressed.put_u32(checksum);
-            compressed
+            IoBuf::from(compressed)
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
             let entry_size = value.encode_size() + CHECKSUM_SIZE;
-            let mut buf = Vec::with_capacity(entry_size);
+            let mut buf = IoBufMut::with_capacity(entry_size);
             value.write(&mut buf);
-            let checksum = Crc32::checksum(&buf);
+            let checksum = Crc32::checksum(buf.as_ref());
             buf.put_u32(checksum);
-            buf
+            buf.freeze()
         };
 
         // Write to blob

@@ -20,8 +20,8 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
-    Spawner, spawn_cell,
+    BufMut as _, Clock, ContextCell, Handle, IoBuf, IoBufMut, IoBufs, Listener as _, Metrics,
+    Network as RNetwork, Quota, Spawner, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -1486,8 +1486,7 @@ impl Link {
         context.child("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
             let (mut sink, _) = context.dial(socket).await.unwrap();
-            if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_frame_size).await
-            {
+            if let Err(err) = send_frame(&mut sink, IoBuf::encode(&dialer), max_frame_size).await {
                 error!(?err, "failed to send public key to listener");
                 return;
             }
@@ -1499,9 +1498,9 @@ impl Link {
 
                 // Send the message
                 let channel_bytes = channel.to_be_bytes();
-                let mut data = Vec::with_capacity(channel_bytes.len() + message.len());
-                data.extend_from_slice(&channel_bytes);
-                data.extend_from_slice(message.as_ref());
+                let mut data = IoBufMut::with_capacity(channel_bytes.len() + message.len());
+                data.put_slice(&channel_bytes);
+                data.put_slice(message.as_ref());
                 let _ = send_frame(&mut sink, data, max_frame_size).await;
 
                 // Bump received messages metric

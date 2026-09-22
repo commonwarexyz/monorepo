@@ -4,7 +4,7 @@ use commonware_codec::{Buf, CodecFixed, FixedSize, Read, ReadExt, Write as Codec
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, BufMut, Error as RError, IoBuf, WriteOptions,
+    Blob, BufMut, Error as RError, IoBuf, IoBufMut, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -25,13 +25,13 @@ struct Record<V: CodecFixed<Cfg = ()>> {
 
 impl<V: CodecFixed<Cfg = ()>> Record<V> {
     /// Serialize `value` followed by the CRC of its serialized bytes.
-    fn encode(value: &V) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(Self::SIZE);
+    fn encode(value: &V) -> IoBuf {
+        let mut buf = IoBufMut::with_capacity(Self::SIZE);
         value.write(&mut buf);
         assert_eq!(buf.len(), V::SIZE, "write() did not write expected bytes");
-        let crc = Crc32::checksum(&buf);
+        let crc = Crc32::checksum(buf.as_ref());
         crc.write(&mut buf);
-        buf
+        buf.freeze()
     }
 
     /// Deserialize a record, returning the value only if the stored CRC matches the raw
@@ -180,7 +180,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
 
             // Replay ignores records outside the committed bits, but recovery clears them so
             // stored blobs match the checkpointed view
-            let empty = vec![0u8; Record::<V>::SIZE];
+            let empty = IoBufMut::zeroed(Record::<V>::SIZE).freeze();
             for (section, (blob, size)) in &blobs {
                 // A section with no bitmap requires every record, so nothing is cleared
                 let Some(Some(bits)) = bits.get(section) else {
@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn test_record_preserves_owned_byte_fields() {
         let value = View::new(7);
-        let encoded = Record::encode(&value);
+        let encoded = Vec::from(Record::encode(&value));
         let source = IoBuf::from(encoded.clone());
         let decoded = Record::<View>::decode_valid(source).unwrap();
         assert_eq!(decoded.bytes, value.bytes);
