@@ -115,6 +115,33 @@ impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
     }
 
     #[inline(always)]
+    fn ranked_root(&self, x: Field, rank: usize) -> Field {
+        let mut candidates = self.roots(x).map(|x| (field_bytes(&x), x));
+        candidates.sort_unstable_by_key(|candidate| candidate.0);
+        candidates[rank].1
+    }
+
+    #[inline(always)]
+    fn valid_points<const N: usize>(&self, points: &[Affine; N]) -> bool {
+        let x = points.map(|point| point.x);
+        let squared = self.products(&x, &x);
+        let ring = &self.ring;
+        // Each residual is y^2 - x^3 - 4. Signed wide products share one
+        // reduction without ever assuming any curve equation from the input.
+        let checks = core::array::from_fn(|i| {
+            ring.ready::<800>(
+                ring.prep_left(points[i].y) * points[i].y
+                    + ring.prep_left(squared[i]) * ring.negate(points[i].x)
+                    + ring.prep_left(self.four()) * ring.negate(Field::ONE),
+            )
+        });
+        let residuals: [Field; N] = ring.batch_reduce_expand(&checks);
+        points.iter().zip(residuals).all(|(point, residual)| {
+            !self.fp_is_zero(&point.x) && !self.fp_is_zero(&point.y) && self.fp_is_zero(&residual)
+        })
+    }
+
+    #[inline(always)]
     fn products<const N: usize>(&self, a: &[Field; N], b: &[Field; N]) -> [Field; N] {
         let pending =
             core::array::from_fn(|i| self.ring.ready::<800>(self.ring.prep_left(a[i]) * b[i]));
@@ -158,18 +185,8 @@ impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
         Some(roots)
     }
 
-    #[inline(always)]
     fn root_batch(&self, inputs: &[Field]) -> Option<Vec<Field>> {
-        const {
-            assert!(LANES > 0);
-        }
-        let mut output = reserved(inputs.len())?;
-        for chunk in inputs.chunks(LANES) {
-            let mut lanes = [Field::ONE; LANES];
-            lanes[..chunk.len()].copy_from_slice(chunk);
-            output.extend_from_slice(&self.extract(&lanes)?[..chunk.len()]);
-        }
-        Some(output)
+        extract_roots::<LANES>(inputs)
     }
 
     #[inline(always)]
@@ -304,8 +321,9 @@ impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
                 inverse,
             );
             let v = self.fp_add(&u, &self.four());
-            products.push(self.fp_mul(&u, &v));
-            radicands.push(self.fp_mul(&self.fp_sqr(&u), &self.cube(&v)));
+            let uv = self.fp_mul(&u, &v);
+            products.push(uv);
+            radicands.push(self.fp_mul(&v, &self.fp_sqr(&uv)));
         }
         let extracted = self.root_batch(&radicands)?;
         inverses.clear();
@@ -332,16 +350,14 @@ impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
             } else {
                 let ((uv, root), inverse) = generic.next().unwrap();
                 // root^6 = u^2 v^3; one inverse recovers both affine coordinates.
-                let mut candidates = self.roots(self.fp_mul(&self.fp_sqr(uv), inverse));
-                candidates.sort_unstable_by_key(field_bytes);
                 let mut base = Affine {
-                    x: candidates[index],
+                    x: self.ranked_root(self.fp_mul(&self.fp_sqr(uv), inverse), index),
                     y: self.fp_mul(
                         &self.fp_mul(&self.fp_sqr(&self.fp_sqr(root)), root),
                         inverse,
                     ),
                 };
-                if (field_bytes(&base.y) > field_bytes(&self.fp_neg(&base.y))) != negative {
+                if bool::from(Fp::from(base.y).lexicographically_largest()) != negative {
                     base.y = self.fp_neg(&base.y);
                 }
                 (
@@ -352,18 +368,47 @@ impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
                     base,
                 )
             };
-            for point in [first, second] {
-                if !self.valid_affine(&point) {
-                    return None;
-                }
-                decoded.push(point);
+            let pair = [first, second];
+            if !self.valid_points(&pair) {
+                return None;
             }
+            decoded.extend(pair);
         }
         let tail = bytes.chunks_exact(96).remainder();
         if !tail.is_empty() {
             decoded.push(self.decode_standard(tail)?);
         }
         Some(decoded)
+    }
+}
+
+// Share the exponentiation loop across pair/triple charts and RNG types.
+// This bulk entry keeps every root operation in the selected feature context.
+#[inline(never)]
+fn extract_roots<const LANES: usize>(inputs: &[Field]) -> Option<Vec<Field>> {
+    with_backend(RootBatch::<LANES>(inputs))
+}
+
+struct RootBatch<'a, const LANES: usize>(&'a [Field]);
+
+impl<const LANES: usize> WithBackend for RootBatch<'_, LANES> {
+    type Output = Option<Vec<Field>>;
+
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        const {
+            assert!(LANES > 0);
+        }
+        let arithmetic = Arithmetic::<B, LANES> {
+            ring: Ring::new(backend),
+        };
+        let mut output = reserved(self.0.len())?;
+        for chunk in self.0.chunks(LANES) {
+            let mut lanes = [Field::ONE; LANES];
+            lanes[..chunk.len()].copy_from_slice(chunk);
+            output.extend_from_slice(&arithmetic.extract(&lanes)?[..chunk.len()]);
+        }
+        Some(output)
     }
 }
 
@@ -380,15 +425,30 @@ struct Receive<'a, R, const LANES: usize> {
     rng: &'a mut R,
 }
 
-impl<R: CryptoRng, const LANES: usize> WithBackend for Receive<'_, R, LANES> {
-    type Output = Option<Vec<G1>>;
+impl<R: CryptoRng, const LANES: usize> Receive<'_, R, LANES> {
+    fn run(self) -> Option<Vec<G1>> {
+        let points = with_backend(Decode::<LANES> {
+            bytes: self.bytes,
+            format: self.format,
+        })?;
+        validate(points, self.rng)
+    }
+}
+
+struct Decode<'a, const LANES: usize> {
+    bytes: &'a [u8],
+    format: Format,
+}
+
+impl<const LANES: usize> WithBackend for Decode<'_, LANES> {
+    type Output = Option<Vec<Affine>>;
 
     #[inline(always)]
     fn call<B: Backend>(self, backend: B) -> Self::Output {
         let arithmetic = Arithmetic::<B, LANES> {
             ring: Ring::new(backend),
         };
-        let affine = match self.format {
+        match self.format {
             Format::Standard => {
                 if !self.bytes.len().is_multiple_of(48) {
                     return None;
@@ -397,13 +457,34 @@ impl<R: CryptoRng, const LANES: usize> WithBackend for Receive<'_, R, LANES> {
                 for bytes in self.bytes.chunks_exact(48) {
                     result.push(arithmetic.decode_standard(bytes)?);
                 }
-                result
+                Some(result)
             }
-            Format::Pair => arithmetic.decode_pairs(self.bytes)?,
-            Format::Triple => arithmetic.decode_triples(self.bytes)?,
-        };
-        let mut points = reserved(affine.len())?;
-        for point in affine {
+            Format::Pair => arithmetic.decode_pairs(self.bytes),
+            Format::Triple => arithmetic.decode_triples(self.bytes),
+        }
+    }
+}
+
+// A separate bulk backend entry shares the checker across root-chain widths.
+// Arithmetic still stays inside the selected AVX-512 target-feature context.
+#[inline(never)]
+fn validate(points: Vec<Affine>, rng: &mut impl CryptoRng) -> Option<Vec<G1>> {
+    with_backend(Validate { points, rng })
+}
+
+struct Validate<'a, R> {
+    points: Vec<Affine>,
+    rng: &'a mut R,
+}
+
+impl<R: CryptoRng> WithBackend for Validate<'_, R> {
+    type Output = Option<Vec<G1>>;
+
+    #[inline(always)]
+    fn call<B: Backend>(self, backend: B) -> Self::Output {
+        let ring = Ring::<Bls12381, B>::new(backend);
+        let mut points = reserved(self.points.len())?;
+        for point in self.points {
             points.push(homogeneous::G1Point {
                 x: point.x,
                 y: point.y,
@@ -413,7 +494,7 @@ impl<R: CryptoRng, const LANES: usize> WithBackend for Receive<'_, R, LANES> {
         if !check(
             &points,
             self.rng,
-            &arithmetic.ring,
+            &ring,
             homogeneous::G1Point::identity(),
             &|point| with_backend(homogeneous::InSubgroup(point)),
         )? {

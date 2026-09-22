@@ -139,30 +139,39 @@ impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
             // t = x0/x1 = (z1^2 - 4)/z0^2. One inverse gives both t and 1/t.
             let t = self.fp_mul(&self.fp_sqr(&c), inverse);
             let inverse_t = self.fp_mul(&self.fp_sqr(&self.fp_sqr(&z0)), inverse);
-            let y0 = self.fp_sub(
-                &z1,
-                &self.fp_mul(
-                    &self.fp_add(&self.double(&self.fp_sub(&z0, &z1)), &self.fp_mul(&z0, &t)),
-                    &t,
+            let ring = &self.ring;
+            let t_squared = self.fp_sqr(&t);
+            // y0 = z1(1 + 2t) - z0(t^2 + 2t)
+            // y1 = (z1 - 2z0) + (2z1 - z0)/t
+            let [y0, y1] = ring.batch_reduce_expand(&[
+                ring.ready::<800>(
+                    ring.prep_left(z1) * ring.prep(Field::ONE + t.scale::<2>())
+                        + ring.prep_left(z0) * ring.negate(ring.prep(t_squared + t.scale::<2>())),
                 ),
-            );
-            let y1 = self.fp_add(
-                &self.fp_sub(&z1, &self.double(&z0)),
-                &self.fp_mul(&self.fp_sub(&self.double(&z1), &z0), &inverse_t),
-            );
-            let a = self.fp_add(&self.cube(&x), &self.four());
-            let y1_squared = self.fp_sqr(&y1);
+                ring.ready::<800>(
+                    ring.prep_left(z1 - z0.scale::<2>()) * Field::ONE
+                        + ring.prep_left(z1.scale::<2>() - z0) * inverse_t,
+                ),
+            ]);
+            let values = [x, y0, y1];
+            let [x_squared, y0_squared, y1_squared] = self.products(&values, &values);
             // Same-orbit pairs have a unique encoding in the fallback format.
-            if self.fp_eq(&self.fp_sqr(&y0), &y1_squared) {
+            if self.fp_eq(&y0_squared, &y1_squared) {
                 return None;
             }
-            let b = self.fp_sub(&y1_squared, &self.four());
+            let [a, b] = ring.batch_reduce_expand(&[
+                ring.ready::<800>(
+                    ring.prep_left(x_squared) * x + ring.prep_left(self.four()) * Field::ONE,
+                ),
+                ring.ready::<800>(ring.prep_left(y1_squared - self.four()) * Field::ONE),
+            ]);
             let ab = self.fp_mul(&a, &b);
             if self.fp_is_zero(&ab) {
                 return None;
             }
             coordinates.push((t, y0, y1, ab));
-            radicands.push(self.fp_mul(&self.cube(&a), &self.fp_sqr(&b)));
+            // a^3 b^2 = a(ab)^2 reuses the coordinate-recovery product.
+            radicands.push(self.fp_mul(&a, &self.fp_sqr(&ab)));
         }
         let extracted = self.root_batch(&radicands)?;
         inverses.clear();
@@ -180,32 +189,29 @@ impl<B: Backend, const LANES: usize> Arithmetic<B, LANES> {
             .zip(&inverses)
         {
             // root^6 = a^3 b^2, x1 = ab/root^2, y2 = root^3/ab.
-            let mut x1 = self.roots(self.fp_mul(&self.fp_sqr(&ab), inverse));
-            x1.sort_unstable_by_key(field_bytes);
-            let x1 = x1[usize::from(selector / 2)];
+            let x1 = self.ranked_root(
+                self.fp_mul(&self.fp_sqr(&ab), inverse),
+                usize::from(selector / 2),
+            );
             let mut y2 = self.fp_mul(
                 &self.fp_mul(&self.fp_sqr(&self.fp_sqr(root)), root),
                 inverse,
             );
-            if (field_bytes(&y2) > field_bytes(&self.fp_neg(&y2))) != (selector & 1 != 0) {
+            if Fp::from(y2).lexicographically_largest().unwrap_u8() != selector & 1 {
                 y2 = self.fp_neg(&y2);
             }
-            for (offset, point) in [
+            let triple = [
                 Affine {
                     x: self.fp_mul(&t, &x1),
                     y: y0,
                 },
                 Affine { x: x1, y: y1 },
                 Affine { x: x2, y: y2 },
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                if !self.valid_affine(&point) {
-                    return None;
-                }
-                decoded[3 * index + offset] = point;
+            ];
+            if !self.valid_points(&triple) {
+                return None;
             }
+            decoded[3 * index..3 * index + 3].copy_from_slice(&triple);
         }
         let tail = self.decode_pairs(bytes.chunks_exact(144).remainder())?;
         decoded[bytes.len() / 144 * 3..].copy_from_slice(&tail);

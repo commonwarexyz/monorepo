@@ -80,7 +80,8 @@ just test -p commonware-cryptography-bls --release \
 
 `COMMONWARE_DECODE_METHODS=standard_batch,triple_roots4` selects a subset.
 Available methods are `standard_individual`, `standard_batch`, `pair_roots4`,
-`triple_roots1`, `triple_roots4`, and `blst_individual`.
+`triple_roots1`, `triple_roots2`, `triple_roots4`, `triple_roots8`, and
+`blst_individual`.
 
 Each workload uses the same deterministic random, distinct subgroup points in
 all formats. blst generates the fixtures outside timing. Native timed paths use
@@ -106,3 +107,18 @@ benchmark to CPU 0 (override with `COMMONWARE_DECODE_CPU`), and saves the log in
 `target/decode-benchmark`. It does not provision instances or read AWS keys.
 The benchmark itself also reports the selected backend and refuses to run
 without AVX-512 when `COMMONWARE_REQUIRE_AVX512` is set.
+
+## AVX-512 tuning candidates
+
+The native experiment also provides `triple_roots2` and `triple_roots8` to measure
+root-chain width on one x86 core. Coordinate recovery combines signed wide
+products before reduction; curve checks batch the exact residuals
+`y^2 - x^3 - 4`. Both checks retain their full adversarial-input semantics.
+Radicands reuse the coordinate product (`a^3 b^2 = a(ab)^2`, and likewise for
+pairs). Root-rank sorting caches each canonical field encoding, and sign
+selection uses one canonical comparison with the field midpoint.
+
+Root extraction and subgroup validation use separate bulk backend entries.
+This shares their machine code across charts and root widths while keeping
+arithmetic inside the selected target-feature context. These are candidates
+until the pinned C8a measurements establish their end-to-end effect.

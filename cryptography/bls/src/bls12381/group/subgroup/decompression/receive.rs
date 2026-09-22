@@ -11,7 +11,9 @@ enum Method {
     StandardBatch,
     Pair,
     TripleSerial,
+    TripleTwo,
     TripleBatch,
+    TripleEight,
 }
 
 impl Method {
@@ -22,6 +24,8 @@ impl Method {
             Self::Pair => "pair_roots4",
             Self::TripleSerial => "triple_roots1",
             Self::TripleBatch => "triple_roots4",
+            Self::TripleTwo => "triple_roots2",
+            Self::TripleEight => "triple_roots8",
         }
     }
 
@@ -29,7 +33,9 @@ impl Method {
         match self {
             Self::StandardIndividual | Self::StandardBatch => Format::Standard,
             Self::Pair => Format::Pair,
-            Self::TripleSerial | Self::TripleBatch => Format::Triple,
+            Self::TripleSerial | Self::TripleTwo | Self::TripleBatch | Self::TripleEight => {
+                Format::Triple
+            }
         }
     }
 
@@ -41,16 +47,30 @@ impl Method {
         match self {
             Self::StandardIndividual => standard.iter().map(G1::from_bytes).collect(),
             Self::StandardBatch => G1::batch_from_bytes(rng, standard),
-            Self::TripleSerial => with_backend(Receive::<_, 1> {
+            Self::TripleSerial => Receive::<_, 1> {
                 bytes,
                 format: self.format(),
                 rng,
-            }),
-            Self::Pair | Self::TripleBatch => with_backend(Receive::<_, 4> {
+            }
+            .run(),
+            Self::TripleTwo => Receive::<_, 2> {
                 bytes,
                 format: self.format(),
                 rng,
-            }),
+            }
+            .run(),
+            Self::Pair | Self::TripleBatch => Receive::<_, 4> {
+                bytes,
+                format: self.format(),
+                rng,
+            }
+            .run(),
+            Self::TripleEight => Receive::<_, 8> {
+                bytes,
+                format: self.format(),
+                rng,
+            }
+            .run(),
         }
     }
 }
@@ -110,7 +130,9 @@ fn measure_wire_to_points() {
             Method::StandardBatch,
             Method::Pair,
             Method::TripleSerial,
+            Method::TripleTwo,
             Method::TripleBatch,
+            Method::TripleEight,
         ] {
             if !selected(method.name()) {
                 continue;

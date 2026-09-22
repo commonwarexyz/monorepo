@@ -69,7 +69,7 @@ pub(super) fn encode(points: &[Affine], format: Format) -> Vec<u8> {
 }
 
 fn receive(bytes: &[u8], format: Format, rng: &mut impl CryptoRng) -> Option<Vec<G1>> {
-    with_backend(Receive::<_, 4> { bytes, format, rng })
+    Receive::<_, 4> { bytes, format, rng }.run()
 }
 
 #[test]
@@ -185,6 +185,26 @@ fn exceptional_fibers_and_canonical_mutations() {
                 ring: Ring::new(backend),
             };
             let base = self.0[0];
+            for i in 0..64u64 {
+                let mut point = base;
+                if i != 0 {
+                    point.x = a.fp_add(&point.x, &Fp::from_u64(i).into());
+                }
+                let triples = [base, point, base];
+                assert_eq!(
+                    a.valid_points(&triples),
+                    triples.iter().all(|p| a.valid_affine(p))
+                );
+            }
+            for point in [
+                Affine::ZERO,
+                Affine {
+                    x: Field::ZERO,
+                    y: Fp::from_u64(2).into(),
+                },
+            ] {
+                assert!(!a.valid_points(&[base, point, base]));
+            }
             let mut cases = vec![self.0];
             for x in a.roots(base.x) {
                 for y in [base.y, a.fp_neg(&base.y)] {
