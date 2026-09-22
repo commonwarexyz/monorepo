@@ -160,6 +160,8 @@ impl Buffer {
         old_tail.truncate(tail_full_len);
         drained.append(old_tail.freeze());
 
+        // The drained chunks must cover exactly the full pages. Advancing by that length
+        // keeps the retained partial page at its original logical position in the blob.
         assert_eq!(
             drained.len(),
             full_len,
