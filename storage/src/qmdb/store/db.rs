@@ -1029,7 +1029,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_construct_basic() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -1139,7 +1138,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_log_replay() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let mut db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -1183,7 +1181,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_build_snapshot_keys_with_shared_prefix() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -1216,7 +1213,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_delete() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 
@@ -1280,7 +1276,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_pruning() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store")).await;
 
@@ -1459,7 +1454,6 @@ mod test {
     #[test_traced("DEBUG")]
     fn test_store_batch() {
         let executor = deterministic::Runner::default();
-
         executor.start(|mut ctx| async move {
             let db = create_test_store(ctx.child("store").with_attribute("index", 0)).await;
 

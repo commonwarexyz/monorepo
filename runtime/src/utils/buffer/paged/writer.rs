@@ -4991,7 +4991,6 @@ mod tests {
         // Verify that shrinking a blob to a partial page validates the CRC, rather than
         // blindly reading raw bytes which could silently load corrupted data.
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
@@ -5420,7 +5419,6 @@ mod tests {
     #[test]
     fn test_recovery_truncate_same_page_shrink_reopens_at_shorter_size() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let data: Vec<u8> = (0..50).collect();
@@ -5506,7 +5504,6 @@ mod tests {
     #[test]
     fn test_recovery_truncate_same_page_shrink_survives_interrupted_crc_stage() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let data: Vec<u8> = (0..50).collect();
@@ -5559,7 +5556,6 @@ mod tests {
     #[test]
     fn test_recovery_truncate_same_page_shrink_survives_interrupted_len_stage() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(600);
             const LARGE_BUFFER_SIZE: usize = 1_200;
@@ -5617,7 +5613,6 @@ mod tests {
     #[test]
     fn test_recovery_truncate_same_page_shrink_preserves_validated_fallback_slot() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let data: Vec<u8> = (0..52).collect();
@@ -5677,7 +5672,6 @@ mod tests {
     #[test]
     fn test_recovery_truncate_full_page_to_partial_reopens_at_shorter_size() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let page_size = PAGE_SIZE.get() as u64;
@@ -5713,7 +5707,6 @@ mod tests {
     #[test]
     fn test_recovery_truncate_full_page_to_partial_survives_interrupted_crc_stage() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let page_size = PAGE_SIZE.get() as u64;
@@ -5770,7 +5763,6 @@ mod tests {
     #[test]
     fn test_recovery_truncate_same_page_shrink_survives_interrupted_length_invalidation() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(600);
             const LARGE_BUFFER_SIZE: usize = 1_200;
@@ -5949,7 +5941,6 @@ mod tests {
     #[test]
     fn test_recovery_partial_tail_append_and_truncate() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             const PAGE_SIZE: NonZeroU16 = NZU16!(64);
             const BUFFER_SIZE: usize = 256;
@@ -5993,7 +5984,6 @@ mod tests {
     #[test]
     fn test_corrupted_crc_len_too_large() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
             let physical_page_size = PAGE_SIZE.get() as usize + CHECKSUM_SIZE as usize;
@@ -6064,7 +6054,6 @@ mod tests {
     #[test]
     fn test_corrupted_crc_both_slots_len_too_large() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 

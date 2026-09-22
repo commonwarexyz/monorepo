@@ -2131,7 +2131,6 @@ mod tests {
     fn test_default_time_zero() {
         // Initialize runtime
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             // Check that the time is zero
             assert_eq!(
@@ -2153,7 +2152,6 @@ mod tests {
         let start_time = UNIX_EPOCH + Duration::from_secs(100);
         let cfg = Config::default().with_start_time(start_time);
         let executor = deterministic::Runner::new(cfg);
-
         executor.start(move |context| async move {
             // Check that the time matches the custom start time
             assert_eq!(context.current(), start_time);

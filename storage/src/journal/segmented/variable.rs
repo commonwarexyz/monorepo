@@ -1597,7 +1597,6 @@ mod tests {
     #[test_traced]
     fn test_journal_prune_guard() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test-partition".into(),
@@ -1708,7 +1707,6 @@ mod tests {
     #[test_traced]
     fn test_journal_prune_guard_across_restart() {
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test-partition".into(),
