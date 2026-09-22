@@ -90,14 +90,11 @@ mod tests {
     fn db_config<S: Strategy>(suffix: &str, pooler: &impl BufferPooler, strategy: S) -> Config<S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle: crate::merkle::full::Config {
-                journal_partition: format!("fixed-journal-{suffix}"),
+            merkle: crate::journal::authenticated::Config {
                 metadata_partition: format!("fixed-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: JournalConfig {
                 partition: format!("fixed-log-journal-{suffix}"),
@@ -176,9 +173,7 @@ mod tests {
         let mut cfg = db_config(suffix, context, Sequential);
         let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
         cfg.log.items_per_blob = NZU64!(1000);
-        cfg.log.page_cache = page_cache.clone();
-        cfg.merkle.items_per_blob = NZU64!(1000);
-        cfg.merkle.page_cache = page_cache;
+        cfg.log.page_cache = page_cache;
         DelayedDb::init(
             DelayedSyncContext {
                 inner: context.child(label),
@@ -329,14 +324,14 @@ mod tests {
         });
     }
 
-    /// Pruning drains the in-flight sync before mutating storage.
+    /// Same-blob pruning performs no storage mutation and need not wait for a pending sync.
     #[test_traced]
-    fn test_keyless_fixed_start_sync_prune_waits() {
+    fn test_keyless_fixed_start_sync_noop_prune_does_not_wait() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(&ctx, "delayed", "start-sync-prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            // Two batches: the second declares floor 2 so the prune below is non-trivial.
+            // The second batch advances the floor within the same physical blob.
             (db, _) = apply_append(db, U64::new(1), Location::new(0)).await;
             (db, _) = apply_append(db, U64::new(2), Location::new(2)).await;
 
@@ -347,15 +342,14 @@ mod tests {
 
             let floor = db.inactivity_floor_loc();
             assert!(*floor > 0);
-            let db = {
-                let mut prune = std::pin::pin!(db.prune(floor));
-                assert!(
-                    prune.as_mut().now_or_never().is_none(),
-                    "prune proceeded while the started sync was pending"
-                );
-                pending.unblock();
-                prune.await.unwrap()
-            };
+            let starts = pending.starts();
+            let db = db
+                .prune(floor)
+                .now_or_never()
+                .expect("same-blob prune must complete without I/O")
+                .unwrap();
+            assert_eq!(pending.starts(), starts);
+            pending.unblock();
             handle.await.unwrap();
             db.destroy().await.unwrap();
         });

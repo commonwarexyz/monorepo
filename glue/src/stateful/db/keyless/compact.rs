@@ -429,8 +429,10 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::{full::Config as MerkleConfig, mmr},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedJournalConfig,
+        },
+        merkle::mmr,
         qmdb::{keyless as storage_keyless, sync::source},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
@@ -495,13 +497,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(context, NZU16!(101), NZUsize!(11));
         storage_keyless::fixed::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("stateful-keyless-full-journal-{suffix}"),
                 metadata_partition: format!("stateful-keyless-full-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("stateful-keyless-full-log-{suffix}"),

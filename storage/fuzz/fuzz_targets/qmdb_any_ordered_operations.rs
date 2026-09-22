@@ -6,9 +6,11 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
     index::ordered::Index,
-    journal::contiguous::fixed::{Config as FConfig, Journal},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::fixed::{Config as FConfig, Journal},
+    },
     merkle::{Family as MerkleFamily, Location, Proof, mmb, mmr},
-    mmr::full::Config as MerkleConfig,
     qmdb::{
         any::{
             FixedConfig as Config,
@@ -148,14 +150,11 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             );
             let cfg = Config::<EightCap, Sequential> {
                 merkle_config: MerkleConfig {
-                    journal_partition: format!("test-qmdb-mmr-journal-{suffix}"),
-                    metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
-                    items_per_blob: NZU64!(500000),
-                    write_buffer: NZUsize!(1024),
-                    replay_buffer: NZUsize!(1024),
-                    strategy: Sequential,
-                    page_cache: page_cache.clone(),
-                },
+metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
+replay_buffer: NZUsize!(1024),
+strategy: Sequential,
+cache: Default::default(),
+},
                 journal_config: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
                     items_per_blob: NZU64!(500000),

@@ -6,9 +6,8 @@ use commonware_cryptography::{Hasher, Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufferPooler, Runner, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::variable::Config as VConfig,
+    journal::{authenticated::Config as MerkleConfig, contiguous::variable::Config as VConfig},
     merkle::{Family as MerkleFamily, Location, mmb, mmr},
-    mmr::full::Config as MerkleConfig,
     qmdb::{
         immutable::{Config, variable::Db as Immutable},
         verify_proof,
@@ -25,7 +24,6 @@ const MAX_PROOF_OPS: u64 = 100;
 const PAGE_SIZE: NonZeroU16 = NZU16!(77);
 const PAGE_CACHE_SIZE: usize = 9;
 const ITEMS_PER_SECTION: u64 = 5;
-const ITEMS_PER_BLOB: u64 = 11;
 
 #[derive(Arbitrary, Debug, Clone)]
 enum ImmutableOperation {
@@ -101,13 +99,10 @@ fn db_config(
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle_config: MerkleConfig {
-            journal_partition: format!("journal-{suffix}"),
             metadata_partition: format!("metadata-{suffix}"),
-            items_per_blob: NZU64!(ITEMS_PER_BLOB),
-            write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: Default::default(),
         },
         log: VConfig {
             partition: format!("log-{suffix}"),

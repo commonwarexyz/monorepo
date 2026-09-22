@@ -1366,7 +1366,6 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
         .await;
         let mut db_config = qmdb_config("stable-leader-qmdb-stateful", page_cache);
         db_config.journal_config.items_per_blob = NZU64!(1024);
-        db_config.merkle_config.items_per_blob = NZU64!(1024);
         let (stateful, mut stateful_mailbox) = StatefulActor::init(
             delayed.child("stateful"),
             StatefulConfig {

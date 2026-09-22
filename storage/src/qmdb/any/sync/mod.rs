@@ -8,7 +8,7 @@ use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered},
     journal::{authenticated, contiguous::Mutable},
-    merkle::{self, Location, full},
+    merkle::{self, Location},
     qmdb::{
         self, SnapshotBuild,
         any::{
@@ -34,9 +34,10 @@ pub(crate) mod tests;
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, C, const N: usize, S>(
     context: E,
-    merkle_config: full::Config<S>,
+    merkle_config: authenticated::Config<S>,
     log: C,
     translator: I::Translator,
+    state: authenticated::Frontier<F, E, H::Digest>,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
@@ -56,20 +57,18 @@ where
 {
     let hasher = qmdb::hasher::<H>();
 
-    let merkle = full::Merkle::<F, _, _, S>::init_sync(
-        context.child("merkle"),
-        full::SyncConfig {
-            config: merkle_config,
-            range: range.clone(),
-            pinned_nodes,
-        },
-    )
-    .await?;
-
+    let expected = pinned_nodes.unwrap_or_default();
+    let boundary = state
+        .candidate()
+        .ok_or(authenticated::Error::MissingFrontier)?;
+    if boundary.location != range.start() || boundary.digests != expected {
+        return Err(crate::merkle::Error::InvalidPinnedNodes.into());
+    }
     let index = I::new(context.child("index"), translator);
 
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
-        merkle,
+        state,
+        merkle_config,
         log,
         hasher,
         apply_batch_size.get(),
@@ -118,11 +117,39 @@ where
         <I as SnapshotBuild<F>>::Concurrency,
     >;
     type Digest = H::Digest;
+    type SyncState = authenticated::Frontier<F, E, H::Digest>;
+
+    async fn begin_sync(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<Self::SyncState, qmdb::Error<F>> {
+        config
+            .merkle_config
+            .cache
+            .capacity::<H::Digest>()
+            .map_err(authenticated::Error::InvalidConfig)?;
+        Ok(authenticated::Frontier::open(
+            context.child("frontier"),
+            config.merkle_config.metadata_partition.clone(),
+        )
+        .await?
+        .importing()
+        .await?)
+    }
+
+    async fn stage_sync_frontier(
+        state: Self::SyncState,
+        location: Location<F>,
+        pins: Vec<Self::Digest>,
+    ) -> Result<Self::SyncState, qmdb::Error<F>> {
+        Ok(state.stage(location, pins).await?)
+    }
 
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
         log: Self::Journal,
+        state: Self::SyncState,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
@@ -132,6 +159,7 @@ where
             config.merkle_config,
             log,
             config.translator,
+            state,
             pinned_nodes,
             range,
             apply_batch_size,
@@ -142,12 +170,13 @@ where
         .await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        self.log = self.log.activate().await?;
         Ok(self)
     }
 
     async fn local_pinned_nodes(
-        context: Self::Context,
+        state: &Self::SyncState,
         config: &Self::Config,
         target: &qmdb::sync::Target<Self::Family, Self::Digest>,
         journal: &Self::Journal,
@@ -159,9 +188,10 @@ where
         }
 
         // The target's range starts at the inactivity floor.
-        qmdb::sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle_config.clone(),
+        qmdb::sync::local_pinned_nodes::<F, _, H, S, _>(
+            state,
+            &config.merkle_config,
+            journal,
             target,
             target.range.start(),
         )

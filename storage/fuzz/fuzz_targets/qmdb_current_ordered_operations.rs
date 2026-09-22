@@ -5,8 +5,8 @@ use commonware_cryptography::{Sha256, sha256::Digest};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
-    merkle::{Graftable, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
+    merkle::{Graftable, Location, mmb, mmr},
     qmdb::{
         any::value::FixedEncoding,
         current::{FixedConfig as Config, ordered::fixed::Db as CurrentDb},
@@ -97,7 +97,6 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(91);
 const PAGE_CACHE_SIZE: usize = 8;
-const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
@@ -171,14 +170,11 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
         );
         let cfg = Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("fuzz-current-ord-{suffix}-merkle-journal"),
-                metadata_partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
-                items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
-                write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-                replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-                strategy: Sequential,
-                page_cache: page_cache.clone(),
-            },
+metadata_partition: format!("fuzz-current-ord-{suffix}-merkle-metadata"),
+replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+strategy: Sequential,
+cache: Default::default(),
+},
             journal_config: FConfig {
                 partition: format!("fuzz-current-ord-{suffix}-log-journal"),
                 items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),

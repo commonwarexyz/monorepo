@@ -225,6 +225,7 @@ where
 
     /// Journal that operations are applied to during sync
     journal: DB::Journal,
+    sync_state: DB::SyncState,
 
     /// Source of operations and proofs, shared with in-flight requests
     source: Arc<S>,
@@ -287,29 +288,26 @@ where
             }));
         }
 
-        let journal = <DB::Journal as Journal<DB::Family>>::new(
+        let mut sync_state =
+            DB::begin_sync(config.context.child("sync_state"), &config.db_config).await?;
+        let journal = <DB::Journal as Journal<DB::Family>>::open(
             config.context.child("journal"),
             config.db_config.journal_config(),
-            config.target.range.clone(),
         )
         .await?;
-        let journal_size = journal.size();
-
-        // The sync journal is the source of truth for resume. If it already
-        // reaches the target, try to recover the target's pinned nodes from local
-        // Merkle state before asking peers for them. Partial journals resume without
-        // probing completed database state.
-        let pinned_nodes = if journal_size == *config.target.range.end() {
-            DB::local_pinned_nodes(
-                config.context.child("local_pinned_nodes"),
-                &config.db_config,
-                &config.target,
-                &journal,
-            )
-            .await?
+        let pinned_nodes = if config.target.range.start() == Location::new(0) {
+            Some(Vec::new())
+        } else if journal.size() >= *config.target.range.end() {
+            DB::local_pinned_nodes(&sync_state, &config.db_config, &config.target, &journal).await?
         } else {
             None
         };
+        if let Some(pins) = &pinned_nodes {
+            sync_state =
+                DB::stage_sync_frontier(sync_state, config.target.range.start(), pins.clone())
+                    .await?;
+        }
+        let journal = journal.prepare_range(config.target.range.clone()).await?;
 
         let sync_context = config.context.child("sync");
         let metrics = Metrics::new(&sync_context);
@@ -324,6 +322,7 @@ where
             fetch_batch_size: config.fetch_batch_size,
             apply_batch_size: config.apply_batch_size,
             journal,
+            sync_state,
             source: Arc::new(config.source),
             context: config.context,
             config: config.db_config,
@@ -433,9 +432,20 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
+        let pins = if self.journal.size() >= *new_target.range.end() {
+            DB::local_pinned_nodes(&self.sync_state, &self.config, &new_target, &self.journal)
+                .await?
+        } else {
+            None
+        };
+        if let Some(pins) = &pins {
+            self.sync_state =
+                DB::stage_sync_frontier(self.sync_state, new_target.range.start(), pins.clone())
+                    .await?;
+        }
         self.journal = self.journal.resize(new_target.range.start()).await?;
         self.fetched_operations.clear();
-        self.pinned_nodes = None;
+        self.pinned_nodes = pins;
 
         // Retain the prior target size so its fetches stay eligible until eviction.
         if self.max_retained_roots > 0 {
@@ -603,13 +613,13 @@ where
     }
 
     /// Handle the result of a fetch operation.
-    fn handle_fetch_result(
-        &mut self,
+    async fn handle_fetch_result(
+        mut self,
         fetch_result: IndexedFetchResult<DB::Family, DB::Op, DB::Digest, S::Error>,
-    ) -> Result<(), Error<DB, S>> {
+    ) -> Result<Self, Error<DB, S>> {
         // A target update can retire a request before its completed result is handled.
         let Some(request) = self.outstanding_requests.remove(fetch_result.id) else {
-            return Ok(());
+            return Ok(self);
         };
 
         let response = fetch_result
@@ -626,12 +636,15 @@ where
                 op, pinned_nodes, ..
             } => {
                 // A tracked boundary request belongs to the current target.
+                self.sync_state =
+                    DB::stage_sync_frontier(self.sync_state, start_loc, pinned_nodes.clone())
+                        .await?;
                 self.pinned_nodes = Some(pinned_nodes);
                 self.store_operations(start_loc, vec![op]);
             }
         }
 
-        Ok(())
+        Ok(self)
     }
 
     /// Handle a sync event and return the next engine state.
@@ -669,7 +682,7 @@ where
             Event::BatchReceived(fetch_result) => {
                 // An aborted request carries no result, but still wakes the loop to reschedule.
                 if let Ok(fetch_result) = fetch_result {
-                    self.handle_fetch_result(fetch_result)?;
+                    self = self.handle_fetch_result(fetch_result).await?;
                 }
                 self.schedule_requests();
                 let mut engine = self.apply_operations().await?;
@@ -750,6 +763,7 @@ where
             self.context,
             self.config,
             self.journal,
+            self.sync_state,
             self.pinned_nodes,
             self.target.range.clone(),
             self.apply_batch_size,
@@ -825,12 +839,15 @@ mod tests {
         type Error = crate::journal::Error;
         type Op = i32;
 
-        async fn new(
-            _context: Self::Context,
-            size: Self::Config,
+        async fn open(_context: Self::Context, size: Self::Config) -> Result<Self, Self::Error> {
+            Ok(Self { size })
+        }
+
+        async fn prepare_range(
+            self,
             _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
         ) -> Result<Self, Self::Error> {
-            Ok(Self { size })
+            Ok(self)
         }
 
         async fn resize(mut self, start: Location<MmrFamily>) -> Result<Self, Self::Error> {
@@ -862,11 +879,26 @@ mod tests {
         type Hasher = Sha256;
         type Journal = TestJournal;
         type Op = i32;
+        type SyncState = ();
+        async fn begin_sync(
+            _context: Self::Context,
+            _config: &Self::Config,
+        ) -> Result<(), qmdb::Error<MmrFamily>> {
+            Ok(())
+        }
+        async fn stage_sync_frontier(
+            _state: (),
+            _location: Location<MmrFamily>,
+            _pins: Vec<Self::Digest>,
+        ) -> Result<(), qmdb::Error<MmrFamily>> {
+            Ok(())
+        }
 
         async fn from_sync_result(
             _context: Self::Context,
             _config: Self::Config,
             _journal: Self::Journal,
+            _state: Self::SyncState,
             _pinned_nodes: Option<Vec<Self::Digest>>,
             _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
             _apply_batch_size: NonZeroU64,
@@ -879,7 +911,7 @@ mod tests {
         }
 
         async fn local_pinned_nodes(
-            _context: Self::Context,
+            _state: &Self::SyncState,
             config: &Self::Config,
             _target: &Target<Self::Family, Self::Digest>,
             _journal: &Self::Journal,
@@ -993,7 +1025,7 @@ mod tests {
             assert!(engine.retained_sizes.is_empty());
             assert_eq!(engine.outstanding_requests.len(), 0);
             assert!(engine.outstanding_requests.remove(old_id).is_none());
-            engine.handle_fetch_result(queued_result).unwrap();
+            engine = engine.handle_fetch_result(queued_result).await.unwrap();
             assert!(engine.fetched_operations.is_empty());
             assert!(engine.pinned_nodes.is_none());
             assert!(matches!(
@@ -1063,7 +1095,7 @@ mod tests {
             );
             assert!(engine.outstanding_requests.contains(&Location::new(7)));
             assert_eq!(engine.outstanding_requests.len(), 1);
-            engine.handle_fetch_result(queued_old_result).unwrap();
+            engine = engine.handle_fetch_result(queued_old_result).await.unwrap();
             assert!(engine.fetched_operations.is_empty());
             assert!(engine.pinned_nodes.is_none());
             assert!(matches!(

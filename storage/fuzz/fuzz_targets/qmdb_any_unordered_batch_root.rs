@@ -7,8 +7,8 @@ use commonware_runtime::{
     BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
-    merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
+    merkle::{Family as MerkleFamily, mmb, mmr},
     qmdb::any::{
         FixedConfig as Config,
         batch::UnmerkleizedBatch,
@@ -103,13 +103,10 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
     let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MerkleConfig {
-            journal_partition: format!("{name}-merkle"),
             metadata_partition: format!("{name}-meta"),
-            items_per_blob: NZU64!(17),
-            write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: Default::default(),
         },
         journal_config: FConfig {
             partition: format!("{name}-log"),

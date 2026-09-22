@@ -17,7 +17,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
-    merkle::{self, full, mmb::Family as Mmb},
+    merkle::{self, mmb::Family as Mmb},
     qmdb::{
         any::traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
         current::{ordered::fixed::Db as OCFixed, unordered::fixed::Db as UCFixed},
@@ -52,15 +52,14 @@ type CurUFix256Mmb =
 type CurOFix256Mmb =
     OCFixed<Mmb, Context, Digest, Digest, Sha256, EightCap, LARGE_CHUNK_SIZE, Rayon>;
 
-fn merkle_cfg(ctx: &(impl BufferPooler + Strategizer), pc: CacheRef) -> full::Config<Rayon> {
-    full::Config {
-        journal_partition: format!("journal-{PARTITION}"),
+fn merkle_cfg(
+    ctx: &(impl BufferPooler + Strategizer),
+) -> commonware_storage::journal::authenticated::Config<Rayon> {
+    commonware_storage::journal::authenticated::Config {
         metadata_partition: format!("metadata-{PARTITION}"),
-        items_per_blob: ITEMS_PER_BLOB,
-        write_buffer: WRITE_BUFFER_SIZE,
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
-        page_cache: pc,
+        cache: Default::default(),
     }
 }
 
@@ -83,7 +82,7 @@ fn cur_fix_cfg(
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
     let pc = pc(ctx);
     commonware_storage::qmdb::current::FixedConfig {
-        merkle_config: merkle_cfg(ctx, pc.clone()),
+        merkle_config: merkle_cfg(ctx),
         journal_config: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,

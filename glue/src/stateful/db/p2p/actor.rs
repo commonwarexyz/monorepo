@@ -365,8 +365,10 @@ mod tests {
         reschedule, telemetry::metrics::count_running_tasks,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, Location, Proof, full::Config as MmrJournalConfig},
+        journal::{
+            authenticated::Config as MmrJournalConfig, contiguous::fixed::Config as FixedLogConfig,
+        },
+        mmr::{self, Location, Proof},
         qmdb::{
             any::{FixedConfig, unordered::fixed},
             sync,
@@ -567,13 +569,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
         FixedConfig {
             merkle_config: MmrJournalConfig {
-                journal_partition: format!("{suffix}-mmr-journal"),
                 metadata_partition: format!("{suffix}-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: FixedLogConfig {
                 partition: format!("{suffix}-log-journal"),

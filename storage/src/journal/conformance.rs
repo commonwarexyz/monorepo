@@ -27,16 +27,13 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 fn authenticated_merkle_config(
     prefix: &str,
-    pooler: &impl BufferPooler,
-) -> crate::merkle::full::Config<Sequential> {
-    crate::merkle::full::Config {
-        journal_partition: format!("{prefix}-merkle-journal"),
+    _pooler: &impl BufferPooler,
+) -> crate::journal::authenticated::Config<Sequential> {
+    crate::journal::authenticated::Config {
         metadata_partition: format!("{prefix}-merkle-metadata"),
-        items_per_blob: NZU64!(11),
-        write_buffer: WRITE_BUFFER,
         replay_buffer: REPLAY_BUFFER,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        cache: Default::default(),
     }
 }
 

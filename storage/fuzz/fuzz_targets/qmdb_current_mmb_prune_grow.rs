@@ -16,8 +16,8 @@ use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Runner, Supervisor as _, buffer::paged::CacheRef, deterministic};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FConfig,
-    merkle::{full::Config as MerkleConfig, mmb},
+    journal::{authenticated::Config as MerkleConfig, contiguous::fixed::Config as FConfig},
+    merkle::mmb,
     qmdb::current::{BitmapPrunedBits, FixedConfig as Config, unordered::fixed::Db as CurrentDb},
     translator::TwoCap,
 };
@@ -142,20 +142,16 @@ fn find_live_key(
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(88);
 const PAGE_CACHE_SIZE: usize = 2;
-const MERKLE_ITEMS_PER_BLOB: u64 = 11;
 const LOG_ITEMS_PER_BLOB: u64 = 7;
 const WRITE_BUFFER_SIZE: usize = 1024;
 
 fn test_config(name: &str, page_cache: CacheRef) -> Config<TwoCap, Sequential> {
     Config {
         merkle_config: MerkleConfig {
-            journal_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-journal"),
             metadata_partition: format!("fuzz-current-mmb-pruning-{name}-merkle-metadata"),
-            items_per_blob: NZU64!(MERKLE_ITEMS_PER_BLOB),
-            write_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: Default::default(),
         },
         journal_config: FConfig {
             partition: format!("fuzz-current-mmb-pruning-{name}-log-journal"),

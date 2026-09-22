@@ -30,10 +30,7 @@ use crate::{
     Context,
     index::{Factory as IndexFactory, Unordered as UnorderedIndex},
     journal::{authenticated, contiguous::Mutable},
-    merkle::{
-        Graftable, Location,
-        full::{self, Merkle},
-    },
+    merkle::{Graftable, Location, storage::Storage as _},
     qmdb::{
         self,
         any::{
@@ -76,9 +73,10 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, 
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     context: E,
-    merkle_config: full::Config<S>,
+    mut merkle_config: authenticated::Config<S>,
     log: J,
     translator: I::Translator,
+    state: authenticated::Frontier<F, E, H::Digest>,
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
@@ -98,19 +96,25 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    if merkle_config.cache.resident_height > 8 {
+        return Err(authenticated::Error::InvalidConfig("resident height exceeds eight").into());
+    }
+    merkle_config.cache.resident_height = merkle_config
+        .cache
+        .resident_height
+        .min(grafting::height::<N>());
     // Build authenticated log.
-    let merkle = Merkle::<F, _, _, S>::init_sync(
-        context.child("merkle"),
-        full::SyncConfig {
-            config: merkle_config,
-            range: range.clone(),
-            pinned_nodes,
-        },
-    )
-    .await?;
+    let expected = pinned_nodes.unwrap_or_default();
+    let boundary = state
+        .candidate()
+        .ok_or(authenticated::Error::MissingFrontier)?;
+    if boundary.location != range.start() || boundary.digests != expected {
+        return Err(crate::merkle::Error::InvalidPinnedNodes.into());
+    }
     let index = I::new(context.child("index"), translator);
     let log = authenticated::Journal::<F, _, _, _, S>::from_components(
-        merkle,
+        state,
+        merkle_config,
         log,
         qmdb::hasher::<H>(),
         apply_batch_size.get(),
@@ -159,7 +163,6 @@ where
             let ops_pos = grafting::grafted_to_ops_pos::<F>(grafted_pos, grafting_height);
             let digest = any
                 .log
-                .merkle
                 .get_node(ops_pos)
                 .await?
                 .ok_or(qmdb::Error::<F>::DataCorrupted("missing ops pinned node"))?;
@@ -174,7 +177,7 @@ where
     let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &grafted_pinned_nodes,
-        &any.log.merkle,
+        &any.log,
         any.inactivity_floor_loc,
         any.root(),
         &strategy,
@@ -198,9 +201,6 @@ where
         halt_before_prune_log: false,
     };
     current_db.update_metrics();
-
-    // Persist metadata so the db can be reopened with init_fixed/init_variable.
-    let current_db = current_db.sync_metadata().await?;
 
     Ok(current_db)
 }
@@ -231,11 +231,44 @@ where
         <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
     >;
     type Digest = H::Digest;
+    type SyncState = authenticated::Frontier<F, E, H::Digest>;
+
+    async fn begin_sync(
+        context: Self::Context,
+        config: &Self::Config,
+    ) -> Result<Self::SyncState, qmdb::Error<F>> {
+        let mut cache = config.merkle_config.cache.clone();
+        if cache.resident_height > 8 {
+            return Err(
+                authenticated::Error::InvalidConfig("resident height exceeds eight").into(),
+            );
+        }
+        cache.resident_height = cache.resident_height.min(grafting::height::<N>());
+        cache
+            .capacity::<H::Digest>()
+            .map_err(authenticated::Error::InvalidConfig)?;
+        Ok(authenticated::Frontier::open(
+            context.child("frontier"),
+            config.merkle_config.metadata_partition.clone(),
+        )
+        .await?
+        .importing()
+        .await?)
+    }
+
+    async fn stage_sync_frontier(
+        state: Self::SyncState,
+        location: Location<F>,
+        pins: Vec<Self::Digest>,
+    ) -> Result<Self::SyncState, qmdb::Error<F>> {
+        Ok(state.stage(location, pins).await?)
+    }
 
     async fn from_sync_result(
         context: Self::Context,
         config: Self::Config,
         log: Self::Journal,
+        state: Self::SyncState,
         pinned_nodes: Option<Vec<Self::Digest>>,
         range: NonEmptyRange<Location<F>>,
         apply_batch_size: NonZeroU64,
@@ -246,6 +279,7 @@ where
             config.merkle_config,
             log,
             config.translator,
+            state,
             pinned_nodes,
             range,
             apply_batch_size,
@@ -258,12 +292,14 @@ where
         .await
     }
 
-    async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
+    async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
+        self = self.sync_metadata().await?;
+        self.any.log = self.any.log.activate().await?;
         Ok(self)
     }
 
     async fn local_pinned_nodes(
-        context: Self::Context,
+        state: &Self::SyncState,
         config: &Self::Config,
         target: &qmdb::sync::Target<Self::Family, Self::Digest>,
         journal: &Self::Journal,
@@ -279,9 +315,10 @@ where
         let inactivity_floor =
             qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
 
-        qmdb::sync::local_pinned_nodes::<F, _, H, S>(
-            context,
-            config.merkle_config.clone(),
+        qmdb::sync::local_pinned_nodes::<F, _, H, S, _>(
+            state,
+            &config.merkle_config,
+            journal,
             target,
             inactivity_floor,
         )

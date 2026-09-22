@@ -34,8 +34,10 @@ use commonware_glue::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
-    journal::contiguous::fixed::Config as FixedLogConfig,
-    mmr::{self, Location, full::Config as MmrJournalConfig},
+    journal::{
+        authenticated::Config as MmrJournalConfig, contiguous::fixed::Config as FixedLogConfig,
+    },
+    mmr::{self, Location},
     qmdb::{
         any::{FixedConfig, unordered::fixed},
         sync::Target,
@@ -469,13 +471,10 @@ impl dkg::SecretStore for FileSecretStore {
 pub fn db_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<TwoCap, Sequential> {
     FixedConfig {
         merkle_config: MmrJournalConfig {
-            journal_partition: format!("{prefix}-qmdb-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-mmr-metadata"),
-            items_per_blob: NZU64!(11),
-            write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: Default::default(),
         },
         journal_config: FixedLogConfig {
             partition: format!("{prefix}-qmdb-log-journal"),

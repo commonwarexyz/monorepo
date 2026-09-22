@@ -833,8 +833,7 @@ where
     );
 
     let grafting_height = grafting::height::<N>();
-    let ops_tree_adapter =
-        BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log.merkle);
+    let ops_tree_adapter = BatchStorageAdapter::new(&inner.journal_batch, &current_db.any.log);
 
     // Snapshot ops_leaves for the post-batch state (the canonical root we're about to compute
     // sees this many ops). Thread it through `graftable_chunks` derivation and root computation.

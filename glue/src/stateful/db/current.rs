@@ -1182,10 +1182,13 @@ mod tests {
         BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::{
-            fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+        journal::{
+            authenticated::Config as MerkleConfig,
+            contiguous::{
+                fixed::Config as FixedJournalConfig, variable::Config as VariableJournalConfig,
+            },
         },
-        merkle::{full::Config as MerkleConfig, mmr},
+        merkle::mmr,
         qmdb::current::{
             ordered::{fixed as ordered_fixed, variable as ordered_variable},
             unordered::{fixed, variable},
@@ -1256,13 +1259,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: FixedJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
@@ -1286,13 +1286,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("stateful-current-journal-{suffix}"),
                 metadata_partition: format!("stateful-current-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: VariableJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),

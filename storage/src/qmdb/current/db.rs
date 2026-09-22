@@ -258,7 +258,7 @@ where
         grafting::Storage::<F, H, _, _>::new(
             &self.grafted_tree,
             grafting::height::<N>(),
-            &self.any.log.merkle,
+            &self.any.log,
         )
     }
 
@@ -555,7 +555,10 @@ where
     ///   or retained node is missing, or the prune location overflows a [Position]).
     #[tracing::instrument(name = "qmdb.current.db.prune", level = "info", skip_all)]
     #[boxed]
-    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
+    pub async fn prune(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>>
+    where
+        C: crate::journal::authenticated::Prunable,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         let sync_boundary = self.sync_boundary();
@@ -678,7 +681,7 @@ where
         let (grafted_tree, root) = rebuild_grafted_tree::<F, H, S, N>(
             self.any.bitmap.as_ref(),
             &pinned_nodes,
-            &self.any.log.merkle,
+            &self.any.log,
             self.any.inactivity_floor_loc,
             self.any.root(),
             &self.strategy,
@@ -1111,7 +1114,7 @@ pub(super) async fn compute_grafted_root<
 ///
 /// Callers must pass only **graftable** chunks (those whose h=G ancestor has already been born in
 /// the ops tree). Each graftable chunk has exactly one covering ops node at height G, looked up via
-/// [`merkle::Graftable::subtree_root_position`].
+/// [`merkle::Family::subtree_root_position`].
 pub(super) async fn read_graft_inputs<F: merkle::Graftable, D: Digest, const N: usize>(
     ops_tree: &impl MerkleStorage<F, Digest = D>,
     chunks: impl IntoIterator<Item = (usize, [u8; N])>,

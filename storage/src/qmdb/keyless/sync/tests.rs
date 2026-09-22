@@ -6,8 +6,8 @@
 //! by the [`sync_tests_for_harness!`] macro.
 
 use crate::{
-    journal::contiguous::Contiguous,
-    merkle::{self, Family, Location, full::Config as MerkleConfig, mmb, mmr},
+    journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous},
+    merkle::{self, Family, Location, mmb, mmr},
     qmdb::{
         self,
         keyless::{self, Operation, variable},
@@ -942,13 +942,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -1207,7 +1204,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         };
         assert!(
             <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_stale"),
+                &db.journal.frontier,
                 &config,
                 &stale_target,
                 &db.journal.journal,
@@ -1223,7 +1220,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         };
         assert!(
             <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_matching"),
+                &db.journal.frontier,
                 &config,
                 &matching_target,
                 &db.journal.journal,
@@ -1290,13 +1287,10 @@ mod compact_variable_mmr {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{suffix}"),
@@ -1354,7 +1348,6 @@ mod compact_variable_mmr {
             let fine_config = |sfx: &str, pooler: &deterministic::Context| {
                 let mut config = source_config(sfx, pooler);
                 config.log.items_per_section = NZU64!(1);
-                config.merkle.items_per_blob = NZU64!(1);
                 config
             };
             let source = SourceDb::init(context.child("source"), fine_config(&suffix, &context))
@@ -1929,6 +1922,101 @@ mod compact_variable_mmr {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_full_sync_root_mismatch_remains_importing_and_resumes() {
+        deterministic::Runner::default().start(|context| async move {
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config("full-mismatch-source", &context),
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .append(vec![2])
+                .append(vec![3])
+                .append(vec![4])
+                .append(vec![5])
+                .append(vec![6])
+                .merkleize(&source, Some(vec![9]), Location::new(0))
+                .await;
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = Arc::new(source.commit().await.unwrap());
+            let size = source.bounds().end;
+            let last = size - 1;
+            let canonical = sync::CompactTarget {
+                root: source.root(),
+                size,
+            };
+            let response = fetch_compact_state(&source, canonical.clone())
+                .await
+                .unwrap();
+            let sync::Response::Boundary {
+                op, pinned_nodes, ..
+            } = response
+            else {
+                unreachable!()
+            };
+            let hasher = qmdb::hasher::<Sha256>();
+            let proof = merkle::verification::historical_range_proof(
+                &hasher,
+                &source.journal,
+                size,
+                last..last + 1,
+                1,
+            )
+            .await
+            .unwrap();
+            let noncanonical = source.journal.merkle.root(&hasher, 1).unwrap();
+            assert_ne!(noncanonical, canonical.root);
+            let config = source_config("full-mismatch-client", &context);
+            let result: Result<SourceDb, _> = sync::sync(compact_engine_config(
+                context.child("client"),
+                SequenceSource::new(vec![sync::Response::Boundary {
+                    proof,
+                    op,
+                    pinned_nodes,
+                }]),
+                sync::CompactTarget {
+                    root: noncanonical,
+                    size,
+                },
+                config.clone(),
+            ))
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+            ));
+            assert!(matches!(
+                SourceDb::init(context.child("rejected"), config.clone()).await,
+                Err(qmdb::Error::Authenticated(
+                    crate::journal::authenticated::Error::IncompleteSync
+                ))
+            ));
+            let client: SourceDb = sync::sync(compact_engine_config(
+                context.child("resume"),
+                source.clone(),
+                canonical.clone(),
+                config.clone(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(client.root(), canonical.root);
+            drop(client);
+            let client = SourceDb::init(context.child("reopened"), config)
+                .await
+                .unwrap();
+            assert_eq!(client.root(), canonical.root);
+            client.destroy().await.unwrap();
+            Arc::try_unwrap(source)
+                .unwrap_or_else(|_| panic!("single source ref"))
+                .destroy()
+                .await
+                .unwrap();
+        });
+    }
+
     /// A boundary response can verify against its target while reconstructing a different
     /// canonical root. Rejecting that import must preserve the destination's durable witness.
     #[test_traced("WARN")]
@@ -1988,12 +2076,15 @@ mod compact_variable_mmr {
             // for this target, but the commit's encoded floor reconstructs the source's canonical
             // root instead, so only the engine's final root check rejects the import.
             let hasher = qmdb::hasher::<Sha256>();
-            let proof = source
-                .journal
-                .merkle
-                .historical_proof(&hasher, size, last_commit_loc, 1)
-                .await
-                .unwrap();
+            let proof = merkle::verification::historical_range_proof(
+                &hasher,
+                &source.journal,
+                size,
+                last_commit_loc..last_commit_loc + 1,
+                1,
+            )
+            .await
+            .unwrap();
             let noncanonical_root = source.journal.merkle.root(&hasher, 1).unwrap();
             assert_ne!(noncanonical_root, source.root());
 
@@ -2163,13 +2254,10 @@ mod compact_variable_mmb {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{suffix}"),

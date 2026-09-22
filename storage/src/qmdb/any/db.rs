@@ -424,11 +424,7 @@ where
         &self,
         loc: Location<F>,
     ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
-        self.log
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.log.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 }
 
@@ -464,7 +460,10 @@ where
     pub(crate) async fn prune_log(
         mut self,
         prune_loc: Location<F>,
-    ) -> Result<(Self, Location<F>), crate::qmdb::Error<F>> {
+    ) -> Result<(Self, Location<F>), crate::qmdb::Error<F>>
+    where
+        C: authenticated::Prunable,
+    {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -492,7 +491,10 @@ where
         ),
     )]
     #[boxed]
-    pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
+    pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>>
+    where
+        C: authenticated::Prunable,
+    {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
         let (mut db, actual_pruned) = self.prune_log(prune_loc).await?;
@@ -838,7 +840,8 @@ where
         Ok(db)
     }
 
-    /// Sync all database state to disk.
+    /// Persist operations and advance the journal's recovery watermark.
+    /// Recovery still replays retained operations to rebuild Merkle state.
     #[tracing::instrument(
         name = "qmdb.any.db.sync",
         level = "info",
@@ -860,12 +863,12 @@ where
     /// Begin durably persisting the journal state published by prior [`Db::apply_batch`] calls.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit].
-    /// Also makes a best-effort attempt to bound the recovery needed on startup. Use
-    /// [Self::sync] to guarantee none is needed. A new sync waits for the prior sync before
-    /// starting. Failures of the deferred durability work surface on the returned handle. A
-    /// failed data sync also fails the next durability operation. A failed recovery-watermark
-    /// sync is not observed by [Self::commit], and a failed merkle-node sync may not be. Both
-    /// resurface on the next [Self::sync].
+    /// The backing journal also attempts to advance its recovery watermark. Recovery always
+    /// replays retained operations to rebuild Merkle state.
+    ///
+    /// A new sync waits for the prior sync before starting. A failed data sync surfaces on the
+    /// returned handle and the next durability operation. A recovery-watermark failure surfaces
+    /// on the handle and the next [Self::sync], but is not observed by [Self::commit].
     #[tracing::instrument(
         name = "qmdb.any.db.start_sync",
         level = "info",

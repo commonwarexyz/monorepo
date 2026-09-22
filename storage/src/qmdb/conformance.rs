@@ -8,8 +8,11 @@
 //! forward and reverse order to two separate databases and asserts root equality.
 
 use crate::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{Family, full::Config as MerkleConfig, mmb, mmr},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
+    merkle::{Family, mmb, mmr},
     qmdb::{
         any::{
             self,
@@ -123,15 +126,12 @@ type ImmutableMmbCompactVariable =
 const PAGE_SIZE: NonZeroU16 = NZU16!(101);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-fn merkle_config(suffix: &str, page_cache: &CacheRef) -> MerkleConfig<Sequential> {
+fn merkle_config(suffix: &str, _page_cache: &CacheRef) -> MerkleConfig<Sequential> {
     MerkleConfig {
-        journal_partition: format!("{suffix}-mj"),
         metadata_partition: format!("{suffix}-mm"),
-        items_per_blob: NZU64!(11),
-        write_buffer: NZUsize!(1024),
         replay_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache: page_cache.clone(),
+        cache: Default::default(),
     }
 }
 

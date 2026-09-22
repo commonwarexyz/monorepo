@@ -557,7 +557,7 @@ where
                 let op = operations
                     .pop()
                     .ok_or(crate::merkle::Error::RangeOutOfBounds(start))?;
-                let pinned_nodes = self.merkle.pinned_nodes_at(start).await?;
+                let pinned_nodes = self.pinned_nodes_at(start).await?;
                 Response::Boundary {
                     proof,
                     op,

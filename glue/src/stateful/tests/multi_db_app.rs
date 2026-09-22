@@ -47,8 +47,11 @@ use commonware_runtime::{
 use commonware_storage::{
     Context as StorageContext,
     archive::prunable,
-    journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
-    mmr::{self, Location, full::Config as MmrJournalConfig},
+    journal::{
+        authenticated::Config as MmrJournalConfig,
+        contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
+    },
+    mmr::{self, Location},
     qmdb::{
         any::{FixedConfig, unordered::fixed},
         immutable,
@@ -89,13 +92,10 @@ pub(super) fn qmdb_config(
 ) {
     let db_a = FixedConfig {
         merkle_config: MmrJournalConfig {
-            journal_partition: format!("{prefix}-qmdb-a-mmr-journal"),
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
-            items_per_blob: NZU64!(11),
-            write_buffer: IO_BUFFER_SIZE,
             replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
-            page_cache: page_cache.clone(),
+            cache: Default::default(),
         },
         journal_config: FixedLogConfig {
             partition: format!("{prefix}-qmdb-a-log-journal"),

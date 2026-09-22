@@ -165,14 +165,11 @@ pub(crate) mod test {
     pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
-            merkle_config: crate::mmr::full::Config {
-                journal_partition: format!("journal-{seed}"),
+            merkle_config: crate::journal::authenticated::Config {
                 metadata_partition: format!("metadata-{seed}"),
-                items_per_blob: NZU64!(13),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
@@ -965,27 +962,20 @@ pub(crate) mod test {
     // FromSyncTestable implementation for from_sync_result tests
     mod from_sync_testable {
         use super::*;
-        use crate::{
-            merkle::mmr::{self, full::Mmr},
-            qmdb::any::sync::tests::FromSyncTestable,
-        };
-        use futures::future::join_all;
+        use crate::{merkle::mmr, qmdb::any::sync::tests::FromSyncTestable};
 
-        type TestMmr = Mmr<deterministic::Context, Digest, Sequential>;
+        type TestMmr =
+            crate::journal::authenticated::Frontier<mmr::Family, deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
             type Merkle = TestMmr;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+                (self.log.frontier, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: mmr::Location) -> Vec<Digest> {
-                join_all(mmr::Family::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+                self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }
     }

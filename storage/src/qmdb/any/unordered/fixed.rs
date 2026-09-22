@@ -356,9 +356,9 @@ pub(crate) mod test {
         });
     }
 
-    /// Pruning drains the in-flight sync before mutating storage.
+    /// Same-blob pruning performs no storage mutation and need not wait for a pending sync.
     #[test_traced]
-    fn test_start_sync_prune_waits() {
+    fn test_start_sync_noop_prune_does_not_wait() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
@@ -373,46 +373,17 @@ pub(crate) mod test {
             (db, handle) = db.start_sync().await.unwrap();
             assert!(pending.starts() > starts_before);
 
-            // A non-trivial prune: the floor advanced past the seed commit.
+            // The floor advanced within the same physical blob.
             let floor = db.inactivity_floor_loc();
             assert!(*floor > 0);
-            let db = {
-                let mut prune = std::pin::pin!(db.prune(floor));
-                assert!(
-                    prune.as_mut().now_or_never().is_none(),
-                    "prune proceeded while the commit sync was pending"
-                );
-                assert_eq!(
-                    pending.starts(),
-                    starts_before + 2,
-                    "prune started the merkle journal sync before blocking"
-                );
-
-                // Release only the merkle sync (parked last): prune must still wait on the
-                // in-flight commit's sync before mutating the log.
-                {
-                    let mut parked = pending.lock();
-                    assert_eq!(
-                        parked.len(),
-                        2,
-                        "expected the commit and merkle syncs parked"
-                    );
-                    let merkle_sync = parked.pop().unwrap();
-                    merkle_sync.release.send(Ok(())).unwrap();
-                }
-                assert!(
-                    prune.as_mut().now_or_never().is_none(),
-                    "prune proceeded while the commit sync was pending"
-                );
-                assert_eq!(
-                    pending.lock().len(),
-                    1,
-                    "prune is blocked on the commit sync, not a new sync of its own"
-                );
-
-                pending.unblock();
-                prune.await.unwrap()
-            };
+            let starts = pending.starts();
+            let db = db
+                .prune(floor)
+                .now_or_never()
+                .expect("same-blob prune must complete without I/O")
+                .unwrap();
+            assert_eq!(pending.starts(), starts);
+            pending.unblock();
             handle.await.unwrap();
             db.destroy().await.unwrap();
         });
@@ -1945,27 +1916,20 @@ pub(crate) mod test {
     // FromSyncTestable implementation for from_sync_result tests
     mod from_sync_testable {
         use super::*;
-        use crate::{
-            merkle::mmr::{self, full::Mmr},
-            qmdb::any::sync::tests::FromSyncTestable,
-        };
-        use futures::future::join_all;
+        use crate::{merkle::mmr, qmdb::any::sync::tests::FromSyncTestable};
 
-        type TestMmr = Mmr<deterministic::Context, Digest, Sequential>;
+        type TestMmr =
+            crate::journal::authenticated::Frontier<mmr::Family, deterministic::Context, Digest>;
 
         impl FromSyncTestable for AnyTest {
             type Merkle = TestMmr;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+                (self.log.frontier, self.log.journal)
             }
 
             async fn pinned_nodes_at(&self, loc: Location) -> Vec<Digest> {
-                join_all(mmr::Family::nodes_to_pin(loc).map(|p| self.log.merkle.get_node(p)))
-                    .await
-                    .into_iter()
-                    .map(|n| n.unwrap().unwrap())
-                    .collect()
+                self.log.pinned_nodes_at(loc).await.unwrap()
             }
         }
     }

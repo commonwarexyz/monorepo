@@ -1576,8 +1576,10 @@ mod tests {
         deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedLogConfig,
-        mmr::{self, Location, full::Config as MmrJournalConfig},
+        journal::{
+            authenticated::Config as MmrJournalConfig, contiguous::fixed::Config as FixedLogConfig,
+        },
+        mmr::{self, Location},
         qmdb::{any, sync::Target},
         translator::TwoCap,
     };
@@ -2275,13 +2277,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
             merkle_config: MmrJournalConfig {
-                journal_partition: format!("{prefix}_mmr_journal"),
                 metadata_partition: format!("{prefix}_mmr_metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
                 replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: FixedLogConfig {
                 partition: format!("{prefix}_log_journal"),

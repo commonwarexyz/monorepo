@@ -6,8 +6,8 @@
 //! by the [`sync_tests_for_harness!`] macro.
 
 use crate::{
-    journal::contiguous::Contiguous,
-    merkle::{self, Location, full::Config as MerkleConfig},
+    journal::{authenticated::Config as MerkleConfig, contiguous::Contiguous},
+    merkle::{self, Location},
     qmdb::{
         self,
         immutable::{self, variable::Operation},
@@ -873,13 +873,10 @@ pub(crate) mod harnesses {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -1171,7 +1168,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         };
         assert!(
             <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_stale"),
+                &db.journal.frontier,
                 &config,
                 &stale_target,
                 &db.journal.journal,
@@ -1187,7 +1184,7 @@ fn test_immutable_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         };
         assert!(
             <DbOf<H> as qmdb::sync::Database>::local_pinned_nodes(
-                context.child("probe_matching"),
+                &db.journal.frontier,
                 &config,
                 &matching_target,
                 &db.journal.journal,
@@ -1266,13 +1263,10 @@ mod compact_variable_mmr {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
@@ -1981,13 +1975,10 @@ mod compact_variable_mmb {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),

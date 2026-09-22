@@ -108,14 +108,11 @@ mod tests {
     ) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
-            merkle: crate::merkle::full::Config {
-                journal_partition: format!("journal-{suffix}"),
+            merkle: crate::journal::authenticated::Config {
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: JournalConfig {
                 partition: format!("log-journal-{suffix}"),

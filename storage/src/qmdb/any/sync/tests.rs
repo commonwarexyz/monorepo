@@ -62,20 +62,12 @@ pub(crate) trait Destructible {
     ) -> impl std::future::Future<Output = Result<(), qmdb::Error<Self::Family>>> + Send;
 }
 
-// Implement Destructible once for the generic full Merkle type used in tests.
-// This is here (rather than in fixed/variable modules) to avoid duplicate implementations.
 impl<F: merkle::Family> Destructible
-    for crate::merkle::full::Merkle<
-        F,
-        deterministic::Context,
-        Digest,
-        commonware_parallel::Sequential,
-    >
+    for crate::journal::authenticated::Frontier<F, deterministic::Context, Digest>
 {
     type Family = F;
-
     async fn destroy(self) -> Result<(), qmdb::Error<F>> {
-        self.destroy().await.map_err(qmdb::Error::Merkle)
+        self.destroy().await.map_err(Into::into)
     }
 }
 
@@ -1577,10 +1569,22 @@ where
         let pinned_nodes = db.pinned_nodes_at(sync_lower_bound).await;
         let (_, journal) = db.into_log_components();
 
+        let state =
+            <DbOf<H> as qmdb::sync::Database>::begin_sync(context.child("import"), &db_config)
+                .await
+                .unwrap();
+        let state = <DbOf<H> as qmdb::sync::Database>::stage_sync_frontier(
+            state,
+            sync_lower_bound,
+            pinned_nodes.clone(),
+        )
+        .await
+        .unwrap();
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
             db_config,
             journal,
+            state,
             Some(pinned_nodes),
             non_empty_range!(sync_lower_bound, sync_upper_bound),
             NZU64!(1024),
@@ -1649,10 +1653,22 @@ where
         let (mmr, journal) = target_db.into_log_components();
 
         // Re-open `sync_db` using from_sync_result
+        let state =
+            <DbOf<H> as qmdb::sync::Database>::begin_sync(context.child("import"), &sync_db_config)
+                .await
+                .unwrap();
+        let state = <DbOf<H> as qmdb::sync::Database>::stage_sync_frontier(
+            state,
+            sync_lower_bound,
+            pinned_nodes.clone(),
+        )
+        .await
+        .unwrap();
         let sync_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             client_context.child("synced"),
             sync_db_config,
             journal,
+            state,
             Some(pinned_nodes),
             non_empty_range!(sync_lower_bound, sync_upper_bound),
             NZU64!(1024),
@@ -1709,10 +1725,22 @@ where
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
 
+        let state =
+            <DbOf<H> as qmdb::sync::Database>::begin_sync(context.child("import"), &new_db_config)
+                .await
+                .unwrap();
+        let state = <DbOf<H> as qmdb::sync::Database>::stage_sync_frontier(
+            state,
+            lower_bound,
+            pinned_nodes.clone(),
+        )
+        .await
+        .unwrap();
         let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
             new_db_config,
             journal,
+            state,
             Some(pinned_nodes),
             non_empty_range!(lower_bound, upper_bound),
             NZU64!(1024),
@@ -1754,10 +1782,22 @@ where
         // Use a different config (simulating a new empty database)
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
 
+        let state =
+            <DbOf<H> as qmdb::sync::Database>::begin_sync(context.child("import"), &new_db_config)
+                .await
+                .unwrap();
+        let state = <DbOf<H> as qmdb::sync::Database>::stage_sync_frontier(
+            state,
+            Location::new(0),
+            Vec::new(),
+        )
+        .await
+        .unwrap();
         let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
             new_db_config,
             journal,
+            state,
             None,
             non_empty_range!(Location::new(0), Location::new(1)),
             NZU64!(1024),

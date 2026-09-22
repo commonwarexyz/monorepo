@@ -90,8 +90,10 @@ where
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::variable::Config as JournalConfig,
-        merkle::{full::Config as MmrConfig, mmb, mmr},
+        journal::{
+            authenticated::Config as MmrConfig, contiguous::variable::Config as JournalConfig,
+        },
+        merkle::{mmb, mmr},
         qmdb::immutable::tests::{self, immutable_tests},
         translator::TwoCap,
     };
@@ -112,13 +114,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
             merkle_config: MmrConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: JournalConfig {
                 partition: format!("log-{suffix}"),

@@ -618,7 +618,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         };
         assert!(
             <Db as SyncDatabase>::local_pinned_nodes(
-                context.child("probe_stale"),
+                &db.any.log.frontier,
                 &config,
                 &stale_target,
                 &db.any.log.journal,
@@ -634,7 +634,7 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         };
         assert!(
             <Db as SyncDatabase>::local_pinned_nodes(
-                context.child("probe_matching"),
+                &db.any.log.frontier,
                 &config,
                 &matching_target,
                 &db.any.log.journal,

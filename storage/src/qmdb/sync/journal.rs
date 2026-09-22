@@ -19,15 +19,15 @@ pub trait Journal<F: Family>: Sized + Send {
     /// The error type returned by the journal
     type Error: std::error::Error + Send + 'static + Into<crate::qmdb::Error<F>>;
 
-    /// Create/open a journal for syncing the given range.
-    ///
-    /// The implementation must:
-    /// - Reuse any on-disk data whose logical locations lie within the range.
-    /// - Discard/ignore any data outside the range.
-    /// - Report `size()` equal to the next location to be filled.
-    fn new(
+    /// Open and recover the journal without discarding retained operations.
+    fn open(
         context: Self::Context,
         config: Self::Config,
+    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+
+    /// Retain reusable operations within the requested synchronization range.
+    fn prepare_range(
+        self,
         range: NonEmptyRange<Location<F>>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
@@ -58,12 +58,12 @@ where
     type Op = V;
     type Error = crate::journal::Error;
 
-    async fn new(
-        context: Self::Context,
-        config: Self::Config,
-        range: NonEmptyRange<Location<F>>,
-    ) -> Result<Self, Self::Error> {
-        Self::init_sync(context, config.clone(), *range.start()..*range.end()).await
+    async fn open(context: Self::Context, config: Self::Config) -> Result<Self, Self::Error> {
+        Self::init(context, config).await
+    }
+
+    async fn prepare_range(self, range: NonEmptyRange<Location<F>>) -> Result<Self, Self::Error> {
+        self.prepare_sync_range(*range.start()..*range.end()).await
     }
 
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
@@ -100,12 +100,12 @@ where
     type Op = A;
     type Error = crate::journal::Error;
 
-    async fn new(
-        context: Self::Context,
-        config: Self::Config,
-        range: NonEmptyRange<Location<F>>,
-    ) -> Result<Self, Self::Error> {
-        let mut journal = Self::init(context, config).await?;
+    async fn open(context: Self::Context, config: Self::Config) -> Result<Self, Self::Error> {
+        Self::init(context, config).await
+    }
+
+    async fn prepare_range(self, range: NonEmptyRange<Location<F>>) -> Result<Self, Self::Error> {
+        let mut journal = self;
         let size = Contiguous::bounds(&journal).end;
 
         // Fresh journal already aligned with the sync start - nothing to do.
@@ -182,16 +182,21 @@ where
     type Op = Op;
     type Error = crate::qmdb::Error<F>;
 
-    async fn new(
-        _context: Self::Context,
-        _config: Self::Config,
-        range: NonEmptyRange<Location<F>>,
-    ) -> Result<Self, Self::Error> {
+    async fn open(_context: Self::Context, _config: Self::Config) -> Result<Self, Self::Error> {
         Ok(Self {
-            start: range.start(),
+            start: Location::new(0),
             ops: Vec::new(),
             _context: std::marker::PhantomData,
         })
+    }
+
+    async fn prepare_range(
+        mut self,
+        range: NonEmptyRange<Location<F>>,
+    ) -> Result<Self, Self::Error> {
+        self = self.resize(range.start()).await?;
+        self.ops.truncate((*range.end() - *self.start) as usize);
+        Ok(self)
     }
 
     async fn resize(mut self, start: Location<F>) -> Result<Self, Self::Error> {
@@ -231,6 +236,14 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
 
+    async fn prepare<J: Journal<F>>(
+        context: J::Context,
+        config: J::Config,
+        range: NonEmptyRange<Location<F>>,
+    ) -> Result<J, J::Error> {
+        J::open(context, config).await?.prepare_range(range).await
+    }
+
     type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
     type VariableJournal = variable::Journal<deterministic::Context, u64>;
     type F = crate::merkle::mmr::Family;
@@ -264,9 +277,7 @@ mod tests {
             let range = non_empty_range!(Location::new(10), Location::new(20));
 
             // A fresh journal is empty at the range start.
-            let journal = <Mem as Journal<F>>::new((), (), range.clone())
-                .await
-                .unwrap();
+            let journal = prepare::<Mem>((), (), range.clone()).await.unwrap();
             assert_eq!(journal.size(), 10);
 
             // Appends extend the size.
@@ -281,9 +292,7 @@ mod tests {
             assert_eq!(ops, vec![3]);
 
             // A resize at or beyond the size clears to an empty journal at the new start.
-            let journal = <Mem as Journal<F>>::new((), (), range.clone())
-                .await
-                .unwrap();
+            let journal = prepare::<Mem>((), (), range.clone()).await.unwrap();
             let journal = journal.append(vec![1, 2]).await.unwrap();
             let journal = journal.resize(Location::new(15)).await.unwrap();
             assert_eq!(journal.size(), 15);
@@ -292,7 +301,7 @@ mod tests {
             assert!(ops.is_empty());
 
             // A resize before the start clears.
-            let journal = <Mem as Journal<F>>::new((), (), range).await.unwrap();
+            let journal = prepare::<Mem>((), (), range).await.unwrap();
             let journal = journal.append(vec![1]).await.unwrap();
             let journal = journal.resize(Location::new(5)).await.unwrap();
             assert_eq!(journal.size(), 5);
@@ -327,7 +336,7 @@ mod tests {
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
             );
-            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+            let journal = prepare::<FixedJournal>(context.child("sync"), cfg, range)
                 .await
                 .unwrap();
 
@@ -359,7 +368,7 @@ mod tests {
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
             );
-            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+            let journal = prepare::<FixedJournal>(context.child("sync"), cfg, range)
                 .await
                 .unwrap();
 
@@ -387,10 +396,9 @@ mod tests {
             drop(journal);
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
-            let journal =
-                <FixedJournal as Journal<F>>::new(context.child("sync"), cfg.clone(), range)
-                    .await
-                    .unwrap();
+            let journal = prepare::<FixedJournal>(context.child("sync"), cfg.clone(), range)
+                .await
+                .unwrap();
 
             assert_eq!(journal.bounds(), 5..20);
             for value in 7..20u8 {
@@ -415,10 +423,9 @@ mod tests {
             drop(journal);
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(60));
-            let journal =
-                <FixedJournal as Journal<F>>::new(context.child("pruned_sync"), cfg, range)
-                    .await
-                    .unwrap();
+            let journal = prepare::<FixedJournal>(context.child("pruned_sync"), cfg, range)
+                .await
+                .unwrap();
 
             assert_eq!(journal.bounds(), 7..7);
             journal.destroy().await.unwrap();
@@ -439,10 +446,9 @@ mod tests {
             drop(journal);
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
-            let journal =
-                <VariableJournal as Journal<F>>::new(context.child("sync"), cfg.clone(), range)
-                    .await
-                    .unwrap();
+            let journal = prepare::<VariableJournal>(context.child("sync"), cfg.clone(), range)
+                .await
+                .unwrap();
 
             assert_eq!(journal.bounds(), 5..20);
             for value in 7..20u64 {
@@ -464,10 +470,9 @@ mod tests {
             drop(journal);
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(60));
-            let journal =
-                <VariableJournal as Journal<F>>::new(context.child("pruned_sync"), cfg, range)
-                    .await
-                    .unwrap();
+            let journal = prepare::<VariableJournal>(context.child("pruned_sync"), cfg, range)
+                .await
+                .unwrap();
 
             assert_eq!(journal.bounds(), 7..7);
             journal.destroy().await.unwrap();

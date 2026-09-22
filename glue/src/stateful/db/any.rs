@@ -796,8 +796,10 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, release_pending_syncs},
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::{full::Config as MerkleConfig, mmr},
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedJournalConfig,
+        },
+        merkle::mmr,
         qmdb::any::unordered::fixed,
         translator::TwoCap,
     };
@@ -814,13 +816,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
-                journal_partition: format!("stateful-any-journal-{suffix}"),
                 metadata_partition: format!("stateful-any-metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             journal_config: FixedJournalConfig {
                 partition: format!("stateful-any-log-{suffix}"),

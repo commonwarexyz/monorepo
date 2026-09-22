@@ -115,16 +115,16 @@ pub trait DbAny<F: Family>:
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
     /// for the state applied before the call, plus a best-effort attempt to bound the recovery
-    /// needed on startup. Use [Self::sync] to guarantee none is needed.
+    /// needed for the operation journal on startup.
     fn start_sync(self) -> impl Future<Output = Result<(Self, Handle<()>), Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash.
     ///
-    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
+    /// Use [Self::sync] to also advance the operation journal recovery watermark.
     fn commit(self) -> impl Future<Output = Result<Self, Error<F>>> + Send;
 
     /// Durably persist the database, guaranteeing the current state will survive a crash, and that
-    /// no recovery will be needed on startup.
+    /// operation recovery is bounded. Startup still reconstructs the volatile Merkle digests.
     ///
     /// This provides a stronger guarantee than [Self::commit] but may be slower.
     fn sync(self) -> impl Future<Output = Result<Self, Error<F>>> + Send;

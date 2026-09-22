@@ -1242,25 +1242,14 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         })
     }
 
-    /// See [Journal::init_sync].
+    /// Prepare recovered operations for the requested synchronization range.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) async fn init_sync(
-        context: E,
-        cfg: Config<V::Cfg>,
+    pub(crate) async fn prepare_sync_range(
+        self: Box<Self>,
         range: Range<u64>,
     ) -> Result<Box<Self>, Error> {
         assert!(!range.is_empty(), "range must not be empty");
-
-        debug!(
-            range.start,
-            range.end,
-            items_per_blob = cfg.items_per_section.get(),
-            "initializing contiguous variable journal for sync"
-        );
-
-        // Initialize contiguous journal
-        let journal = Box::new(Self::init(context.child("journal"), cfg.clone()).await?);
-
+        let journal = self;
         let size = journal.size();
 
         // No existing data - reset to sync range start if needed
@@ -1540,23 +1529,24 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::prune].
+    fn prune_target(&self, requested: u64) -> Result<u64, Error> {
+        let items_per_blob = self.items_per_blob.get();
+        let target = position_to_blob(requested.min(self.bounds.end), items_per_blob);
+        if target <= self.blobs.oldest_blob_index() {
+            return Ok(self.bounds.start);
+        }
+        blob_first_position(target, items_per_blob)
+    }
+
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_position: u64,
     ) -> Result<(Box<Self>, bool), Error> {
-        let items_per_blob = self.items_per_blob.get();
-
-        // Calculate the blob that would contain min_position, capped to the tail (which is
-        // guaranteed to exist by our invariant).
-        let target_blob = position_to_blob(min_position, items_per_blob);
-        let tail_blob = position_to_blob(self.bounds.end, items_per_blob);
-        let min_blob = target_blob.min(tail_blob);
-
-        if min_blob <= self.blobs.oldest_blob_index() {
+        let new_boundary = self.prune_target(min_position)?;
+        if new_boundary <= self.bounds.start {
             return Ok((self, false));
         }
-
-        let new_boundary = blob_first_position(min_blob, items_per_blob)?;
+        let min_blob = position_to_blob(new_boundary, self.items_per_blob.get());
 
         // Make all data durable before removing any: the prune target may be justified by an
         // appended-but-unflushed item (e.g. a consumer's commit record), and removals are
@@ -2225,12 +2215,22 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// A contiguous journal ready for sync operations. The journal's size will be within the range.
     ///
     #[commonware_macros::stability(ALPHA)]
+    #[cfg(test)]
     pub(crate) async fn init_sync(
         context: E,
         cfg: Config<V::Cfg>,
         range: Range<u64>,
     ) -> Result<Self, Error> {
-        Ok(Self(Inner::init_sync(context, cfg, range).await?))
+        let mut journal = Self::init(context, cfg).await?;
+        journal.0 = journal.0.prepare_sync_range(range).await?;
+        Ok(journal)
+    }
+
+    /// Prepare recovered operations for a synchronization range.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn prepare_sync_range(mut self, range: Range<u64>) -> Result<Self, Error> {
+        self.0 = self.0.prepare_sync_range(range).await?;
+        Ok(self)
     }
 
     /// Discard all items and reposition the journal at `new_size`.
@@ -2449,6 +2449,13 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 
     async fn destroy(self) -> Result<(), Error> {
         Self::destroy(self).await
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+impl<E: Context, V: CodecShared> authenticated::Prunable for Journal<E, V> {
+    fn prune_target(&self, requested: u64) -> Result<u64, Error> {
+        self.0.prune_target(requested)
     }
 }
 

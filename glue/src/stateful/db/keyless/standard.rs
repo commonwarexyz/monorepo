@@ -501,8 +501,11 @@ mod tests {
         BufferPooler, Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_storage::{
-        journal::contiguous::fixed::Config as FixedJournalConfig,
-        merkle::full::Config as MerkleConfig, mmr, qmdb::keyless as storage_keyless,
+        journal::{
+            authenticated::Config as MerkleConfig, contiguous::fixed::Config as FixedJournalConfig,
+        },
+        mmr,
+        qmdb::keyless as storage_keyless,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::U64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -518,13 +521,10 @@ mod tests {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         storage_keyless::Config {
             merkle: MerkleConfig {
-                journal_partition: format!("journal-{suffix}"),
                 metadata_partition: format!("metadata-{suffix}"),
-                items_per_blob: NZU64!(11),
-                write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: page_cache.clone(),
+                cache: Default::default(),
             },
             log: FixedJournalConfig {
                 partition: format!("log-{suffix}"),

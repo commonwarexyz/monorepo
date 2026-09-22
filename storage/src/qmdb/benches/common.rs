@@ -5,8 +5,11 @@ use commonware_cryptography::{DigestOf, Hasher as _, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{BufferPooler, Strategizer, buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
-    journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{self, Family, full::Config as MerkleConfig},
+    journal::{
+        authenticated::Config as MerkleConfig,
+        contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
+    },
+    merkle::{self, Family},
     qmdb::{
         any::{
             FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
@@ -112,20 +115,12 @@ const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
 const PARTITION_IMM: &str = "bench-immutable";
 
-fn merkle_cfg(
-    suffix: &str,
-    ctx: &(impl BufferPooler + Strategizer),
-    page_cache: CacheRef,
-    items_per_blob: NonZeroU64,
-) -> MerkleConfig<Rayon> {
+fn merkle_cfg(suffix: &str, ctx: &(impl BufferPooler + Strategizer)) -> MerkleConfig<Rayon> {
     MerkleConfig {
-        journal_partition: format!("journal-{suffix}"),
         metadata_partition: format!("metadata-{suffix}"),
-        items_per_blob,
-        write_buffer: WRITE_BUFFER_SIZE,
         replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
-        page_cache,
+        cache: Default::default(),
     }
 }
 
@@ -177,7 +172,7 @@ pub fn any_fix_cfg_full<B>(
 ) -> AnyFixedConfig<EightCap, Rayon, B> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, page_cache_size);
     AnyFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        merkle_config: merkle_cfg(PARTITION_FIX, ctx),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
@@ -192,7 +187,7 @@ pub fn imm_fix_cfg_with(
 ) -> ImmutableFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     ImmutableFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
+        merkle_config: merkle_cfg(PARTITION_IMM, ctx),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
         init_buffer: NZUsize!(1 << 21),
@@ -209,7 +204,7 @@ pub fn cur_fix_cfg_with(
 ) -> CurrentFixedConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
-        merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
+        merkle_config: merkle_cfg(PARTITION_FIX, ctx),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
@@ -231,7 +226,7 @@ pub fn any_var_digest_cfg_with(
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
         init_cache: INIT_CACHE_SIZE,
@@ -252,7 +247,7 @@ pub fn cur_var_digest_cfg_with(
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
@@ -277,7 +272,7 @@ pub fn any_var_vec_cfg_with(
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx),
         journal_config: var_log_cfg(
             PARTITION_VAR,
             page_cache,
@@ -303,7 +298,7 @@ pub fn cur_var_vec_cfg_with(
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
-        merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
+        merkle_config: merkle_cfg(PARTITION_VAR, ctx),
         journal_config: var_log_cfg(
             PARTITION_VAR,
             page_cache,
@@ -330,7 +325,7 @@ pub fn keyless_cfg_with(
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
-        merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone(), items_per_blob),
+        merkle: merkle_cfg(PARTITION_KEYLESS, ctx),
         log: var_log_cfg(
             PARTITION_KEYLESS,
             page_cache,
