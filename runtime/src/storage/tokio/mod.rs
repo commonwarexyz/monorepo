@@ -50,18 +50,31 @@ struct Partitions {
 }
 
 impl Partitions {
-    /// Makes directory entry changes durable, with test hooks to pause or fail
+    /// Makes storage root entry changes durable, with test hooks to pause or fail
     /// before the filesystem sync.
-    fn sync_dir(&mut self, path: &Path) -> Result<(), Error> {
+    fn sync_root(&mut self, root: &Path) -> Result<(), Error> {
         #[cfg(all(test, target_os = "macos"))]
         self.sync_hook.run()?;
-        sync_dir(path)
+        sync_dir(root)
     }
 
-    /// Record a partition after its required directory syncs have succeeded.
-    fn mark_synced(&mut self, _path: impl Into<PathBuf>) {
+    /// Make a partition's directory entries durable before caching it. Supply
+    /// `root` during blob creation to persist the partition's directory entry too.
+    fn sync(
+        &mut self,
+        path: impl AsRef<Path> + Into<PathBuf>,
+        root: Option<&Path>,
+    ) -> Result<(), Error> {
+        #[cfg(all(test, target_os = "macos"))]
+        self.sync_hook.run()?;
+        sync_dir(path.as_ref())?;
+        if let Some(root) = root {
+            self.sync_root(root)?;
+        }
+
         #[cfg(target_os = "macos")]
-        self.synced.insert(_path.into());
+        self.synced.insert(path.into());
+        Ok(())
     }
 
     /// Retire a partition's durability record before changing its directory entries.
@@ -80,8 +93,7 @@ impl Partitions {
                 return Ok(());
             }
 
-            self.sync_dir(_path)?;
-            self.mark_synced(_path);
+            self.sync(_path, None)?;
         }
         Ok(())
     }
@@ -197,9 +209,7 @@ impl crate::Storage for Storage {
                 None => {
                     // Make the blob name and its partition durable before writing a parseable
                     // header. A visible partition directory does not establish its durability.
-                    partitions.sync_dir(parent)?;
-                    partitions.sync_dir(&storage_directory)?;
-                    partitions.mark_synced(parent);
+                    partitions.sync(parent, Some(&storage_directory))?;
 
                     // Truncate to zero before writing, per the [Header::create] contract.
                     let (region, blob_version) = Header::create(&blob_layouts, &versions);
@@ -240,12 +250,13 @@ impl crate::Storage for Storage {
             // partition marked durable.
             partitions.invalidate(&path);
 
-            // Remove all related files
-            let sync_path = if let Some(name) = &name {
+            // Make the removal durable in its containing directory. Only a
+            // surviving partition regains its cache entry after a successful sync.
+            if let Some(name) = &name {
                 let blob_path = path.join(hex(name));
                 fs::remove_file(blob_path).map_err(|_| Error::BlobMissing(partition, hex(name)))?;
 
-                path
+                partitions.sync(path, None)
             } else {
                 // Distinguish missing partitions from other filesystem failures.
                 fs::remove_dir_all(&path).map_err(|error| match error.kind() {
@@ -253,16 +264,8 @@ impl crate::Storage for Storage {
                     _ => Error::Io(error.into()),
                 })?;
 
-                storage_directory
-            };
-
-            // Make the removal durable before restoring the surviving partition's
-            // cache entry. Removed partitions stay uncached.
-            partitions.sync_dir(&sync_path)?;
-            if name.is_some() {
-                partitions.mark_synced(sync_path);
+                partitions.sync_root(&storage_directory)
             }
-            Ok(())
         })
         .await
     }
