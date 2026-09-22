@@ -379,6 +379,8 @@ where
             witness: witness_config,
             commit_codec_config,
         } = cfg;
+
+        // Reconstruct and verify the selected witness before exposing any state derived from it.
         let mut merkle = compact_merkle::Merkle::new(strategy);
         let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, K, V>>(
             context.child("witness"),
@@ -391,6 +393,8 @@ where
                 .to_vec(),
         )
         .await?;
+
+        // Commit metadata, location, and root must all come from the same verified witness.
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
@@ -1995,37 +1999,24 @@ mod tests {
                 sizes.push(db.size());
             }
 
-            // Prune history below B: reopening at B still works, reopening at A does not.
-            let db = db.prune(sizes[1]).await.unwrap();
-            assert!(matches!(
-                {
-                    _ = db.sync().await.unwrap();
-                    open_bounded::<mmr::Family>(context.child("cap"), witness_cfg.clone(), sizes[0])
-                        .await
-                },
-                Err(Error::HistoricalFloorPruned(_))
-            ));
-
-            // Reopen at B after the durable prune.
-            let cfg = Config {
-                strategy: Sequential,
-                witness: witness_cfg.clone(),
-                commit_codec_config: (),
-            };
-            let db: TestDb<mmr::Family> =
-                Db::init(context.child("db").with_attribute("index", 2), cfg, None)
-                    .await
-                    .unwrap();
-            let db = {
-                _ = db.sync().await.unwrap();
-                open_bounded::<mmr::Family>(context.child("cap"), witness_cfg.clone(), sizes[1])
-                    .await
-            }
+            // Reopen retained state B before the terminal check that pruned state A is unavailable.
+            let db = db.prune(sizes[1]).await.unwrap().sync().await.unwrap();
+            drop(db);
+            let db = open_bounded::<mmr::Family>(
+                context.child("retained"),
+                witness_cfg.clone(),
+                sizes[1],
+            )
+            .await
             .unwrap();
             assert_eq!(db.size(), sizes[1]);
             assert_eq!(db.get_metadata(), Some(Sha256::fill(2)));
+            drop(db);
 
-            db.destroy().await.unwrap();
+            assert!(matches!(
+                open_bounded::<mmr::Family>(context.child("pruned"), witness_cfg, sizes[0]).await,
+                Err(Error::HistoricalFloorPruned(_))
+            ));
         });
     }
 

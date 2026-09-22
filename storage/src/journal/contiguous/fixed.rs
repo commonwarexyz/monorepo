@@ -443,6 +443,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             });
         }
 
+        // Select the active partition and reconcile its oldest blob with the checkpoint's retained
+        // start before excluding any suffix.
         let (blob_partition, names) = Partition::select(&context, &cfg.partition).await?;
         let partition = Partition::new(
             context.child("blobs"),
@@ -612,6 +614,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let blob = super::position_to_blob(pos, self.cfg.items_per_blob.get());
         let first = first_in_blob(self.bounds.start, blob, self.cfg.items_per_blob.get())?;
         let offset = Inner::<E, A>::items_to_bytes(pos - first)?;
+
         // `bounds.end` is derived by walking `pending`, and every mutation keeps `pending`
         // contiguous over `bounds`, so a position inside `bounds` always has a blob.
         let writer = self
@@ -647,6 +650,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         Ok(self)
     }
 
+    /// Durably reconcile the recovered blobs and checkpoint to a prefix no longer than
+    /// `max_size`.
     async fn repair_to(mut self, max_size: u64) -> Result<Self, Error> {
         let size = self.bounds.end.min(max_size);
         if size < self.bounds.start {
@@ -657,6 +662,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         let bytes = Inner::<E, A>::items_to_bytes(
             size - first_in_blob(self.bounds.start, tail_blob, items_per_blob)?,
         )?;
+
+        // The checkpoint must not acknowledge a suffix once blob removal begins.
         self.watermark = self.watermark.min(size);
         let boundary_hint =
             (!self.bounds.start.is_multiple_of(items_per_blob)).then_some(self.bounds.start);
@@ -671,7 +678,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         if size == self.bounds.start
             && (!self.discarded.is_empty() || self.pending.keys().any(|&blob| blob > tail_blob))
         {
-            // Keep a durable tail at the retained boundary before removing its last backing blob.
+            // An empty prefix needs a durable boundary blob before its last backing blob is
+            // removed.
             if let Entry::Vacant(entry) = self.pending.entry(tail_blob) {
                 let mut writer = self.partition.open_recovery(tail_blob).await?;
                 writer.sync().await?;
@@ -680,7 +688,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             self.discarded.retain(|&blob| blob != tail_blob);
         }
 
-        // Make the target newest before changing its partial-page checksum.
+        // Make the selected tail newest before changing its partial-page checksum. Remove suffix
+        // blobs newest-first so every crash cut leaves a contiguous physical prefix.
         while let Some(blob) = self.discarded.pop() {
             self.partition.remove(blob).await?;
         }
@@ -692,11 +701,13 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             self.partition.remove(blob).await?;
             drop(writer);
         }
+
+        // A truncated tail is made durable by truncation. An appended tail needs an explicit
+        // barrier before publication can raise the watermark.
         if let Some(writer) = self.pending.get_mut(&tail_blob) {
             if bytes < writer.size() {
                 writer.truncate(bytes).await?;
             } else {
-                // Appended tail bytes must be durable before publication raises the watermark.
                 writer.sync().await?;
             }
         }
@@ -726,6 +737,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         mut self: Box<Self>,
         position: u64,
     ) -> Result<(Box<Self>, bool), Error> {
+        // Recovery pruning advances only to the whole-blob boundary containing the requested
+        // retained position.
         let per_blob = self.cfg.items_per_blob.get();
         let blob = super::position_to_blob(position.min(self.bounds.end), per_blob);
         let boundary = super::blob_first_position(blob, per_blob)?;
@@ -738,6 +751,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         if let Entry::Vacant(entry) = self.pending.entry(blob) {
             entry.insert(self.partition.open_recovery(blob).await?);
         }
+
+        // The retained anchor must be durable before any older blob is removed.
         for writer in self.pending.values_mut() {
             writer.sync().await?;
         }
@@ -771,11 +786,17 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
+        // The durable intent makes `size` authoritative across every later crash cut.
         self.checkpoint = self.checkpoint.stage_clear(size).await?;
+
+        // Dependent state is cleared under the same intent before either journal partition is
+        // removed.
         clear_dependents().await?;
         Partition::<E>::remove_all(&self.context, &self.cfg.partition).await?;
         Partition::<E>::remove_all(&self.context, &format!("{}-blobs", self.cfg.partition)).await?;
         self.pending.clear();
+
+        // Recreate the target tail before the checkpoint publishes reset completion.
         self.partition = Partition::new(
             self.context.child("blobs"),
             format!("{}-blobs", self.cfg.partition),
@@ -797,11 +818,14 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
 
     /// Select a retained prefix and finish it before creating a live journal.
     pub(super) async fn publish(mut self, max_size: u64) -> Result<Inner<E, A>, Error> {
+        // Complete the durable prefix selection before sealing blobs for live access.
         self = self.repair_to(max_size).await?;
         let size = self.bounds.end;
         let items_per_blob = self.cfg.items_per_blob.get();
         let tail_blob = super::position_to_blob(size, items_per_blob);
         let blobs = Writable::recover(self.partition, self.pending, tail_blob).await?;
+
+        // A bounded open publishes the selected end after every retained blob is durable.
         if self.bounded && self.checkpoint.watermark() != Some(size) {
             self.checkpoint = self
                 .checkpoint
@@ -1347,7 +1371,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused. After clearing, the
     /// journal will behave as if initialized with `init_at_size(new_size)`.
-    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end.
     ///
     /// # Crash Safety
     ///
@@ -1358,6 +1381,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         mut self: Box<Self>,
         new_size: u64,
     ) -> Result<Box<Self>, Error> {
+        // Live reset advances the append position. Prefix selection belongs to initialization.
         if new_size < self.bounds.end {
             return Err(Error::ItemOutOfRange(new_size));
         }
@@ -1397,7 +1421,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// calling `clear_to_size` to finish. If a crash interrupts the sequence, the next `init`
     /// completes the staged clear. The follow-up `clear_to_size` re-stages the same target
     /// idempotently.
-    /// Returns [Error::ItemOutOfRange] if `new_size` is below the current end.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(
         mut self: Box<Self>,
@@ -1467,10 +1490,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Initialize a `Journal` in a fully-pruned state at `size`: existing data is cleared and the
     /// journal behaves as if `size` items were appended then pruned. It is empty (`bounds` is
     /// `size..size`) and the next `append` writes at position `size`. Used for state sync.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::SizeOverflow] if `size` is `u64::MAX`.
     ///
     /// # Crash Safety
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is

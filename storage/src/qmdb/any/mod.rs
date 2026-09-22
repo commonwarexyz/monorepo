@@ -194,6 +194,8 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
+    // Keep the selected commit unpublished until every variant-owned reconstruction constraint has
+    // been checked against the same retained prefix.
     let pending = crate::qmdb::prepare_initialization::<F, E, J, H, S>(
         context.child("log"),
         cfg.merkle_config,
@@ -201,6 +203,9 @@ where
         max_size,
     )
     .await?;
+
+    // Snapshot replay requires both the selected commit and its floor to remain above the bitmap
+    // boundary. Current also requires every absorbed chunk pair to exist at the selected size.
     let size = pending.bounds().end;
     if bitmap
         .as_ref()
@@ -217,6 +222,8 @@ where
     if pair_absorption_threshold.is_some_and(|minimum| size < minimum) {
         return Err(QmdbError::HistoricalFloorPruned(Location::new(size)));
     }
+
+    // Publish the selected journal prefix only after its in-memory state is reconstructible.
     let mut log = pending.finish().await?;
 
     if log.size() == 0 {
@@ -226,6 +233,7 @@ where
         log = log.sync().await?;
     }
 
+    // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
     let index = I::new(context.child("index"), cfg.translator);
     let snapshot_context = context.child("snapshot");
     let metrics = Metrics::new(context);
@@ -800,7 +808,8 @@ pub(crate) mod test {
 
         // Select a commit before a tail where
         // - the same key (`key0`) was updated multiple times
-        // - `key1` was deleted then recreated (exercises net-zero active_keys_delta path)
+        // - `key1` was deleted then recreated, with opposite membership changes to `key2`
+        //   keeping each batch's active-key delta at zero
         drop(db);
         let db = bounded_db(context.child("cap"), size_a).await.unwrap();
         assert_eq!(db.root(), root_a);

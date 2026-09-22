@@ -100,9 +100,8 @@ pub trait SectionBuffer: Send + Sync {
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Shorten an unpublished section during initialization. A shorter length is durable when
-    /// this returns.
-    fn truncate_pending(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+    /// Shorten the buffer. A shorter length is durable when this returns.
+    fn truncate(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
 impl<B: Blob> SectionBuffer for PagedRecovery<B> {
@@ -122,8 +121,8 @@ impl<B: Blob> SectionBuffer for PagedRecovery<B> {
         Self::wait_for_sync(self).await
     }
 
-    async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
-        self.truncate(len).await
+    async fn truncate(&mut self, len: u64) -> Result<(), RError> {
+        Self::truncate(self, len).await
     }
 }
 
@@ -145,7 +144,7 @@ impl<B: Blob> SectionBuffer for Write<B> {
         Self::wait_for_sync(self).await
     }
 
-    async fn truncate_pending(&mut self, len: u64) -> Result<(), RError> {
+    async fn truncate(&mut self, len: u64) -> Result<(), RError> {
         if len < self.size() {
             self.resize(len).await?;
             self.sync().await?;
@@ -563,7 +562,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             // Truncate the blob to the given size
             let current = blob.size();
             if size < current {
-                blob.truncate_pending(size).await?;
+                blob.truncate(size).await?;
                 debug!(section, from = current, to = size, "truncated section");
             }
         }
@@ -584,7 +583,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
         let futures = self.blobs.iter_mut().filter_map(|(section, blob)| {
             let &size = sizes.get(section)?;
-            (size < blob.size()).then(|| blob.truncate_pending(size))
+            (size < blob.size()).then(|| blob.truncate(size))
         });
         try_join_all(futures).await.map_err(Error::Runtime)?;
         Ok(())
@@ -622,6 +621,7 @@ pub(super) mod tests {
         page: &[u8],
         suffix_pages: usize,
     ) {
+        // Seed one acknowledged page whose physical encoding can prefix the crash image.
         let physical = page.len() + CHECKSUM_SIZE as usize;
         let source = format!("{partition}-source");
         let (raw, size) = context.open(&source, b"source").await.unwrap();
@@ -657,6 +657,8 @@ pub(super) mod tests {
         assert_eq!(&image[..physical], acknowledged.as_ref());
         drop(writer);
         drop(raw);
+
+        // Clear the unacknowledged pages' length slots to model torn checksum publication.
         for page_index in 1..=suffix_pages {
             let footer = page_index * physical + page.len();
             image[footer..footer + 2].fill(0);
@@ -744,7 +746,7 @@ pub(super) mod tests {
             Ok(())
         }
 
-        async fn truncate_pending(&mut self, _len: u64) -> Result<(), RError> {
+        async fn truncate(&mut self, _len: u64) -> Result<(), RError> {
             Ok(())
         }
     }
@@ -784,6 +786,7 @@ pub(super) mod tests {
             "truncate_pending",
         ] {
             deterministic::Runner::default().start(|context| async move {
+                // Observe each buffer drop against the partition contents visible at that instant.
                 let drops = Arc::new(Mutex::new(Vec::new()));
                 let observed = drops.clone();
                 let observer = context.child("drop_observer");
@@ -797,6 +800,7 @@ pub(super) mod tests {
                 manager.get_or_create(1).await.unwrap();
                 manager.get_or_create(2).await.unwrap();
 
+                // Every cleanup path must remove persistent names before releasing their owners.
                 match operation {
                     "prune" => assert!(manager.prune(3).await.unwrap()),
                     "remove_section" => {
@@ -809,6 +813,7 @@ pub(super) mod tests {
                     _ => unreachable!(),
                 }
 
+                // Each drop observes only names whose owners remain live.
                 let remaining = if operation == "truncate_pending" {
                     1u64
                 } else {
@@ -929,6 +934,7 @@ pub(super) mod tests {
     fn test_truncate_waits_for_in_flight_start_sync() {
         for fails in [false, true] {
             deterministic::Runner::default().start(|context| async move {
+                // Hold a sync on the section that truncation will remove.
                 let pending = PendingSyncs::default();
                 let wait_for_syncs = Arc::new(AtomicUsize::new(0));
                 let cfg = test_config(pending.clone(), wait_for_syncs.clone());
@@ -936,6 +942,8 @@ pub(super) mod tests {
                 manager.get_or_create(1).await.unwrap();
                 manager.get_or_create(2).await.unwrap();
                 let handle = manager.start_sync(2).await.unwrap();
+
+                // Truncation must wait for that sync and surface its completion result.
                 let result = {
                     let truncate = manager.truncate_pending(1, 0);
                     futures::pin_mut!(truncate);
@@ -947,6 +955,8 @@ pub(super) mod tests {
                     );
                     truncate.await
                 };
+
+                // A failed sync is fatal to this manager; success leaves only the retained section.
                 if fails {
                     assert!(matches!(result, Err(Error::Runtime(RError::Closed))));
                     assert!(matches!(handle.await, Err(RError::Closed)));

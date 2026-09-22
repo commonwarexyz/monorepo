@@ -1188,6 +1188,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         ceiling: u64,
         valid_lengths: &BTreeMap<u64, u64>,
     ) -> Result<Self, Error> {
+        // Reconcile the logical retained start from offsets metadata and data blob names before
+        // decoding any frame.
         let per_blob = self.cfg.items_per_section.get();
         let offsets_start = self.offsets.pruning_boundary();
         let oldest = self
@@ -1252,6 +1254,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         self.offsets = self.offsets.truncate(anchor).await?;
         let mut end = anchor;
         while let Some(writer) = self.pending.get_mut(&blob) {
+            // Scan one capacity-bounded blob from its retained start and rebuild every derived
+            // offset at or above the recovery anchor.
             let first = blob_first_position(blob, per_blob)?.max(start);
             let limit = super::blob_end_position(blob, per_blob, ceiling);
             let physical_size = writer.size();
@@ -1297,6 +1301,9 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 return Err(Error::Corruption(message));
             }
             end = pos;
+
+            // A complete frame beyond a full blob is corruption. A short blob or the requested
+            // ceiling ends the selected contiguous prefix.
             if pos == limit && pos != ceiling && matches!(scanner.next().await?, Frame::Item { .. })
             {
                 return Err(Error::Corruption(format!(
@@ -1372,6 +1379,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 retained_bytes(blob).is_some_and(|bytes| bytes < writer.size())
             });
         if repair_data {
+            // Delete excluded blobs newest-first, then durably shorten each retained data blob to
+            // the frame boundary established by inspection.
             for blob in self.discarded.into_iter().rev() {
                 self.partition.remove(blob).await?;
             }
@@ -1405,6 +1414,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
                 },
             );
         }
+
+        // Align offsets with the selected data prefix before sealing its blobs for live access.
         let (offsets, bounds) = Inner::<E, V>::align(
             &self.partition,
             &mut self.pending,
@@ -1424,6 +1435,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         let tail = position_to_blob(bounds.end, per_blob);
         let blobs = Writable::recover(self.partition, self.pending, tail).await?;
         let barrier = Barrier::new(offsets.recovery_watermark());
+
+        // Publish the offsets watermark only after the data it authorizes is durable.
         let offsets = Box::new(offsets.publish(bounds.end).await?);
         let metrics = Metrics::new(self.context);
         metrics.update(bounds.end, bounds.start, per_blob);
@@ -2618,7 +2631,7 @@ mod tests {
     use super::*;
     use crate::{
         journal::{
-            authenticated::BackingRecovery as _,
+            authenticated::{self, BackingRecovery as _},
             contiguous::{checkpoint::Checkpoint, tests::run_contiguous_tests},
         },
         utils::codec::View,
@@ -2702,6 +2715,45 @@ mod tests {
             for pos in 20..28 {
                 assert_eq!(journal.read(pos).await.unwrap(), pos - 20);
             }
+        });
+    }
+
+    #[test]
+    fn test_sync_rejects_missing_acknowledged_data() {
+        deterministic::Runner::default().start(|context| async move {
+            // Persist a data prefix and its acknowledged offsets.
+            let config = initialization_cfg(&context, "initialization-missing-anchor", 5);
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), config.clone())
+                .await
+                .unwrap();
+            for value in 0..20 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            _ = journal.sync().await.unwrap();
+
+            // Remove acknowledged data while leaving its offsets and watermark intact.
+            for section in 1u64..=4 {
+                context
+                    .remove(
+                        "initialization-missing-anchor_data",
+                        Some(&section.to_be_bytes()),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            // The watermark makes this missing data fatal during recovery.
+            let result = <Journal<_, u64> as authenticated::Backing<_>>::recover(
+                context.child("sync"),
+                config,
+                Some(40),
+            )
+            .await;
+            let error = result.err().expect("missing acknowledged data must fail");
+            assert!(
+                matches!(error, Error::Corruption(_)),
+                "must reject missing data instead of authorizing a reset: {error}"
+            );
         });
     }
 
@@ -8165,7 +8217,7 @@ mod tests {
             let lower_bound = 10;
             let upper_bound = 26;
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8224,7 +8276,7 @@ mod tests {
             let lower_bound = 8;
             let upper_bound = 31;
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8279,7 +8331,7 @@ mod tests {
 
             #[allow(clippy::reversed_empty_ranges)]
             let _result = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg,
                 10..5, // invalid range: lower > upper
             )
@@ -8320,7 +8372,7 @@ mod tests {
             let lower_bound = 5; // blob 1
             let upper_bound = 20; // blob 3
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8390,7 +8442,7 @@ mod tests {
             let lower_bound = 8; // blob 1
             let upper_bound = 20;
             let journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("sync"),
+                context.child("sync"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8435,7 +8487,7 @@ mod tests {
             let lower_bound = 10;
             let upper_bound = 26;
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("second"),
+                context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8489,7 +8541,7 @@ mod tests {
             let lower_bound = 7;
             let upper_bound = 20;
             let journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("second"),
+                context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8538,7 +8590,7 @@ mod tests {
             let lower_bound = 15; // blob 3
             let upper_bound = 26; // last element in blob 5
             let journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("second"),
+                context.child("second"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8592,7 +8644,7 @@ mod tests {
             let lower_bound = 15; // Exactly at blob boundary (15/5 = 3)
             let upper_bound = 25; // Last element exactly at blob boundary (24/5 = 4)
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )
@@ -8662,7 +8714,7 @@ mod tests {
             let lower_bound = 10; // operation 10 (blob 2: 10/5 = 2)
             let upper_bound = 15; // Last operation 14 (blob 2: 14/5 = 2)
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
-                || context.child("storage"),
+                context.child("storage"),
                 cfg.clone(),
                 lower_bound..upper_bound,
             )

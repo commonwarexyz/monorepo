@@ -130,7 +130,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         _context: E,
         _config: Self::Config,
         _expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Self::Error>> {
+    ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
         Ok(Self::default())
     }
 

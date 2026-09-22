@@ -262,6 +262,8 @@ where
     where
         C: authenticated::Backing<E>,
     {
+        // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
+        // floor must remain in the retained operation prefix.
         let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle_config,

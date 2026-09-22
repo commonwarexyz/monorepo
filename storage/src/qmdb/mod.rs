@@ -39,8 +39,8 @@
 //! state. Zero is invalid, and a bound above the stored size does not grow the database.
 //! Initialization fails if pruning removed history needed by the selected commit.
 //!
-//! Initialization durably removes the later history. The bound does not limit future appends.
-//! Close all existing users of the storage before reopening. If initialization fails, retry it.
+//! Initialization durably removes later history before returning successfully. The bound does not
+//! limit future appends. Close all existing users of the storage before reopening.
 //! To require an exact checkpoint, also check the recovered root and range.
 //!
 //! # Ownership

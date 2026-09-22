@@ -126,7 +126,7 @@ impl<E: Context> Partition<E> {
         self.open_many(names).await
     }
 
-    /// Open only blobs that may contain items below a cap, retaining discarded names.
+    /// Open only blobs that may contain items below a cap, returning discarded blob indices.
     pub(super) async fn open_bounded(
         &self,
         max_size: u64,

@@ -225,7 +225,7 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>>> {
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
         let db = <Self>::init(context, config, expected.as_ref().map(|target| target.size))
             .await
             .map_err(InitError::Database)?;
@@ -291,7 +291,7 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>>> {
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
         let db = <Self>::init(context, config, expected.as_ref().map(|target| target.size))
             .await
             .map_err(InitError::Database)?;

@@ -52,9 +52,8 @@ where
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
     /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-    /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
-    /// commit's inactivity floor.
-    /// `None` selects the latest retained state.
+    /// while `None` selects the latest retained state. Initialization fails with
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
@@ -106,9 +105,9 @@ pub mod partitioned {
         /// Initializes a [Db] from the given `config`.
         /// The configured [`Strategy`] is used to parallelize merkleization.
         /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
-        /// failing with [Error::HistoricalFloorPruned] if the log or the bitmap has pruned that
-        /// commit's inactivity floor.
-        /// `None` selects the latest retained state.
+        /// while `None` selects the latest retained state. Initialization fails with
+        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
+        /// floor.
         pub async fn init(
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,

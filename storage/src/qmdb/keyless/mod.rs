@@ -163,6 +163,8 @@ where
     where
         C: authenticated::Backing<E>,
     {
+        // Keyless restores commit fields without replaying a keyed snapshot, so its logical floor
+        // may precede the retained operation prefix.
         let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
             context.child("journal"),
             cfg.merkle,

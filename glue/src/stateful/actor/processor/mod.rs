@@ -578,7 +578,7 @@ impl<T: Clone> Pruning<T> {
             return None;
         }
 
-        // Retain the full marshal recovery window before pruning.
+        // Observe the full marshal recovery window after startup before pruning.
         if self.retained_targets.len() < self.marshal_retention_window {
             return None;
         }

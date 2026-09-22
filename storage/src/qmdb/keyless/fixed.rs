@@ -31,6 +31,7 @@ mod tests {
         qmdb::{
             Error,
             keyless::tests::{self, keyless_tests},
+            sync,
         },
     };
     use commonware_codec::FixedSize;
@@ -46,10 +47,13 @@ mod tests {
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, next_pending_sync},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::U64};
+    use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, probability, sequence::U64};
     use core::future::Future;
     use futures::FutureExt as _;
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use std::{
+        num::{NonZeroU16, NonZeroUsize},
+        sync::Arc,
+    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
@@ -271,6 +275,54 @@ mod tests {
         deterministic::Runner::default().start(bounded_compact::<mmb::Family>);
     }
 
+    /// A keyless database imported from a retained suffix reopens from that same history.
+    #[test_traced]
+    fn test_keyless_synced_range_reopens() {
+        deterministic::Runner::default().start(|context| async move {
+            // Build and persist the source history.
+            let source_cfg = db_config("synced-range-source", &context, Sequential);
+            let source = TestDb::<mmr::Family>::init(context.child("source"), source_cfg, None)
+                .await
+                .unwrap();
+            let mut batch = source.new_batch();
+            for value in 0..10 {
+                batch = batch.append(U64::new(value));
+            }
+            let batch = batch.merkleize(&source, None, Location::new(0)).await;
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = Arc::new(source.sync().await.unwrap());
+
+            // Import a suffix whose logical inactivity floor precedes its retained start.
+            let client_cfg = db_config("synced-range-client", &context, Sequential);
+            let client: TestDb<mmr::Family> = sync::sync(sync::engine::Config {
+                context: context.child("client"),
+                db_config: client_cfg.clone(),
+                target: sync::Target {
+                    root: source.root(),
+                    range: non_empty_range!(Location::new(5), source.bounds().end),
+                },
+                source,
+                apply_batch_size: NZU64!(10),
+                fetch_batch_size: NZU64!(5),
+                max_outstanding_requests: 1,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 8,
+            })
+            .await
+            .unwrap();
+            assert_eq!(*client.bounds().start, 5);
+            assert_eq!(*client.inactivity_floor_loc(), 0);
+
+            // Persist and reopen the imported prefix without requiring replay from its floor.
+            _ = client.sync().await.unwrap();
+            TestDb::<mmr::Family>::init(context.child("reopened"), client_cfg, None)
+                .await
+                .unwrap();
+        });
+    }
+
     fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {
         Box::new(|ctx, cap| {
             Box::pin(async move {
@@ -465,8 +517,8 @@ mod tests {
                 .start_and_recover(move |ctx| async move {
                     let pending = PendingSyncs::default();
 
-                    // Each 18-byte operation occupies one page, so selecting the genesis
-                    // commit discards two complete pages from the same seven-item blob.
+                    // Keep both branches in one blob while placing each operation on its own page,
+                    // so selecting the genesis commit discards two complete pages.
                     let mut cfg = db_config("rebranch-sync-crash", &ctx, Sequential);
                     cfg.log.items_per_blob = NZU64!(7);
                     cfg.log.page_cache = CacheRef::from_pooler(&ctx, NZU16!(18), PAGE_CACHE_SIZE);
@@ -487,6 +539,7 @@ mod tests {
                     assert_eq!(db.bounds().end, Location::new(3));
                     drop(db);
 
+                    // Replace the first branch with a second branch from the genesis commit.
                     let open = DelayedDb::init(
                         DelayedSyncContext {
                             inner: ctx.child("bounded"),
@@ -506,6 +559,7 @@ mod tests {
                     let root_b = db.root();
                     assert_ne!(root_a, root_b);
 
+                    // Complete only one side of the paired operation/Merkle sync before crashing.
                     let starts = pending.starts();
                     let completions = pending.completions();
                     let handle;
@@ -528,6 +582,8 @@ mod tests {
                     (root_p, root_b)
                 });
 
+            // Recovery may publish the new branch only when its operation journal completed first;
+            // otherwise both journals must remain on the genesis state.
             deterministic::Runner::from(checkpoint).start(move |ctx| async move {
                 let pending = PendingSyncs::default();
                 let mut cfg = db_config("rebranch-sync-crash", &ctx, Sequential);

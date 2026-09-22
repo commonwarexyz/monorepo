@@ -191,6 +191,7 @@ fn fuzz(input: FuzzInput) {
                     cache_page_size,
                     cache_capacity,
                 } => {
+                    // Reopening requires exclusive ownership and a durable source tail.
                     if let Some(mut previous) = append_buffer.take() {
                         if previous.sync().await.is_err() {
                             return;
@@ -305,6 +306,7 @@ fn fuzz(input: FuzzInput) {
 
                 FuzzOperation::AppendReopenAtMost { new_size } => {
                     if let Some(mut append) = append_buffer.take() {
+                        // Close the live writer before selecting a shorter durable prefix.
                         if append.sync().await.is_err() {
                             return;
                         }

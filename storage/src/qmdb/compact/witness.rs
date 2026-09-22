@@ -660,8 +660,13 @@ where
     Op: Read + Floored<F>,
 {
     crate::qmdb::validate_initialization_bound(max_size)?;
+
+    // Keep recovery unpublished until the target witness has been selected and verified.
     let pending = Journal::<E, F, H::Digest>::recover(context, config, None).await?;
     let bounds = pending.bounds();
+
+    // Only an empty journal at position zero represents fresh storage. A nonzero empty range is an
+    // interrupted import whose missing witness must remain fatal.
     if bounds.is_empty() {
         if bounds.start != 0 {
             return Err(Error::DataCorrupted("witness journal has no tip"));
@@ -674,9 +679,11 @@ where
             load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
         return Ok((Store::new(journal, witness), op));
     }
+
+    // Witness positions count commits, while witness sizes count database operations. Search the
+    // monotonic sizes for the latest witness within the requested operation bound.
     let mut end = bounds.end;
     if let Some(cap) = max_size {
-        // Witness positions count commits, while their sizes count database operations.
         let mut start = bounds.start;
         while start < end {
             let mid = start + (end - start) / 2;

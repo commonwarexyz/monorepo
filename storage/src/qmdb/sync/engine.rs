@@ -287,8 +287,9 @@ where
             }));
         }
 
+        // Recover the operation prefix that can resume this target.
         let journal = <DB::Journal as Journal<DB::Family>>::new(
-            || config.context.child("journal"),
+            config.context.child("journal"),
             config.db_config.journal_config(),
             config.target.range.clone(),
         )
@@ -826,7 +827,7 @@ mod tests {
         type Op = i32;
 
         async fn new(
-            _context: impl Fn() -> Self::Context + Send,
+            _context: Self::Context,
             size: Self::Config,
             _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
         ) -> Result<Self, Self::Error> {

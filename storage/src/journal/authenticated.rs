@@ -879,8 +879,12 @@ where
 
     /// Persist the selected operations before the Merkle state acknowledging them.
     pub(crate) async fn finish(self) -> Result<Journal<F, E, C, H, S>, Error<F>> {
+        // Publish and fully sync the selected operations before finalizing Merkle state that
+        // acknowledges them.
         let journal = self.journal.finish(self.selected_end).await?;
         let journal = journal.sync().await?;
+
+        // Finalize the selected Merkle prefix, replay any durable operation suffix, and persist it.
         let merkle = self.merkle.finish().await?;
         let merkle =
             Journal::<F, E, C, H, S>::align(merkle, &journal, &self.hasher, APPLY_BATCH_SIZE)
@@ -957,8 +961,12 @@ where
         predicate: fn(&C::Item) -> bool,
         bagging: merkle::Bagging,
     ) -> Result<Recovery<F, E, C, H, S>, Error<F>> {
+        // Select the operation prefix before constraining Merkle recovery to the same end.
         let journal = C::recover(context.child("journal"), journal_cfg, max_size).await?;
         let bounds = journal.bounds();
+
+        // A fully pruned empty journal has no retained item to match, but its append position
+        // remains the selected end.
         let selected_end = if max_size.is_none() && bounds.is_empty() {
             bounds.end
         } else {
@@ -966,6 +974,9 @@ where
                 .last_matching(max_size.unwrap_or(u64::MAX), predicate)
                 .await?
         };
+
+        // Recover Merkle at the selected operation end and require it to cover retained
+        // operations.
         let hasher = StandardHasher::<H>::new(bagging);
         let merkle = Merkle::prepare(
             context.child("merkle"),
@@ -1148,9 +1159,13 @@ pub trait BackingRecovery: Send + Sync + Sized {
     {
         async move {
             let bounds = self.bounds();
+
+            // A ceiling below retained history cannot select a supported prefix.
             if ceiling < bounds.start {
                 return Err(JournalError::ItemPruned(ceiling));
             }
+
+            // Search backward and return the exclusive end immediately after the latest match.
             let mut end = bounds.end.min(ceiling);
             while end > bounds.start {
                 if predicate(&self.read(end - 1).await?) {
@@ -1158,6 +1173,8 @@ pub trait BackingRecovery: Send + Sync + Sized {
                 }
                 end -= 1;
             }
+
+            // Only an unpruned journal can establish genesis when no retained item matches.
             if bounds.start != 0 {
                 return Err(JournalError::ItemPruned(bounds.start));
             }
@@ -1168,6 +1185,9 @@ pub trait BackingRecovery: Send + Sync + Sized {
 
 /// A [Mutable] journal that can back an authenticated [Journal].
 pub trait Backing<E: Context>: Mutable {
+    /// The configuration needed to initialize this journal.
+    type Config: Clone + Send;
+
     /// Initialization-owned storage used to select and validate the retained prefix.
     type Recovery: BackingRecovery<Journal = Self>;
 
@@ -1179,32 +1199,32 @@ pub trait Backing<E: Context>: Mutable {
         cfg: Self::Config,
         max_size: Option<u64>,
     ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
-
-    /// The configuration needed to initialize this journal.
-    type Config: Clone + Send;
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
-/// The context factory preserves the caller's metric prefix if recovery needs a second open.
 pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
-    context: impl Fn() -> E + Send,
+    context: E,
     cfg: J::Config,
     range: Range<u64>,
 ) -> Result<J, JournalError> {
     assert!(!range.is_empty(), "range must not be empty");
-    let pending = match J::recover(context(), cfg.clone(), Some(range.end)).await {
-        Ok(pending) => pending,
-        // A bound below the retained start cannot select a prefix. Open the reset owner.
-        Err(JournalError::ItemPruned(_)) => J::recover(context(), cfg, None).await?,
-        Err(err) => return Err(err),
-    };
+
+    // Sync targets describe the same append-only log. Recover local history before choosing the
+    // prefix to reuse for this target.
+    let pending = J::recover(context, cfg, None).await?;
     let bounds = pending.bounds();
+
+    // A fresh journal already aligned with the sync start needs no reset.
     if bounds == (0..0) && range.start == 0 {
         return pending.finish(0).await;
     }
+
+    // Fetch the range anew when its start is pruned or local progress does not reach it.
     if bounds.start > range.start || bounds.end <= range.start {
         return pending.reset(range.start).await?.finish(range.start).await;
     }
+
+    // Publish the retained prefix before pruning complete sections below the sync start.
     let journal = pending.finish(range.end).await?;
     let (journal, _) = journal.prune(range.start).await?;
     Ok(journal)
@@ -1299,6 +1319,7 @@ mod tests {
     #[test]
     fn test_initialization_syncs_operations_before_merkle_repair() {
         deterministic::Runner::default().start(|context| async move {
+            // Control operation and Merkle sync completion independently.
             let operation_syncs = PendingSyncs::default();
             let merkle_syncs = PendingSyncs::default();
             operation_syncs.unblock();
@@ -1311,6 +1332,8 @@ mod tests {
                 inner: context.child("merkle"),
                 pending: merkle_syncs.clone(),
             };
+
+            // Prepare an empty Merkle prefix alongside one selected operation.
             let cfg = merkle_config("sync-order", &context);
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init(
@@ -1357,6 +1380,8 @@ mod tests {
                 hasher,
                 selected_end: 1,
             };
+
+            // Finishing must request the operation sync before any Merkle sync.
             operation_syncs.arm();
             merkle_syncs.arm();
             let finish = pending.finish();
@@ -1364,6 +1389,8 @@ mod tests {
             assert!(futures::poll!(&mut finish).is_pending());
             assert_eq!(operation_syncs.calls(), 1);
             assert_eq!(merkle_syncs.calls(), 0);
+
+            // Complete both syncs and verify the published operation prefix.
             operation_syncs.unblock();
             merkle_syncs.unblock();
             let journal = finish.await.unwrap();
@@ -1841,6 +1868,7 @@ mod tests {
     }
 
     async fn test_initialization_selection_inner<F: Family + PartialEq>(context: Context) {
+        // Select the latest complete commit at or below each cap, both before and after pruning.
         for start in [0, 7] {
             for cap in [0, 1, 2, 3, 4, 7, 8, 11, 12, 14, 15, 100] {
                 let suffix = format!("select-{start}-{cap}");
@@ -1867,6 +1895,8 @@ mod tests {
                     Some(cap),
                 )
                 .await;
+
+                // Derive the expected exclusive end from the retained commit candidates.
                 let expected = [2, 4, 11, 14]
                     .into_iter()
                     .filter(|end| *end <= cap && *end > start)
@@ -1883,6 +1913,8 @@ mod tests {
                 }
                 let size = selected.unwrap();
                 assert_eq!(size, expected.unwrap_or(0));
+
+                // Publication makes the selected end authoritative on reopen.
                 drop(pending.finish(size).await.unwrap());
                 let journal =
                     ContiguousJournal::<_, TestOp<F>>::init(context.child("restart"), cfg)
@@ -1891,6 +1923,8 @@ mod tests {
                 assert_eq!(journal.size(), size);
             }
         }
+
+        // Bound both authenticated components to every prefix around the durable tip.
         for cap in [0, 1, 2, 3, 4, 5, 6, 7, 8, 100] {
             let suffix = format!("authenticated-cap-{cap}");
             let mc = merkle_config(&suffix, &context);
@@ -1982,6 +2016,7 @@ mod tests {
             }
         }
 
+        // End each branch at a commit so initialization can select it as a complete state.
         fn branch<F: Family + PartialEq>(first: u8, len: u64) -> Vec<TestOp<F>> {
             let mut ops: Vec<TestOp<F>> = (0..len - 1)
                 .map(|i| create_operation::<F>(first + i as u8))
@@ -2361,6 +2396,7 @@ mod tests {
     #[test_traced]
     fn test_reopen_persists_merkle_watermark() {
         deterministic::Runner::default().start(|context| async move {
+            // Persist operations while the Merkle recovery watermark still describes genesis.
             let pending = PendingSyncs::default();
             let open = open_delayed_journal(&context, "first", "watermark", &pending);
             let mut journal = drive_pending_syncs(&pending, open).await.unwrap();
@@ -2379,6 +2415,8 @@ mod tests {
             drive_pending_syncs(&pending, handle).await.unwrap();
             let size = *journal.merkle.size();
             drop(journal);
+
+            // Confirm the first publication left the Merkle watermark at genesis.
             let before = ContiguousJournal::<_, Digest>::persisted_watermark(
                 context.child("p0"),
                 "mmr-journal-watermark",
@@ -2387,6 +2425,7 @@ mod tests {
             .unwrap();
             assert_eq!(before, Some(0));
 
+            // Reopening publishes the recovered Merkle prefix even without new node writes.
             let journal =
                 create_empty_journal::<mmr::Family>(context.child("second"), "watermark").await;
             assert_eq!(*journal.merkle.size(), size);
@@ -3986,7 +4025,9 @@ mod tests {
         });
     }
 
+    /// A fully pruned authenticated journal preserves its append position and root across reopen.
     async fn fully_pruned_authenticated_reopens<F: Family + PartialEq>(context: Context) {
+        // Fill exactly one operation blob, then prune the complete durable prefix.
         let merkle_cfg = merkle_config("fully-pruned-reopen", &context);
         let journal_cfg = journal_config("fully-pruned-reopen", &context);
         assert_eq!(journal_cfg.items_per_blob.get(), 7);
@@ -4012,6 +4053,7 @@ mod tests {
         assert_eq!(journal.root(0).unwrap(), root);
         drop(journal);
 
+        // Reopen at the retained boundary and append at that position.
         let journal = TestJournal::<F>::new(
             context.child("reopen"),
             merkle_cfg,

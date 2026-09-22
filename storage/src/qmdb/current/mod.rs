@@ -453,8 +453,10 @@ where
         .map_err(|_| crate::qmdb::Error::<F>::DataCorrupted("pruned chunks overflow"))?;
     let bitmap = Arc::new(Shared::<N>::new(bitmap));
 
-    // Initialize the underlying `any` database. It takes sole ownership of the bitmap and
-    // populates it during snapshot rebuild.
+    // The persisted bitmap boundary and delayed-pair absorption threshold constrain which retained
+    // commit can be reconstructed. The underlying `any` database takes sole ownership of the
+    // bitmap, validates both constraints before publishing the selected journal prefix, then
+    // populates the bitmap during snapshot rebuild.
     let any = any::init_with_bitmap(
         context.child("any"),
         config.into(),
@@ -464,7 +466,7 @@ where
     )
     .await?;
 
-    // Rebuild the grafted tree and canonical root from the initialized `any` state.
+    // Rebuild the grafted tree and canonical root from the persisted pins and selected operation tree.
     let (grafted_tree, root) = db::rebuild_grafted_tree::<F, H, S, N>(
         any.bitmap.as_ref(),
         &pinned_nodes,

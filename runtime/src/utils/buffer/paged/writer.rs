@@ -183,12 +183,12 @@ impl<B: Blob> Recovery<B> {
             blob.resize(new_blob_size).await?;
             blob.sync().await?;
         }
-
         let capacity = adjusted_capacity(capacity, page_size);
 
         // A valid tail may still include unsynced writes from the wrapped blob handle.
         let needs_sync = !invalid_data_found;
 
+        // Retain a partial page in the tip buffer; complete pages remain backed by the blob.
         let (current_page, partial_page_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (pages - 1, Some(crc_record), Some(partial_page)),
             None => (pages, None, None),
@@ -329,7 +329,6 @@ impl<B: Blob> Recovery<B> {
                 .resize(&self.blob, new_physical_size)
                 .await?;
         }
-
         if partial_bytes > 0 {
             return self
                 .shrink_to_partial(full_pages, partial_bytes, page_size, tail_offset)

@@ -1890,7 +1890,7 @@ fn test_fixed_prune_surfaces_failed_sync() {
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
         let cfg = fixed::Config {
-            partition: "fixed-rewind-fail".into(),
+            partition: "fixed-prune-fail".into(),
             items_per_blob: NZU64!(3),
             page_cache: CacheRef::from_pooler(&context, NZU16!(44), NZUsize!(8)),
             write_buffer: NZUsize!(2048),
@@ -1909,7 +1909,7 @@ fn test_variable_prune_surfaces_failed_sync() {
     executor.start(|context| async move {
         let pending = PendingSyncs::default();
         let cfg = variable::Config {
-            partition: "variable-rewind-fail".into(),
+            partition: "variable-prune-fail".into(),
             items_per_section: NZU64!(3),
             compression: None,
             codec_config: (),
@@ -1943,7 +1943,7 @@ fn test_fresh_sync_avoids_reset_writes() {
         );
         let (sync, sync_io) = RecordingContext::new(context.child("fixed_sync"));
         let journal = crate::journal::authenticated::init_sync::<_, fixed::Journal<_, u64>>(
-            || sync.child("journal"),
+            sync.child("journal"),
             fixed_cfg("fixed-sync"),
             0..10,
         )
@@ -1971,7 +1971,7 @@ fn test_fresh_sync_avoids_reset_writes() {
         );
         let (sync, sync_io) = RecordingContext::new(context.child("variable_sync"));
         let journal = crate::journal::authenticated::init_sync::<_, variable::Journal<_, u64>>(
-            || sync.child("journal"),
+            sync.child("journal"),
             variable_cfg("variable-sync"),
             0..10,
         )

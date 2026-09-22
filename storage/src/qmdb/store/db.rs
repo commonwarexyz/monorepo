@@ -378,6 +378,8 @@ where
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
         max_size: Option<Location>,
     ) -> Result<Self, Error> {
+        // Variable-journal recovery rebuilds item offsets before selecting a commit. Keep the
+        // recovery owner unpublished until that commit and its replay floor are validated.
         crate::qmdb::validate_initialization_bound(max_size)?;
         let pending = Journal::<E, Operation<crate::mmr::Family, K, V>>::recover(
             context.child("log"),
@@ -401,6 +403,8 @@ where
             commit.as_ref(),
             true,
         )?;
+
+        // Finishing recovery publishes the selected offset prefix before releasing later value bytes.
         let mut log = pending.finish(size).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");
@@ -409,14 +413,13 @@ where
                 .await?;
         }
 
-        // Sync the log to avoid having to repeat any recovery that may have been performed on next
-        // startup.
+        // Persist recovery repairs and any genesis commit so the next startup need not repeat them.
         let log = log.sync().await?;
 
         let last_commit_loc =
             Location::new(log.size().checked_sub(1).expect("commit should exist"));
 
-        // Build the snapshot.
+        // Build the snapshot only from the durable selected prefix.
         let cache_size = cfg.init_cache;
         let init_buffer = cfg.init_buffer;
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
@@ -626,6 +629,7 @@ mod test {
     fn test_store_bounded_initialization_commit_selection() {
         for cap_case in 0..4 {
             deterministic::Runner::default().start(move |context| async move {
+                // Persist two commits with distinct metadata and key state.
                 let cfg = test_config(&context);
                 let db = TestStore::init(context.child("seed"), cfg.clone(), None)
                     .await
@@ -649,6 +653,9 @@ mod test {
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let latest_size = db.size();
                 _ = db.sync().await.unwrap();
+
+                // Exact, in-between, equal-tip, and above-tip caps must select the latest commit at
+                // or below the bound.
                 let cap = match cap_case {
                     0 => first_size,
                     1 => first_size + 1,
@@ -672,6 +679,8 @@ mod test {
                 );
                 assert_eq!(db.get(&b).await.unwrap(), old.then(|| vec![2]));
                 assert_eq!(db.get(&c).await.unwrap(), (!old).then(|| vec![4]));
+
+                // Selection is durable, and future appends continue from the selected commit.
                 drop(db);
                 let db = TestStore::init(context.child("reopen"), cfg.clone(), None)
                     .await

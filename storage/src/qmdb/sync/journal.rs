@@ -21,14 +21,12 @@ pub trait Journal<F: Family>: Sized + Send {
 
     /// Create/open a journal for syncing the given range.
     ///
-    /// The factory creates a context with the same identity for each recovery attempt.
-    ///
     /// The implementation must:
     /// - Reuse any on-disk data whose logical locations lie within the range.
     /// - Discard/ignore any data outside the range.
     /// - Report `size()` equal to the next location to be filled.
     fn new(
-        context: impl Fn() -> Self::Context + Send,
+        context: Self::Context,
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
@@ -61,7 +59,7 @@ where
     type Error = crate::journal::Error;
 
     async fn new(
-        context: impl Fn() -> Self::Context + Send,
+        context: Self::Context,
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
@@ -104,7 +102,7 @@ where
     type Error = crate::journal::Error;
 
     async fn new(
-        context: impl Fn() -> Self::Context + Send,
+        context: Self::Context,
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
@@ -161,7 +159,7 @@ where
     type Error = crate::qmdb::Error<F>;
 
     async fn new(
-        _context: impl Fn() -> Self::Context + Send,
+        _context: Self::Context,
         _config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
@@ -242,7 +240,7 @@ mod tests {
             let range = non_empty_range!(Location::new(10), Location::new(20));
 
             // A fresh journal is empty at the range start.
-            let journal = <Mem as Journal<F>>::new(|| (), (), range.clone())
+            let journal = <Mem as Journal<F>>::new((), (), range.clone())
                 .await
                 .unwrap();
             assert_eq!(journal.size(), 10);
@@ -259,7 +257,7 @@ mod tests {
             assert_eq!(ops, vec![3]);
 
             // A resize at or beyond the size clears to an empty journal at the new start.
-            let journal = <Mem as Journal<F>>::new(|| (), (), range.clone())
+            let journal = <Mem as Journal<F>>::new((), (), range.clone())
                 .await
                 .unwrap();
             let journal = journal.append(vec![1, 2]).await.unwrap();
@@ -270,7 +268,7 @@ mod tests {
             assert!(ops.is_empty());
 
             // A resize before the start clears.
-            let journal = <Mem as Journal<F>>::new(|| (), (), range).await.unwrap();
+            let journal = <Mem as Journal<F>>::new((), (), range).await.unwrap();
             let journal = journal.append(vec![1]).await.unwrap();
             let journal = journal.resize(Location::new(5)).await.unwrap();
             assert_eq!(journal.size(), 5);
@@ -306,7 +304,7 @@ mod tests {
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
             );
-            let journal = <FixedJournal as Journal<F>>::new(|| context.child("sync"), cfg, range)
+            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
                 .await
                 .unwrap();
 
@@ -338,7 +336,7 @@ mod tests {
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
             );
-            let journal = <FixedJournal as Journal<F>>::new(|| context.child("sync"), cfg, range)
+            let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
                 .await
                 .unwrap();
 
@@ -356,6 +354,7 @@ mod tests {
     fn test_fixed_sync_journal_preserves_metric_prefix() {
         for reset in [false, true] {
             deterministic::Runner::default().start(|context| async move {
+                // Exercise both fresh storage and a retained start beyond the requested range.
                 let cfg = test_cfg(&context);
                 if reset {
                     let journal =
@@ -364,12 +363,13 @@ mod tests {
                             .unwrap();
                     _ = journal.sync().await.unwrap();
                 }
+
+                // Initialization keeps the caller's metric prefix through either path.
                 let start = if reset { 7 } else { 0 };
                 let range = non_empty_range!(Location::<F>::new(start), Location::new(20));
-                let journal =
-                    <FixedJournal as Journal<F>>::new(|| context.child("sync"), cfg, range)
-                        .await
-                        .unwrap();
+                let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+                    .await
+                    .unwrap();
                 assert_eq!(journal.bounds(), start..start);
                 let metrics = commonware_runtime::Metrics::encode(&context);
                 let expected = format!("sync_size {start}");
@@ -394,7 +394,7 @@ mod tests {
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
             let journal =
-                <FixedJournal as Journal<F>>::new(|| context.child("sync"), cfg.clone(), range)
+                <FixedJournal as Journal<F>>::new(context.child("sync"), cfg.clone(), range)
                     .await
                     .unwrap();
 
@@ -422,7 +422,7 @@ mod tests {
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(60));
             let journal =
-                <FixedJournal as Journal<F>>::new(|| context.child("pruned_sync"), cfg, range)
+                <FixedJournal as Journal<F>>::new(context.child("pruned_sync"), cfg, range)
                     .await
                     .unwrap();
 
@@ -435,6 +435,7 @@ mod tests {
     fn test_variable_sync_journal_preserves_metric_prefix() {
         for reset in [false, true] {
             deterministic::Runner::default().start(|context| async move {
+                // Exercise both fresh storage and a retained start beyond the requested range.
                 let cfg = variable_test_cfg(&context);
                 if reset {
                     let journal =
@@ -443,10 +444,12 @@ mod tests {
                             .unwrap();
                     _ = journal.sync().await.unwrap();
                 }
+
+                // Initialization keeps the caller's metric prefix through either path.
                 let start = if reset { 7 } else { 0 };
                 let range = non_empty_range!(Location::<F>::new(start), Location::new(20));
                 let journal =
-                    <VariableJournal as Journal<F>>::new(|| context.child("sync"), cfg, range)
+                    <VariableJournal as Journal<F>>::new(context.child("sync"), cfg, range)
                         .await
                         .unwrap();
                 assert_eq!(journal.bounds(), start..start);
@@ -473,7 +476,7 @@ mod tests {
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
             let journal =
-                <VariableJournal as Journal<F>>::new(|| context.child("sync"), cfg.clone(), range)
+                <VariableJournal as Journal<F>>::new(context.child("sync"), cfg.clone(), range)
                     .await
                     .unwrap();
 
@@ -498,7 +501,7 @@ mod tests {
 
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(60));
             let journal =
-                <VariableJournal as Journal<F>>::new(|| context.child("pruned_sync"), cfg, range)
+                <VariableJournal as Journal<F>>::new(context.child("pruned_sync"), cfg, range)
                     .await
                     .unwrap();
 

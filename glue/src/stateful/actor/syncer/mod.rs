@@ -388,6 +388,8 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
+    // A completed state sync may be ahead of marshal's processed height. Recover from the
+    // later anchor and skip already-applied blocks while marshal catches up.
     let sync_height = sync_metadata.sync_height();
     let processed_height = marshal.get_processed_height().await;
     let skip_finalized_until = match (sync_height, processed_height) {
@@ -417,6 +419,9 @@ where
         .chain((floor_block.height() > marshal_floor).then_some(floor_block.height()))
         .max();
 
+    // A crash can leave databases ahead of marshal or at different checkpoints. Opening each
+    // at this target discards its extra suffix before the set is exposed. A missing target,
+    // including one lost to corruption or excessive pruning, makes startup fail.
     let processed_targets = A::sync_targets(&floor_block);
     let databases =
         A::Databases::init(context.child("db_set"), db_config, Some(processed_targets)).await;

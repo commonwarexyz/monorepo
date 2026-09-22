@@ -308,7 +308,7 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>>> {
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
         let db = <Self>::init(
             context,
             config,
@@ -403,7 +403,7 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>>> {
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
         let db = <Self>::init(
             context,
             config,

@@ -240,7 +240,7 @@ pub struct Oversized<E: Context, I: Record, V: Codec> {
 }
 
 /// Owns both journals while initialization may still discard unreferenced data.
-struct Recovery<E: Context, I: Record, V: Codec> {
+struct Pending<E: Context, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: GlobRecovery<E, V>,
     tracking: Option<Tracking<E>>,
@@ -255,11 +255,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> std::fmt::Debug for Ov
     }
 }
 
-impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Recovery<E, I, V>>
+impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Pending<E, I, V>>
     for Oversized<E, I, V>
 {
     /// Publish both journals after paired recovery.
-    fn from(recovery: Recovery<E, I, V>) -> Self {
+    fn from(recovery: Pending<E, I, V>) -> Self {
         Self {
             index: recovery.index,
             values: recovery.values.into(),
@@ -268,7 +268,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> From<Recovery<E, I, V>
     }
 }
 
-impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
+impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
     /// Find a recoverable terminal record within the cap without crossing a committed floor.
     async fn select_cap(
         &self,
@@ -293,7 +293,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
         Ok((retained * chunk, value_end))
     }
 
-    /// Open the index and value journals, reconciling them per the selected [RecoveryMode] mode.
+    /// Open the index and value journals, reconciling them per the selected [RecoveryMode] contract.
     async fn init(
         context: E,
         cfg: Config<V::Cfg>,
@@ -392,6 +392,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
         let chunk_size = FixedJournal::<E, I>::CHUNK_SIZE as u64;
         let sections: Vec<u64> = self.index.sections().collect();
 
+        // Shorten each index prefix before collecting the value suffixes it releases. Once all
+        // index repairs are durable, no stale entry can claim a subsequently reused value range.
         let mut value_truncations = BTreeMap::new();
         for section in sections {
             let index_size = self.index.size(section)?;
@@ -433,6 +435,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
             }
         }
 
+        // Durable index prefixes now authorize releasing and reusing the unreferenced values.
         self.values = self.values.truncate_sections(&value_truncations).await?;
 
         // Clean up orphan value sections that don't exist in index
@@ -659,10 +662,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Recovery<E, I, V> {
             .truncate_pending_section(section, index_size)
             .await?;
 
-        // Derive value size from last entry (section may not exist if empty)
+        // The durable index prefix owns the retained value boundary. Release its value suffix only
+        // after deriving that boundary from the now-authoritative index.
         let value_size = self.retained_value_end(section, index_size).await?;
-
-        // Truncate values
         self.values = self.values.truncate_section(section, value_size).await?;
         self.values = self.values.sync(section).await?;
         Ok(self)
@@ -698,7 +700,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         end: u64,
     ) -> Result<Self, Error> {
         let buffer = cfg.replay_buffer;
-        let mut pending = Recovery::init(context, cfg, RecoveryMode::Infer).await?;
+        let mut pending = Pending::init(context, cfg, RecoveryMode::Infer).await?;
         let (index_end, value_end) = pending.select_cap(section, end, 0).await?;
         pending.index = pending
             .index
@@ -715,7 +717,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// it.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let replay_buffer = cfg.replay_buffer;
-        let journal = Recovery::init(context, cfg, RecoveryMode::Infer).await?;
+        let journal = Pending::init(context, cfg, RecoveryMode::Infer).await?;
         journal.recover_inferred(replay_buffer).await
     }
 
@@ -735,7 +737,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         checkpoint: (u64, u64),
     ) -> Result<Self, Error> {
         let (section, index_size) = checkpoint;
-        Recovery::init(
+        Pending::init(
             context,
             cfg,
             RecoveryMode::Restore {
@@ -747,7 +749,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         .map(Into::into)
     }
 
-    /// Initialize tracked recovery and return its required full replay.
+    /// Initialize using durable per-section validation markers and return the required full replay.
     ///
     /// The caller must drain the replay and call [Replay::finish_tracked]. Entries below each
     /// durable marker are retained after their cross-journal boundary is proven. Entries above it
@@ -761,9 +763,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         Self::init_tracked_inner(context, cfg, metadata_partition, read_options, None).await
     }
 
-    /// Begin tracked initialization with an upper bound on the retained section/index-byte end.
-    /// Required markers and the selected paired boundary are validated before lowering markers
-    /// and releasing suffix storage. Drain the returned replay before publication.
+    /// Initialize using durable per-section validation markers through an upper bound on the
+    /// retained section and index-byte end.
+    ///
+    /// The selected paired boundary is validated before markers are lowered and suffix storage is
+    /// released. The caller must drain the replay and call [Replay::finish_tracked].
     pub async fn init_with_metadata_at_most(
         context: &E,
         cfg: Config<V::Cfg>,
@@ -782,6 +786,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         .await
     }
 
+    /// Open marker metadata, apply an optional retained bound, and start the required validation
+    /// replay without publishing the paired journals.
     async fn init_tracked_inner(
         context: &E,
         cfg: Config<V::Cfg>,
@@ -810,6 +816,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             })
             .collect::<BTreeMap<_, _>>();
 
+        // Limit advertised floors to the caller's bound before they authorize retained data.
         if let Some((section, end)) = cap {
             let items = end / FixedJournal::<E, I>::CHUNK_SIZE as u64;
             floors.retain(|candidate, _| *candidate <= section);
@@ -825,11 +832,15 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         } else {
             RecoveryMode::Floors(&floors)
         };
-        let mut journal = Recovery::init(context.child("oversized"), cfg, recovery).await?;
+        let mut journal = Pending::init(context.child("oversized"), cfg, recovery).await?;
+
+        // Select the paired boundary before publishing lower markers or releasing either suffix.
         if let Some((section, end)) = cap {
             let minimum_items = floors.get(&section).copied().unwrap_or(0);
             let (index_end, value_end) = journal.select_cap(section, end, minimum_items).await?;
             let items = index_end / FixedJournal::<E, I>::CHUNK_SIZE as u64;
+
+            // Publish the lower marker generation before freeing storage it previously protected.
             let mut changed = false;
             metadata.retain(|key, _| {
                 let keep = u64::from(key) <= section;
@@ -844,6 +855,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
             if changed {
                 metadata = metadata.sync().await?;
             }
+
+            // Durably shorten the index before discarding values its old suffix referenced.
             journal.index = journal
                 .index
                 .truncate_pending_tail(section, index_end)
@@ -1258,7 +1271,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Replay<E, I, V> {
         if validation.failed {
             return Err(Error::ReplayFailed);
         }
-        let mut journal = Recovery {
+        let mut journal = Pending {
             index: self.index.finish()?,
             values,
             tracking: self.tracking,
@@ -1421,17 +1434,13 @@ mod tests {
                 },
                 pending: outer.clone(),
             };
-            let Recovery {
+            let Pending {
                 index,
                 values,
                 tracking,
-            } = Recovery::<_, TestEntry, TestValue>::init(
-                delayed,
-                cfg.clone(),
-                RecoveryMode::Infer,
-            )
-            .await
-            .unwrap();
+            } = Pending::<_, TestEntry, TestValue>::init(delayed, cfg.clone(), RecoveryMode::Infer)
+                .await
+                .unwrap();
             let mut replay = index
                 .replay(0, 0, cfg.replay_buffer, ReadOptions::default())
                 .await
@@ -1439,7 +1448,7 @@ mod tests {
             while let Some(item) = replay.next().await {
                 item.unwrap();
             }
-            let recovery = Recovery {
+            let recovery = Pending {
                 index: replay.finish().unwrap(),
                 values,
                 tracking,
@@ -1545,9 +1554,95 @@ mod tests {
     type TestValue = [u8; 16];
 
     #[test]
+    fn test_overshooting_cap_keeps_lazy_committed_validation() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed two durable entries and publish a marker covering both.
+            let cfg = test_cfg(&context);
+            let seed_context = context.child("seed");
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                &seed_context,
+                cfg.clone(),
+                "overshooting-cap-markers".into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let mut journal = replay.finish_tracked().await.unwrap();
+            (journal, _, _, _) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .unwrap();
+            let offset;
+            (journal, _, offset, _) = journal
+                .append(1, TestEntry::new(2, 0, 0), &[2; 16])
+                .await
+                .unwrap();
+            _ = journal.sync_all().await.unwrap();
+            let mut markers: Metadata<_, SectionKey, u64> = Metadata::init(
+                context.child("markers"),
+                MetadataConfig {
+                    partition: "overshooting-cap-markers".into(),
+                    codec_config: (),
+                },
+            )
+            .await
+            .unwrap();
+            markers.put(SectionKey::new(1), 2);
+            _ = markers.sync().await.unwrap();
+
+            // Damage a committed value so eager validation would reject the marked prefix.
+            let (blob, _) = context
+                .open(&cfg.value_partition, &1u64.to_be_bytes())
+                .await
+                .unwrap();
+            blob.write_at(offset, vec![0xff], WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(blob);
+
+            // Ordinary marker-backed initialization retains committed values for lazy reads.
+            let ordinary_context = context.child("ordinary");
+            let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
+                &ordinary_context,
+                cfg.clone(),
+                "overshooting-cap-markers".into(),
+                ReadOptions::default(),
+            )
+            .await
+            .unwrap();
+            while let Some(item) = replay.next().await {
+                item.unwrap();
+            }
+            let journal = replay.finish_tracked().await.unwrap();
+            assert_eq!(journal.size(1).unwrap(), 2 * TestEntry::SIZE as u64);
+            drop(journal);
+
+            // A cap beyond the journal end must preserve the same lazy validation contract.
+            let cap_context = context.child("cap");
+            let result = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
+                &cap_context,
+                cfg,
+                "overshooting-cap-markers".into(),
+                ReadOptions::default(),
+                1,
+                u64::MAX,
+            )
+            .await;
+            assert!(
+                result.is_ok(),
+                "an overshooting cap must preserve ordinary lazy validation"
+            );
+        });
+    }
+
+    #[test]
     fn test_tracked_bounded_noop_preserves_metadata() {
         for cap in [2 * TestEntry::SIZE as u64, u64::MAX] {
             deterministic::Runner::default().start(|context| async move {
+                // Seed a tracked journal whose marker already matches either effective cap.
                 let cfg = test_cfg(&context);
                 let seed = context.child("seed");
                 let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
@@ -1575,6 +1670,7 @@ mod tests {
                 drop(tracking);
                 drop(journal);
 
+                // Reopening without shortening the prefix must not rewrite the marker generation.
                 let (context, recordings) =
                     commonware_runtime::mocks::RecordingContext::new(context);
                 let reopen = context.child("reopen");
@@ -1605,6 +1701,7 @@ mod tests {
     #[test]
     fn test_tracked_bounded_initialization_is_restart_stable() {
         deterministic::Runner::default().start(|context| async move {
+            // Seed three tracked sections, then retain all of section zero and one item from one.
             let cfg = test_cfg(&context);
             let seed_context = context.child("seed");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
@@ -1646,6 +1743,8 @@ mod tests {
             }
             assert_eq!(ids, vec![(0, 0), (0, 1), (0, 2), (1, 0)]);
             drop(replay.finish_tracked().await.unwrap());
+
+            // A normal restart must reproduce the selected prefix and append at its boundary.
             let restart_context = context.child("restart");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
                 &restart_context,
@@ -1668,6 +1767,8 @@ mod tests {
                 .unwrap();
             assert_eq!(position, 1);
             _ = journal.sync_all().await.unwrap();
+
+            // A second restart must retain the append made after bounded initialization.
             let verify_context = context.child("verify");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
                 &verify_context,
@@ -1980,6 +2081,7 @@ mod tests {
         }
         let chunk = FixedJournal::<deterministic::Context, TestEntry>::CHUNK_SIZE as u64;
 
+        // Seed durable history, reopen at the bound, and leave its replacement suffix unsynced.
         let executor = deterministic::Runner::default();
         let (_, checkpoint) = executor.start_and_recover(move |context| async move {
             let mut journal: Oversized<_, TestEntry, TestValue> =
@@ -2022,6 +2124,8 @@ mod tests {
             drop(journal);
         });
 
+        // Recovery may retain any prefix of the replacement suffix, but every retained pair must
+        // belong to the new history at that position.
         deterministic::Runner::from(checkpoint).start(move |context| async move {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let journal: Oversized<_, TestEntry, TestValue> =
@@ -3018,6 +3122,8 @@ mod tests {
             for tracked in [false, true] {
                 let context = context.child(if tracked { "tracked" } else { "untracked" });
                 let cfg = test_cfg(&context);
+
+                // Open each publication mode and establish an empty validated journal.
                 let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
                     let mut replay = Oversized::init_with_metadata(
                         &context,
@@ -3037,6 +3143,7 @@ mod tests {
                         .unwrap()
                 };
 
+                // Every completed live replay returns the same journal for the next append.
                 for id in 0..3 {
                     let position;
                     (journal, position, _, _) = journal
@@ -3064,6 +3171,7 @@ mod tests {
                     .unwrap();
                 _ = journal.sync_all().await.unwrap();
 
+                // Reinitialization must publish all four paired entries in either mode.
                 let journal: Oversized<_, TestEntry, TestValue> = if tracked {
                     let mut replay = Oversized::init_with_metadata(
                         &context,

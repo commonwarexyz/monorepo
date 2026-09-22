@@ -529,8 +529,9 @@ fn fuzz(input: FuzzInput) {
                                 .expect("empty flush failed");
                     }
                     7 if tracked => {
-                        // Await held syncs before pruning or rewinding so the durable counts can
-                        // be adjusted to match the retained entries.
+                        // Finish held syncs before pruning or reopening storage. Pruning needs
+                        // their durable coverage to update the model; reopening requires exclusive
+                        // ownership.
                         release_pending_syncs(&pending);
                         for (covered_section, covered, handle) in held.drain(..) {
                             handle.await.expect("pipelined sync failed");

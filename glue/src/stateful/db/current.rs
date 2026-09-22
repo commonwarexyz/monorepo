@@ -526,7 +526,7 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>>> {
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
         let db = <Self>::init(
             context,
             config,
@@ -630,7 +630,7 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>>> {
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
         let db = <Self>::init(
             context,
             config,
@@ -812,7 +812,7 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>>> {
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
         let db = open::variable(
             context,
             config,
@@ -921,7 +921,7 @@ where
         context: E,
         config: Self::Config,
         expected: Option<Self::SyncTarget>,
-    ) -> Result<Self, InitError<Error<F>>> {
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
         let db = open::ordered_variable(
             context,
             config,
@@ -1563,6 +1563,7 @@ mod tests {
     #[test]
     fn ordered_managed_db_bounded_initialization_to_target_round_trips() {
         deterministic::Runner::default().start(|context| async move {
+            // Finalize two distinct checkpoints so bounded initialization must discard a suffix.
             let config = fixed_config("ordered-bounded-init-round-trip", &context);
             let db =
                 <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone(), None)
@@ -1606,6 +1607,7 @@ mod tests {
                 slot.put(apply_and_finalize::<OrderedFixedDb>(database, merkleized2).await);
             }
 
+            // Reopen at the first checkpoint and verify the complete recovered target.
             drop(db);
             let db = <OrderedFixedDb as ManagedDb<_>>::init(
                 context.child("cap"),
@@ -1618,6 +1620,7 @@ mod tests {
             assert_eq!(target_after_reopen, target_after_first);
             drop(db);
 
+            // Root, end, and floor mismatches must each report both sides of the comparison.
             let mut wrong_root = target_after_first.clone();
             wrong_root.root = Sha256::hash(&[b"wrong initialization root"]);
             let mut behind = target_after_first.clone();
@@ -1630,10 +1633,11 @@ mod tests {
                     <OrderedFixedDb as ManagedDb<_>>::init(
                         context.child("mismatch").with_attribute("case", index),
                         config.clone(),
-                        Some(target),
+                        Some(target.clone()),
                     )
                     .await,
-                    Err(InitError::TargetMismatch)
+                    Err(InitError::TargetMismatch { expected, recovered })
+                        if expected == target && recovered == target_after_first
                 ));
                 let reopened = <OrderedFixedDb as ManagedDb<_>>::init(
                     context.child("restart").with_attribute("case", index),
@@ -1832,10 +1836,11 @@ mod tests {
                 <FixedDb as ManagedDb<_>>::init(
                     context.child("second"),
                     config(&context),
-                    Some(second),
+                    Some(second.clone()),
                 )
                 .await,
-                Err(InitError::TargetMismatch)
+                Err(InitError::TargetMismatch { expected, recovered })
+                    if expected == second && recovered == first
             ));
 
             // A rejected initialization leaves the first target in place.

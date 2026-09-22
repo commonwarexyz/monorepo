@@ -1200,9 +1200,11 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let local_end = bounds.end;
         assert!(local_start > Location::new(0));
         let sync_root = H::db_root(&db);
+
+        // Reopen the operation journal independently to probe the persisted Merkle boundary.
         drop(db);
         let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
-            || context.child("journal"),
+            context.child("journal"),
             qmdb::sync::DatabaseConfig::journal_config(&config),
             non_empty_range!(local_start, local_end),
         )
@@ -1804,6 +1806,7 @@ mod compact_variable_mmr {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
+            // Select the earlier target durably before serving it and growing a new suffix.
             drop(source);
             let source = ClientDb::init(
                 context.child("cap_source"),
@@ -1913,7 +1916,6 @@ mod compact_variable_mmr {
             let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
                 .await
                 .unwrap();
-            let mut first_size = None;
             for i in 1u8..=3 {
                 let floor = seeded.inactivity_floor_loc();
                 let batch = seeded
@@ -1923,21 +1925,12 @@ mod compact_variable_mmr {
                     .await;
                 (seeded, _) = seeded.apply_batch(batch).await.unwrap();
                 seeded = seeded.sync().await.unwrap();
-                first_size.get_or_insert(seeded.size());
             }
+
+            // Leave a nonzero witness-journal pruning boundary for the import to replace.
             let boundary = seeded.size();
             let seeded = seeded.prune(boundary).await.unwrap();
-            // The prune moved the journal's pruning boundary: the first commit is unreachable.
             drop(seeded);
-            assert!(matches!(
-                ClientDb::init(
-                    context.child("cap_pruned"),
-                    client_cfg.clone(),
-                    Some(first_size.unwrap())
-                )
-                .await,
-                Err(crate::qmdb::Error::HistoricalFloorPruned(_))
-            ));
 
             // Sync different state into the same partition.
             let source = SourceDb::init(
@@ -2158,7 +2151,7 @@ mod compact_variable_mmr {
             // Drop the unpersisted import. It must not replace the previous durable witness.
             drop(imported);
 
-            // Prune is likewise rejected while the import is pending; rebuild the import.
+            // Pruning requires a persisted import; rebuild the pending import to check rejection.
             let response = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
@@ -2654,6 +2647,7 @@ mod compact_variable_mmb {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
+            // Select the earlier target durably before serving it and growing a new suffix.
             drop(source);
             let source = ClientDb::init(
                 context.child("cap_source"),

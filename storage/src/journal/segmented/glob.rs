@@ -758,6 +758,7 @@ mod tests {
             ..test_cfg()
         };
         for retained in [true, false] {
+            // Seed durable history, reopen after its first frame, and leave a replacement unsynced.
             let executor = deterministic::Runner::default();
             let ((kept, offset, size), checkpoint) =
                 executor.start_and_recover(move |context| async move {
@@ -798,6 +799,7 @@ mod tests {
                     (kept, offset, size)
                 });
 
+            // Recovery may retain or lose the replacement, but cannot restore the discarded suffix.
             deterministic::Runner::from(checkpoint).start(move |context| async move {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let glob: Glob<_, i32> = Glob::init(context.child("second"), cfg()).await.unwrap();

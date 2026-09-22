@@ -420,6 +420,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         section: u64,
         end: u64,
     ) -> Result<Self, Error> {
+        let replay_buffer = cfg.write_buffer;
         let mut end = end;
         super::manager::truncate_paged_tail(
             &context,
@@ -437,23 +438,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             && end < blob.size()
         {
             end = end.min(
-                blob.recoverable_prefix_len_at_most(
-                    0,
-                    end,
-                    commonware_utils::NZUsize!(65536),
-                    ReadOptions::default(),
-                )
-                .await?,
+                blob.recoverable_prefix_len_at_most(0, end, replay_buffer, ReadOptions::default())
+                    .await?,
             );
         }
         journal.0.manager.truncate_pending(section, end).await?;
         let mut replay = journal
-            .replay(
-                0,
-                0,
-                commonware_utils::NZUsize!(65536),
-                ReadOptions::default(),
-            )
+            .replay(0, 0, replay_buffer, ReadOptions::default())
             .await?;
         while let Some(item) = replay.next().await {
             item?;
@@ -992,9 +983,10 @@ mod tests {
 
         async fn test_reopen_section(self, section: u64, end: u64) -> Result<Self, Error> {
             let (context, partition, factory) = self.0.manager.test_configuration();
+            let replay_buffer = factory.write_buffer;
             let cfg = Config {
                 partition,
-                write_buffer: factory.write_buffer,
+                write_buffer: replay_buffer,
                 page_cache: factory.page_cache_ref,
                 compression: self.0.compression,
                 codec_config: self.0.codec_config.clone(),
@@ -1007,12 +999,7 @@ mod tests {
                 .truncate_pending_section(section, end)
                 .await?;
             let mut replay = journal
-                .replay(
-                    0,
-                    0,
-                    commonware_utils::NZUsize!(65536),
-                    ReadOptions::default(),
-                )
+                .replay(0, 0, replay_buffer, ReadOptions::default())
                 .await?;
             while let Some(item) = replay.next().await {
                 item?;
@@ -1078,6 +1065,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             for source_section in [0, 1] {
                 for cap in [0, 9] {
+                    // Compare a short and long discarded suffix behind the same retained cap.
                     let mut counts = Vec::new();
                     for pages in [16, 4096] {
                         let partition = format!("torn-cap-{source_section}-{cap}-{pages}");
@@ -1098,6 +1086,8 @@ mod tests {
                             pages,
                         )
                         .await;
+
+                        // Bounded initialization must read independently of the discarded suffix.
                         let cfg = Config {
                             partition,
                             page_cache: CacheRef::from_pooler(&context, NZU16!(72), NZUsize!(4)),
@@ -1113,6 +1103,8 @@ mod tests {
                         let retained = if source_section == 0 { cap } else { 0 };
                         assert_eq!(journal.size(0).unwrap(), retained);
                         counts.push(recordings.snapshot().reads.len());
+
+                        // Appending after the cap must not reconnect any discarded frames.
                         (journal, _, _) = journal.append(0, &999).await.unwrap();
                         drop(journal.sync_all().await.unwrap());
                         let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
@@ -1134,6 +1126,8 @@ mod tests {
                         };
                         assert_eq!(actual, expected);
                     }
+
+                    // Suffix length must not change the number of reads needed for the same cap.
                     assert_eq!(
                         counts[0], counts[1],
                         "discarded suffix reads grew: {counts:?}"
@@ -1146,6 +1140,7 @@ mod tests {
     #[test_traced]
     fn test_bounded_initialization_bounds_scan() {
         deterministic::Runner::default().start(|context| async move {
+            // Seed different journal lengths under the same page and buffer configuration.
             let mut counts = Vec::new();
             for count in [128, 65536] {
                 let cfg = Config {
@@ -1169,6 +1164,8 @@ mod tests {
                     (journal, _, _) = journal.append(0, &value).await.unwrap();
                 }
                 _ = journal.sync_all().await.unwrap();
+
+                // Record the reads required to reopen at the same one-item boundary.
                 let (recorded, recordings) =
                     RecordingContext::new(context.child(if count == 128 {
                         "cap_small"
@@ -1181,6 +1178,8 @@ mod tests {
                 assert_eq!(journal.size(0).unwrap(), 9);
                 counts.push(recordings.snapshot().reads.len());
             }
+
+            // Work below the cap must be independent of the discarded journal length.
             assert_eq!(
                 counts[0], counts[1],
                 "same one-item cap: small/large suffix read counts {counts:?}"
@@ -1192,6 +1191,7 @@ mod tests {
     fn test_bounded_initialization_recovers_torn_page() {
         deterministic::Runner::default().start(|context| async move {
             for cap in [0, 9, 60, 63, 64, 65, 90, 128, 135, u64::MAX] {
+                // Seed two sections so the bound must repair one and remove the later section.
                 let cfg = Config {
                     partition: format!("capped-torn-{cap}"),
                     page_cache: CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(4)),
@@ -1218,6 +1218,8 @@ mod tests {
                 assert_eq!(journal.size(0).unwrap(), expected_bytes, "cap {cap}");
                 assert_eq!(journal.newest_section(), Some(0));
                 drop(journal);
+
+                // A normal restart must retain the repaired prefix and append at its exact end.
                 let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
                     .await
                     .unwrap();

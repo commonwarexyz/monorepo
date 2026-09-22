@@ -614,11 +614,13 @@ fn test_current_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         let sync_root = SyncDatabase::root(&db);
 
         assert!(local_start > crate::merkle::Location::new(0));
+
+        // Reopen the operation journal independently to probe the persisted Merkle boundary.
         drop(db);
         let journal = <<Db as SyncDatabase>::Journal as crate::qmdb::sync::Journal<
             crate::merkle::mmr::Family,
         >>::new(
-            || context.child("journal"),
+            context.child("journal"),
             crate::qmdb::sync::DatabaseConfig::journal_config(&config),
             non_empty_range!(local_start, local_end),
         )
