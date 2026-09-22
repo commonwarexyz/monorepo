@@ -140,6 +140,15 @@ just test -p commonware-cryptography --release \
   decompression::triple::measure_triple_decoding --run-ignored only --no-capture
 ```
 
+Two further experiments did not establish a material latency improvement and
+were removed. Updating exponentiation accumulators in place took 131.995 ms
+versus 132.327 ms for the existing helpers on 20,000 roots with four lanes
+(seven-run medians). Processing 256 triples per chunk took 264.598 ms versus
+266.607 ms for decoding 100,000 points, while slightly slowing smaller batches.
+The latter bounds temporary memory, but its sub-1% latency difference does not
+justify another speedup claim. These measurements used side-by-side variants;
+their absolute timings should not be compared with runs from other sessions.
+
 ## Earlier pair measurements
 
 Local arm64 macOS, Rust 1.97.1, optimized release build. Times are medians of
