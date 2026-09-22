@@ -2425,6 +2425,7 @@ mod tests {
     struct TestDb;
 
     struct InitializationDb {
+        /// Restart target selected during initialization.
         current_target: u64,
     }
 
@@ -2644,6 +2645,7 @@ mod tests {
         fn sync_target(&self) -> Self::SyncTarget {}
     }
 
+    /// Database mock that can fail after recording its selected restart target.
     struct RecoverableStartupDb(u64);
 
     impl<E: Send> ManagedDb<E> for RecoverableStartupDb {

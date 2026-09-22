@@ -2020,9 +2020,13 @@ pub mod tests {
 
     /// State observed after one generation of [build_generations].
     struct Generation {
+        /// Exclusive operation-log end after this generation's commit.
         size: Location<mmr::Family>,
+        /// Logical inactivity floor recorded with this generation.
         floor: Location<mmr::Family>,
+        /// Latest safe chunk boundary for pruning and state synchronization.
         sync_boundary: Location<mmr::Family>,
+        /// Canonical root after this generation's commit.
         root: Digest,
     }
 

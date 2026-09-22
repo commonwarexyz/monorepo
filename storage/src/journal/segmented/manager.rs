@@ -698,6 +698,7 @@ pub(super) mod tests {
     }
 
     struct TestBuffer<B: Blob> {
+        /// Keeps the raw blob owner alive while the test buffer models an open section.
         _blob: B,
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,

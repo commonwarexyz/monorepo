@@ -120,7 +120,9 @@ pub type Recovery<B> = Writer<B, Recovering>;
 
 /// Unique writer to a cache-wrapped [Blob].
 pub struct Writer<B: Blob, Phase = Append> {
+    /// Distinguishes the recovery owner from the append-only writer.
     phase: PhantomData<Phase>,
+
     /// The underlying blob being wrapped.
     blob: B,
 

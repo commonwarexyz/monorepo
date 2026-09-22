@@ -1057,17 +1057,36 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
 
 /// Variable data and derived offsets owned exclusively by initialization.
 pub struct Recovery<E: Context, V: CodecShared> {
+    /// Runtime context for partition resets and the published journal's metrics.
     context: E,
+
+    /// Frame encoding, blob layout, and I/O settings used during recovery and live access.
     cfg: Config<V::Cfg>,
+
+    /// Data-blob partition held under recovery ownership until publication.
     partition: Partition<E>,
+
+    /// Opened data blobs keyed by physical index, including suffix candidates awaiting repair.
     pending: BTreeMap<u64, PagedRecovery<E::Blob>>,
+
+    /// Data blob indices excluded by the cap. When no lower blob was opened, their oldest index
+    /// still constrains the retained start; publication removes them.
     discarded: Vec<u64>,
+
+    /// Validated frame counts and byte ends keyed by blob index, reused during publication.
     recovered_scans: BTreeMap<u64, BlobScan>,
+
     /// Inspection rebuilds retained entries at or above the watermark from validated frames.
     /// Together with acknowledged entries, these cover every position in `bounds`.
     offsets: Box<fixed::Recovery<E, u64>>,
+
+    /// Selected logical item range; its end is exclusive.
     bounds: Range<u64>,
+
+    /// Whether recovery was opened with an explicit cap; bounded inspection rejects retained
+    /// offsets when no physical data blob exists.
     bounded: bool,
+
     /// When set, `publish` parks right after deleting discarded data blobs so tests can crash
     /// at that exact point.
     #[cfg(test)]
@@ -1361,6 +1380,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // would otherwise find retained offsets with no data blobs.
         (self.offsets, _) = self.offsets.prune(self.bounds.start).await?;
 
+        // Data outside the selected offset prefix must be removed, including partial tails
+        // and whole blobs excluded by inspection.
         let tail = position_to_blob(size, per_blob);
         let retained_bytes = |blob| {
             if blob == tail {

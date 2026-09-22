@@ -131,13 +131,14 @@ enum RecoveryMode<'a> {
 
 /// Durable recovery state for a journal that validates every uncommitted value during replay.
 struct Tracking<E: Context> {
-    /// Durable committed item count for each retained section.
+    /// Per-section committed item counts, including staged updates awaiting marker persistence.
     metadata: Metadata<E, SectionKey, u64>,
 
     /// Completion of the marker generation currently being persisted.
     marker_sync_pending: Option<SyncCompletion>,
 
-    /// Joint index/value durability proofs not yet fully published as markers.
+    /// Joint index/value durability proofs whose item counts are not yet fully published as
+    /// markers.
     barriers: BTreeMap<u64, Barrier>,
 }
 
@@ -199,12 +200,18 @@ impl<E: Context> Tracking<E> {
 
 /// State for the one marker-aware replay performed while opening a tracked journal.
 struct Validation {
-    /// Cursor state for the section currently being replayed.
+    /// Section whose cached `floor` and `truncated` state is active.
     current_section: Option<u64>,
+
+    /// Committed item count from the durable marker; replay checks value checksums only at or
+    /// above it.
     floor: u64,
+
+    /// Whether this section reached its first invalid value, so later index entries are skipped.
     truncated: bool,
 
-    /// First invalid position in each section, applied after replay releases the index journal.
+    /// First invalid item position per section, converted to an index-byte truncation after
+    /// replay releases the index journal.
     truncations: Vec<(u64, u64)>,
 
     /// Whether replay yielded an error that makes the journal unavailable.
@@ -241,8 +248,14 @@ pub struct Oversized<E: Context, I: Record, V: Codec> {
 
 /// Owns both journals while initialization may still discard unreferenced data.
 struct Pending<E: Context, I: Record, V: Codec> {
+    /// Unpublished index whose per-section byte extents are reconciled with value storage.
     index: FixedJournal<E, I>,
+
+    /// Unpublished values; bytes owned by a discarded index suffix are released only after its
+    /// truncation is durable.
     values: GlobRecovery<E, V>,
+
+    /// Marker and barrier state carried through tracked recovery into the published journal.
     tracking: Option<Tracking<E>>,
 }
 
@@ -863,6 +876,8 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 .await?;
             journal.values = journal.values.truncate(section, value_end).await?;
         }
+
+        // Keep the durable floors attached while replay validates each uncommitted suffix.
         journal.tracking = Some(Tracking {
             metadata,
             marker_sync_pending: None,
@@ -1179,6 +1194,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
 /// reader to get the journal back.
 pub struct Replay<E: Context, I: Record, V: Codec> {
     index: FixedReplay<E, I>,
+    /// Value ownership phase, with validation state only during tracked startup recovery.
     phase: ReplayPhase<E, V>,
     tracking: Option<Tracking<E>>,
 }
@@ -1187,7 +1203,10 @@ pub struct Replay<E: Context, I: Record, V: Codec> {
 enum ReplayPhase<E: Context, V: Codec> {
     Live(Glob<E, V>),
     Tracked {
+        /// Value recovery owner used to validate entries at or above each durable floor until
+        /// the first invalid value.
         values: GlobRecovery<E, V>,
+        /// Cursor and deferred truncation state for the tracked startup replay.
         validation: Validation,
     },
 }

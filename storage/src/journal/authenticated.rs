@@ -848,9 +848,13 @@ where
     H: Hasher,
     S: Strategy,
 {
+    /// Operation journal awaiting finalization at `selected_end`.
     journal: C::Recovery,
+    /// Merkle recovery capped at `selected_end` and covering the operation journal's retained start.
     merkle: merkle::full::Recovery<F, E, H::Digest, S>,
+    /// Hasher and peak-bagging mode retained for Merkle alignment and the published journal.
     hasher: StandardHasher<H>,
+    /// Exclusive operation end chosen for publication.
     selected_end: u64,
 }
 
@@ -2089,6 +2093,8 @@ mod tests {
                     roots
                 });
 
+            // Recover the selected base commit or a prefix of its replacement branch, with no
+            // operations from the discarded branch.
             deterministic::Runner::from(checkpoint).start(move |context| async move {
                 *context.storage_fault_config().write() = deterministic::FaultConfig::default();
                 let journal = TestJournal::<F>::new(
@@ -2113,6 +2119,8 @@ mod tests {
                         "operation at retained position {pos} was never written there"
                     );
                 }
+
+                // The recovered root and proof must authenticate that same operation history.
                 let root = journal_root(&journal);
                 assert_eq!(
                     root,

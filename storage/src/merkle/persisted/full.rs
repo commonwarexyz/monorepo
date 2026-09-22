@@ -181,12 +181,20 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
 
 /// A validated Merkle prefix whose storage has not yet been deliberately truncated.
 pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
+    /// Node journal that may extend beyond the greatest complete tree.
     journal: Box<JournalRecovery<E, D>>,
+    /// Persisted pruning boundary and pinned nodes used to reconstruct retained history.
     metadata: Metadata<E, U64, Vec<u8>>,
+    /// Complete tree reconstructed from tip pins, including any recoverable orphan leaf.
     mem: Mem<F, D>,
+    /// Node count of the greatest complete prefix of the recovered journal, excluding nodes
+    /// rebuilt from an orphan leaf.
     retained_size: Position<F>,
+    /// Persisted leaf pruning boundary expressed as a node position.
     metadata_prune_pos: Position<F>,
+    /// Stricter of the persisted pruning boundary and the journal's leaf-aligned start.
     effective_prune_pos: Position<F>,
+    /// Parallelization strategy for the recovered Merkle structure.
     strategy: S,
 }
 
@@ -377,8 +385,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         }
         mem.add_pinned_nodes(extra_pinned);
 
+        // An intact orphan leaf can reconstruct missing parents within the leaf cap.
         if retained_size != journal_size && max_leaves.is_none_or(|cap| leaves < cap) {
-            // An intact orphan leaf can reconstruct missing parents within the leaf cap.
             if let Ok(leaf) = journal.read(*retained_size).await {
                 let batch = mem
                     .new_batch()

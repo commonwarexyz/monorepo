@@ -384,15 +384,33 @@ pub(super) struct Inner<E: Context, A> {
 
 /// Storage under recovery, before append or snapshot access is available.
 pub struct Recovery<E: Context, A> {
+    /// Runtime context for partition resets and the published journal's metrics.
     context: E,
+
+    /// Blob layout and I/O settings shared by recovery and the published journal.
     cfg: Config,
+
+    /// Recovery checkpoint, persisted before discarding any acknowledged suffix.
     checkpoint: Checkpoint<E>,
+
+    /// Active blob partition used to open and remove blobs until publication.
     partition: Partition<E>,
+
+    /// Opened recovery blobs keyed by physical index, including suffix candidates awaiting repair.
     pending: BTreeMap<u64, PagedRecovery<E::Blob>>,
+
+    /// Blob indices excluded by the initial cap; repair removes them unless needed as an empty tail.
     discarded: Vec<u64>,
+
+    /// Selected logical item range; its end is exclusive.
     bounds: Range<u64>,
+
+    /// Durable lower bound on the logical item end, lowered before removing an acknowledged suffix.
     watermark: u64,
+
+    /// Whether an explicit opening cap requires publication to persist the selected end.
     bounded: bool,
+
     _marker: PhantomData<A>,
 }
 
