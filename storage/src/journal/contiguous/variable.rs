@@ -2655,22 +2655,21 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{checkpoint::Checkpoint, tests::run_contiguous_tests},
         },
-        utils::{
-            RESOURCE_TEST_PAGE_SIZE, codec::View, pooled_bytes_in_use, resource_test_pool_config,
-        },
+        utils::{codec::View, created_bytes},
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage, Supervisor as _,
-        WriteOptions,
+        BufferPoolConfig, BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage,
+        Supervisor as _, WriteOptions,
         buffer::paged::{CacheRef, Writer, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, drive_pending_syncs,
             fail_pending_syncs, next_pending_sync, release_pending_syncs,
         },
+        telemetry::metrics::{has_metric_value, metric_samples},
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize, probability, sequence::FixedBytes};
+    use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use std::num::NonZeroU16;
 
@@ -3106,9 +3105,12 @@ mod tests {
 
     #[test]
     fn test_offset_rebuild_bounds_pooled_backing() {
+        const PAGE_SIZE: usize = 4096;
+        const WRITE_BUFFER: usize = 131072;
         const SECTIONS: u64 = 16;
         const CACHE_PAGES: usize = 4;
         const ACTIVE_WRITERS: usize = 2;
+        const WORKING_BYTES: usize = 2 * ACTIVE_WRITERS * WRITE_BUFFER;
         const RECOVERY_WRITERS: usize = 2 * SECTIONS as usize;
         const RECOVERY_CHECKPOINT_PAGES: usize = 1;
 
@@ -3120,22 +3122,32 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(
                     context,
-                    NZU16!(RESOURCE_TEST_PAGE_SIZE as u16),
+                    NZU16!(PAGE_SIZE as u16),
                     NZUsize!(CACHE_PAGES),
                 ),
-                write_buffer: NZUsize!(131072),
-                replay_buffer: NZUsize!(RESOURCE_TEST_PAGE_SIZE),
+                write_buffer: NZUsize!(WRITE_BUFFER),
+                replay_buffer: NZUsize!(PAGE_SIZE),
             }
         }
 
         // Exercise both page-aligned sections and sections with a final partial page.
         for items_per_section in [8192, 8193] {
             let size = SECTIONS * items_per_section;
-            let runtime = deterministic::Config::default()
-                .with_storage_buffer_pool_config(resource_test_pool_config());
-            let (live_bytes, checkpoint) =
+
+            // Keep every workload allocation tracked so heap fallbacks cannot hide retained bytes.
+            let runtime = deterministic::Config::default().with_storage_buffer_pool_config(
+                BufferPoolConfig::for_storage()
+                    .with_size_class_range(
+                        NZUsize!(PAGE_SIZE),
+                        NZUsize!(2 * WRITE_BUFFER),
+                        NZU32!(64),
+                    )
+                    .with_pool_min_size(0)
+                    .with_alignment(NZUsize!(PAGE_SIZE))
+                    .with_thread_cache_disabled(),
+            );
+            let (created, checkpoint) =
                 deterministic::Runner::new(runtime).start_and_recover(move |context| async move {
-                    let mut pool_metrics = context.encode();
                     let mut journal = Journal::<_, u64>::init(
                         context.child("seed"),
                         config(&context, items_per_section),
@@ -3146,23 +3158,39 @@ mod tests {
                         (journal, _) = journal.append(&value).await.unwrap();
                     }
                     let journal = journal.commit().await.unwrap();
-                    let live_bytes = pooled_bytes_in_use(&context, &mut pool_metrics);
+                    let metrics = context.encode();
+                    assert!(
+                        has_metric_value(
+                            &metrics,
+                            "storage_buffer_pool_buffer_pool_oversized_total",
+                            0
+                        ),
+                        "oversized requests bypass the pool and would hide retained bytes"
+                    );
+                    assert_eq!(
+                        metric_samples(&metrics, "storage_buffer_pool_buffer_pool_exhausted_total")
+                            .count(),
+                        0,
+                        "exhausted classes fall back to untracked backing"
+                    );
+                    let created = created_bytes(&metrics);
                     drop(journal);
-                    live_bytes
+                    created
                 });
 
-            // The live journal owns one data and one offsets tail. Each may retain one partial
-            // page, and the shared cache owns at most four pages.
+            // Created backing includes reusable scratch from both writers' geometric growth and
+            // flushes. Allow a fixed scratch budget plus their partial pages and shared cache.
             assert!(
-                live_bytes <= (ACTIVE_WRITERS + CACHE_PAGES) * RESOURCE_TEST_PAGE_SIZE,
-                "live journal retains too much pooled backing: items_per_section={items_per_section}, \
-                 live_bytes={live_bytes}"
+                (CACHE_PAGES * PAGE_SIZE
+                    ..=WORKING_BYTES + (ACTIVE_WRITERS + CACHE_PAGES) * PAGE_SIZE)
+                    .contains(&created),
+                "unexpected live journal backing creation: items_per_section={items_per_section}, \
+                 created={created}"
             );
 
             // A fresh pool prevents allocations from the original writes from masking retention.
-            let recovery_bytes =
+            let recovery_created =
                 deterministic::Runner::from(checkpoint).start(move |context| async move {
-                    let mut pool_metrics = context.encode();
                     let pending = Recovery::<_, u64>::open(
                         context.child("recover"),
                         config(&context, items_per_section),
@@ -3172,7 +3200,22 @@ mod tests {
                     .unwrap();
                     assert_eq!(pending.bounds, 0..size);
                     assert_eq!(pending.offsets.recovery_watermark(), 0);
-                    let recovery_bytes = pooled_bytes_in_use(&context, &mut pool_metrics);
+                    let metrics = context.encode();
+                    assert!(
+                        has_metric_value(
+                            &metrics,
+                            "storage_buffer_pool_buffer_pool_oversized_total",
+                            0
+                        ),
+                        "oversized requests bypass the pool and would hide retained bytes"
+                    );
+                    assert_eq!(
+                        metric_samples(&metrics, "storage_buffer_pool_buffer_pool_exhausted_total")
+                            .count(),
+                        0,
+                        "exhausted classes fall back to untracked backing"
+                    );
+                    let recovery_created = created_bytes(&metrics);
 
                     let journal = Journal(Box::new(pending.publish(size).await.unwrap()));
                     for section in 0..SECTIONS {
@@ -3183,18 +3226,19 @@ mod tests {
                             assert_eq!(journal.read(pos).await.unwrap(), pos);
                         }
                     }
-                    recovery_bytes
+                    recovery_created
                 });
 
-            // Recovery owns one data and one offsets writer per item-bearing section. A synced
-            // writer may retain one partial page, the shared cache owns four pages, and the
-            // offsets checkpoint retains its one persisted metadata copy in a pooled page.
+            // Recovery visits sections sequentially, so its allocation scratch stays fixed.
+            // Each retained section writer, cache entry, and checkpoint adds at most one page
+            // of backing.
             assert!(
-                recovery_bytes
-                    <= (RECOVERY_WRITERS + RECOVERY_CHECKPOINT_PAGES + CACHE_PAGES)
-                        * RESOURCE_TEST_PAGE_SIZE,
-                "recovery retains too much pooled backing: items_per_section={items_per_section}, \
-                 recovery_bytes={recovery_bytes}"
+                (CACHE_PAGES * PAGE_SIZE
+                    ..=WORKING_BYTES
+                        + (RECOVERY_WRITERS + RECOVERY_CHECKPOINT_PAGES + CACHE_PAGES) * PAGE_SIZE)
+                    .contains(&recovery_created),
+                "unexpected recovery backing creation: items_per_section={items_per_section}, \
+                 recovery_created={recovery_created}"
             );
         }
     }
