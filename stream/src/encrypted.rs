@@ -406,10 +406,10 @@ impl<O: Sink> Sender<O> {
         let max_batch_size = self.pool.config().max_size().get();
         let mut chunks = IoBufs::default();
         let mut messages = messages.into_iter();
-        while let Some((_, frame_len)) = messages.as_slice().first() {
+        while let Some((_, first_len)) = messages.as_slice().first() {
             // Size one chunk before allocating it. An oversized first frame
             // occupies its own chunk.
-            let mut total_len = *frame_len;
+            let mut total_len = *first_len;
             let mut message_count = 1;
             for (_, frame_len) in &messages.as_slice()[1..] {
                 let Some(next_len) = total_len
@@ -916,10 +916,10 @@ mod test {
             sends.store(0, Ordering::Relaxed);
             chunk_counts.lock().clear();
 
-            // The first two framed messages fit together under the 256-byte cap,
-            // but the third must spill into a second chunk. We still hand the
-            // runtime one chunked `IoBufs`, so there is only one sink call.
-            let payload = vec![7u8; 100];
+            // Each frame is 128 bytes: 111 payload + 16 tag + 1 length prefix.
+            // Two fill the 256-byte cap exactly; the third spills into a second
+            // chunk. The runtime still receives one chunked `IoBufs` in one sink call.
+            let payload = vec![7u8; 111];
             dialer_sender
                 .send_many(vec![
                     IoBufs::from(IoBuf::from(payload.clone())),
@@ -1064,7 +1064,7 @@ mod test {
             sends.store(0, Ordering::Relaxed);
             chunk_counts.lock().clear();
 
-            // The valid prefix spans both pooled and oversized chunks.
+            // A late validation error must not advance nonces for preceding chunks.
             let valid = vec![7u8; 32];
             let large = vec![8u8; 200];
             let oversized = vec![9u8; MAX_MESSAGE_SIZE as usize + 1];
