@@ -20,7 +20,7 @@ use commonware_cryptography_vroom::{Backend, Bls12381, WithBackend, rns::Ring, w
 use rand_core::CryptoRng;
 
 #[cfg(test)]
-mod decompression;
+pub(crate) mod decompression;
 
 const DIRECT_MAX: usize = 81;
 const GRAPH_MIN: usize = 65_536;

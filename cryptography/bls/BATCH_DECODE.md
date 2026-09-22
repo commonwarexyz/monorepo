@@ -6,7 +6,7 @@ commit `5a68b8f417f14073f1a00fe5958c8d0ba7e82d44`, and merges the complete
 
 The native port lives in
 [`group/subgroup/decompression.rs`](src/bls12381/group/subgroup/decompression.rs).
-It is compiled only for tests, like the original codecs. It is an executable
+It is compiled only for tests and the dedicated decode benchmark, like the original codecs. It is an executable
 experiment, not a public wire format. Existing `G1::from_bytes` and
 `G1::batch_from_bytes` retain their standard compressed encoding and identity
 semantics.
@@ -73,10 +73,15 @@ just test -p commonware-cryptography-bls --release large_receiver_uses_certified
 Run one process without other tests or builds running:
 
 ```sh
+cargo bench -p commonware-cryptography-bls --bench decode --no-run
 COMMONWARE_DECODE_COUNTS=1000,6000,100000 \
-just test -p commonware-cryptography-bls --release \
-  decompression::receive::measure_wire_to_points --run-ignored only --no-capture
+taskset -c 0 cargo bench -p commonware-cryptography-bls --bench decode
 ```
+
+The dedicated executable compiles the same private implementation modules as the
+library, without emitting unrelated unit-test functions. It adds no public codec
+API. The ignored `measure_wire_to_points` test remains available and calls the
+same benchmark function.
 
 `COMMONWARE_DECODE_METHODS=standard_batch,triple_roots4` selects a subset.
 Available methods are `standard_individual`, `standard_batch`, `pair_roots4`,

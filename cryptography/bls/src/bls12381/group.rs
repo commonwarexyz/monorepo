@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 
 mod homogeneous;
 mod msm;
-mod subgroup;
+pub(crate) mod subgroup;
 pub(super) use msm::EncodedScalar;
 
 // Thirteen windows cover a u64; twenty-six cover a u128. The final partial

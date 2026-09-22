@@ -66,6 +66,10 @@ impl Method {
 #[test]
 #[ignore = "manual Criterion wire-to-validated-G1 benchmark"]
 fn measure_wire_to_points() {
+    benchmark_wire_to_points();
+}
+
+pub(crate) fn benchmark_wire_to_points() {
     #[cfg(target_arch = "x86_64")]
     let avx512 =
         std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512ifma");

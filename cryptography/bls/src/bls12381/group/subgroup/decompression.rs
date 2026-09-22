@@ -13,7 +13,7 @@ use commonware_cryptography_vroom::{
 };
 use rand_core::CryptoRng;
 
-mod receive;
+pub(crate) mod receive;
 mod tests;
 mod triple;
 

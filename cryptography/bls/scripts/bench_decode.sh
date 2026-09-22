@@ -24,7 +24,7 @@ log="target/decode-benchmark/$(date -u +%Y%m%dT%H%M%SZ).log"
     lscpu
     python3 cryptography/bls/scripts/subgroup.py
     just test -p commonware-cryptography-bls --release decompression:: --test-threads 1
+    cargo bench -p commonware-cryptography-bls --bench decode --no-run
     taskset -c "${COMMONWARE_DECODE_CPU:-0}" \
-        just test -p commonware-cryptography-bls --release \
-        decompression::receive::measure_wire_to_points --run-ignored only --no-capture --test-threads 1
+        cargo bench -p commonware-cryptography-bls --bench decode
 } 2>&1 | tee "$log"

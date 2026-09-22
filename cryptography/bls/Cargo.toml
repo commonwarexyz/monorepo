@@ -52,6 +52,11 @@ name = "bls"
 harness = false
 path = "src/benches/bench.rs"
 
+[[bench]]
+name = "decode"
+harness = false
+path = "src/decode_bench.rs"
+
 [features]
 default = [ "std" ]
 arbitrary = [
