@@ -37,9 +37,9 @@ type LocatedKey<F, K, V> = Option<(Location<F>, Update<K, V>)>;
 enum Cursor<K> {
     /// The lower bound's bucket.
     Start,
-    /// The bucket holding this active key, the successor of the last key drained.
+    /// The bucket holding this active key, the successor of the pending bucket's largest key.
     Next(K),
-    /// No active key in range remains.
+    /// No further bucket needs fetching.
     Done,
 }
 
@@ -237,63 +237,32 @@ where
             move |(range, mut cursor, mut pending)| async move {
                 loop {
                     // Drain each collision bucket in ascending order before fetching another.
-                    while let Some(item) = pending.pop() {
-                        // The last key's successor wraps to the first, so a non-ascending or
-                        // out-of-range successor means no further bucket needs reading.
-                        cursor = if item.next_key <= item.key
-                            || past_end(range.end_bound(), &item.next_key)
-                        {
-                            Cursor::Done
-                        } else {
-                            Cursor::Next(item.next_key)
-                        };
-                        if !range.contains(&item.key) {
-                            // Only the starting bucket holds keys below the range.
-                            if past_end(range.end_bound(), &item.key) {
-                                return None;
-                            }
-                            continue;
-                        }
+                    if let Some(item) = pending.pop() {
                         return Some((Ok((item.key, item.value)), (range, cursor, pending)));
                     }
 
-                    let updates = match &cursor {
-                        Cursor::Done => return None,
-                        // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): fetch
-                        // the following buckets concurrently with draining this one.
-                        Cursor::Next(key) => {
-                            self.fetch_all_updates(self.snapshot.get(key).copied())
-                                .await
-                        }
-                        Cursor::Start => match range.start_bound() {
-                            Unbounded => {
-                                let iter = self.snapshot.first_translated_key()?;
-                                self.fetch_all_updates(iter.copied()).await
-                            }
-                            Included(start) | Excluded(start) => {
-                                // The bound's own bucket may hold keys below it. When no active
-                                // key shares its translated key, the following bucket starts.
-                                let mut locs = self.snapshot.get(start).copied().peekable();
-                                if locs.peek().is_some() {
-                                    self.fetch_all_updates(locs).await
-                                } else {
-                                    let Some((iter, false)) =
-                                        self.snapshot.next_translated_key(start)
-                                    else {
-                                        return None;
-                                    };
-                                    self.fetch_all_updates(iter.copied()).await
-                                }
-                            }
-                        },
+                    // TODO(https://github.com/commonwarexyz/monorepo/issues/2527): fetch
+                    // the following buckets concurrently with draining this one.
+                    let mut updates =
+                        match self.fetch_scan_bucket(&cursor, range.start_bound()).await {
+                            Ok(Some(updates)) => updates,
+                            Ok(None) => return None,
+                            // Keep the cursor unchanged so a later poll retries this bucket.
+                            Err(e) => return Some((Err(e), (range, cursor, pending))),
+                        };
+
+                    // Save the largest key's successor before filtering: the starting bucket
+                    // may contain only keys below the lower bound.
+                    let last = updates.first().expect("index bucket has no locations");
+                    cursor = if last.next_key <= last.key
+                        || past_end(range.end_bound(), &last.next_key)
+                    {
+                        Cursor::Done
+                    } else {
+                        Cursor::Next(last.next_key.clone())
                     };
-                    match updates {
-                        Ok(updates) => {
-                            assert!(!updates.is_empty(), "index bucket has no locations");
-                            pending = updates;
-                        }
-                        Err(e) => return Some((Err(e), (range, cursor, pending))),
-                    }
+                    updates.retain(|item| range.contains(&item.key));
+                    pending = updates;
                 }
             },
         )
@@ -305,6 +274,43 @@ where
         range: impl RangeBounds<K> + Send + 'a,
     ) -> impl Stream<Item = Result<K, crate::qmdb::Error<F>>> + Send + 'a {
         self.stream_range(range).map_ok(|(key, _)| key)
+    }
+
+    /// Fetches the cursor's bucket, or returns `None` when the scan has no further bucket.
+    async fn fetch_scan_bucket(
+        &self,
+        cursor: &Cursor<K>,
+        start: Bound<&K>,
+    ) -> Result<Option<Vec<Update<K, V>>>, crate::qmdb::Error<F>> {
+        let updates = match cursor {
+            Cursor::Done => return Ok(None),
+            Cursor::Next(key) => {
+                self.fetch_all_updates(self.snapshot.get(key).copied())
+                    .await?
+            }
+            Cursor::Start => match start {
+                Unbounded => {
+                    let Some(iter) = self.snapshot.first_translated_key() else {
+                        return Ok(None);
+                    };
+                    self.fetch_all_updates(iter.copied()).await?
+                }
+                Included(start) | Excluded(start) => {
+                    // The bound's own bucket may hold keys below it. When no active key shares
+                    // its translated key, the following bucket starts.
+                    let mut locs = self.snapshot.get(start).copied().peekable();
+                    if locs.peek().is_some() {
+                        self.fetch_all_updates(locs).await?
+                    } else {
+                        let Some((iter, false)) = self.snapshot.next_translated_key(start) else {
+                            return Ok(None);
+                        };
+                        self.fetch_all_updates(iter.copied()).await?
+                    }
+                }
+            },
+        };
+        Ok(Some(updates))
     }
 
     /// Fetches all update operations corresponding to the input locations, returning the result in
