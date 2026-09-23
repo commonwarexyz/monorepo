@@ -35,7 +35,7 @@ use bytes::{Bytes, BytesMut};
 use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    Blob as RBlob, Buf, BufferPool, Handle, IoBuf, ReadOptions,
+    Blob as RBlob, Buf, Handle, IoBuf, ReadOptions,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay},
 };
 use futures::{
@@ -389,9 +389,6 @@ impl<C> Config<C> {
 struct Inner<E: Context, V: Codec> {
     /// The data blobs: sealed history plus the writable tail.
     blobs: Writable<E>,
-
-    /// Shared backing for temporary encodings before compression.
-    pool: BufferPool,
 
     /// Index mapping positions to byte offsets within their data blob. Its checkpoint is also
     /// this journal's durable recovery record.
@@ -1466,7 +1463,6 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         metrics.update(bounds.end, bounds.start, per_blob);
         Ok(Inner {
             blobs,
-            pool: self.cfg.page_cache.pool().clone(),
             offsets,
             bounds,
             #[cfg(test)]
@@ -1525,7 +1521,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             .await?,
         );
 
-        let pool = cfg.page_cache.pool().clone();
         let partition = Partition::new(
             data_context,
             data_partition,
@@ -1544,7 +1539,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         Ok(Self {
             blobs,
-            pool,
             offsets,
             bounds: size..size,
             #[cfg(test)]
@@ -1582,7 +1576,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let mut item_starts = Vec::with_capacity(items.len());
         let mut encode = |item: &V| {
             item_starts.push(encoded.len());
-            encode_frame_into(&self.pool, self.compression, item, &mut encoded)
+            encode_frame_into(self.compression, item, &mut encoded)
         };
         match items {
             Many::Flat(items) => {
@@ -2575,7 +2569,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         item: V,
     ) -> Result<(u64, u32), Error> {
         let mut encoded = Vec::new();
-        encode_frame_into(&self.0.pool, self.0.compression, &item, &mut encoded)?;
+        encode_frame_into(self.0.compression, &item, &mut encoded)?;
         let item_len = encoded.len() as u32;
 
         let tail_blob = self.0.blobs.tail_blob_index();
@@ -2660,11 +2654,9 @@ mod tests {
         journal::{
             authenticated::{self, BackingRecovery as _},
             contiguous::{checkpoint::Checkpoint, tests::run_contiguous_tests},
-            frame::UncompressedFrame,
         },
         utils::{codec::View, created_bytes},
     };
-    use commonware_codec::Write as _;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         BufferPoolConfig, BufferPooler, Metrics as _, ReadOptions, Runner, Spawner as _, Storage,
@@ -4173,7 +4165,7 @@ mod tests {
                 })
                 .collect();
             let mut frame = Vec::new();
-            encode_frame_into(context.storage_buffer_pool(), None, &values[0], &mut frame).unwrap();
+            encode_frame_into(None, &values[0], &mut frame).unwrap();
             let frame_len = frame.len();
             let mut journal = Journal::<_, Vec<View>>::init(context, cfg).await.unwrap();
             for value in &values {
@@ -4225,7 +4217,7 @@ mod tests {
     fn test_variable_frame_span_preserves_byte_fields() {
         let fields = vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")];
         let mut frame = Vec::new();
-        UncompressedFrame::new(&fields).unwrap().write(&mut frame);
+        encode_frame_into(None, &fields, &mut frame).unwrap();
         let source = Bytes::from(frame);
         let range = source.as_ptr_range();
         let decoded =
@@ -6739,7 +6731,7 @@ mod tests {
             let partition = journal.test_truncate_data(12).await.unwrap();
             let mut orphan = partition.open_recovery(2).await.unwrap();
             let mut encoded = Vec::new();
-            encode_frame_into(context.storage_buffer_pool(), None, &9999u64, &mut encoded).unwrap();
+            encode_frame_into(None, &9999u64, &mut encoded).unwrap();
             orphan.append(&encoded).await.unwrap();
             orphan.sync().await.unwrap();
             drop(orphan);
