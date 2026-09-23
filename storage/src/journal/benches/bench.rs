@@ -14,6 +14,7 @@ mod fixed_append_buffered;
 mod fixed_read_random;
 mod fixed_read_sequential;
 mod fixed_replay;
+mod variable_prepare_append;
 mod variable_read_random;
 mod variable_replay;
 
@@ -23,6 +24,7 @@ criterion_main!(
     fixed_read_random::benches,
     fixed_read_sequential::benches,
     fixed_replay::benches,
+    variable_prepare_append::benches,
     variable_read_random::benches,
     variable_replay::benches,
 );
