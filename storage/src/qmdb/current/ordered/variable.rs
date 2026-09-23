@@ -52,11 +52,15 @@ where
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+    /// while `None` selects the latest retained state. Initialization fails with
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config).await
+        crate::qmdb::current::init(context, config, max_size).await
     }
 }
 
@@ -100,11 +104,16 @@ pub mod partitioned {
         Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+        /// while `None` selects the latest retained state. Initialization fails with
+        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
+        /// floor.
         pub async fn init(
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config).await
+            crate::qmdb::current::init(context, config, max_size).await
         }
     }
 }
@@ -139,7 +148,7 @@ mod test {
         partition_prefix: String,
     ) -> CurrentTest<F> {
         let cfg = variable_config::<OneCap>(&partition_prefix, &context);
-        CurrentTest::<F>::init(context, cfg).await.unwrap()
+        CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
