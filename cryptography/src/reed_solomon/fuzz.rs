@@ -5,7 +5,7 @@ use super::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use super::engine::{Avx2, Avx512, Ssse3};
 use super::{
-    Decoder,
+    Decoder, Error, RecoveryPlan,
     engine::{
         CANTOR_BASIS, DefaultEngine, Engine, GF_MODULUS, GF_ORDER, GF_POLYNOMIAL, GfElement, Naive,
         NoSimd, SHARD_CHUNK_BYTES, ShardsRefMut,
@@ -147,6 +147,8 @@ pub enum RatePlan {
     Contract(RateKind),
     /// Check the public recovery decoder's reuse and missing recovery shards.
     Recovery,
+    /// Compare prepared recovery against ordinary decoding across sizes, reuse, and mismatches.
+    PreparedRecovery,
 }
 
 impl RatePlan {
@@ -179,6 +181,7 @@ impl RatePlan {
                 each_engine!(rate_contract(kind, &case_a, &case_b));
             }
             Self::Recovery => exercise_recovery_reuse(&case_a, &case_b),
+            Self::PreparedRecovery => exercise_prepared_reuse(&case_a, &case_b),
         }
         Ok(())
     }
@@ -764,6 +767,151 @@ fn exercise_recovery_reuse(case_a: &RateCase, case_b: &RateCase) {
     recovery_round(&mut decoder, case_b, &expected_b, 0);
 }
 
+fn prepared_round(
+    decoder: &mut Decoder,
+    case: &RateCase,
+    recovery: &[Vec<u8>],
+    start_delta: usize,
+) {
+    let missing = case.missing_originals(start_delta);
+    let provided = case.provided_recoveries(start_delta);
+    let originals = (0..case.original_count).filter(|&i| !missing[i]);
+    let recoveries = (0..case.recovery_count).filter(|&i| provided[i]);
+    let plan = RecoveryPlan::new(
+        case.original_count,
+        case.recovery_count,
+        originals,
+        recoveries,
+    )
+    .unwrap();
+    prepared_round_with_plan(decoder, case, recovery, start_delta, &plan);
+}
+
+fn prepared_round_with_plan(
+    decoder: &mut Decoder,
+    case: &RateCase,
+    recovery: &[Vec<u8>],
+    start_delta: usize,
+    plan: &RecoveryPlan,
+) {
+    let missing = case.missing_originals(start_delta);
+    let provided = case.provided_recoveries(start_delta);
+    let mut reference =
+        Decoder::new(case.original_count, case.recovery_count, case.shard_bytes).unwrap();
+    for (index, shard) in case.originals.iter().enumerate() {
+        if !missing[index] {
+            decoder.add_original_shard(index, shard).unwrap();
+            reference.add_original_shard(index, shard).unwrap();
+        }
+    }
+    for (index, shard) in recovery.iter().enumerate() {
+        if provided[index] {
+            decoder.add_recovery_shard(index, shard).unwrap();
+            reference.add_recovery_shard(index, shard).unwrap();
+        }
+    }
+
+    // A wrong count and a changed mask must leave the submitted shards usable for a retry.
+    let other_counts = RecoveryPlan::new(
+        case.original_count + 1,
+        case.recovery_count,
+        0..case.original_count + 1,
+        [],
+    )
+    .unwrap();
+    assert!(matches!(
+        decoder.decode_with_recovery_plan(&other_counts),
+        Err(Error::RecoveryPlanMismatch)
+    ));
+    let additional = provided.iter().position(|present| !present).unwrap();
+    let changed = RecoveryPlan::new(
+        case.original_count,
+        case.recovery_count,
+        (0..case.original_count).filter(|&i| !missing[i]),
+        (0..case.recovery_count).filter(|&i| provided[i] || i == additional),
+    )
+    .unwrap();
+    assert!(matches!(
+        decoder.decode_with_recovery_plan(&changed),
+        Err(Error::RecoveryPlanMismatch)
+    ));
+    let result = decoder.decode_with_recovery_plan(plan).unwrap().unwrap();
+    let ordinary = reference.decode_with_recovery().unwrap().unwrap();
+    for (index, shard) in case.originals.iter().enumerate() {
+        assert_eq!(result.original(index), ordinary.original(index));
+        assert_eq!(
+            result.original(index),
+            missing[index].then_some(shard.as_slice())
+        );
+    }
+    for (index, shard) in recovery.iter().enumerate() {
+        assert_eq!(result.recovery(index), ordinary.recovery(index));
+        assert_eq!(
+            result.recovery(index),
+            (!provided[index]).then_some(shard.as_slice())
+        );
+    }
+}
+
+fn exercise_prepared_reuse(case_a: &RateCase, case_b: &RateCase) {
+    let recovery_a = encode::<DefaultRate<Naive>, _>(case_a, Naive::new());
+    let recovery_b = encode::<DefaultRate<Naive>, _>(case_b, Naive::new());
+    let mut decoder = Decoder::new(
+        case_a.original_count,
+        case_a.recovery_count,
+        case_a.shard_bytes,
+    )
+    .unwrap();
+    prepared_round(&mut decoder, case_a, &recovery_a, 0);
+    prepared_round(&mut decoder, case_a, &recovery_a, 1);
+    let missing = case_a.missing_originals(0);
+    let provided = case_a.provided_recoveries(0);
+    let shared = RecoveryPlan::new(
+        case_a.original_count,
+        case_a.recovery_count,
+        (0..case_a.original_count).filter(|&i| !missing[i]),
+        (0..case_a.recovery_count).filter(|&i| provided[i]),
+    )
+    .unwrap();
+    let mut short = case_a.clone();
+    short.shard_bytes = 2;
+    for original in &mut short.originals {
+        original.truncate(2);
+    }
+    let short_recovery = encode::<DefaultRate<Naive>, _>(&short, Naive::new());
+    decoder
+        .reset(short.original_count, short.recovery_count, 2)
+        .unwrap();
+    prepared_round_with_plan(&mut decoder, &short, &short_recovery, 0, &shared);
+    decoder
+        .reset(
+            case_a.original_count,
+            case_a.recovery_count,
+            case_a.shard_bytes,
+        )
+        .unwrap();
+    let all = RecoveryPlan::new(
+        case_a.original_count,
+        case_a.recovery_count,
+        0..case_a.original_count,
+        [],
+    )
+    .unwrap();
+    for (i, original) in case_a.originals.iter().enumerate() {
+        decoder.add_original_shard(i, original).unwrap();
+    }
+    assert!(decoder.decode_with_recovery_plan(&all).unwrap().is_none());
+    decoder
+        .reset(
+            case_b.original_count,
+            case_b.recovery_count,
+            case_b.shard_bytes,
+        )
+        .unwrap();
+    prepared_round(&mut decoder, case_b, &recovery_b, 0);
+    prepared_round(&mut decoder, case_b, &recovery_b, 1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,6 +987,31 @@ mod tests {
             .with_seed(0)
             .with_search_limit(32)
             .test(|u| RatePlan::Recovery.run(u));
+    }
+
+    #[test]
+    fn minifuzz_prepared_recovery() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(32)
+            .test(|u| RatePlan::PreparedRecovery.run(u));
+    }
+
+    #[test]
+    fn prepared_received_mask_reuse() {
+        // Reuse larger masks for both partial and full final words in each rate.
+        for (original_count, recovery_count) in [(3, 5), (5, 3), (16, 48), (48, 16)] {
+            let large = fixed_case(original_count * 4, recovery_count * 4, 2, 21);
+            let small = fixed_case(original_count, recovery_count, 2, 23);
+            exercise_prepared_reuse(&large, &small);
+        }
+    }
+
+    #[test]
+    fn prepared_low_full_polynomial() {
+        let low = fixed_case(3, 510, 66, 21);
+        let high = fixed_case(11, 3, 2, 23);
+        exercise_prepared_reuse(&low, &high);
     }
 
     #[test]

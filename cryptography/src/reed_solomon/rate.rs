@@ -41,9 +41,9 @@ use crate::reed_solomon::{
 
 mod decoder_work;
 mod encoder_work;
-mod rate_default;
-mod rate_high;
-mod rate_low;
+pub(crate) mod rate_default;
+pub(crate) mod rate_high;
+pub(crate) mod rate_low;
 
 const fn validate_work_size(shard_bytes: usize, work_count: usize) -> Result<(), Error> {
     // The chunk array must fit within Vec's maximum allocation size.

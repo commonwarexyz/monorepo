@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error,
+    DecoderResult, EncoderResult, Error, RecoveryPlan,
     engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, tables},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
@@ -7,11 +7,34 @@ use core::marker::PhantomData;
 use fixedbitset::FixedBitSet;
 
 // Bound the quadratic calculation and its stack storage.
-const DIRECT_EVALUATION_LIMIT: usize = 512;
+pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 512;
+
+/// Evaluate the erasure coefficients and borrow them for the supplied operation.
+pub(crate) fn with_erasures<E: Engine, T>(
+    original_count: usize,
+    recovery_count: usize,
+    received: &FixedBitSet,
+    f: impl FnOnce(&[GfElement]) -> T,
+) -> T {
+    let end = original_count.next_power_of_two() + recovery_count;
+    if end <= DIRECT_EVALUATION_LIMIT {
+        let mut erasures = [0; DIRECT_EVALUATION_LIMIT];
+        eval_direct(&mut erasures[..end], original_count, received);
+        f(&erasures[..end])
+    } else {
+        let mut erasures = [0; GF_ORDER];
+        eval_full::<E>(&mut erasures, original_count, recovery_count, received);
+        f(&erasures[..end])
+    }
+}
 
 /// Compute log erasure factors directly from the known positions in a small decoding domain.
 /// This avoids evaluating the erasure polynomial over the entire field.
-fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &FixedBitSet) {
+pub(crate) fn eval_direct(
+    erasures: &mut [GfElement],
+    original_count: usize,
+    received: &FixedBitSet,
+) {
     let chunk_size = original_count.next_power_of_two();
     let mut known = [0; DIRECT_EVALUATION_LIMIT];
     let mut count = 0;
@@ -35,6 +58,29 @@ fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &Fix
         }
         *erasure = GF_MODULUS - (sum % u32::from(GF_MODULUS)) as GfElement;
     }
+}
+
+// The caller supplies a zeroed GF_ORDER buffer.
+pub(crate) fn eval_full<E: Engine>(
+    erasures: &mut [GfElement; GF_ORDER],
+    original_count: usize,
+    recovery_count: usize,
+    received: &FixedBitSet,
+) {
+    let chunk_size = original_count.next_power_of_two();
+    let end = chunk_size + recovery_count;
+    for i in 0..original_count {
+        if !received[i] {
+            erasures[i] = 1;
+        }
+    }
+    for i in chunk_size..end {
+        if !received[i] {
+            erasures[i] = 1;
+        }
+    }
+    erasures[end..].fill(1);
+    E::eval_poly(erasures, GF_ORDER);
 }
 
 // ======================================================================
@@ -225,111 +271,7 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
     }
 
     fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error> {
-        let Some((mut work, original_count, recovery_count, received)) =
-            self.work.decode_begin()?
-        else {
-            // Every original was provided: nothing to reconstruct. Clear the received state and
-            // report nothing.
-            self.work.reset_received();
-            return Ok(None);
-        };
-
-        let chunk_size = original_count.next_power_of_two();
-        let recovery_end = chunk_size + recovery_count;
-        let work_count = work.len();
-
-        // ERASURE LOCATIONS
-
-        let mut direct_erasures;
-        let mut full_erasures;
-        let erasures = if recovery_end <= DIRECT_EVALUATION_LIMIT {
-            direct_erasures = [0; DIRECT_EVALUATION_LIMIT];
-            let erasures = &mut direct_erasures[..recovery_end];
-            eval_direct(erasures, original_count, received);
-            erasures
-        } else {
-            full_erasures = [0; GF_ORDER];
-            for i in 0..original_count {
-                if !received[i] {
-                    full_erasures[i] = 1;
-                }
-            }
-            for i in chunk_size..recovery_end {
-                if !received[i] {
-                    full_erasures[i] = 1;
-                }
-            }
-            full_erasures[recovery_end..].fill(1);
-            E::eval_poly(&mut full_erasures, GF_ORDER);
-            &mut full_erasures[..recovery_end]
-        };
-
-        // MULTIPLY SHARDS
-
-        // work[               .. original_count] = original * erasures
-        // work[original_count .. chunk_size    ] = 0
-        // work[chunk_size     .. original_end  ] = recovery * erasures
-        // work[recovery_end   ..               ] = 0
-
-        for i in 0..original_count {
-            if received[i] {
-                self.engine.mul(&mut work[i], erasures[i]);
-            } else {
-                work[i].fill([0; SHARD_CHUNK_BYTES]);
-            }
-        }
-
-        work.zero(original_count..chunk_size);
-
-        for i in chunk_size..recovery_end {
-            if received[i] {
-                self.engine.mul(&mut work[i], erasures[i]);
-            } else {
-                work[i].fill([0; SHARD_CHUNK_BYTES]);
-            }
-        }
-
-        work.zero(recovery_end..);
-
-        // IFFT / FORMAL DERIVATIVE / FFT
-
-        self.engine.ifft(&mut work, 0, work_count, recovery_end, 0);
-        engine::formal_derivative(&mut work);
-        self.engine.fft(&mut work, 0, work_count, recovery_end, 0);
-
-        // REVEAL ERASURES
-
-        for i in 0..original_count {
-            if !received[i] {
-                self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
-            }
-        }
-
-        // REVEAL ERASURES (RECOVERY)
-        //
-        // Only when the caller passed `compute_recovery = true` to `decode`. Recovery shards
-        // live at `work[chunk_size..recovery_end]`. Un-scale the missing ones by the inverse
-        // locator so they hold the canonical recovery values, mirroring the original reveal above.
-        // This lets `DecoderResult::recovery` return them without a separate re-encode.
-
-        if compute_recovery {
-            for i in chunk_size..recovery_end {
-                if !received[i] {
-                    self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
-                }
-            }
-        }
-
-        // UNDO LAST CHUNK ENCODING
-
-        self.work.undo_last_chunk_encoding();
-        if compute_recovery {
-            self.work.undo_last_chunk_encoding_recovery();
-        }
-
-        // DONE
-
-        Ok(Some(DecoderResult::new(&mut self.work)))
+        self.decode_impl(compute_recovery, None)
     }
 
     fn into_parts(self) -> (E, DecoderWork) {
@@ -362,6 +304,109 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
 // LowRateDecoder - PRIVATE
 
 impl<E: Engine> LowRateDecoder<E> {
+    pub(crate) fn decode_with_plan(
+        &mut self,
+        compute_recovery: bool,
+        plan: &RecoveryPlan,
+    ) -> Result<Option<DecoderResult<'_>>, Error> {
+        self.decode_impl(compute_recovery, Some(plan))
+    }
+
+    fn decode_impl(
+        &mut self,
+        compute_recovery: bool,
+        plan: Option<&RecoveryPlan>,
+    ) -> Result<Option<DecoderResult<'_>>, Error> {
+        if let Some(plan) = plan {
+            self.work.validate_plan(plan, false)?;
+        }
+        let Some((mut work, original_count, recovery_count, received)) =
+            self.work.decode_begin()?
+        else {
+            // Every original was provided: nothing to reconstruct. Clear the received state and
+            // report nothing.
+            self.work.reset_received();
+            return Ok(None);
+        };
+
+        let chunk_size = original_count.next_power_of_two();
+        let recovery_end = chunk_size + recovery_count;
+        let work_count = work.len();
+
+        let mut decode = |erasures: &[GfElement]| {
+            // MULTIPLY SHARDS
+
+            // work[               .. original_count] = original * erasures
+            // work[original_count .. chunk_size    ] = 0
+            // work[chunk_size     .. original_end  ] = recovery * erasures
+            // work[recovery_end   ..               ] = 0
+
+            for i in 0..original_count {
+                if received[i] {
+                    self.engine.mul(&mut work[i], erasures[i]);
+                } else {
+                    work[i].fill([0; SHARD_CHUNK_BYTES]);
+                }
+            }
+
+            work.zero(original_count..chunk_size);
+
+            for i in chunk_size..recovery_end {
+                if received[i] {
+                    self.engine.mul(&mut work[i], erasures[i]);
+                } else {
+                    work[i].fill([0; SHARD_CHUNK_BYTES]);
+                }
+            }
+
+            work.zero(recovery_end..);
+
+            // IFFT / FORMAL DERIVATIVE / FFT
+
+            self.engine.ifft(&mut work, 0, work_count, recovery_end, 0);
+            engine::formal_derivative(&mut work);
+            self.engine.fft(&mut work, 0, work_count, recovery_end, 0);
+
+            // REVEAL ERASURES
+
+            for i in 0..original_count {
+                if !received[i] {
+                    self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
+                }
+            }
+
+            // REVEAL ERASURES (RECOVERY)
+            //
+            // Only when the caller passed `compute_recovery = true` to `decode`. Recovery shards
+            // live at `work[chunk_size..recovery_end]`. Un-scale the missing ones by the inverse
+            // locator so they hold the canonical recovery values, mirroring the original reveal above.
+            // This lets `DecoderResult::recovery` return them without a separate re-encode.
+
+            if compute_recovery {
+                for i in chunk_size..recovery_end {
+                    if !received[i] {
+                        self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
+                    }
+                }
+            }
+        };
+        match plan {
+            Some(plan) => decode(plan.coefficients()),
+            None => with_erasures::<E, _>(original_count, recovery_count, received, decode),
+        }
+
+        // UNDO LAST CHUNK ENCODING
+
+        self.work.undo_last_chunk_encoding();
+        if compute_recovery {
+            self.work.undo_last_chunk_encoding_recovery();
+        }
+
+        // DONE
+
+        Ok(Some(DecoderResult::new(&mut self.work)))
+    }
+
     fn reset_work(
         original_count: usize,
         recovery_count: usize,

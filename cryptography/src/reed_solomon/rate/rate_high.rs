@@ -1,9 +1,33 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error,
-    engine::{self, Engine, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES},
+    DecoderResult, EncoderResult, Error, RecoveryPlan,
+    engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
 use core::marker::PhantomData;
+use fixedbitset::FixedBitSet;
+
+// The caller supplies a zeroed GF_ORDER buffer.
+pub(crate) fn eval_erasures<E: Engine>(
+    erasures: &mut [GfElement; GF_ORDER],
+    original_count: usize,
+    recovery_count: usize,
+    received: &FixedBitSet,
+) {
+    let chunk_size = recovery_count.next_power_of_two();
+    let end = chunk_size + original_count;
+    for i in 0..recovery_count {
+        if !received[i] {
+            erasures[i] = 1;
+        }
+    }
+    erasures[recovery_count..chunk_size].fill(1);
+    for i in chunk_size..end {
+        if !received[i] {
+            erasures[i] = 1;
+        }
+    }
+    E::eval_poly(erasures, end);
+}
 
 // ======================================================================
 // HighRate - PUBLIC
@@ -193,6 +217,55 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
     }
 
     fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error> {
+        self.decode_impl(compute_recovery, None)
+    }
+
+    fn into_parts(self) -> (E, DecoderWork) {
+        (self.engine, self.work)
+    }
+
+    fn new(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+        engine: E,
+        work: Option<DecoderWork>,
+    ) -> Result<Self, Error> {
+        let mut work = work.unwrap_or_default();
+        Self::reset_work(original_count, recovery_count, shard_bytes, &mut work)?;
+        Ok(Self { engine, work })
+    }
+
+    fn reset(
+        &mut self,
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error> {
+        Self::reset_work(original_count, recovery_count, shard_bytes, &mut self.work)
+    }
+}
+
+// ======================================================================
+// HighRateDecoder - PRIVATE
+
+impl<E: Engine> HighRateDecoder<E> {
+    pub(crate) fn decode_with_plan(
+        &mut self,
+        compute_recovery: bool,
+        plan: &RecoveryPlan,
+    ) -> Result<Option<DecoderResult<'_>>, Error> {
+        self.decode_impl(compute_recovery, Some(plan))
+    }
+
+    fn decode_impl(
+        &mut self,
+        compute_recovery: bool,
+        plan: Option<&RecoveryPlan>,
+    ) -> Result<Option<DecoderResult<'_>>, Error> {
+        if let Some(plan) = plan {
+            self.work.validate_plan(plan, true)?;
+        }
         let Some((mut work, original_count, recovery_count, received)) =
             self.work.decode_begin()?
         else {
@@ -206,27 +279,24 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
         let original_end = chunk_size + original_count;
         let work_count = work.len();
 
-        // ERASURE LOCATIONS
-
-        let mut erasures = [0; GF_ORDER];
-
-        for i in 0..recovery_count {
-            if !received[i] {
-                erasures[i] = 1;
+        let mut owned_erasures;
+        #[expect(
+            clippy::option_if_let_else,
+            reason = "The fallback initializes a scratch buffer and returns a borrow of it."
+        )]
+        let erasures: &[GfElement] = match plan {
+            Some(plan) => plan.coefficients(),
+            None => {
+                owned_erasures = [0; GF_ORDER];
+                eval_erasures::<E>(
+                    &mut owned_erasures,
+                    original_count,
+                    recovery_count,
+                    received,
+                );
+                &owned_erasures
             }
-        }
-
-        erasures[recovery_count..chunk_size].fill(1);
-
-        for i in chunk_size..original_end {
-            if !received[i] {
-                erasures[i] = 1;
-            }
-        }
-
-        // EVALUATE POLYNOMIAL
-
-        E::eval_poly(&mut erasures, original_end);
+        };
 
         // MULTIPLY SHARDS
 
@@ -296,36 +366,6 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
         Ok(Some(DecoderResult::new(&mut self.work)))
     }
 
-    fn into_parts(self) -> (E, DecoderWork) {
-        (self.engine, self.work)
-    }
-
-    fn new(
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-        engine: E,
-        work: Option<DecoderWork>,
-    ) -> Result<Self, Error> {
-        let mut work = work.unwrap_or_default();
-        Self::reset_work(original_count, recovery_count, shard_bytes, &mut work)?;
-        Ok(Self { engine, work })
-    }
-
-    fn reset(
-        &mut self,
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-    ) -> Result<(), Error> {
-        Self::reset_work(original_count, recovery_count, shard_bytes, &mut self.work)
-    }
-}
-
-// ======================================================================
-// HighRateDecoder - PRIVATE
-
-impl<E: Engine> HighRateDecoder<E> {
     fn reset_work(
         original_count: usize,
         recovery_count: usize,

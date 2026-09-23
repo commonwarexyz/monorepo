@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryDecoderResult,
+    DecoderResult, EncoderResult, Error, RecoveryDecoderResult, RecoveryPlan,
     engine::DefaultEngine,
     rate::{DefaultRate, DefaultRateDecoder, DefaultRateEncoder, Rate, RateDecoder, RateEncoder},
 };
@@ -134,6 +134,18 @@ impl Decoder {
         self.0.decode(false)
     }
 
+    /// Decode using coefficients prepared for the exact received indices.
+    ///
+    /// The plan can be shared between decoders with different valid shard byte lengths.
+    /// A mismatched plan returns [`Error::RecoveryPlanMismatch`] before changing shard data;
+    /// the decoder may then be used with the correct plan or regular [`decode`](Self::decode).
+    pub fn decode_with_plan(
+        &mut self,
+        plan: &RecoveryPlan,
+    ) -> Result<Option<DecoderResult<'_>>, Error> {
+        self.0.decode_with_plan(false, plan)
+    }
+
     /// Like [`decode`](Decoder::decode), but also reconstructs the missing recovery shards, returning
     /// `Some(`[`RecoveryDecoderResult`]`)` that additionally exposes them via
     /// [`RecoveryDecoderResult::recovery`] / [`recovery_iter`]. This costs up to `recovery_count`
@@ -143,6 +155,19 @@ impl Decoder {
     /// [`recovery_iter`]: RecoveryDecoderResult::recovery_iter
     pub fn decode_with_recovery(&mut self) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
         Ok(self.0.decode(true)?.map(RecoveryDecoderResult::new))
+    }
+
+    /// Decode and reconstruct missing recovery shards using a matching prepared plan.
+    ///
+    /// A mismatched plan returns [`Error::RecoveryPlanMismatch`] before changing shard data.
+    pub fn decode_with_recovery_plan(
+        &mut self,
+        plan: &RecoveryPlan,
+    ) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
+        Ok(self
+            .0
+            .decode_with_plan(true, plan)?
+            .map(RecoveryDecoderResult::new))
     }
 
     /// Creates new decoder with given configuration
