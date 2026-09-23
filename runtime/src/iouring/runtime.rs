@@ -228,6 +228,8 @@ pub struct Config {
     tcp_nodelay: Option<bool>,
     /// Request immediate reset on socket close, defaulting to true.
     zero_linger: bool,
+    /// Request Multipath TCP for dialed and listening sockets, defaulting to false.
+    mptcp: bool,
     /// Whole-call outbound connection deadline, defaulting to 10 seconds.
     connect_timeout: Duration,
     /// Whole-call send and receive deadline, defaulting to 60 seconds.
@@ -258,6 +260,7 @@ impl Config {
             storage_blob_layouts: BlobLayout::ALL,
             tcp_nodelay: Some(true),
             zero_linger: true,
+            mptcp: false,
             connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
             read_buffer_size: 64 * 1024,
@@ -327,6 +330,15 @@ impl Config {
     /// Set whether sockets request zero linger when configured.
     pub const fn with_zero_linger(mut self, enabled: bool) -> Self {
         self.zero_linger = enabled;
+        self
+    }
+
+    /// Set whether dialed and listening sockets request Multipath TCP (MPTCP).
+    ///
+    /// Best effort: sockets use TCP when the kernel reports MPTCP as unsupported
+    /// or disabled. See [Multipath TCP](crate#multipath-tcp).
+    pub const fn with_mptcp(mut self, enabled: bool) -> Self {
+        self.mptcp = enabled;
         self
     }
 
@@ -410,6 +422,11 @@ impl Config {
     /// Return whether sockets request zero linger.
     pub const fn zero_linger(&self) -> bool {
         self.zero_linger
+    }
+
+    /// Return whether sockets request Multipath TCP.
+    pub const fn mptcp(&self) -> bool {
+        self.mptcp
     }
 
     /// Return the network receive buffer size.
@@ -1867,6 +1884,7 @@ impl crate::Runner for Runner {
                 NetworkConfig {
                     tcp_nodelay: self.cfg.tcp_nodelay,
                     zero_linger: self.cfg.zero_linger,
+                    mptcp: self.cfg.mptcp,
                     connect_timeout: self.cfg.connect_timeout,
                     read_write_timeout: self.cfg.read_write_timeout,
                     read_buffer_size: self.cfg.read_buffer_size,

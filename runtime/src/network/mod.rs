@@ -10,20 +10,40 @@ stability_scope!(BETA {
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub(crate) mod tokio;
 });
+stability_scope!(BETA, cfg(target_os = "linux") {
+    pub(crate) mod mptcp;
+});
 stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub(crate) mod iouring;
 });
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::mptcp::tests as mptcp;
     use crate::{Clock, IoBuf, IoBufs, Listener, Sink, Spawner, Stream};
+    #[cfg(target_os = "linux")]
+    use crate::{SinkOf, StreamOf};
     use commonware_macros::select;
     use commonware_utils::{channel::oneshot, sync::Barrier};
     use futures::{FutureExt, StreamExt, join, stream::FuturesUnordered};
+    #[cfg(target_os = "linux")]
+    use std::{net::Ipv6Addr, os::fd::AsFd};
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     const CLIENT_SEND_DATA: &[u8] = b"client_send_data";
     const SERVER_SEND_DATA: &[u8] = b"server_send_data";
+
+    /// Deterministic payload of `len` bytes (a multiple of 8) whose 64-bit words
+    /// count up from `index * len / 8`, so reordered, repeated, or lost bytes
+    /// are detected.
+    #[cfg(target_os = "linux")]
+    fn chunk(index: u64, len: usize) -> Vec<u8> {
+        let words = (len / 8) as u64;
+        (index * words..(index + 1) * words)
+            .flat_map(u64::to_le_bytes)
+            .collect()
+    }
 
     pub(super) async fn test_network_trait<C, N, F>(context: C, new_network: F)
     where
@@ -696,6 +716,294 @@ mod tests {
 
         // Confirm the dial remained pending for the configured budget.
         assert!(start.elapsed() >= connect_timeout);
+    }
+
+    /// Test each pairing of MPTCP and TCP ends over IPv4 and IPv6 loopback.
+    ///
+    /// `new_network(mptcp)` builds a network that requests MPTCP when `mptcp` is
+    /// set. Both ends must negotiate MPTCP only when both request it and the
+    /// kernel supports it, and every pairing must deliver small and large
+    /// payloads exactly in both directions.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn test_network_mptcp_interop<C, N, F>(context: C, new_network: F)
+    where
+        C: Spawner + Clock,
+        F: Fn(bool) -> N,
+        N: crate::Network,
+        SinkOf<N>: AsFd,
+    {
+        const TEST: &str = "test_network_mptcp_interop";
+        const LARGE: usize = 1024 * 1024;
+
+        let supported = match mptcp::supported() {
+            Ok(()) => true,
+            Err(reason) => {
+                mptcp::skip(TEST, &format!("verifying TCP fallback only: {reason}"));
+                false
+            }
+        };
+        let mut addresses = vec![SocketAddr::from(([127, 0, 0, 1], 0))];
+        if std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok() {
+            addresses.push(SocketAddr::from((Ipv6Addr::LOCALHOST, 0)));
+        } else {
+            mptcp::skip(TEST, "IPv6 loopback unavailable");
+        }
+
+        for address in addresses {
+            for (dialer_mptcp, listener_mptcp) in
+                [(false, false), (true, true), (true, false), (false, true)]
+            {
+                let negotiated = supported && dialer_mptcp && listener_mptcp;
+                let mut listener = new_network(listener_mptcp)
+                    .bind(address)
+                    .await
+                    .expect("Failed to bind");
+                let listener_addr = listener.local_addr().expect("Failed to get local address");
+
+                // Server echoes each payload after checking the accepted socket.
+                let server = context.child("server").spawn(move |_| async move {
+                    let (_, mut sink, mut stream) =
+                        listener.accept().await.expect("Failed to accept");
+                    assert_eq!(mptcp::token(sink.as_fd()).is_some(), negotiated);
+                    for len in [CLIENT_SEND_DATA.len(), LARGE] {
+                        let received = stream.recv(len).await.expect("Failed to receive");
+                        sink.send(received).await.expect("Failed to send");
+                    }
+                    (sink, stream)
+                });
+
+                let (mut sink, mut stream) = new_network(dialer_mptcp)
+                    .dial(listener_addr)
+                    .await
+                    .expect("Failed to dial server");
+                let protocol = if supported && dialer_mptcp {
+                    libc::IPPROTO_MPTCP
+                } else {
+                    libc::IPPROTO_TCP
+                };
+                assert_eq!(mptcp::protocol(sink.as_fd()), protocol);
+                assert_eq!(mptcp::token(sink.as_fd()).is_some(), negotiated);
+                for payload in [CLIENT_SEND_DATA.to_vec(), chunk(0, LARGE)] {
+                    sink.send(payload.clone()).await.expect("Failed to send");
+                    let received = stream.recv(payload.len()).await.expect("Failed to receive");
+                    assert_eq!(received.coalesce(), payload.as_slice());
+                }
+                server.await.expect("Server task failed");
+            }
+        }
+    }
+
+    /// Test that MPTCP requests use TCP when the kernel reports MPTCP disabled.
+    ///
+    /// Must run in a network namespace with `net.mptcp.enabled` set to 0, using a
+    /// network that requests MPTCP.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn test_network_mptcp_fallback<C, N>(context: C, network: N)
+    where
+        C: Spawner + Clock,
+        N: crate::Network,
+        SinkOf<N>: AsFd,
+    {
+        assert_eq!(mptcp::creation_error(), Some(libc::ENOPROTOOPT));
+
+        let mut listener = network
+            .bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .expect("Failed to bind");
+        let listener_addr = listener.local_addr().expect("Failed to get local address");
+        let server = context.child("server").spawn(move |_| async move {
+            let (_, mut sink, mut stream) = listener.accept().await.expect("Failed to accept");
+            assert_eq!(mptcp::protocol(sink.as_fd()), libc::IPPROTO_TCP);
+            let received = stream
+                .recv(CLIENT_SEND_DATA.len())
+                .await
+                .expect("Failed to receive");
+            assert_eq!(received.coalesce(), CLIENT_SEND_DATA);
+            sink.send(IoBuf::from(SERVER_SEND_DATA))
+                .await
+                .expect("Failed to send");
+            (sink, stream)
+        });
+
+        let (mut sink, mut stream) = network
+            .dial(listener_addr)
+            .await
+            .expect("Failed to dial server");
+        assert_eq!(mptcp::protocol(sink.as_fd()), libc::IPPROTO_TCP);
+        sink.send(IoBuf::from(CLIENT_SEND_DATA))
+            .await
+            .expect("Failed to send");
+        let received = stream
+            .recv(SERVER_SEND_DATA.len())
+            .await
+            .expect("Failed to receive");
+        assert_eq!(received.coalesce(), SERVER_SEND_DATA);
+        server.await.expect("Server task failed");
+    }
+
+    /// Test an MPTCP connection that loses its initial path during a transfer.
+    ///
+    /// Must run in `paths.client` with a network that requests MPTCP. The
+    /// connection is dialed over path 1, adds a subflow over path 2, carries
+    /// data on both, and must deliver every byte in order after path 1 goes down.
+    #[cfg(target_os = "linux")]
+    pub(super) async fn test_network_mptcp_multipath<C, N>(
+        context: C,
+        network: N,
+        paths: &mptcp::Paths,
+    ) where
+        C: Spawner + Clock,
+        N: crate::Network,
+        SinkOf<N>: AsFd,
+    {
+        const CHUNK: usize = 256 * 1024;
+        // Chunks acknowledged before checking that both subflows carried data.
+        const BOTH_PATHS: u64 = 64;
+        // Chunks acknowledged before path 1 goes down.
+        const INTERRUPT: u64 = 96;
+        // Chunks sent over the connection.
+        const TOTAL: u64 = 256;
+
+        let client_initial = paths.address(1, 1);
+        let server_initial = paths.address(1, 2);
+
+        // Listen on every server address so joins to the announced address reach
+        // the listener. Binding completes synchronously, so the socket is created
+        // in the server namespace before the guard restores the client namespace.
+        let mut listener = {
+            let _entered = paths.server.enter();
+            network
+                .bind(SocketAddr::new(paths.unspecified(), 0))
+                .now_or_never()
+                .expect("bind should complete without waiting")
+                .expect("Failed to bind")
+        };
+        let port = listener
+            .local_addr()
+            .expect("Failed to get local address")
+            .port();
+
+        // Server verifies every chunk and acknowledges the running count.
+        let server = context.child("server").spawn(move |_| async move {
+            let (address, mut sink, mut stream) =
+                listener.accept().await.expect("Failed to accept");
+
+            // Accept reports only the initial subflow's peer.
+            assert_eq!(address.ip(), client_initial);
+            assert!(
+                mptcp::token(sink.as_fd()).is_some(),
+                "server fell back to TCP"
+            );
+            for index in 0..TOTAL {
+                let received = stream.recv(CHUNK).await.expect("Failed to receive");
+                assert!(
+                    received.coalesce() == chunk(index, CHUNK).as_slice(),
+                    "chunk {index} corrupted"
+                );
+                sink.send((index + 1).to_le_bytes().to_vec())
+                    .await
+                    .expect("Failed to acknowledge");
+            }
+            (sink, stream)
+        });
+
+        let (mut sink, mut stream) = network
+            .dial(SocketAddr::new(server_initial, port))
+            .await
+            .expect("Failed to dial server");
+        let token = mptcp::token(sink.as_fd()).expect("client fell back to TCP");
+        let fd = sink
+            .as_fd()
+            .try_clone_to_owned()
+            .expect("Failed to duplicate socket");
+        let acknowledged = async |stream: &mut StreamOf<N>, expected: u64| {
+            let ack = stream
+                .recv(8)
+                .await
+                .expect("Failed to receive acknowledgement");
+            let count = u64::from_le_bytes(ack.coalesce().as_ref().try_into().unwrap());
+            assert_eq!(count, expected);
+        };
+
+        // Complete one round trip over path 1, then wait for the announced path
+        // to join as a second established subflow.
+        sink.send(chunk(0, CHUNK)).await.expect("Failed to send");
+        acknowledged(&mut stream, 1).await;
+        let mut attempts = 0;
+        loop {
+            let subflows = mptcp::subflows(fd.as_fd());
+            let established = |path| {
+                paths
+                    .subflow(&subflows, path)
+                    .is_some_and(|subflow| subflow.established)
+            };
+            if established(1) && established(2) {
+                break;
+            }
+            attempts += 1;
+            assert!(
+                attempts < 500,
+                "second subflow not established: {subflows:?}"
+            );
+            context.sleep(Duration::from_millis(10)).await;
+        }
+
+        let sender = context.child("sender").spawn(move |_| async move {
+            for index in 1..TOTAL {
+                sink.send(chunk(index, CHUNK))
+                    .await
+                    .expect("Failed to send");
+            }
+            sink
+        });
+
+        let mut interrupted = None;
+        for expected in 2..=TOTAL {
+            acknowledged(&mut stream, expected).await;
+            if expected == BOTH_PATHS {
+                // Both subflows carry data while both paths are up.
+                let subflows = mptcp::subflows(fd.as_fd());
+                for path in [1, 2] {
+                    let subflow = paths.subflow(&subflows, path).expect("subflow closed");
+                    assert!(
+                        subflow.bytes_acked >= CHUNK as u64,
+                        "path {path} carried no data: {subflows:?}"
+                    );
+                }
+            }
+            if expected == INTERRUPT {
+                // Let acknowledgements already in flight settle before sampling.
+                paths.interrupt_initial();
+                context.sleep(Duration::from_millis(100)).await;
+                interrupted = Some(mptcp::subflows(fd.as_fd()));
+            }
+        }
+        let sink = sender.await.expect("Sender task failed");
+        server.await.expect("Server task failed");
+
+        // Path 1 made no progress after the interruption, and path 2 carried the
+        // rest of the transfer on the same connection.
+        let interrupted = interrupted.unwrap();
+        let end = mptcp::subflows(fd.as_fd());
+        if let Some(initial) = paths.subflow(&end, 1) {
+            let before = paths
+                .subflow(&interrupted, 1)
+                .expect("path 1 subflow reappeared");
+            assert_eq!(
+                initial.bytes_acked, before.bytes_acked,
+                "path 1 made progress"
+            );
+        }
+        let before = paths
+            .subflow(&interrupted, 2)
+            .expect("path 2 subflow closed");
+        let after = paths.subflow(&end, 2).expect("path 2 subflow closed");
+        let remaining = (TOTAL - INTERRUPT) * CHUNK as u64;
+        assert!(
+            after.bytes_acked - before.bytes_acked >= remaining / 2,
+            "path 2 carried too little after the interruption: {interrupted:?} {end:?}"
+        );
+        assert_eq!(mptcp::token(sink.as_fd()), Some(token));
     }
 
     /// Network stress tests

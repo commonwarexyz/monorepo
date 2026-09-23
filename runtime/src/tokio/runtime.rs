@@ -86,6 +86,14 @@ pub struct NetworkConfig {
     /// Defaults to `true`.
     zero_linger: bool,
 
+    /// Whether to request Multipath TCP (MPTCP) for dialed and listening sockets.
+    ///
+    /// Best effort: other platforms, and Linux kernels that report MPTCP as
+    /// unsupported or disabled, use TCP. See [Multipath TCP](crate#multipath-tcp).
+    ///
+    /// Defaults to `false`.
+    mptcp: bool,
+
     /// Timeout for establishing an outbound TCP connection.
     ///
     /// Defaults to 10 seconds.
@@ -106,6 +114,7 @@ impl Default for NetworkConfig {
         Self {
             tcp_nodelay: Some(true),
             zero_linger: true,
+            mptcp: false,
             connect_timeout: Duration::from_secs(10),
             read_write_timeout: Duration::from_secs(60),
         }
@@ -238,6 +247,12 @@ impl Config {
         self
     }
     /// See [Config]
+    #[stability(ALPHA)]
+    pub const fn with_mptcp(mut self, enabled: bool) -> Self {
+        self.network_cfg.mptcp = enabled;
+        self
+    }
+    /// See [Config]
     pub fn with_storage_directory(mut self, p: impl Into<PathBuf>) -> Self {
         self.storage_directory = p.into();
         self
@@ -302,6 +317,11 @@ impl Config {
     /// See [Config]
     pub const fn zero_linger(&self) -> bool {
         self.network_cfg.zero_linger
+    }
+    /// See [Config]
+    #[stability(ALPHA)]
+    pub const fn mptcp(&self) -> bool {
+        self.network_cfg.mptcp
     }
     /// See [Config]
     pub const fn storage_directory(&self) -> &PathBuf {
@@ -489,7 +509,8 @@ impl crate::Runner for Runner {
             .with_read_timeout(self.cfg.network_cfg.read_write_timeout)
             .with_write_timeout(self.cfg.network_cfg.read_write_timeout)
             .with_tcp_nodelay(self.cfg.network_cfg.tcp_nodelay)
-            .with_zero_linger(self.cfg.network_cfg.zero_linger);
+            .with_zero_linger(self.cfg.network_cfg.zero_linger)
+            .with_mptcp(self.cfg.network_cfg.mptcp);
         let network = MeteredNetwork::new(
             TokioNetwork::new(config, network_buffer_pool.clone()),
             &mut runtime_registry,
@@ -860,13 +881,17 @@ impl crate::BufferPooler for Context {
 #[allow(deprecated)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use crate::network::mptcp::tests as mptcp;
     use crate::{
-        AbortOnDrop, Blob as _, Metrics, Network, Resolver, Runner as _, Sink, Spawner as _,
-        Storage as _, Strategizer as _, Stream, Supervisor as _, telemetry::metrics::raw::Counter,
-        tokio::telemetry,
+        AbortOnDrop, Blob as _, Listener as _, Metrics, Network, Resolver, Runner as _, Sink,
+        Spawner as _, Storage as _, Strategizer as _, Stream, Supervisor as _,
+        telemetry::metrics::raw::Counter, tokio::telemetry,
     };
     use bytes::Bytes;
     use commonware_parallel::Strategy as _;
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsFd as _;
     use std::{
         self,
         collections::HashMap,
@@ -1365,6 +1390,37 @@ mod tests {
     fn test_thread_stack_size_override() {
         let cfg = Config::new().with_thread_stack_size(4 * 1024 * 1024);
         assert_eq!(cfg.thread_stack_size(), 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_mptcp_config() {
+        assert!(!Config::new().mptcp());
+        for enabled in [false, true] {
+            let cfg = Config::new().with_mptcp(enabled);
+            assert_eq!(cfg.mptcp(), enabled);
+            Runner::new(cfg).start(|context| async move {
+                let mut listener = context
+                    .bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                    .await
+                    .unwrap();
+                let (mut sink, mut stream) =
+                    context.dial(listener.local_addr().unwrap()).await.unwrap();
+                let (_, mut accepted_sink, mut accepted_stream) = listener.accept().await.unwrap();
+
+                // Linux dials and accepts MPTCP only when configured and supported.
+                // Other platforms use TCP.
+                #[cfg(target_os = "linux")]
+                {
+                    let negotiated = enabled && mptcp::supported().is_ok();
+                    assert_eq!(mptcp::token(sink.as_fd()).is_some(), negotiated);
+                    assert_eq!(mptcp::token(accepted_sink.as_fd()).is_some(), negotiated);
+                }
+                sink.send(b"ping".as_slice()).await.unwrap();
+                assert_eq!(accepted_stream.recv(4).await.unwrap().coalesce(), b"ping");
+                accepted_sink.send(b"pong".as_slice()).await.unwrap();
+                assert_eq!(stream.recv(4).await.unwrap().coalesce(), b"pong");
+            });
+        }
     }
 
     #[test]
