@@ -238,7 +238,7 @@ where
     ///
     /// Holders must never manually prune these databases. Stateful uses
     /// [`Config::prune_config`](crate::stateful::Config::prune_config) to
-    /// schedule safe pruning without pruning past the rewind window needed for
+    /// schedule safe pruning without pruning past the recovery window needed for
     /// crash reconciliation. With pruning enabled, glue keeps a
     /// `max_pending_acks + 1` finalized-target window plus the configured
     /// extra block windows before pruning.

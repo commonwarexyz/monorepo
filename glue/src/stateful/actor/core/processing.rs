@@ -2743,7 +2743,7 @@ mod tests {
             release.send(Ok(())).expect("newer flush should be pending");
             waiter2.await.expect("newer block should be acknowledged");
             actor.abort();
-            marshal.abort();
+            marshal.abort().await;
         });
     }
 

@@ -67,7 +67,7 @@
 //! until worker cleanup and failure reporting finish. It retains only the
 //! [`Workers`] barrier, allowing that worker's [`Shared`] owners to be released first.
 //! I/O registers directly with the current worker on first poll. Mailboxes carry
-//! task spawns, wakes, and cancellation messages.
+//! task spawns, wakes, observation transfers, and cancellation messages.
 //!
 //! Each turn polls a bounded batch of tasks and checks the root's wake flag,
 //! services I/O and timers, and applies a bounded batch of mailbox messages.
@@ -104,13 +104,12 @@
 
 use super::{
     driver::Driver,
-    mailbox::{Mailbox, Message},
+    mailbox::{Cancel, Forward, Mailbox, Message},
     request::{RequestOutput, RetiredResources},
-    sleep::{Sleep, TimerId, Timers},
+    sleep::{Sleep, Timers},
     spinner::{Config as SpinnerConfig, Spinner},
     task::{BoxedTask, Running, Target, Task, TaskWaker, Tasks},
     timeout::TimeoutWheel,
-    waiter::WaiterId,
     waker::SUBMISSION_SEQ_MASK,
 };
 #[cfg(feature = "external")]
@@ -637,9 +636,11 @@ impl Shared {
 ///
 /// Ordinary children always target the runner's calling thread, including those
 /// spawned by dedicated and blocking tasks. Task factories run on their caller,
-/// while returned futures run on the selected worker. Resources may move between
-/// workers between I/O operations. Registered I/O futures and sleeps stay bound
-/// to their worker. Detached sync completion handles can be awaited on any thread.
+/// while returned futures run on the selected worker. Resources and pending I/O
+/// and sleep futures can move between workers. Registrations stay on their original
+/// worker. Closing that worker causes unresolved I/O futures to fail and unresolved
+/// sleeps to panic when polled. Detached sync completion handles can be awaited on
+/// any thread.
 pub struct Context {
     /// User-facing task and metric namespace.
     name: String,
@@ -821,11 +822,14 @@ impl Clock for Context {
         SystemTime::now()
     }
 
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
         Sleep::new(duration)
     }
 
-    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep_until(
+        &self,
+        deadline: SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static + use<> {
         Sleep::until(deadline)
     }
 }
@@ -936,8 +940,14 @@ impl crate::BufferPooler for Context {
     }
 }
 
-/// Detached sync result and the sender that publishes it outside Local.
-type SyncResult = (oneshot::Sender<Result<(), Error>>, Result<(), Error>);
+/// Sync or timer completion notification published outside Local.
+type Completion = (oneshot::Sender<Result<(), Error>>, Result<(), Error>);
+
+/// I/O result forwarded to another thread, including any returned buffers or descriptors.
+type OperationResult = (
+    oneshot::Sender<Result<RequestOutput, Error>>,
+    Result<RequestOutput, Error>,
+);
 
 /// Mutable execution state accessed only by its owning worker thread.
 ///
@@ -1014,56 +1024,28 @@ impl Local {
         matches.then_some(local)
     }
 
-    /// Resolve the owning worker for a registered operation or sleep.
-    ///
-    /// With no matching current worker, returns [`Error::Closed`] if the owner has
-    /// closed, and panics otherwise. The caller checks whether a matching worker is
-    /// closing before accessing its registrations.
-    pub fn bound(mailbox: &Weak<Mailbox>) -> Result<Rc<RefCell<Self>>, Error> {
-        if let Some(local) = Self::owner(mailbox) {
-            return Ok(local);
-        }
-
-        // A closed owner has already assumed cleanup responsibility. Polling
-        // elsewhere while that owner is live violates worker affinity.
-        if mailbox.upgrade().is_none_or(|mailbox| !mailbox.is_open()) {
-            return Err(Error::Closed);
-        }
-
-        panic!("registered io_uring handle polled outside its owning worker");
-    }
-
     /// Release an operation or timer on its worker, directly or through its mailbox.
     ///
-    /// Accepts only [`Message::Orphan`] and [`Message::CancelTimer`]. A worker whose
-    /// mailbox is closed or gone has already taken responsibility for cleanup.
-    pub fn cancel(mailbox: &Weak<Mailbox>, message: Message) {
+    /// A worker whose mailbox is closed or gone has already taken responsibility
+    /// for cleanup.
+    pub fn cancel(mailbox: &Weak<Mailbox>, cancel: Cancel) {
         if let Some(local) = Self::owner(mailbox) {
             // Owner-local drops also reach this path after the mailbox has closed.
-            let mut local = local.borrow_mut();
-            match message {
-                Message::Orphan(id) => local.orphan(id),
-                Message::CancelTimer(id) => local.cancel_timer(id),
-                _ => unreachable!("invalid cancellation message"),
-            }
+            local.borrow_mut().release(cancel);
             return;
         }
 
         if let Some(mailbox) = mailbox.upgrade() {
             // If closure wins the race, worker cleanup will release the registration.
-            let _ = mailbox.send(message);
+            let _ = mailbox.send(Message::Cancel(cancel));
         }
     }
 
     /// Detach observation without running callbacks under the local borrow.
-    pub fn orphan(&mut self, id: WaiterId) {
-        self.driver.as_mut().unwrap().orphan(id, &mut self.deferred);
-    }
-
-    /// Remove a sleep registration and defer destruction of its waker.
-    fn cancel_timer(&mut self, id: TimerId) {
-        if let Some(waker) = self.timers.cancel(id) {
-            self.deferred.drops.push(waker);
+    fn release(&mut self, cancel: Cancel) {
+        match cancel {
+            Cancel::Waiter(id) => self.driver.as_mut().unwrap().orphan(id, &mut self.deferred),
+            Cancel::Timer(id) => self.timers.cancel(id, &mut self.deferred),
         }
     }
 
@@ -1220,7 +1202,7 @@ impl Drop for RetirementGuard {
 /// borrowing the batch currently being drained. Each vector retains its capacity.
 #[derive(Default)]
 pub struct Deferred {
-    /// Notifications for tasks observing completed local transitions.
+    /// Notifications of I/O completion, timer expiry, or worker closure.
     pub wakes: Vec<Waker>,
     /// Wakers whose registrations were replaced or cancelled.
     pub drops: Vec<Waker>,
@@ -1228,8 +1210,10 @@ pub struct Deferred {
     pub outputs: Vec<RequestOutput>,
     /// Buffers and descriptors no longer used by the kernel.
     pub resources: Vec<RetiredResources>,
-    /// Detached durable-sync publications.
-    pub sync_results: Vec<SyncResult>,
+    /// Detached sync and forwarded timer notifications without I/O output.
+    pub completions: Vec<Completion>,
+    /// Forwarded I/O output or worker-closure errors.
+    pub results: Vec<OperationResult>,
 }
 
 impl Deferred {
@@ -1239,7 +1223,8 @@ impl Deferred {
             && self.drops.is_empty()
             && self.outputs.is_empty()
             && self.resources.is_empty()
-            && self.sync_results.is_empty()
+            && self.completions.is_empty()
+            && self.results.is_empty()
     }
 
     /// Run each callback independently, retaining failures until cleanup finishes.
@@ -1258,8 +1243,13 @@ impl Deferred {
             panics.run(|| drop(resources));
         }
 
-        // Publish detached sync results after releasing the completed requests' owners.
-        for (sender, output) in self.sync_results.drain(..) {
+        // Publish results after releasing the completed requests' owners.
+        for (sender, output) in self.completions.drain(..) {
+            panics.run(|| {
+                let _ = sender.send(output);
+            });
+        }
+        for (sender, output) in self.results.drain(..) {
             panics.run(|| {
                 let _ = sender.send(output);
             });
@@ -1445,7 +1435,9 @@ impl Worker {
         self.begin_close();
 
         // Closing the driver and timer table below subsumes queued cancellations.
-        // Spawn messages still own futures, which must be destroyed unborrowed.
+        // Discard queued forwarding messages so their receivers observe closure.
+        // Senders and spawned futures can run callbacks on drop, so destroy these
+        // messages outside the local borrow.
         for message in self.inbox.drain(..) {
             Panics::contain(|| drop(message));
         }
@@ -1458,7 +1450,7 @@ impl Worker {
             drop(waker);
         }
 
-        // Close every ordinary observer and timer before running callbacks.
+        // Detach local and forwarded observers before running callbacks.
         // Admission is closed, so subsequent handle drops find no registration
         // to detach. Only driver service can produce further deferred work.
         {
@@ -1470,7 +1462,7 @@ impl Worker {
                 ..
             } = &mut *local;
             driver.as_mut().unwrap().close(deferred);
-            timers.clear(&mut deferred.drops);
+            timers.clear(deferred);
             local.update_pending();
         }
         self.callbacks();
@@ -1558,8 +1550,22 @@ impl Worker {
                         Target::Task(id) => local.tasks.wake(id),
                     }
                 }
-                Message::Orphan(id) => self.local.borrow_mut().orphan(id),
-                Message::CancelTimer(id) => self.local.borrow_mut().cancel_timer(id),
+                Message::Forward(forward) => {
+                    let mut local = self.local.borrow_mut();
+                    let Local {
+                        driver,
+                        timers,
+                        deferred,
+                        ..
+                    } = &mut *local;
+                    match forward {
+                        Forward::Waiter(id, sender) => {
+                            driver.as_mut().unwrap().forward(id, sender, deferred);
+                        }
+                        Forward::Timer(id, sender) => timers.forward(id, sender, deferred),
+                    }
+                }
+                Message::Cancel(cancel) => self.local.borrow_mut().release(cancel),
             }
         }
     }
@@ -1582,8 +1588,8 @@ impl Worker {
             .service(*now, defer_kernel_service, deferred);
         let outcome = result.expect("io_uring driver service failed");
 
-        // Timer expiry only queues wakers. Callbacks run after this borrow ends.
-        timers.expire(*now, &mut deferred.wakes);
+        // Expiry defers observer notifications until after this borrow ends.
+        timers.expire(*now, deferred);
         local.update_pending();
         outcome
     }

@@ -12,7 +12,11 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{CHECKSUM_SIZE, CacheRef, Replay, read::PageReader, view::View};
+use super::{
+    CHECKSUM_SIZE, CacheRef, Replay,
+    read::PageReader,
+    view::{Tail, View},
+};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
 use commonware_utils::Widen;
 use std::{num::NonZeroUsize, sync::Arc};
@@ -47,8 +51,8 @@ struct SealedInner<B: Blob> {
     cache_ref: CacheRef,
 
     /// Page-cache id. [`super::Writer::seal`] preserves the writer id so hot full pages remain
-    /// valid across the transition. [`super::Writer::snapshot`] uses a fresh id because the writer
-    /// can keep mutating its own cache namespace.
+    /// valid across the transition. Snapshots share this identity. Full pages stay immutable within
+    /// one writer incarnation, and each snapshot owns its frozen partial page.
     id: u64,
 }
 
@@ -96,11 +100,12 @@ impl<B: Blob> Sealed<B> {
             id: self.inner.id,
             size: self.inner.size,
             tail_offset: self.partial_offset(),
-            tail: self
-                .inner
-                .partial_page
-                .as_ref()
-                .map_or(&[][..], |p| p.as_ref()),
+            tail: Tail::Sealed(
+                self.inner
+                    .partial_page
+                    .as_ref()
+                    .map_or(&[][..], |p| p.as_ref()),
+            ),
         }
     }
 
@@ -170,8 +175,9 @@ impl<B: Blob> Sealed<B> {
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
     ///
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
-    /// is not async. Every underlying blob read performed by the returned replay uses
-    /// `read_options`, including refills after seeking.
+    /// is not async. Replay reads the partial page from storage too. It does not use the frozen
+    /// partial-page copy used by [`Self::read_at`]. Every underlying blob read performed by the
+    /// returned replay uses `read_options`, including refills after seeking.
     pub fn replay(
         &self,
         buffer_size: NonZeroUsize,

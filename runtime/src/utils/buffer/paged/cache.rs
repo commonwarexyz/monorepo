@@ -418,26 +418,32 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// - Panics if `offset` is not page aligned.
-    /// - If the buffer is not the size of a page.
-    pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
+    /// Panics if `offset` is not page aligned.
+    pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
+        let page_size: usize = self.page_size.widen();
+        buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)
+    }
+
+    /// Insert whole logical pages under one cache lock, returning the number of bytes cached.
+    pub(super) fn cache_pages<'a>(
+        &self,
+        blob_id: u64,
+        pages: impl Iterator<Item = &'a [u8]>,
+        offset: u64,
+    ) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
-        {
-            // Write lock the page cache.
-            let page_size: usize = self.page_size.widen();
-            let mut page_cache = self.cache.write();
-            while buf.len() >= page_size {
-                page_cache.cache(blob_id, &buf[..page_size], page_num);
-                buf = &buf[page_size..];
-                page_num = match page_num.checked_add(1) {
-                    Some(next) => next,
-                    None => break,
-                };
-            }
+        let mut cached = 0;
+        let mut page_cache = self.cache.write();
+        for page in pages {
+            page_cache.cache(blob_id, page, page_num);
+            cached += page.len();
+            page_num = match page_num.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
         }
-
-        buf.len()
+        cached
     }
 
     /// Drop all cached pages while retaining the backing page buffers for reuse.
@@ -446,13 +452,6 @@ impl CacheRef {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn clear(&self) {
         self.cache.write().clear();
-    }
-
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Used after a blob is
-    /// truncated so subsequent reads can't observe pre-truncation bytes in a page that the tip
-    /// buffer (or future writes) now owns.
-    pub(super) fn invalidate_from(&self, blob_id: u64, start_page: u64) {
-        self.cache.write().invalidate_from(blob_id, start_page);
     }
 }
 
@@ -546,12 +545,6 @@ impl Cache {
         self.cache.get(&key)
     }
 
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`.
-    fn invalidate_from(&mut self, blob_id: u64, start_page: u64) {
-        self.cache
-            .retain(|&(bid, page_num), _| bid != blob_id || page_num < start_page);
-    }
-
     /// Drop all cached pages while retaining backing page buffers for reuse.
     #[cfg(any(test, feature = "test-utils"))]
     fn clear(&mut self) {
@@ -594,10 +587,10 @@ mod tests {
     use crate::{
         BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufs, IoBufsMut, Runner as _,
         Spawner as _, Storage as _, Supervisor as _, WriteOptions, buffer::paged::CHECKSUM_SIZE,
-        deterministic, telemetry::metrics::Registry,
+        deterministic, mocks::MigratingReadBlob, telemetry::metrics::Registry,
     };
     use commonware_cryptography::Crc32;
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_utils::{NZU16, NZUsize, channel::oneshot, sync::Mutex};
     use futures::{future::pending, poll};
     use rstest::rstest;
@@ -804,20 +797,18 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_invalidate_from_does_not_orphan_re_cached_page() {
-        // Invalidating pages, re-caching one, then forcing an eviction must keep every live page
-        // readable. Freed slots are reused cleanly, so an invalidated-then-re-cached page is never
-        // orphaned by a later eviction.
+    fn test_clear_does_not_orphan_recached_page() {
+        // Clearing the cache and reusing its slots must keep each newly cached page readable.
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
         let blob_id = 0u64;
         let page_size = PAGE_SIZE.get() as usize;
 
-        // Fill both slots, then invalidate them so both slots are freed for reuse.
+        // Fill both slots, then clear the cache so both slots are available for reuse.
         cache.cache(blob_id, &vec![0xAA; page_size], 0);
         cache.cache(blob_id, &vec![0xBB; page_size], 1);
-        cache.invalidate_from(blob_id, 0);
+        cache.clear();
 
         // Re-cache page 1 into a reused slot.
         cache.cache(blob_id, &vec![0xCC; page_size], 1);
@@ -904,6 +895,110 @@ mod tests {
 
             // Cleanup.
             blob.sync().await.unwrap();
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default(), false)]
+    #[case::tokio(crate::tokio::Runner::default(), false)]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default(), true)
+    )]
+    fn test_page_fetch_migrates_between_dedicated_workers<R: crate::Runner>(
+        #[case] runner: R,
+        #[case] require_pending: bool,
+    ) where
+        R::Context: crate::BufferPooler + crate::Clock + crate::Spawner + crate::Storage,
+    {
+        runner.start(|context| async move {
+            // Build a valid checksummed page in the runtime's real storage backend.
+            let logical_page = vec![7u8; PAGE_SIZE.get() as usize];
+            let crc = Crc32::checksum(&logical_page);
+            let mut physical_page = logical_page.clone();
+            physical_page.extend_from_slice(&Checksum::new(PAGE_SIZE.get(), crc).to_bytes());
+
+            let partition = "cache_page_fetch_migration";
+            let (blob, size) = context.open(partition, b"blob").await.unwrap();
+            assert_eq!(size, 0);
+            blob.write_at(0, physical_page, WriteOptions::default())
+                .await
+                .unwrap();
+
+            // Count reads beneath an empty cache so duplicate physical misses remain observable.
+            let blob = MigratingReadBlob::new(blob, require_pending);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+            let blob_id = cache_ref.next_id();
+
+            // The source polls its cache read once and then stays alive without repolling it. Once
+            // that poll has fully unwound, the destination joins and solely drives the shared fetch
+            // to completion before the source is released.
+            let concurrent_reads = async {
+                let (source_polled_tx, source_polled_rx) = oneshot::channel();
+                let (source_release_tx, source_release_rx) = oneshot::channel();
+                let first_cache = cache_ref.clone();
+                let first_blob = blob.clone();
+                let first = context.child("first").dedicated().spawn(move |_| async move {
+                    let mut buf = vec![0; PAGE_SIZE.get() as usize];
+                    let mut read = Box::pin(first_cache.read_after_miss(
+                        &first_blob,
+                        blob_id,
+                        &mut buf,
+                        0,
+                    ));
+
+                    // Publish the handoff only after Shared has released its polling lock, then
+                    // park on an unrelated signal so source wakeups cannot repoll the cache read.
+                    assert!(poll!(&mut read).is_pending());
+                    source_polled_tx
+                        .send(())
+                        .expect("source poll receiver dropped");
+                    source_release_rx
+                        .await
+                        .expect("source release signal dropped");
+                    read.await.unwrap();
+                    buf
+                });
+                source_polled_rx
+                    .await
+                    .expect("source cache poll never completed");
+
+                // Join the installed PageFetch from a second worker, which becomes its only active
+                // poller while the source remains parked.
+                let second_cache = cache_ref.clone();
+                let second_blob = blob.clone();
+                let second = context
+                    .child("second")
+                    .dedicated()
+                    .spawn(move |_| async move {
+                        let mut buf = vec![0; PAGE_SIZE.get() as usize];
+                        second_cache
+                            .read_after_miss(&second_blob, blob_id, &mut buf, 0)
+                            .await
+                            .unwrap();
+                        buf
+                    });
+
+                // Release the source only after the destination completes the shared fetch.
+                let second_buf = second.await.unwrap();
+                source_release_tx
+                    .send(())
+                    .expect("source worker exited before release");
+                (first.await.unwrap(), second_buf)
+            };
+
+            // Bound the coordination independently of either worker so a lost migration wakeup
+            // fails instead of leaving the runtime parked indefinitely.
+            let (first_buf, second_buf) = select! {
+                result = concurrent_reads => result,
+                _ = context.sleep(Duration::from_secs(10)) => panic!("concurrent page fetch timed out"),
+            };
+
+            // Both waiters must receive the validated logical page from one physical backend read.
+            assert_eq!(first_buf, logical_page);
+            assert_eq!(second_buf, logical_page);
+            assert_eq!(blob.reads(), 1);
+            context.remove(partition, None).await.unwrap();
         });
     }
 
@@ -1639,22 +1734,11 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_cached_many_invalidated_page_is_a_miss() {
-        // Invalidated pages free their slots but keep their keys. Their hints need no
-        // cleanup: a freed slot is not live, so the dropped page reads as a miss until
-        // re-cached.
+    fn test_read_cached_many_evicted_page_is_a_miss() {
         let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(1));
         let blob_id = cache_ref.next_id();
         let page_size = PAGE_SIZE.get() as usize;
-        {
-            let mut cache = cache_ref.cache.write();
-            for page in 0u64..4 {
-                cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);
-            }
-        }
-        cache_ref.invalidate_from(blob_id, 2);
-
         let read_page = |page: u64| {
             let mut buf = vec![0u8; page_size];
             let mut ranges: Vec<(&mut [u8], u64)> = vec![(&mut buf, page * PAGE_SIZE_U64)];
@@ -1663,17 +1747,19 @@ mod tests {
             drop(ranges);
             hit.then_some(buf)
         };
-        assert_eq!(read_page(0), Some(vec![1u8; page_size]));
-        assert_eq!(read_page(1), Some(vec![2u8; page_size]));
-        assert_eq!(read_page(2), None);
-        assert_eq!(read_page(3), None);
 
-        // Re-caching a dropped page restores it through the hint path.
-        {
-            let mut cache = cache_ref.cache.write();
-            cache.cache(blob_id, &vec![0xCC; page_size], 2);
-        }
-        assert_eq!(read_page(2), Some(vec![0xCC; page_size]));
+        cache_ref.cache(blob_id, &vec![1; page_size], 0);
+        assert_eq!(read_page(0), Some(vec![1; page_size]));
+
+        // The one-page cache must evict page zero when page one arrives.
+        cache_ref.cache(blob_id, &vec![2; page_size], PAGE_SIZE_U64);
+        assert_eq!(read_page(0), None);
+        assert_eq!(read_page(1), Some(vec![2; page_size]));
+
+        // A reused slot must expose the replacement bytes through the hint path.
+        cache_ref.cache(blob_id, &vec![0xCC; page_size], 0);
+        assert_eq!(read_page(0), Some(vec![0xCC; page_size]));
+        assert_eq!(read_page(1), None);
     }
 
     #[rstest]

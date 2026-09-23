@@ -248,16 +248,20 @@ where
     }
 }
 
-/// Recovers a signature from at least `threshold` partial signatures.
+/// Interpolates a candidate signature from partial signatures.
+///
+/// Requires at least [`Sharing::required`] distinct indices and uses the lowest ones. Any
+/// remaining partials are ignored. Input indices must be unique.
+///
+/// Recovery does not verify the partials or the result. When using unverified partials, callers
+/// must verify the result against the expected group key and signing context before accepting it.
+/// Even a valid result does not prove that the selected partials are valid: their errors can
+/// cancel during interpolation.
 ///
 /// # Determinism
 ///
-/// Signatures recovered by this function are deterministic and are safe
-/// to use in a consensus-critical context.
-///
-/// # Warning
-///
-/// This function assumes that each partial signature is unique.
+/// Recovery is deterministic for a fixed input set with unique indices. For valid partials
+/// under the same sharing, namespace, and message, every quorum recovers the same signature.
 pub fn recover<'a, V, I>(
     sharing: &Sharing<V>,
     partials: I,
@@ -275,18 +279,10 @@ where
         .ok_or(Error::InvalidRecovery)
 }
 
-/// Recovers multiple signatures from multiple sets of at least `threshold`
-/// partial signatures.
+/// Interpolates a candidate signature from each set of partial signatures.
 ///
-/// # Determinism
-///
-/// Signatures recovered by this function are deterministic and are safe
-/// to use in a consensus-critical context.
-///
-/// # Warning
-///
-/// This function assumes that each partial signature is unique and that
-/// each set of partial signatures has the same indices.
+/// Each set must satisfy [`recover`]'s requirements and select the same indices. The same
+/// verification and determinism guarantees apply independently to each recovered signature.
 pub fn recover_multiple<'a, V, I>(
     sharing: &Sharing<V>,
     many_evals: Vec<I>,
@@ -325,9 +321,9 @@ where
     results.into_iter().collect()
 }
 
-/// Recovers a pair of signatures from two sets of at least `threshold` partial signatures.
+/// Interpolates a pair of candidate signatures from two sets of partial signatures.
 ///
-/// This is just a wrapper around `recover_multiple`.
+/// A wrapper around [`recover_multiple`] with the same requirements and guarantees.
 pub fn recover_pair<'a, V, I>(
     sharing: &Sharing<V>,
     first: I,

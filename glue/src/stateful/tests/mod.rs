@@ -54,7 +54,7 @@ use commonware_storage::{
     qmdb::{
         any::unordered::fixed,
         immutable::fixed as immutable_fixed,
-        sync::{FeedbackTx, Request, Response, Source as QmdbSource},
+        sync::{Request, Source as QmdbSource, source},
     },
 };
 use commonware_utils::{
@@ -851,13 +851,10 @@ impl QmdbSource for NoopQmdbResolver {
     type Op = fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
     type Error = Infallible;
 
-    fn serve<'a>(
-        &'a self,
+    fn serve(
+        &self,
         _request: Request<Self::Family>,
-    ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
-    > + Send
-    + 'a {
+    ) -> impl Future<Output = source::Result<Self>> + Send {
         std::future::pending()
     }
 }
@@ -871,13 +868,10 @@ impl QmdbSource for NoopCompactQmdbResolver {
     type Op = immutable_fixed::Operation<mmr::Family, sha256::Digest, sha256::Digest>;
     type Error = Infallible;
 
-    fn serve<'a>(
-        &'a self,
+    fn serve(
+        &self,
         _request: Request<Self::Family>,
-    ) -> impl Future<
-        Output = Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error>,
-    > + Send
-    + 'a {
+    ) -> impl Future<Output = source::Result<Self>> + Send {
         std::future::pending()
     }
 }
@@ -1058,6 +1052,7 @@ async fn build_chain(context: &deterministic::Context, blocks: u64) -> (Block, V
     let databases = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("chain_builder"),
         qmdb_config("certify-chain-builder", page_cache),
+        None,
     )
     .await;
     let mut batches = <SingleDatabaseSet<deterministic::Context> as DatabaseSet<
@@ -1113,6 +1108,7 @@ async fn build_multi_chain(
     let databases = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<_>>::init(
         context.child("multi_chain_builder"),
         multi_qmdb_config("certify-multi-chain-builder", page_cache),
+        None,
     )
     .await;
     let mut batches = <MultiDatabaseSet<deterministic::Context> as DatabaseSet<

@@ -9,6 +9,9 @@
 //! The core abstraction is the [`Strategy`] trait, which provides several operations:
 //!
 //! **Core Operations:**
+//! - [`run`](Strategy::run): Chooses between serial and parallel operation bodies
+//! - [`run_batches`](Strategy::run_batches): Runs a whole-input algorithm or supplies batches
+//!   for the caller to prepare and execute
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
 //! - [`try_fold`](Strategy::try_fold): Like `fold`, but stops applying the fold operation after
 //!   failures
@@ -68,11 +71,10 @@
 
 commonware_macros::stability_scope!(BETA {
     use cfg_if::cfg_if;
-    use core::{cmp::Ordering, fmt};
+    use core::{cmp::Ordering, convert::Infallible, fmt, num::NonZeroUsize, ops::Range};
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
-            use core::{convert::Infallible, num::NonZeroUsize};
             use futures::{
                 channel::oneshot,
                 future::{self, Either},
@@ -110,6 +112,61 @@ commonware_macros::stability_scope!(BETA {
         /// Returns the parallelism to use for manually partitioned work.
         pub const fn parallelism(&self) -> usize {
             self.parallelism
+        }
+    }
+
+    /// Batches supplied for one invocation of [`Strategy::run_batches`].
+    ///
+    /// Consume this value to prepare and execute the batches. Preparation can borrow input
+    /// slices or split mutable output buffers into disjoint slices for each batch.
+    ///
+    /// Batches cannot outlive the operation that receives them:
+    ///
+    /// ```compile_fail
+    /// use commonware_parallel::{Sequential, Strategy};
+    /// use core::num::NonZeroUsize;
+    ///
+    /// let batches = Sequential.run_batches(8, NonZeroUsize::MIN, 1, |batches| batches);
+    /// ```
+    #[derive(Debug)]
+    pub struct Batches<'scope, S: Strategy> {
+        strategy: &'scope S,
+        ranges: Vec<Range<usize>>,
+    }
+
+    impl<S: Strategy> Batches<'_, S> {
+        /// Prepare and map batches, collecting results in batch order.
+        ///
+        /// `prepare` is called once with ordered, nonempty ranges that cover the operation's
+        /// input extent without overlap. It must produce one item per range in the same order.
+        /// The mapping operation may execute those items in any order.
+        pub fn map_collect_vec<I, P, F, R>(self, prepare: P, map_op: F) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            P: FnOnce(Vec<Range<usize>>) -> I,
+            F: Fn(I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            self.strategy.map_collect_vec(prepare(self.ranges), map_op)
+        }
+
+        /// Like [`map_collect_vec`](Self::map_collect_vec), but for fallible mapping.
+        ///
+        /// After an error, remaining items may be skipped. If multiple items fail, any of
+        /// their errors may be returned. Successful results preserve batch order.
+        pub fn try_map_collect_vec<I, P, F, R, E>(
+            self,
+            prepare: P,
+            map_op: F,
+        ) -> Result<Vec<R>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            P: FnOnce(Vec<Range<usize>>) -> I,
+            F: Fn(I::Item) -> Result<R, E> + Send + Sync,
+            R: Send,
+            E: Send,
+        {
+            self.strategy.try_map_collect_vec(prepare(self.ranges), map_op)
         }
     }
 
@@ -169,6 +226,74 @@ commonware_macros::stability_scope!(BETA {
             E: Send,
             SEQ: FnOnce() -> Result<R, E> + Send,
             PAR: FnOnce() -> Result<R, E> + Send;
+
+        /// Run an operation on its whole input or on strategy-provided batches.
+        ///
+        /// `run` is called once with `None` for the whole-input algorithm or `Some` for batches
+        /// covering `0..len`, each at least `minimum_batch_len` long. The strategy may choose
+        /// whole-input execution even when batching is possible. Empty extents and extents
+        /// that cannot form two such batches always use the whole-input algorithm.
+        ///
+        /// `multiplier` estimates work per input unit. Complete the operation, including
+        /// preparation and result assembly, inside `run`. Both execution paths must produce
+        /// equivalent results. The default implementation uses the whole-input algorithm.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Sequential, Strategy};
+        /// use core::num::NonZeroUsize;
+        ///
+        /// let values = [1u64, 2, 3, 4];
+        /// let total = Sequential.run_batches(values.len(), NonZeroUsize::MIN, 1, |batches| {
+        ///     match batches {
+        ///         None => values.iter().sum::<u64>(),
+        ///         Some(batches) => batches.map_collect_vec(
+        ///             |ranges| ranges.into_iter().map(|range| &values[range]).collect::<Vec<_>>(),
+        ///             |batch| batch.iter().sum::<u64>(),
+        ///         ).into_iter().sum(),
+        ///     }
+        /// });
+        /// assert_eq!(total, 10);
+        /// ```
+        #[track_caller]
+        fn run_batches<R, F>(
+            &self,
+            len: usize,
+            minimum_batch_len: NonZeroUsize,
+            multiplier: usize,
+            run: F,
+        ) -> R
+        where
+            R: Send,
+            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> R + Send,
+        {
+            match self.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
+                Ok::<_, Infallible>(run(batches))
+            }) {
+                Ok(result) => result,
+                Err(e) => match e {},
+            }
+        }
+
+        /// Like [`run_batches`](Self::run_batches), but for fallible work.
+        ///
+        /// Adaptive strategies record elapsed time only when the complete operation succeeds.
+        #[track_caller]
+        fn try_run_batches<R, E, F>(
+            &self,
+            _len: usize,
+            _minimum_batch_len: NonZeroUsize,
+            _multiplier: usize,
+            run: F,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+        {
+            run(None)
+        }
 
         /// Reduces a collection to a single value with per-partition initialization.
         ///
@@ -655,6 +780,27 @@ commonware_macros::stability_scope!(BETA {
         }
 
         #[track_caller]
+        fn try_run_batches<R, E, F>(
+            &self,
+            len: usize,
+            minimum_batch_len: NonZeroUsize,
+            multiplier: usize,
+            run: F,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+        {
+            self.strategy.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
+                run(batches.map(|batches| Batches {
+                    strategy: self,
+                    ranges: batches.ranges,
+                }))
+            })
+        }
+
+        #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -911,6 +1057,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// pool. It records wall-clock estimates by callsite, input-size and work-size buckets, and
     /// planning parallelism so small inputs can avoid rayon scheduling overhead without disabling
     /// parallel execution for larger inputs.
+    ///
+    /// Nested calls at the same callsite share estimates across parent paths, so use distinct
+    /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
     ///
     /// # Thread Pool Ownership
     ///
@@ -1177,6 +1326,43 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         }
 
         #[track_caller]
+        fn try_run_batches<R, E, F>(
+            &self,
+            len: usize,
+            minimum_batch_len: NonZeroUsize,
+            multiplier: usize,
+            run: F,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+        {
+            let count = self.parallelism.min(len / minimum_batch_len.get());
+            if count < 2 {
+                return run(None);
+            }
+            self.try_execute(len, multiplier, |execution| match execution {
+                policy::RunExecution::Serial => run(None),
+                policy::RunExecution::Parallel => {
+                    let per_batch = len / count;
+                    let extra = len % count;
+                    let ranges = (0..count)
+                        .map(|batch| {
+                            let start = batch * per_batch + batch.min(extra);
+                            start..start + per_batch + usize::from(batch < extra)
+                        })
+                        .collect();
+                    let manual = self.manual();
+                    run(Some(Batches {
+                        strategy: &manual.strategy,
+                        ranges,
+                    }))
+                }
+            })
+        }
+
+        #[track_caller]
         fn fold_init<I, INIT, T, R, ID, F, RD>(
             &self,
             iter: I,
@@ -1356,9 +1542,12 @@ mod test {
     use futures::FutureExt;
     use proptest::prelude::*;
     use rayon::ThreadPoolBuilder;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        rc::Rc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     fn parallel_strategy() -> Rayon {
@@ -1412,21 +1601,29 @@ mod test {
         assert!(spawn_recorded(&strategy, loc));
     }
 
-    /// Once the seed and boundary runs measure a trivial job cheaper than the pool hand-off,
-    /// spawn places it inline on the calling (non-pool) thread.
+    /// Spawn honors an inline decision after cheap job and hand-off samples are recorded.
+    /// Caller tracking keys the recorded samples and spawn to the same policy entry.
     #[test]
-    fn spawn_converges_inline_for_tiny_jobs() {
+    #[track_caller]
+    fn spawn_inlines_a_sub_overhead_job() {
         let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+        let caller = std::panic::Location::caller();
+        let threads = strategy.thread_pool.current_num_threads();
 
-        for _ in 0..100 {
-            let on_pool = futures::executor::block_on(
-                strategy.spawn(64, |_| rayon::current_thread_index().is_some()),
+        for _ in 0..2 {
+            assert_eq!(
+                policy.choose_spawn(caller, 64, threads),
+                (crate::policy::SpawnExecution::Offload, true)
             );
-            if !on_pool {
-                return;
-            }
+            policy.record_spawn_job(caller, 64, threads, std::time::Duration::from_micros(2));
+            policy.record_spawn_overhead(caller, 64, threads, std::time::Duration::from_micros(50));
         }
-        panic!("a trivial job never converged to inline placement");
+
+        assert_eq!(
+            futures::executor::block_on(strategy.spawn(64, |_| std::thread::current().id())),
+            std::thread::current().id()
+        );
     }
 
     /// A job measured over the inline budget keeps offloading: the calling task is never blocked
@@ -1449,6 +1646,196 @@ mod test {
 
     fn policy_len(strategy: &Rayon) -> usize {
         strategy.policy.as_ref().map_or(0, |policy| policy.len())
+    }
+
+    #[test]
+    fn run_batches_preserves_whole_input_without_splitting() {
+        fn check(strategy: &impl Strategy, len: usize, minimum: NonZeroUsize) {
+            let owned = Box::new(len);
+            let calls = AtomicUsize::new(0);
+            let result = strategy.run_batches(len, minimum, usize::MAX, |batches| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                assert!(batches.is_none());
+                *owned
+            });
+            assert_eq!(result, len);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+
+        let one_worker = Rayon::new(NonZeroUsize::MIN).unwrap();
+        let parallel = parallel_strategy();
+        let minimum = NonZeroUsize::new(8).unwrap();
+        for len in [0, 1, 7, 8, 15] {
+            check(&Sequential, len, minimum);
+            check(&one_worker, len, minimum);
+            check(&parallel, len, minimum);
+            check(&parallel.manual(), len, minimum);
+        }
+        check(&Sequential, usize::MAX, NonZeroUsize::MIN);
+        check(&one_worker, usize::MAX, NonZeroUsize::MIN);
+        check(&parallel, usize::MAX, NonZeroUsize::MAX);
+        assert_eq!(policy_len(&one_worker), 0);
+        assert_eq!(policy_len(&parallel), 0);
+    }
+
+    #[test]
+    fn run_batches_supplies_ordered_balanced_ranges() {
+        let strategy = Rayon::new(NonZeroUsize::MIN)
+            .unwrap()
+            .with_parallelism(NonZeroUsize::new(8).unwrap())
+            .manual();
+        for (len, minimum) in [
+            (2, 1),
+            (7, 1),
+            (8, 1),
+            (9, 1),
+            (17, 1),
+            (15, 7),
+            (16, 8),
+            (17, 8),
+            (usize::MAX, 1),
+            (usize::MAX, usize::MAX / 2),
+        ] {
+            let ranges = strategy.run_batches(
+                len,
+                NonZeroUsize::new(minimum).unwrap(),
+                usize::MAX,
+                |batches| {
+                    batches
+                        .unwrap()
+                        .map_collect_vec(|ranges| ranges, |range| range)
+                },
+            );
+            assert_eq!(ranges.len(), 8.min(len / minimum));
+            assert_eq!(ranges.first().unwrap().start, 0);
+            assert_eq!(ranges.last().unwrap().end, len);
+            assert!(ranges.windows(2).all(|pair| pair[0].end == pair[1].start));
+            assert!(ranges.iter().all(|range| range.len() >= minimum));
+            let shortest = ranges.iter().map(|range| range.len()).min().unwrap();
+            let longest = ranges.iter().map(|range| range.len()).max().unwrap();
+            assert!(longest - shortest <= 1);
+        }
+        assert_eq!(policy_len(&strategy.strategy), 0);
+    }
+
+    #[test]
+    fn run_batches_prepares_borrowed_outputs_once() {
+        let strategy = parallel_strategy().manual();
+        let input: Vec<_> = (0..17).map(|value| value * 3).collect();
+        let mut output = vec![0; input.len()];
+        let preparations = AtomicUsize::new(0);
+        let ranges = strategy.run_batches(input.len(), NonZeroUsize::MIN, 1, |batches| {
+            let owned = Rc::new(42);
+            batches.unwrap().map_collect_vec(
+                |ranges| {
+                    assert_eq!(*owned, 42);
+                    drop(owned);
+                    preparations.fetch_add(1, Ordering::Relaxed);
+                    let mut remaining = output.as_mut_slice();
+                    ranges
+                        .into_iter()
+                        .map(|range| {
+                            let (head, tail) =
+                                std::mem::take(&mut remaining).split_at_mut(range.len());
+                            remaining = tail;
+                            (range, head)
+                        })
+                        .collect::<Vec<_>>()
+                },
+                |(range, out)| {
+                    assert!(rayon::current_thread_index().is_some());
+                    out.copy_from_slice(&input[range.clone()]);
+                    range
+                },
+            )
+        });
+        assert_eq!(preparations.load(Ordering::Relaxed), 1);
+        assert_eq!(output, input);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, input.len());
+    }
+
+    #[track_caller]
+    fn run_batches_flagged(
+        strategy: &Rayon,
+        fail_mapping: bool,
+        fail_assembly: bool,
+    ) -> (&'static std::panic::Location<'static>, Result<usize, ()>) {
+        (
+            std::panic::Location::caller(),
+            strategy.try_run_batches(16, NonZeroUsize::MIN, usize::MAX, |batches| {
+                let total = match batches {
+                    None if fail_mapping => return Err(()),
+                    None => 16,
+                    Some(batches) => batches
+                        .try_map_collect_vec(
+                            |ranges| ranges,
+                            |range| {
+                                if fail_mapping {
+                                    Err(())
+                                } else {
+                                    Ok(range.len())
+                                }
+                            },
+                        )?
+                        .into_iter()
+                        .sum(),
+                };
+                if fail_assembly { Err(()) } else { Ok(total) }
+            }),
+        )
+    }
+
+    #[test]
+    fn run_batches_records_only_complete_success() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+
+        let (mapping_loc, mapping) = run_batches_flagged(&strategy, true, false);
+        assert_eq!(mapping, Err(()));
+        assert_eq!(
+            policy.get_entry(mapping_loc, 16, usize::MAX, 4),
+            Some((None, None))
+        );
+
+        let (assembly_loc, assembly) = run_batches_flagged(&strategy, false, true);
+        assert_eq!(assembly, Err(()));
+        assert_eq!(
+            policy.get_entry(assembly_loc, 16, usize::MAX, 4),
+            Some((None, None))
+        );
+
+        let (success_loc, result) = run_batches_flagged(&strategy, false, false);
+        assert_eq!(result, Ok(16));
+        let (_, parallel) = policy.get_entry(success_loc, 16, usize::MAX, 4).unwrap();
+        assert!(parallel.is_some());
+        assert_eq!(policy_len(&strategy), 3);
+    }
+
+    #[test]
+    fn run_batches_keeps_one_policy_decision_and_manual_execution() {
+        let strategy = parallel_strategy();
+        let run = |strategy: &Rayon| {
+            strategy.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+                batches
+                    .unwrap()
+                    .map_collect_vec(|ranges| ranges, |range| range.len())
+            })
+        };
+        assert_eq!(run(&strategy).into_iter().sum::<usize>(), 16);
+        assert_eq!(policy_len(&strategy), 1);
+
+        let manual = strategy.manual();
+        for _ in 0..3 {
+            let on_pool = manual.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+                batches
+                    .unwrap()
+                    .map_collect_vec(|ranges| ranges, |_| rayon::current_thread_index().is_some())
+            });
+            assert!(on_pool.into_iter().all(|on_pool| on_pool));
+        }
+        assert_eq!(policy_len(&strategy), 1);
+        assert_eq!(policy_len(&manual.strategy), 0);
     }
 
     fn map_from_same_callsite(strategy: &Rayon, len: usize) {
@@ -1646,13 +2033,13 @@ mod test {
     fn adaptive_policy_keys_default_methods_by_external_callsite() {
         let strategy = parallel_strategy();
 
-        // `fold` uses the trait's default body (no `Rayon` override), so this also guards that
-        // `#[track_caller]` still attributes the policy key to the caller's line rather than the
-        // default method body: two calls from distinct callsites must yield two distinct entries.
+        // Default methods must attribute policy keys to their external callers.
         let _: i32 = strategy.fold(0..16, || 0, |acc, x| acc + x, |a, b| a + b);
         let _: i32 = strategy.fold(0..16, || 0, |acc, x| acc + x, |a, b| a + b);
+        strategy.run_batches(16, NonZeroUsize::MIN, 1, |_| ());
+        strategy.run_batches(16, NonZeroUsize::MIN, 1, |_| ());
 
-        assert_eq!(policy_len(&strategy), 2);
+        assert_eq!(policy_len(&strategy), 4);
     }
 
     #[test]
