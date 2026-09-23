@@ -413,6 +413,10 @@ where
     /// Returns results in the same order as the input keys. The staged batch records updates by
     /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
     /// appends another index range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
     pub async fn stage<E, C, I>(
         self,
         keys: &[&U::Key],
@@ -455,6 +459,10 @@ where
     /// Expansion does not deduplicate against previously staged keys and does not observe values the
     /// caller has computed for earlier staged slots but not yet passed to
     /// [`merkleize`](Staged::merkleize).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
     pub async fn expand<E, C, I>(
         self,
         keys: &[&U::Key],
@@ -500,6 +508,10 @@ where
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
     /// is committed with the returned batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
+    ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
@@ -527,6 +539,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        let validated_ancestors = inner.validate_commitment(db.any.commitment())?;
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same source the floor
@@ -545,7 +558,9 @@ where
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(validated_ancestors);
+        result
     }
 }
 
@@ -565,6 +580,10 @@ where
     /// A `Some` value is an upsert. `None` is a delete. Update indices refer to the staged read
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
     /// is committed with the returned batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
     ///
     /// # Panics
     ///
@@ -616,6 +635,10 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize",
@@ -661,6 +684,10 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize",

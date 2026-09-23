@@ -35,7 +35,7 @@ pub(crate) struct DiffEntry<F: Family, V> {
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
-/// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
+/// Consuming [`UnmerkleizedBatch::merkleize`] produces a merkleized batch.
 /// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
@@ -235,22 +235,23 @@ where
         Ok(results)
     }
 
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations and return a merkleized batch.
     ///
     /// `inactivity_floor` declares that all operations before this location are inactive.
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `db` does not match this batch's database boundary or a live ancestor
-    /// commitment (both size and root).
+    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or
+    /// a live ancestor commitment (both size and root).
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, K, V, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -277,8 +278,7 @@ where
                 state: batch.commitment(),
             });
         }
-        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)
-            .expect("merkleization requires a database on the batch's branch");
+        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)?;
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
@@ -308,7 +308,7 @@ where
         // Keep ancestor batches alive until the journal has captured their operations and nodes.
         drop(live_ancestors);
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
@@ -320,7 +320,7 @@ where
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 

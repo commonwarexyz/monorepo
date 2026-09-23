@@ -751,6 +751,79 @@ pub(crate) mod test {
         });
     }
 
+    #[test_traced]
+    fn test_staged_merkleize_rejects_stale_sibling() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = open_db(context.child("storage")).await;
+            let key = Sha256::hash(&[b"key"]);
+
+            let seed = db
+                .new_batch()
+                .write(key, Some(vec![0]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            let keys = [&key];
+            let (_, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+            let sibling = db
+                .new_batch()
+                .write(key, Some(vec![1]))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                staged
+                    .merkleize(vec![(0, Some(vec![2]))], Vec::new(), None, &db)
+                    .await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_stage_and_expand_reject_foreign_db() {
+        deterministic::Runner::default().start(|context| async move {
+            let db_a = open_db(context.child("a")).await;
+            let db_b = open_db(context.child("b")).await;
+            let key_a = Sha256::hash(&[b"a"]);
+            let key_b = Sha256::hash(&[b"b"]);
+
+            let seed_a = db_a
+                .new_batch()
+                .write(key_a, Some(vec![1]))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let seed_b = db_b
+                .new_batch()
+                .write(key_b, Some(vec![2]))
+                .merkleize(&db_b, None)
+                .await
+                .unwrap();
+            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+
+            assert_eq!(db_a.bounds().end, db_b.bounds().end);
+            assert_ne!(db_a.root(), db_b.root());
+
+            let keys = [&key_a];
+            assert!(matches!(
+                db_a.new_batch().stage(&keys, &db_b).await,
+                Err(Error::StaleBatch)
+            ));
+
+            let (_, staged) = db_a.new_batch().stage(&keys, &db_a).await.unwrap();
+            assert!(matches!(
+                staged.expand(&keys, &db_b).await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
     /// Sibling batches with different operation counts are still detected
     /// as stale.
     #[test_traced]

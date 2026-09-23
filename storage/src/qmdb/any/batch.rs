@@ -367,7 +367,23 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
-type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
+pub(crate) type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
+
+/// Validate `current` against an effective database boundary and retained ancestor chain.
+fn validate_ancestor_chain<F: Family, D: Digest, U: update::Update, S: Strategy>(
+    current: Commitment<F, D>,
+    db_state: Commitment<F, D>,
+    ancestors: &[AncestorBatch<F, D, U, S>],
+) -> Result<(), crate::qmdb::Error<F>> {
+    let bounds: Vec<_> = ancestors
+        .iter()
+        .map(|ancestor| chain::AncestorBounds {
+            floor: ancestor.bounds.inactivity_floor,
+            state: ancestor.commitment(),
+        })
+        .collect();
+    chain::validate_batch_applicable(current, db_state, &bounds)
+}
 
 /// Batch-infrastructure state used during merkleization.
 ///
@@ -736,6 +752,14 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Validate `current` against the boundary and ancestor chain retained by this merkleizer.
+    fn validate_commitment(
+        &self,
+        current: Commitment<F, H::Digest>,
+    ) -> Result<(), crate::qmdb::Error<F>> {
+        validate_ancestor_chain(current, self.db_state, &self.ancestors)
+    }
+
     /// Returns `Some(op)` if `loc` falls in the batch or ancestor regions, and `None` when `loc` is
     /// in the committed region (`loc < db_size`).
     fn try_read_op_from_uncommitted(
@@ -1284,6 +1308,15 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Validate `current` against the underlying batch's live chain.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn validate_commitment(
+        &self,
+        current: Commitment<F, H::Digest>,
+    ) -> Result<Vec<AncestorBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>> {
+        self.batch.validate_commitment(current)
+    }
+
     /// Expand this staged batch with more reads.
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
@@ -1298,6 +1331,10 @@ where
     /// Values the caller has computed for earlier staged slots are not visible until they are passed
     /// to [`merkleize`](Staged::merkleize). Callers that need speculative read-your-writes behavior
     /// should maintain their own overlay while deciding which staged slots to update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.batch.expand",
@@ -1466,6 +1503,10 @@ where
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
+    ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
@@ -1488,12 +1529,13 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let validated_ancestors = self.batch.validate_commitment(db.commitment())?;
         let (batch, staged_updates, prefetched) = self
             .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
             })
             .await?;
-        batch
+        let result = batch
             .merkleize_with_floor_scan(
                 db,
                 metadata,
@@ -1501,7 +1543,9 @@ where
                 Some(prefetched),
                 |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
             )
-            .await
+            .await;
+        drop(validated_ancestors);
+        result
     }
 
     /// Resolve the caller's updates on the strategy pool while gathering and reading the
@@ -1520,6 +1564,10 @@ where
     /// the last emitted candidate or the committed boundary as the continuation point. Both
     /// are correct: the skipped span holds no set bits, and the source cannot change during
     /// the call (commits and prunes take `&mut` on the database).
+    ///
+    /// The caller must validate `db.commitment()` with [`Staged::validate_commitment`] before
+    /// calling this method and retain the returned ancestors until delegated merkleization takes
+    /// ownership of the same live chain.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn resolve_updates_prefetched<E, C, I, const N: usize>(
         self,
@@ -1607,6 +1655,10 @@ where
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
+    ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
@@ -1652,14 +1704,35 @@ where
         self
     }
 
+    /// Validate that `current` is a state on this batch's live chain, returning strong ancestor
+    /// references that keep the validated chain stable through subsequent asynchronous work.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn validate_commitment(
+        &self,
+        current: Commitment<F, H::Digest>,
+    ) -> Result<Vec<AncestorBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>> {
+        let ancestors = self.retain_ancestors();
+        let db_state = chain::effective_boundary(
+            self.base.db(),
+            ancestors.last().map(|oldest| oldest.bounds.base),
+        );
+        validate_ancestor_chain(current, db_state, &ancestors)?;
+        Ok(ancestors)
+    }
+
+    /// Collect the currently-live ancestor chain, immediate parent first.
+    fn retain_ancestors(&self) -> Vec<AncestorBatch<F, H::Digest, U, S>> {
+        self.base.parent().map_or_else(Vec::new, |parent| {
+            let mut ancestors = vec![Arc::clone(parent)];
+            ancestors.extend(parent.ancestors());
+            ancestors
+        })
+    }
+
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
     fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
-        let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
-            let mut v = vec![Arc::clone(parent)];
-            v.extend(parent.ancestors());
-            v
-        });
+        let ancestors = self.retain_ancestors();
         let db_state = chain::effective_boundary(
             self.base.db(),
             ancestors.last().map(|oldest| oldest.bounds.base),
@@ -1800,6 +1873,10 @@ where
     /// [`expand`](Staged::expand) appends another index range. Unlike
     /// [`get_many`](Self::get_many), the resolved locations are reused at merkleize, so keys
     /// that are read and then written skip the index re-probe and journal re-read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.batch.stage",
@@ -1849,6 +1926,7 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
+        let validated_ancestors = self.validate_commitment(db.commitment())?;
         let mut resolutions: Vec<StagedResolution<F, U>> =
             iter::repeat_with(|| None).take(keys.len()).collect();
 
@@ -1888,6 +1966,7 @@ where
             },
         )
         .await?;
+        drop(validated_ancestors);
         Ok((
             results,
             keys.iter().map(|key| (*key).to_owned()).collect(),
@@ -1905,6 +1984,10 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize",
@@ -1958,6 +2041,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
     {
         let (mut mutations, m) = self.into_parts();
+        m.validate_commitment(db.commitment())?;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
@@ -2108,6 +2192,10 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize",
@@ -2158,6 +2246,7 @@ where
         I: OrderedIndex<Value = Location<F>>,
     {
         let (mut mutations, m) = self.into_parts();
+        m.validate_commitment(db.commitment())?;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);

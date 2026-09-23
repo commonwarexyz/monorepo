@@ -22,7 +22,8 @@ type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, DigestOf<H>, V, S>>;
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
-/// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
+/// Consuming [`UnmerkleizedBatch::merkleize`] produces a result containing an
+/// `Arc<MerkleizedBatch>`.
 pub struct UnmerkleizedBatch<F, H, V, S: Strategy>
 where
     F: Family,
@@ -241,24 +242,25 @@ where
         Ok(results)
     }
 
-    /// Resolve appends into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve appends into operations, merkleize, and return the batch.
     ///
     /// `inactivity_floor` is the application-declared floor embedded in the commit. It must
     /// be monotonically non-decreasing across the chain (enforced on `apply_batch`) and must
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `db` does not match this batch's database boundary or a live ancestor
-    /// commitment (both size and root).
+    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
+    /// live ancestor commitment (both size and root).
+    #[allow(clippy::type_complexity)]
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, V, S>>, Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,
@@ -276,8 +278,7 @@ where
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
         );
-        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)
-            .expect("merkleization requires a database on the batch's branch");
+        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)?;
 
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
@@ -300,7 +301,7 @@ where
         // Keep ancestor batches alive until the journal has captured their operations and nodes.
         drop(live_ancestors);
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             parent: self.parent.as_ref().map(Arc::downgrade),
             bounds: chain::Bounds {
@@ -310,7 +311,7 @@ where
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 

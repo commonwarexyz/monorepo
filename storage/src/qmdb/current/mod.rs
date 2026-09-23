@@ -1977,6 +1977,132 @@ pub mod tests {
     // MerkleizedBatch::get, batch chaining) which layer bitmap and grafted tree
     // computation on top of the `any` batch.
 
+    #[test_traced]
+    fn test_current_foreign_db_merkleize_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let db_a = UnorderedFixedDb::init(
+                context.child("a"),
+                fixed_config::<OneCap>("foreign-a", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let db_b = UnorderedFixedDb::init(
+                context.child("b"),
+                fixed_config::<OneCap>("foreign-b", &context),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let seed_a = db_a
+                .new_batch()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let seed_b = db_b
+                .new_batch()
+                .write(key(2), Some(val(2)))
+                .merkleize(&db_b, None)
+                .await
+                .unwrap();
+            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+
+            assert_eq!(db_a.bounds().end, db_b.bounds().end);
+            assert_ne!(db_a.ops_root(), db_b.ops_root());
+            assert_ne!(db_a.root(), db_b.root());
+
+            let staged_keys = [key(1)];
+            let staged_refs: Vec<_> = staged_keys.iter().collect();
+            assert!(matches!(
+                db_a.new_batch().stage(&staged_refs, &db_b).await,
+                Err(Error::StaleBatch)
+            ));
+
+            let batch = db_a.new_batch().write(key(1), Some(val(3)));
+            assert!(matches!(
+                batch.merkleize(&db_b, None).await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_current_merkleize_rejects_stale_sibling() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = OrderedFixedDb::init(
+                context.child("db"),
+                fixed_config::<OneCap>("stale-unmerkleized", &context),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let seed = db
+                .new_batch()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            let stale = db.new_batch().write(key(1), Some(val(2)));
+            let sibling = db
+                .new_batch()
+                .write(key(1), Some(val(3)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                stale.merkleize(&db, None).await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_current_staged_merkleize_rejects_stale_sibling() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = UnorderedFixedDb::init(
+                context.child("db"),
+                fixed_config::<OneCap>("stale-staged", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let target = key(1);
+
+            let seed = db
+                .new_batch()
+                .write(target, Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            let staged_keys = [&target];
+            let (_, staged) = db.new_batch().stage(&staged_keys, &db).await.unwrap();
+            let sibling = db
+                .new_batch()
+                .write(target, Some(val(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(sibling).await.unwrap();
+
+            assert!(matches!(
+                staged
+                    .merkleize(vec![(0, Some(val(3)))], Vec::new(), None, &db)
+                    .await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
     /// Bitmap chunk size in bits for the `N = 32` database aliases above.
     const CHUNK_BITS: u64 = commonware_utils::bitmap::BitMap::<32>::CHUNK_SIZE_BITS;
 
