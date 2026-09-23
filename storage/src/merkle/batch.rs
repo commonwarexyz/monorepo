@@ -541,8 +541,8 @@ fn build_range<F: Family, D: Digest, Item: Write>(
     base: Position<F>,
     nodes: &mut [D],
 ) -> Vec<(u32, Position<F>)> {
-    let nodes_end = base + nodes.len() as u64;
-    let leaves_end = *first + items.len() as u64;
+    // A node is in `nodes` when one of these leaves creates it: `first < birth <= leaves_end`.
+    let leaves_end = first + items.len() as u64;
     let index = |pos: Position<F>| (*pos - *base) as usize;
 
     let mut buf = Vec::new();
@@ -553,28 +553,30 @@ fn build_range<F: Family, D: Digest, Item: Write>(
         nodes[index(pos)] = hasher.leaf_digest(pos, &buf);
     }
 
-    let mut subtrees = Vec::new();
     for height in 1..=(items.len() as u64).ilog2() {
         let width = 1u64 << height;
-        let children = |nodes: &[D], leaf: u64| {
-            let left = F::subtree_root_position(Location::new(leaf), height - 1);
-            let right = F::subtree_root_position(Location::new(leaf + width / 2), height - 1);
+        let children = |nodes: &[D], leaf: Location<F>| {
+            let left = F::subtree_root_position(leaf, height - 1);
+            let right = F::subtree_root_position(leaf + width / 2, height - 1);
             (nodes[index(left)], nodes[index(right)])
         };
 
-        subtrees.clear();
-        let mut leaf = (*first).next_multiple_of(width);
-        while leaf + width <= leaves_end {
-            let pos = F::subtree_root_position(Location::new(leaf), height);
-            if pos >= nodes_end {
-                break;
+        // Subtrees starting at or after `first`, in order, until one is created after this range.
+        let mut next_leaf = (*first).next_multiple_of(width);
+        let mut next = || {
+            let leaf = Location::new(next_leaf);
+            if F::subtree_birth_size(leaf, height)? > leaves_end {
+                return None;
             }
-            subtrees.push((leaf, pos));
-            leaf += width;
-        }
-
-        let (pairs, remainder) = subtrees.as_chunks::<2>();
-        for &[(left_leaf, left), (right_leaf, right)] in pairs {
+            next_leaf += width;
+            Some((leaf, F::subtree_root_position(leaf, height)))
+        };
+        while let Some((left_leaf, left)) = next() {
+            let Some((right_leaf, right)) = next() else {
+                let (l, r) = children(nodes, left_leaf);
+                nodes[index(left)] = hasher.node_digest(left, &l, &r);
+                break;
+            };
             let (ll, lr) = children(nodes, left_leaf);
             let (rl, rr) = children(nodes, right_leaf);
             let (left_digest, right_digest) =
@@ -582,28 +584,24 @@ fn build_range<F: Family, D: Digest, Item: Write>(
             nodes[index(left)] = left_digest;
             nodes[index(right)] = right_digest;
         }
-        if let [(leaf, pos)] = remainder {
-            let (left, right) = children(nodes, *leaf);
-            nodes[index(*pos)] = hasher.node_digest(*pos, &left, &right);
-        }
     }
 
-    // Remaining nodes start before `first`. Positions fall with `leaf`, so stop below `base`.
+    // Remaining nodes start before `first`. Birth sizes fall with `leaf`, so stop at `first`.
     let mut deferred = Vec::new();
-    for height in 1..=leaves_end.ilog2() {
+    for height in 1..=(*leaves_end).ilog2() {
         let width = 1u64 << height;
         let mut leaf = (*first).next_multiple_of(width);
         while let Some(prev) = leaf.checked_sub(width) {
             leaf = prev;
-            if leaf + width > leaves_end {
+            let loc = Location::new(leaf);
+            let Some(birth) = F::subtree_birth_size(loc, height) else {
                 continue;
-            }
-            let pos = F::subtree_root_position(Location::new(leaf), height);
-            if pos < base {
+            };
+            if birth <= first {
                 break;
             }
-            if pos < nodes_end {
-                deferred.push((height, pos));
+            if birth <= leaves_end {
+                deferred.push((height, F::subtree_root_position(loc, height)));
             }
         }
     }
@@ -1401,6 +1399,90 @@ mod tests {
             .manual()
     }
 
+    /// `add_many` near the maximum leaf count, where some subtree roots can never exist.
+    fn add_many_at_limit<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            for (first, count) in [((1u64 << 62) - 1, 1u64), (*F::MAX_LEAVES - 7, 7)] {
+                let first = Location::new(first);
+                let pinned = F::nodes_to_pin(first).map(|_| D::EMPTY).collect();
+                let base = Mem::<F, D>::from_components(Vec::new(), first, pinned).unwrap();
+                let items: Vec<u64> = (0..count).collect();
+
+                let batch = base
+                    .new_batch()
+                    .add_many(&hasher, &items)
+                    .merkleize(&base, &hasher);
+                let mut expected = base.new_batch();
+                for item in &items {
+                    expected = expected.add(&hasher, &item.to_be_bytes());
+                }
+                let expected = expected.merkleize(&base, &hasher);
+
+                assert_eq!(batch.appended, expected.appended, "first={first}");
+                assert_eq!(
+                    batch.root(&base, &hasher, 0).unwrap(),
+                    expected.root(&base, &hasher, 0).unwrap(),
+                    "first={first}"
+                );
+            }
+        });
+    }
+
+    /// Repeated `add_many` calls on real worker threads, interleaved with `add` and `update_leaf`
+    /// on a pruned base, match the same operations one leaf at a time on a parent batch.
+    fn add_many_mixed_operations<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            for parallelism in [1, 2, 3, 8] {
+                let strategy = Rayon::new(NZUsize!(parallelism)).unwrap().manual();
+                let mut base = build_reference::<F>(&hasher, 63);
+                base.prune_all();
+                let parent = base
+                    .new_batch()
+                    .add(&hasher, b"parent")
+                    .merkleize(&base, &hasher);
+
+                let mut actual = MerkleizedBatch::from_mem_with_strategy(&base, strategy)
+                    .new_batch()
+                    .add(&hasher, b"parent");
+                let mut expected = parent.new_batch();
+                for count in [0, 1, 2, 63, 64, 127, 128, 129, 256, 511, 1000] {
+                    actual = actual.add(&hasher, b"prefix");
+                    expected = expected.add(&hasher, b"prefix");
+                    let items: Vec<u64> = (0..count).collect();
+                    actual = actual.add_many(&hasher, &items);
+                    for item in &items {
+                        expected = expected.add(&hasher, &item.to_be_bytes());
+                    }
+                    for loc in [63, *actual.leaves() / 2 + 32, *actual.leaves() - 1] {
+                        let loc = Location::new(loc);
+                        actual = actual.update_leaf(&hasher, loc, b"update").unwrap();
+                        expected = expected.update_leaf(&hasher, loc, b"update").unwrap();
+                    }
+                }
+                let actual = actual.merkleize(&base, &hasher);
+                let expected = expected.merkleize(&base, &hasher);
+
+                assert_eq!(
+                    actual.root(&base, &hasher, 0).unwrap(),
+                    expected.root(&base, &hasher, 0).unwrap(),
+                    "workers={parallelism}"
+                );
+                for pos in *parent.size()..*actual.size() {
+                    let pos = Position::new(pos);
+                    assert_eq!(
+                        actual.get_node(pos),
+                        expected.get_node(pos),
+                        "workers={parallelism} pos={pos}"
+                    );
+                }
+            }
+        });
+    }
+
     /// `add_many` split across workers matches adding the same items one at a time, on top of
     /// committed leaves and an unapplied parent batch.
     fn add_many_matches_add<F: Family>() {
@@ -1509,6 +1591,16 @@ mod tests {
     }
 
     #[test]
+    fn mmr_add_many_at_limit() {
+        add_many_at_limit::<crate::mmr::Family>();
+    }
+
+    #[test]
+    fn mmr_add_many_mixed_operations() {
+        add_many_mixed_operations::<crate::mmr::Family>();
+    }
+
+    #[test]
     fn mmr_consistency() {
         consistency_with_reference::<crate::mmr::Family>();
     }
@@ -1595,6 +1687,16 @@ mod tests {
     #[test]
     fn mmb_add_many_then_mutate() {
         add_many_then_mutate::<crate::mmb::Family>();
+    }
+
+    #[test]
+    fn mmb_add_many_at_limit() {
+        add_many_at_limit::<crate::mmb::Family>();
+    }
+
+    #[test]
+    fn mmb_add_many_mixed_operations() {
+        add_many_mixed_operations::<crate::mmb::Family>();
     }
 
     #[test]

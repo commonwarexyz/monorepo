@@ -243,6 +243,19 @@ impl merkle::Family for Family {
         let birth_pos = Self::location_to_position(birth_leaf);
         birth_pos.checked_add(1).expect("position overflow")
     }
+
+    fn subtree_birth_size(leaf_start: Location, height: u32) -> Option<Location> {
+        if height == 0 {
+            return leaf_start.checked_add(1);
+        }
+
+        // One past the birth leaf `leaf_start + 3 * 2^(h-1) - 2`.
+        let offset = 1u64
+            .checked_shl(height - 1)?
+            .checked_mul(3)?
+            .checked_sub(1)?;
+        leaf_start.checked_add(offset)
+    }
 }
 
 impl Graftable for Family {
@@ -603,9 +616,31 @@ mod tests {
                     *pos, next_pos,
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"
                 );
+                assert_eq!(
+                    Family::subtree_birth_size(Location::new(leftmost), h),
+                    Some(Location::new(leaf_idx + 1)),
+                    "height-{h} subtree_birth_size mismatch at leaf {leaf_idx}"
+                );
                 next_pos += 1;
             }
         }
+    }
+
+    #[test]
+    fn test_subtree_limits() {
+        // A height-62 root would be created at leaf count 3 * 2^61 - 1, past `MAX_LEAVES`.
+        let root = Location::new(0);
+        assert_eq!(Family::subtree_birth_size(root, 62), None);
+        assert_eq!(
+            Family::subtree_birth_size(root, 61),
+            Some(Location::new((3 << 60) - 1))
+        );
+        let last = Location::new(*Family::MAX_LEAVES - 1);
+        assert_eq!(
+            Family::subtree_birth_size(last, 0),
+            Some(Family::MAX_LEAVES)
+        );
+        assert_eq!(Family::subtree_birth_size(Family::MAX_LEAVES, 0), None);
     }
 
     #[test]

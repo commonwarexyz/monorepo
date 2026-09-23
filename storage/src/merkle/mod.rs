@@ -153,21 +153,24 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     fn pos_to_height(pos: Position<Self>) -> u32;
 
     /// Return the deterministic position of the node at `height` whose leftmost leaf is at
-    /// `leaf_start`.
+    /// `leaf_start`, a multiple of `2^height`.
     ///
-    /// For some families, this position corresponds to a node that physically exists in any
-    /// structure containing those leaves. For others (e.g. MMB with delayed merging), it may be a
-    /// "virtual" position that no actual node occupies, but is still deterministic and unique for
-    /// the given leaf range and height.
-    ///
-    /// Used by grafting to map grafted-structure positions to ops-structure positions for domain
-    /// separation in hash pre-images.
+    /// The node is appended after the leaf that brings the leaf count to
+    /// [`subtree_birth_size`](Self::subtree_birth_size), and before the next leaf. So at a fixed
+    /// height, positions increase with `leaf_start`, and every other node of the subtree precedes
+    /// the node. For some families (e.g. MMB with delayed merging), a structure holding all of the
+    /// node's leaves may not contain the node yet, so its position is "virtual" until the
+    /// structure reaches the birth size.
     ///
     /// # Panics
     ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if the resulting position
-    /// computation overflows the bounds of the underlying numeric types.
+    /// May panic if `subtree_birth_size` returns `None` for the same arguments.
     fn subtree_root_position(leaf_start: Location<Self>, height: u32) -> Position<Self>;
+
+    /// Return the leaf count at which the node at `height` whose leftmost leaf is at
+    /// `leaf_start` (a multiple of `2^height`) is created, or `None` if that count exceeds
+    /// [`MAX_LEAVES`](Self::MAX_LEAVES) and the node can never exist.
+    fn subtree_birth_size(leaf_start: Location<Self>, height: u32) -> Option<Location<Self>>;
 }
 
 /// Pending-chunk slot for Merkle families that do not carry a pending chunk (e.g. MMR).
