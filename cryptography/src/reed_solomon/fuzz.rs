@@ -1083,7 +1083,8 @@ mod tests {
     fn locator_domain_boundaries() {
         for high in [false, true] {
             for end in [
-                2, 3, 4, 7, 8, 15, 16, 511, 512, 513, 32767, 32768, 32769, 65535, 65536,
+                2, 3, 4, 7, 8, 15, 16, 127, 128, 129, 511, 512, 513, 32767, 32768, 32769, 65535,
+                65536,
             ] {
                 // Chunk size one places the other group immediately after it.
                 let (original_count, recovery_count) =
@@ -1148,10 +1149,12 @@ mod tests {
     }
 
     #[test]
-    fn prepared_low_full_polynomial() {
-        let low = fixed_case(3, 510, 66, 21);
+    fn prepared_low_locator_boundaries() {
         let high = fixed_case(11, 3, 2, 23);
-        exercise_prepared_reuse(&low, &high);
+        for recovery_count in [123, 124, 125, 510] {
+            let low = fixed_case(3, recovery_count, 66, 21);
+            exercise_prepared_reuse(&low, &high);
+        }
     }
 
     #[test]
