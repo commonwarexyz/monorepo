@@ -486,15 +486,15 @@ mod tests {
 
     #[test]
     fn test_replay_buf_copy_to_slice_page_boundaries() {
-        let source = bytes::Bytes::from_static(b"abcd............efgh............");
+        let source = bytes::Bytes::from_static(b"abcd............efgh............ijkl............");
         let mut replay = ReplayBuf::new(16, 4);
         replay.push(
             BufferState {
                 buffer: source,
-                num_pages: 2,
+                num_pages: 3,
                 last_page_len: 4,
             },
-            8,
+            12,
         );
 
         // Ends inside the first page.
@@ -502,19 +502,26 @@ mod tests {
         replay.try_copy_to_slice(&mut inside).unwrap();
         assert_eq!(&inside, b"abc");
         assert_eq!(replay.chunk(), b"d");
-        assert_eq!(replay.remaining(), 5);
+        assert_eq!(replay.remaining(), 9);
+
+        // Ends exactly at the end of a non-final page.
+        let mut boundary = [0u8; 1];
+        replay.try_copy_to_slice(&mut boundary).unwrap();
+        assert_eq!(&boundary, b"d");
+        assert_eq!(replay.chunk(), b"efgh");
+        assert_eq!(replay.remaining(), 8);
 
         // Spans the page boundary.
-        let mut spanning = [0u8; 3];
+        let mut spanning = [0u8; 6];
         replay.try_copy_to_slice(&mut spanning).unwrap();
-        assert_eq!(&spanning, b"def");
-        assert_eq!(replay.chunk(), b"gh");
+        assert_eq!(&spanning, b"efghij");
+        assert_eq!(replay.chunk(), b"kl");
         assert_eq!(replay.remaining(), 2);
 
         // Ends exactly at the end of the last page.
         let mut tail = [0u8; 2];
         replay.try_copy_to_slice(&mut tail).unwrap();
-        assert_eq!(&tail, b"gh");
+        assert_eq!(&tail, b"kl");
         assert_eq!(replay.chunk(), b"");
         assert_eq!(replay.remaining(), 0);
 
