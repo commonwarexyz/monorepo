@@ -125,7 +125,7 @@ impl<B: Backend> Arithmetic<B> {
             let x = read_field(&x)?;
             let c = self.fp_sub(&self.fp_sqr(&z1), &self.four());
             let denominator = self.fp_mul(&self.fp_sqr(&z0), &c);
-            if self.fp_is_zero(&denominator) || self.fp_is_zero(&x) {
+            if !self.nonzero(&[denominator, x]) {
                 return None;
             }
             records.push((index, z0, z1, x, c, selector));

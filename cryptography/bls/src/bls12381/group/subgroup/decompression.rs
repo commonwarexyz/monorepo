@@ -30,6 +30,9 @@ const ROOT_NINE: Fp = Fp::from_raw(&[
 ])
 .expect("canonical ninth root");
 
+// Evaluated at compile time; a runtime conversion costs two basis extensions.
+const FOUR: Fp = Fp::from_u64(4);
+
 #[derive(Clone, Copy)]
 struct Affine {
     x: Field,
@@ -97,7 +100,8 @@ impl<B: Backend> Arithmetic<B> {
     }
     #[inline(always)]
     fn fp_eq(&self, a: &Field, b: &Field) -> bool {
-        Fp::from(*a) == Fp::from(*b)
+        // One canonical projection of the difference, rather than one per side.
+        self.fp_is_zero(&self.fp_sub(a, b))
     }
     #[inline(always)]
     fn cube(&self, a: &Field) -> Field {
@@ -105,7 +109,7 @@ impl<B: Backend> Arithmetic<B> {
     }
     #[inline(always)]
     fn four(&self) -> Field {
-        Fp::from_u64(4).into()
+        FOUR.into()
     }
     #[inline(always)]
     fn roots(&self, x: Field) -> [Field; 3] {
@@ -134,7 +138,9 @@ impl<B: Backend> Arithmetic<B> {
     fn valid_points<const N: usize>(&self, points: &[Affine; N]) -> bool {
         const { assert!(N > 0) };
         let x = points.map(|point| point.x);
+        let y = points.map(|point| point.y);
         let squared = self.products(&x, &x);
+        let coordinates = self.products(&x, &y);
         // Each residual is y^2 - x^3 - 4. Signed wide products share one
         // reduction without ever assuming any curve equation from the input.
         let mut checks = [self.curve_residual(&points[0], squared[0]); N];
@@ -142,13 +148,27 @@ impl<B: Backend> Arithmetic<B> {
             checks[i] = self.curve_residual(&points[i], squared[i]);
         }
         let residuals = self.ring.batch_reduce_expand(&checks);
-        for (point, residual) in points.iter().zip(residuals) {
-            if self.fp_is_zero(&point.x) || self.fp_is_zero(&point.y) || !self.fp_is_zero(&residual)
-            {
+        // A field product is zero exactly when some factor is zero, so one
+        // canonical test covers every x and y. Residuals stay separate.
+        if !self.nonzero(&coordinates) {
+            return false;
+        }
+        for residual in residuals {
+            if !self.fp_is_zero(&residual) {
                 return false;
             }
         }
         true
+    }
+
+    #[inline(always)]
+    fn nonzero<const N: usize>(&self, values: &[Field; N]) -> bool {
+        const { assert!(N > 0) };
+        let mut product = values[0];
+        for value in &values[1..] {
+            product = self.fp_mul(&product, value);
+        }
+        !self.fp_is_zero(&product)
     }
 
     #[inline(always)]
@@ -176,10 +196,8 @@ impl<B: Backend> Arithmetic<B> {
     // Keep independent chains in the same RNS reduction batch and backend entry.
     #[inline(always)]
     fn extract<const N: usize>(&self, inputs: &[Field; N]) -> Option<[Field; N]> {
-        for input in inputs {
-            if self.fp_is_zero(input) {
-                return None;
-            }
+        if !self.nonzero(inputs) {
+            return None;
         }
         let squares = self.products(inputs, inputs);
         let mut powers = [*inputs; 16];
