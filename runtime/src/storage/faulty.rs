@@ -262,6 +262,11 @@ impl<B> PendingMutation<B> {
 /// Unresolved entries in issue order within each file generation.
 type PendingMutations<B> = Arc<Mutex<Vec<PendingMutation<B>>>>;
 
+/// Evidence detached from the fault model. Callers release namespace locks before dropping it.
+pub(crate) struct Retired<B> {
+    _mutations: Vec<PendingMutation<B>>,
+}
+
 /// Identifies a file by partition and name.
 type FileKey = (String, Vec<u8>);
 
@@ -281,10 +286,16 @@ impl FileGeneration {
 /// Tracks the generation shared by existing handles and unresolved mutations for each file.
 type FileGenerations = Arc<Mutex<BTreeMap<FileKey, Weak<FileGeneration>>>>;
 
-fn clear_pending<B>(pending: &PendingMutations<B>, generation: &Arc<FileGeneration>) {
-    pending
-        .lock()
-        .retain(|mutation| !Arc::ptr_eq(mutation.generation(), generation));
+fn clear_pending<B>(pending: &PendingMutations<B>, generation: &Arc<FileGeneration>) -> Retired<B> {
+    let mut pending = pending.lock();
+    let retired = pending
+        .extract_if(.., |mutation| {
+            Arc::ptr_eq(mutation.generation(), generation)
+        })
+        .collect();
+    Retired {
+        _mutations: retired,
+    }
 }
 
 /// A successful full sync retires mutations issued before it while preserving later crash debt.
@@ -300,15 +311,17 @@ fn resolve_pending_sync<B>(
         return;
     };
     let mut index = 0;
-    pending.retain(|mutation| {
+    let retired: Vec<_> = pending.extract_if(.., |mutation| {
         let is_target = matches!(mutation, PendingMutation::Sync { sync: candidate, .. } if Arc::ptr_eq(candidate, sync));
         let retire = is_target
             || (succeeded
                 && index < cut
                 && Arc::ptr_eq(mutation.generation(), &sync.generation));
         index += 1;
-        !retire
-    });
+        retire
+    }).collect();
+    drop(pending);
+    drop(retired);
 }
 
 impl Oracle {
@@ -448,7 +461,7 @@ impl<S: crate::Storage> Storage<S> {
     }
 
     /// Retires generations and pending mutations for one file or an entire partition.
-    fn retire_names(&self, partition: &str, name: Option<&[u8]>) {
+    fn retire_names(&self, partition: &str, name: Option<&[u8]>) -> Retired<S::Blob> {
         let retired = {
             let mut generations = self.generations.lock();
             match name {
@@ -469,13 +482,45 @@ impl<S: crate::Storage> Storage<S> {
                 }
             }
         };
-        for generation in retired {
-            clear_pending(&self.pending, &generation);
+        Retired {
+            _mutations: retired
+                .into_iter()
+                .flat_map(|generation| clear_pending(&self.pending, &generation)._mutations)
+                .collect(),
         }
+    }
+
+    /// Retire the removed file's crash evidence without destroying its byte owners.
+    pub(crate) async fn remove_retired(
+        &self,
+        partition: &str,
+        name: Option<&[u8]>,
+    ) -> Result<Retired<S::Blob>, Error> {
+        if self.ctx.should_fail(Op::Remove) {
+            return Err(injected_io_error().into());
+        }
+        self.inner.remove(partition, name).await?;
+        Ok(self.retire_names(partition, name))
     }
 }
 
 impl Storage<crate::storage::memory::Storage> {
+    /// Retire crash evidence excluded from the durable snapshot admitted by a successful open.
+    /// The caller holds the logical namespace guard through admission and retirement.
+    pub(crate) fn admit(
+        &self,
+        partition: &str,
+        name: &[u8],
+    ) -> Retired<crate::storage::memory::Blob> {
+        let generation = self
+            .generations
+            .lock()
+            .get(&(partition.to_owned(), name.to_vec()))
+            .and_then(Weak::upgrade)
+            .expect("an admitted blob retains its file generation");
+        clear_pending(&self.pending, &generation)
+    }
+
     /// Replay selected crash outcomes in issue order.
     pub(crate) fn crash(&self) -> Result<(), Error> {
         let pending = std::mem::take(&mut *self.pending.lock());
@@ -555,11 +600,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        if self.ctx.should_fail(Op::Remove) {
-            return Err(injected_io_error().into());
-        }
-        self.inner.remove(partition, name).await?;
-        self.retire_names(partition, name);
+        drop(self.remove_retired(partition, name).await?);
         Ok(())
     }
 
@@ -639,13 +680,14 @@ impl<B: crate::Blob> Blob<B> {
         let mut pending = self.pending.lock();
         let mutations = std::mem::take(&mut *pending);
         let mut retained = Vec::with_capacity(mutations.len() + 1);
+        let mut retired = Vec::new();
         let mut follows_resize = false;
         for mutation in mutations {
             if !Arc::ptr_eq(mutation.generation(), &self.generation) {
                 retained.push(mutation);
                 continue;
             }
-            let (write_generation, write_blob, write_offset, bufs, retention, selection_offset) =
+            let (write_generation, write_blob, write_offset, mut bufs, retention, selection_offset) =
                 match mutation {
                     PendingMutation::Write {
                         generation,
@@ -683,15 +725,18 @@ impl<B: crate::Blob> Blob<B> {
                 continue;
             }
 
-            let bytes = bufs.coalesce();
-            if write_offset < overlap_start {
-                let prefix_len = usize::try_from(overlap_start - write_offset)
-                    .expect("a pending-write subrange fits its source buffer");
+            let prefix_len = usize::try_from(overlap_start - write_offset)
+                .expect("a pending-write subrange fits its source buffer");
+            let prefix = bufs.split_to(prefix_len);
+            let overlap_len = usize::try_from(overlap_end - overlap_start)
+                .expect("an overlapping subrange fits its source buffer");
+            retired.push(bufs.split_to(overlap_len));
+            if prefix_len != 0 {
                 retained.push(PendingMutation::Write {
                     generation: write_generation.clone(),
                     blob: write_blob.clone(),
                     offset: write_offset,
-                    bufs: bytes.slice(..prefix_len).into(),
+                    bufs: prefix,
                     retention: retention.clone(),
                     selection_offset,
                 });
@@ -703,7 +748,7 @@ impl<B: crate::Blob> Blob<B> {
                     generation: write_generation,
                     blob: write_blob,
                     offset: overlap_end,
-                    bufs: bytes.slice(suffix_start..).into(),
+                    bufs,
                     retention,
                     selection_offset: selection_offset
                         .checked_add(suffix_start)
@@ -726,6 +771,8 @@ impl<B: crate::Blob> Blob<B> {
             });
         }
         *pending = retained;
+        drop(pending);
+        drop(retired);
     }
 }
 

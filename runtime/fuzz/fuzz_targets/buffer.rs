@@ -144,6 +144,7 @@ fn fuzz(input: FuzzInput) {
                     let blob_size = blob_size as u64;
                     let buffer_size = (buffer_size as usize).clamp(1, MAX_SIZE);
 
+                    drop(read_buffer.take());
                     let (blob, size) = context
                         .open("test_partition", b"read_blob")
                         .await
@@ -172,6 +173,7 @@ fn fuzz(input: FuzzInput) {
                 } => {
                     let capacity = (capacity as usize).clamp(1, MAX_SIZE);
 
+                    drop(write_buffer.take());
                     let (blob, _) = context
                         .open("test_partition", b"write_blob")
                         .await
