@@ -288,7 +288,7 @@ where
         }
 
         let journal = <DB::Journal as Journal<DB::Family>>::new(
-            config.context.child("journal"),
+            || config.context.child("journal"),
             config.db_config.journal_config(),
             config.target.range.clone(),
         )
@@ -826,7 +826,7 @@ mod tests {
         type Op = i32;
 
         async fn new(
-            _context: Self::Context,
+            _context: impl Fn() -> Self::Context + Send,
             size: Self::Config,
             _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
         ) -> Result<Self, Self::Error> {
