@@ -694,6 +694,27 @@ macro_rules! impl_certificate_mock {
                     .verify_attestations::<Self, _, D, _>(rng, subject, attestations)
             }
 
+            fn optimistic_assemble<'a, R, D, I, J>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                pending: I,
+                verified: J,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> Result<Self::Certificate, $crate::certificate::Verification<Self>>
+            where
+                R: rand_core::CryptoRng,
+                D: $crate::Digest,
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                I::IntoIter: ExactSizeIterator + Send,
+                J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
+                J::IntoIter: Send,
+            {
+                $crate::certificate::optimistic_assemble::<Self, _, D, _, _>(
+                    self, rng, subject, pending, verified, strategy,
+                )
+            }
+
             fn assemble<I>(
                 &self,
                 attestations: commonware_utils::iter::NonEmpty<I>,

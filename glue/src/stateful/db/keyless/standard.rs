@@ -130,10 +130,6 @@ where
     async fn prune(self, target: &sync::Target<F, H::Digest>) -> Result<Self, Error<F>> {
         self.prune(target.range.start()).await
     }
-
-    async fn rewind(self, size: Location<F>) -> Result<Self, Error<F>> {
-        self.rewind(size).await?.sync().await
-    }
 }
 
 #[cfg(test)]
@@ -146,7 +142,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_storage::{journal::Error as JournalError, mmr, qmdb::keyless::fixed};
-    use commonware_utils::sequence::U64;
+    use commonware_utils::{non_empty_range, sequence::U64};
 
     type FixedDb = fixed::Db<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
 
@@ -154,7 +150,9 @@ mod tests {
     fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db
@@ -185,7 +183,9 @@ mod tests {
     fn managed_db_prune_drops_history_below_the_target_floor() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "prune");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             // Eight appends at locations 1..=8 and a floor of 8: pruning to the floor drops the
@@ -225,7 +225,9 @@ mod tests {
     fn merkleize_rejects_floor_at_batch_size() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "floor-at-size");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             // The commit lands at location 2, so a floor of 3 is past it and `apply` would
@@ -245,6 +247,44 @@ mod tests {
                 err,
                 Error::FloorBeyondSize(floor, commit)
                     if floor == mmr::Location::new(3) && commit == mmr::Location::new(2)
+            ));
+        });
+    }
+    #[test]
+    fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "matches-sync-target");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+            let batch = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1))
+                .with_metadata(U64::new(9));
+            let merkleized = batch.merkleize().await.unwrap();
+            let valid = merkleized.target();
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid
+            ));
+            let wrong_start = sync::Target {
+                root: valid.root,
+                range: non_empty_range!(mmr::Location::new(0), valid.range.end()),
+            };
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_start
+            ));
+            let wrong_end = sync::Target {
+                root: valid.root,
+                range: non_empty_range!(valid.range.start(), valid.range.end() - 1),
+            };
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_end
             ));
         });
     }

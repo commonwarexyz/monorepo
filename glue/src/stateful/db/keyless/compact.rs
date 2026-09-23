@@ -78,17 +78,13 @@ where
     async fn prune(self, target: &sync::Target<F, H::Digest>) -> Result<Self, Error<F>> {
         self.prune(target.range.end()).await
     }
-
-    async fn rewind(self, size: Location<F>) -> Result<Self, Error<F>> {
-        self.rewind(size).await
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::stateful::db::{
-        ManagedDb, Shared, StateSyncDb, Unmerkleized as _,
+        InitError, ManagedDb, Shared, StateSyncDb, Unmerkleized as _,
         tests::configs::{
             keyless::{compact::fixed_config, fixed_config as full_fixed_config},
             sync_config,
@@ -140,7 +136,9 @@ mod tests {
 
     async fn populated_fixed_db(context: deterministic::Context, suffix: &str) -> FixedDb {
         let config = fixed_config(&context, suffix);
-        let source = FixedDb::init(context.child("db"), config).await.unwrap();
+        let source = FixedDb::init(context.child("db"), config, None)
+            .await
+            .unwrap();
         let floor = source.inactivity_floor_loc();
         let batch = source
             .new_batch()
@@ -155,7 +153,9 @@ mod tests {
     fn managed_db_apply_and_finalize_persists_fixed_keyless_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db
@@ -176,6 +176,109 @@ mod tests {
             let target = <FixedDb as ManagedDb<_>>::sync_target(&guard);
             assert_eq!(target.root, guard.root());
             assert_eq!(target.range.end(), mmr::Location::new(3));
+        });
+    }
+
+    #[test]
+    fn managed_db_apply_retains_each_keyless_bounded_initialization_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "apply-checkpoints");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let first = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_metadata(U64::new(11));
+            let first = crate::stateful::db::Unmerkleized::merkleize(first)
+                .await
+                .unwrap();
+            let first_target = sync::Target {
+                root: first.root(),
+                range: non_empty_range!(first.bounds().tip.size - 1, first.bounds().tip.size),
+            };
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, first)
+                .await
+                .unwrap();
+            slot.put(database);
+
+            let second = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(8))
+                .with_metadata(U64::new(22));
+            let second = crate::stateful::db::Unmerkleized::merkleize(second)
+                .await
+                .unwrap();
+            let (slot, database) = db.write().await;
+            let database = <FixedDb as ManagedDb<_>>::apply(database, second)
+                .await
+                .unwrap();
+            let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
+            sync.await.expect("database sync failed");
+            slot.put(database);
+            drop(db);
+
+            let database = <FixedDb as ManagedDb<_>>::init(
+                context.child("reopen"),
+                fixed_config(&context, "apply-checkpoints"),
+                Some(first_target.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                <FixedDb as ManagedDb<_>>::sync_target(&database),
+                first_target,
+            );
+        });
+    }
+
+    #[test]
+    fn managed_db_matches_sync_target_rejects_wrong_size() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "matches-sync-target");
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
+            let db = Shared::new("test", db);
+
+            let batch = db
+                .new_batch_for_test::<_>()
+                .await
+                .append(U64::new(7))
+                .with_inactivity_floor(mmr::Location::new(1))
+                .with_metadata(U64::new(9));
+            let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                .await
+                .unwrap();
+
+            let valid_target = sync::Target {
+                root: merkleized.root(),
+                range: non_empty_range!(
+                    merkleized.bounds().tip.size - 1,
+                    merkleized.bounds().tip.size
+                ),
+            };
+            assert!(<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &valid_target,
+            ));
+
+            let wrong_size = sync::Target {
+                root: merkleized.root(),
+                range: non_empty_range!(
+                    merkleized.bounds().tip.size - 1 - 1,
+                    merkleized.bounds().tip.size - 1
+                ),
+            };
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_size,
+            ));
         });
     }
 
@@ -210,6 +313,7 @@ mod tests {
             let source = FullFixedDb::init(
                 context.child("source"),
                 full_fixed_config(&context, "source"),
+                None,
             )
             .await
             .unwrap();
@@ -267,7 +371,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let source_context = context.child("source");
             let source_config = fixed_config(&source_context, "source");
-            let source = FixedDb::init(source_context, source_config).await.unwrap();
+            let source = FixedDb::init(source_context, source_config, None)
+                .await
+                .unwrap();
             let floor = source.inactivity_floor_loc();
             let batch = source
                 .new_batch()
@@ -352,6 +458,7 @@ mod tests {
             let source = FixedDb::init(
                 context.child("source"),
                 fixed_config(&context, "supersede-source"),
+                None,
             )
             .await
             .unwrap();
@@ -419,12 +526,61 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_prune_bounds_fixed_keyless_unjournaled_rewind_history() {
+    fn managed_db_initializes_fixed_keyless_unjournaled_multiple_commit_ranges() {
+        deterministic::Runner::default().start(|context| async move {
+            let config = fixed_config(&context, "bounded-init");
+            let mut db = FixedDb::init(context.child("db"), config.clone(), None)
+                .await
+                .unwrap();
+
+            let floor = db.inactivity_floor_loc();
+            let batch = db
+                .new_batch()
+                .append(U64::new(1))
+                .merkleize(&db, Some(U64::new(11)), floor)
+                .await;
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.sync().await.unwrap();
+            let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+
+            // Add two ranges so reopening at the first target spans multiple commits.
+            for i in [2u64, 3] {
+                let floor = db.inactivity_floor_loc();
+                let batch = db
+                    .new_batch()
+                    .append(U64::new(i))
+                    .merkleize(&db, Some(U64::new(i * 11)), floor)
+                    .await;
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.sync().await.unwrap();
+            }
+            let third_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_ne!(third_target, first_target);
+
+            drop(db);
+            let db = <FixedDb as ManagedDb<_>>::init(
+                context.child("cap"),
+                config.clone(),
+                Some(first_target.clone()),
+            )
+            .await
+            .unwrap();
+
+            let recovered_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
+            assert_eq!(recovered_target, first_target);
+            assert_eq!(db.get_metadata(), Some(U64::new(11)));
+        });
+    }
+
+    #[test]
+    fn managed_db_prune_bounds_fixed_keyless_unjournaled_bounded_initialization_history() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
             let mut config = fixed_config(&context, "prune");
             config.witness.items_per_section = NZU64!(1);
-            let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let mut db = FixedDb::init(context.child("db"), config.clone(), None)
+                .await
+                .unwrap();
 
             // Commit three ranges, recording each target.
             let mut targets = Vec::new();
@@ -442,21 +598,28 @@ mod tests {
 
             assert_ne!(targets[0], targets[1]);
 
-            // Prune to the second target: the first is no longer a rewind target, but the
-            // second still is.
+            // Pruning at the second target retains it but excludes the first.
             let db = <FixedDb as ManagedDb<_>>::prune(db, &targets[1])
                 .await
                 .unwrap();
-            let db = <FixedDb as ManagedDb<_>>::rewind_to_target(db, targets[1].clone())
-                .await
-                .unwrap();
+            drop(db);
+            let db = <FixedDb as ManagedDb<_>>::init(
+                context.child("cap"),
+                config.clone(),
+                Some(targets[1].clone()),
+            )
+            .await
+            .unwrap();
             assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), targets[1]);
-            assert_eq!(db.get_metadata(), Some(U64::new(22)));
+            drop(db);
             assert!(matches!(
-                db.rewind(targets[0].range.end()).await,
-                Err(Error::Merkle(
-                    commonware_storage::merkle::Error::RewindBeyondHistory
-                ))
+                <FixedDb as ManagedDb<_>>::init(
+                    context.child("pruned_cap"),
+                    config,
+                    Some(targets[0].clone())
+                )
+                .await,
+                Err(InitError::Database(Error::HistoricalFloorPruned(_)))
             ));
         });
     }

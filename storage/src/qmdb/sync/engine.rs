@@ -284,6 +284,7 @@ where
         }
         DB::validate_target(&target).map_err(SyncError::Engine)?;
 
+        // Recover the operation prefix that can resume this target.
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
             config.db_config.journal_config(),
@@ -874,6 +875,7 @@ mod tests {
         async fn init(
             _context: Self::Context,
             _config: Self::Config,
+            _max_size: Option<Location<Self::Family>>,
         ) -> Result<Self, qmdb::Error<Self::Family>> {
             Ok(Self)
         }

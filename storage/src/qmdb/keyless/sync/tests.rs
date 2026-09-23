@@ -1028,14 +1028,14 @@ pub(crate) mod harnesses {
         async fn init_db(mut ctx: deterministic::Context) -> Self::Db {
             let seed = ctx.next_u64();
             let config = variable_config(&format!("sync-test-{seed}"), &ctx);
-            VariableDb::<F>::init(ctx, config).await.unwrap()
+            VariableDb::<F>::init(ctx, config, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: deterministic::Context,
             config: ConfigOf<Self>,
         ) -> Self::Db {
-            VariableDb::<F>::init(ctx, config).await.unwrap()
+            VariableDb::<F>::init(ctx, config, None).await.unwrap()
         }
 
         #[boxed]
@@ -1201,6 +1201,16 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
         assert!(local_start > Location::new(0));
         let sync_root = H::db_root(&db);
 
+        // Reopen the operation journal independently to probe the persisted Merkle boundary.
+        drop(db);
+        let journal = <JournalOf<H> as qmdb::sync::Journal<_>>::new(
+            context.child("journal"),
+            qmdb::sync::DatabaseConfig::journal_config(&config),
+            non_empty_range!(local_start, local_end),
+        )
+        .await
+        .unwrap();
+
         let stale_target = Target {
             root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
@@ -1210,7 +1220,7 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
-                &db.journal.journal,
+                &journal,
             )
             .await
             .unwrap()
@@ -1226,14 +1236,13 @@ fn test_keyless_local_pinned_nodes_rejects_target_before_local_lower_bound() {
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
-                &db.journal.journal,
+                &journal,
             )
             .await
             .unwrap()
             .is_some()
         );
-
-        H::destroy(db).await;
+        drop(journal);
     });
 }
 
@@ -1353,9 +1362,13 @@ mod compact_variable_mmr {
                 config.merkle.items_per_blob = NZU64!(1);
                 config
             };
-            let source = SourceDb::init(context.child("source"), fine_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                fine_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![1, 2, 3])
@@ -1414,9 +1427,13 @@ mod compact_variable_mmr {
     fn test_compact_sync_roundtrip() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let metadata = vec![9, 9, 9];
             let floor = Location::new(2);
             let batch = source
@@ -1449,7 +1466,7 @@ mod compact_variable_mmr {
             assert_eq!(client.inactivity_floor_loc(), floor);
             drop(client);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -1466,9 +1483,13 @@ mod compact_variable_mmr {
     fn test_compact_rejects_target_wider_than_last_commit() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-wide-target-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![1, 2, 3])
@@ -1501,9 +1522,13 @@ mod compact_variable_mmr {
     fn test_compact_sync_recovers_after_invalid_proof() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-bad-proof-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![7, 8, 9])
@@ -1547,9 +1572,13 @@ mod compact_variable_mmr {
     fn test_compact_sync_recovers_after_tampered_commit_floor() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-bad-floor-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![7, 8, 9])
@@ -1597,9 +1626,13 @@ mod compact_variable_mmr {
     fn test_compact_sync_recovers_after_size_mismatch() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-bad-leaf-count-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![7, 8, 9])
@@ -1641,9 +1674,13 @@ mod compact_variable_mmr {
     fn test_compact_sync_recovers_after_tampered_pinned_nodes() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-bad-pinned-nodes-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![1, 2, 3])
@@ -1681,8 +1718,9 @@ mod compact_variable_mmr {
             assert_eq!(sequence.take_verdicts().await, vec![false, true]);
             assert_eq!(synced.target(), target);
             assert_eq!(synced.get_metadata(), Some(vec![7]));
+            drop(synced);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.target(), target);
@@ -1698,9 +1736,13 @@ mod compact_variable_mmr {
     fn test_compact_full_source_serves_historical_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-stale-full-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch1 = source
                 .new_batch()
                 .append(vec![1, 2, 3])
@@ -1745,11 +1787,11 @@ mod compact_variable_mmr {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_source_reopen_rewind_regrow_and_stale_target() {
+    fn test_compact_source_reopen_bounded_initialization_regrow_and_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-unj-source-{}", context.next_u64());
             let source_cfg = client_config(&format!("{suffix}-source"), &context);
-            let source = ClientDb::init(context.child("source_init"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_init"), source_cfg.clone(), None)
                 .await
                 .unwrap();
 
@@ -1765,7 +1807,7 @@ mod compact_variable_mmr {
             let target1 = source.target();
             drop(source);
 
-            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -1784,7 +1826,7 @@ mod compact_variable_mmr {
             assert_eq!(served1.inactivity_floor_loc(), floor1);
             served1.destroy().await.unwrap();
 
-            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             let metadata2 = vec![2, 2, 2];
@@ -1799,7 +1841,15 @@ mod compact_variable_mmr {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            let source = source.rewind(target1.range.end()).await.unwrap();
+            // Select the earlier target durably before serving it and growing a new suffix.
+            drop(source);
+            let source = ClientDb::init(
+                context.child("cap_source"),
+                source_cfg.clone(),
+                Some(target1.range.end()),
+            )
+            .await
+            .unwrap();
             assert_eq!(source.target(), target1);
 
             let serve2_cfg = client_config(&format!("{suffix}-serve2"), &context);
@@ -1816,7 +1866,7 @@ mod compact_variable_mmr {
             assert_eq!(served2.inactivity_floor_loc(), floor1);
             served2.destroy().await.unwrap();
 
-            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -1848,7 +1898,7 @@ mod compact_variable_mmr {
             served3.destroy().await.unwrap();
 
             let source = Arc::new(
-                ClientDb::init(context.child("source_stale"), source_cfg.clone())
+                ClientDb::init(context.child("source_stale"), source_cfg.clone(), None)
                     .await
                     .unwrap(),
             );
@@ -1898,10 +1948,9 @@ mod compact_variable_mmr {
             // Seed the client partition with several commits, then prune its witness journal.
             let mut client_cfg = client_config(&suffix, &context);
             client_cfg.witness.items_per_section = NZU64!(1);
-            let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
+            let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
                 .await
                 .unwrap();
-            let mut first_size = None;
             for i in 1u8..=3 {
                 let floor = seeded.inactivity_floor_loc();
                 let batch = seeded
@@ -1911,22 +1960,21 @@ mod compact_variable_mmr {
                     .await;
                 (seeded, _) = seeded.apply_batch(batch).await.unwrap();
                 seeded = seeded.sync().await.unwrap();
-                first_size.get_or_insert(seeded.size());
             }
+
+            // Leave a nonzero witness-journal pruning boundary for the import to replace.
             let boundary = seeded.size();
             let seeded = seeded.prune(boundary).await.unwrap();
-            // The prune moved the journal's pruning boundary: the first commit is unreachable.
-            assert!(matches!(
-                seeded.rewind(first_size.unwrap()).await,
-                Err(crate::qmdb::Error::Merkle(
-                    crate::merkle::Error::RewindBeyondHistory
-                ))
-            ));
+            drop(seeded);
 
             // Sync different state into the same partition.
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let metadata = vec![9, 9, 9];
             let batch = source
                 .new_batch()
@@ -1952,7 +2000,7 @@ mod compact_variable_mmr {
             assert_eq!(synced.root(), target.root);
             drop(synced);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -1970,7 +2018,7 @@ mod compact_variable_mmr {
             // Seed the destination partition with durable state that a failed import must not
             // replace.
             let client_cfg = client_config(&suffix, &context);
-            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
+            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
                 .await
                 .unwrap();
             let batch = seeded
@@ -1984,9 +2032,13 @@ mod compact_variable_mmr {
             drop(seeded);
 
             // Build a compact boundary response from a valid source state.
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![2])
@@ -2049,7 +2101,7 @@ mod compact_variable_mmr {
             ));
 
             // Reopening the destination must recover the original durable state.
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.target(), original_target);
@@ -2069,7 +2121,7 @@ mod compact_variable_mmr {
 
             // Seed the client partition with committed state A.
             let client_cfg = client_config(&suffix, &context);
-            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
+            let seeded = ClientDb::init(context.child("seed"), client_cfg.clone(), None)
                 .await
                 .unwrap();
             let batch = seeded
@@ -2084,9 +2136,13 @@ mod compact_variable_mmr {
 
             // Reconstruct state B into the same partition, then drop it before the first
             // persist (as a cancelled sync would).
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![9])
@@ -2127,11 +2183,10 @@ mod compact_variable_mmr {
             .unwrap();
             assert_eq!(imported.target(), target_b);
 
-            // Rewind is rejected until the import is persisted, even to the imported leaf
-            // count itself: the fast path must not report unpersisted state as durable.
-            assert!(imported.rewind(target_b.range.end()).await.is_err());
+            // Drop the unpersisted import. It must not replace the previous durable witness.
+            drop(imported);
 
-            // Prune is likewise rejected while the import is pending; rebuild the import.
+            // Pruning requires a persisted import; rebuild the pending import to check rejection.
             let response = fetch_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
@@ -2159,7 +2214,7 @@ mod compact_variable_mmr {
             assert!(imported.prune(target_b.range.end()).await.is_err());
 
             // The dropped imports never touched the journal: state A is still there.
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.target(), target_a);
@@ -2254,9 +2309,13 @@ mod compact_variable_mmb {
     fn test_compact_sync_roundtrip() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let metadata = vec![3, 3, 3];
             let floor = Location::new(2);
             let batch = source
@@ -2289,7 +2348,7 @@ mod compact_variable_mmb {
             assert_eq!(client.inactivity_floor_loc(), floor);
             drop(client);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
@@ -2306,9 +2365,13 @@ mod compact_variable_mmb {
     fn test_compact_sync_recovers_after_invalid_proof() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-bad-proof-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![7, 8, 9])
@@ -2352,9 +2415,13 @@ mod compact_variable_mmb {
     fn test_compact_sync_recovers_after_tampered_commit_floor() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-bad-floor-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![7, 8, 9])
@@ -2405,9 +2472,13 @@ mod compact_variable_mmb {
                 "compact-keyless-mmb-bad-pinned-nodes-{}",
                 context.next_u64()
             );
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![1, 2, 3])
@@ -2442,7 +2513,7 @@ mod compact_variable_mmb {
             assert_eq!(synced.target(), target);
             drop(synced);
 
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
                 .await
                 .unwrap();
             assert_eq!(reopened.target(), target);
@@ -2458,9 +2529,13 @@ mod compact_variable_mmb {
     fn test_compact_sync_recovers_after_size_mismatch() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-bad-leaf-count-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch = source
                 .new_batch()
                 .append(vec![7, 8, 9])
@@ -2502,9 +2577,13 @@ mod compact_variable_mmb {
     fn test_compact_full_source_serves_historical_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-stale-full-{}", context.next_u64());
-            let source = SourceDb::init(context.child("source"), source_config(&suffix, &context))
-                .await
-                .unwrap();
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config(&suffix, &context),
+                None,
+            )
+            .await
+            .unwrap();
             let batch1 = source
                 .new_batch()
                 .append(vec![1, 2, 3])
@@ -2549,11 +2628,11 @@ mod compact_variable_mmb {
     }
 
     #[test_traced("WARN")]
-    fn test_compact_source_reopen_rewind_regrow_and_stale_target() {
+    fn test_compact_source_reopen_bounded_initialization_regrow_and_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-unj-source-{}", context.next_u64());
             let source_cfg = client_config(&format!("{suffix}-source"), &context);
-            let source = ClientDb::init(context.child("source_init"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_init"), source_cfg.clone(), None)
                 .await
                 .unwrap();
 
@@ -2569,7 +2648,7 @@ mod compact_variable_mmb {
             let target1 = source.target();
             drop(source);
 
-            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_reopen"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -2588,7 +2667,7 @@ mod compact_variable_mmb {
             assert_eq!(served1.inactivity_floor_loc(), floor1);
             served1.destroy().await.unwrap();
 
-            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_resume"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             let metadata2 = vec![2, 2, 2];
@@ -2603,7 +2682,15 @@ mod compact_variable_mmb {
             let target2 = source.target();
             assert_ne!(target2, target1);
 
-            let source = source.rewind(target1.range.end()).await.unwrap();
+            // Select the earlier target durably before serving it and growing a new suffix.
+            drop(source);
+            let source = ClientDb::init(
+                context.child("cap_source"),
+                source_cfg.clone(),
+                Some(target1.range.end()),
+            )
+            .await
+            .unwrap();
             assert_eq!(source.target(), target1);
 
             let serve2_cfg = client_config(&format!("{suffix}-serve2"), &context);
@@ -2620,7 +2707,7 @@ mod compact_variable_mmb {
             assert_eq!(served2.inactivity_floor_loc(), floor1);
             served2.destroy().await.unwrap();
 
-            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone())
+            let source = ClientDb::init(context.child("source_regrow"), source_cfg.clone(), None)
                 .await
                 .unwrap();
             assert_eq!(source.target(), target1);
@@ -2652,7 +2739,7 @@ mod compact_variable_mmb {
             served3.destroy().await.unwrap();
 
             let source = Arc::new(
-                ClientDb::init(context.child("source_stale"), source_cfg.clone())
+                ClientDb::init(context.child("source_stale"), source_cfg.clone(), None)
                     .await
                     .unwrap(),
             );

@@ -93,7 +93,7 @@ mod tests {
         context: deterministic::Context,
     ) -> TestDb<F> {
         let cfg = db_config(suffix, &context);
-        TestDb::init(context, cfg).await.unwrap()
+        TestDb::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_compact<F: crate::merkle::Family>(
@@ -112,7 +112,16 @@ mod tests {
             },
             commit_codec_config: ((0..=10000usize).into(), ()),
         };
-        TestCompactDb::init(context, cfg).await.unwrap()
+        TestCompactDb::init(context, cfg, None).await.unwrap()
+    }
+
+    fn bounded_open<F: Family>() -> tests::BoundedOpen<TestDb<F>, F> {
+        Box::new(|ctx, cap| {
+            Box::pin(async move {
+                let cfg = db_config("partition", &ctx);
+                TestDb::init(ctx, cfg, Some(cap)).await
+            })
+        })
     }
 
     fn reopen<F: Family>() -> tests::Reopen<TestDb<F>> {
@@ -149,16 +158,18 @@ mod tests {
         test_keyless_variable_stale_batch_child_before_parent => run_stale_batch_child_before_parent, db;
         test_keyless_variable_to_batch => run_to_batch, db;
         test_keyless_variable_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, db;
-        test_keyless_variable_rewind_recovery => run_rewind_recovery, reopen;
-        test_keyless_variable_rewind_pruned_target_errors => run_rewind_pruned_target_errors, reopen;
-        test_keyless_variable_rewind_to_non_commit_errors => run_rewind_to_non_commit_errors, db;
+        test_keyless_variable_bounded_initialization_recovery => run_bounded_initialization_recovery, bounded;
+        test_keyless_variable_bounded_initialization_pruned_target_errors =>
+            run_bounded_initialization_pruned_target_errors, bounded;
         test_keyless_variable_merkleized_batch_target => run_merkleized_batch_target, db;
         test_keyless_variable_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, reopen;
         test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
-        test_keyless_variable_rewind_restores_floor => run_rewind_restores_floor, db;
+        test_keyless_variable_bounded_initialization_restores_floor =>
+            run_bounded_initialization_restores_floor, bounded_floor;
         test_keyless_variable_floor_at_commit_loc_accepted => run_floor_at_commit_loc_accepted, db;
-        test_keyless_variable_rewind_after_reopen_with_floor => run_rewind_after_reopen_with_floor, reopen_indexed;
+        test_keyless_variable_bounded_initialization_after_reopen_with_floor =>
+            run_bounded_initialization_after_reopen_with_floor, bounded_indexed;
         test_keyless_variable_ancestor_floor_regression_rejected => run_ancestor_floor_regression_rejected, reopen;
         test_keyless_variable_ancestor_floor_beyond_commit_loc_rejected => run_ancestor_floor_beyond_commit_loc_rejected, db;
         test_keyless_variable_chained_apply_with_valid_floors_succeeds => run_chained_apply_with_valid_floors_succeeds, db;
@@ -318,10 +329,5 @@ mod tests {
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.get(loc));
         is_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_rewind_is_send(db: TestDb<mmr::Family>, loc: crate::merkle::Location<mmr::Family>) {
-        is_send(db.rewind(loc));
     }
 }

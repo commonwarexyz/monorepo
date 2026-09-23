@@ -131,10 +131,6 @@ where
     async fn prune(self, target: &sync::Target<F, H::Digest>) -> Result<Self, Error<F>> {
         self.prune(target.range.start()).await
     }
-
-    async fn rewind(self, size: Location<F>) -> Result<Self, Error<F>> {
-        self.rewind(size).await?.sync().await
-    }
 }
 
 #[cfg(test)]
@@ -155,7 +151,9 @@ mod tests {
     fn managed_db_apply_and_finalize_persists_fixed_immutable_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "managed-db");
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
             let key = Sha256::hash(&[b"key"]);
 

@@ -65,8 +65,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type QmdbA<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-/// The compact (witness-only) QMDB used as DB-B, so the suite drives deep rewind,
-/// pruning, and state sync through the compact path as well.
+/// The compact (witness-only) QMDB used as DB-B for bounded recovery, pruning, and state sync.
 pub(super) type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 

@@ -1,8 +1,8 @@
 //! [`ManagedDb`] and [`StateSyncDb`] implementations for QMDB databases.
 
 use super::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, validate_initialization,
 };
 use commonware_runtime::Handle;
 use commonware_storage::{
@@ -61,12 +61,6 @@ pub trait Qmdb: sync::Database<Config: Send> + Sync {
     fn prune(
         self,
         target: &sync::Target<Self::Family, Self::Digest>,
-    ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
-
-    /// Rewind to `size` operations. Durable on return.
-    fn rewind(
-        self,
-        size: Location<Self::Family>,
     ) -> impl Future<Output = Result<Self, Error<Self::Family>>> + Send;
 }
 
@@ -191,8 +185,19 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
     type Config = D::Config;
     type SyncTarget = sync::Target<D::Family, D::Digest>;
 
-    async fn init(context: D::Context, config: D::Config) -> Result<Self, Error<D::Family>> {
-        D::init(context, config).await
+    async fn init(
+        context: D::Context,
+        config: D::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
+        let db = D::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -227,14 +232,6 @@ impl<D: Qmdb> ManagedDb<D::Context> for D {
 
     fn sync_target(&self) -> Self::SyncTarget {
         self.target()
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<D::Family>> {
-        let db = self.rewind(target.range.end()).await?;
-        if db.target() != target {
-            return Err(Error::DataCorrupted("rewound database target mismatch"));
-        }
-        Ok(db)
     }
 }
 

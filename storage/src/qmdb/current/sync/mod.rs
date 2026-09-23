@@ -235,8 +235,12 @@ where
     >;
     type Digest = H::Digest;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
-        crate::qmdb::current::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        crate::qmdb::current::init(context, config, max_size).await
     }
 
     async fn from_sync_result(

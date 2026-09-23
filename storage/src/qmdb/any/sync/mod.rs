@@ -122,8 +122,15 @@ where
     >;
     type Digest = H::Digest;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
-        crate::qmdb::any::init_with_bitmap::<F, E, U, H, I, C, S, N>(context, config, None).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        crate::qmdb::any::init_with_bitmap::<F, E, U, H, I, C, S, N>(
+            context, config, None, max_size, None,
+        )
+        .await
     }
 
     async fn from_sync_result(

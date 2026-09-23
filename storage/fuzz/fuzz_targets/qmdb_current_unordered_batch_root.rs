@@ -156,7 +156,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let cfg = test_config(&test_name, &context);
-        let db: Db<F> = Db::init(context.child("storage"), cfg)
+        let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init current unordered db");
 

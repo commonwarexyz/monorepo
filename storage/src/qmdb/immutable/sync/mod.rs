@@ -56,8 +56,8 @@ where
     ///   fresh Merkle structure from the provided `pinned_nodes`
     /// - If the Merkle journal has data but is incomplete (has length < range end), missing
     ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, it is rewound to match the sync
-    ///   target
+    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
+    ///   sync target
     ///
     /// # Returns
     ///
@@ -103,7 +103,7 @@ where
 
         // Replay the log from the inactivity floor to build the snapshot. Every retained
         // location is inserted, mirroring the live apply path, so a repeated key keeps
-        // serving one of its written values across restarts and rewinds.
+        // serving one of its written values across restarts.
         immutable::build_snapshot(
             inactivity_floor_loc,
             &journal.journal,
@@ -127,8 +127,12 @@ where
         db.sync().await
     }
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        Self::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        Self::init(context, config, max_size).await
     }
 
     async fn persist_sync_result(self) -> Result<Self, Error<F>> {
@@ -209,8 +213,12 @@ where
         .await
     }
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        Self::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        Self::init(context, config, max_size).await
     }
 
     async fn persist_sync_result(self) -> Result<Self, Error<F>> {

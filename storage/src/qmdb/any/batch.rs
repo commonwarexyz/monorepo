@@ -3681,7 +3681,7 @@ mod tests {
                     for existed in [false, true] {
                         let context = context.child("db").with_attribute("existed", existed);
                         let config = fixed_db_config::<OneCap>(stringify!($name), &context);
-                        let db = TestDb::init(context, config).await.unwrap();
+                        let db = TestDb::init(context, config, None).await.unwrap();
                         let key = |i| colliding_digest(0xA0, i);
                         let value = |i| colliding_digest(0xB0, i);
 
@@ -3790,7 +3790,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("operations-match-applied-log", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_a = Sha256::hash(&[b"operations-a"]);
             let key_b = Sha256::hash(&[b"operations-b"]);
@@ -3943,7 +3943,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_update = Sha256::hash(&[b"update-through-all-layers"]);
             let key_recreate_then_delete = Sha256::hash(&[b"recreate-then-delete"]);
@@ -4046,7 +4046,7 @@ mod tests {
                     >;
 
                     let config = fixed_db_config::<OneCap>($partition, &context);
-                    let db = TestDb::init(context, config).await.unwrap();
+                    let db = TestDb::init(context, config, None).await.unwrap();
 
                     let k0 = colliding_digest(0x40 + $shift, 0);
                     let k1 = colliding_digest(0x40 + $shift, 1);
@@ -4217,7 +4217,7 @@ mod tests {
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
             let config = fixed_db_config::<OneCap>("unordered-staged-resolve-updates", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0x90, 0);
             let k1 = colliding_digest(0x90, 1);
@@ -4296,7 +4296,7 @@ mod tests {
 
             let config =
                 fixed_db_config::<OneCap>("unordered-staged-resolve-updates-scale", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let n: usize = 512;
             let keys: Vec<_> = (0..n).map(|i| colliding_digest(0xA0, i as u64)).collect();
@@ -4385,7 +4385,7 @@ mod tests {
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
             let config = fixed_db_config::<OneCap>("unordered-staged-prior-mutation", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key = colliding_digest(0x95, 0);
             let old = colliding_digest(0x95, 1);
@@ -4444,7 +4444,7 @@ mod tests {
             type TestUpdate = update::Ordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
             let config = fixed_db_config::<OneCap>("ordered-staged-resolve-updates", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let delete_key = colliding_digest(0x92, 0);
             let update_a = colliding_digest(0x92, 1);
@@ -4505,7 +4505,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("staged-bad-index", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0x40, 0);
             let keys = vec![&k0];
@@ -4569,7 +4569,7 @@ mod tests {
                         };
                         let context = context.child(label);
                         let config = fixed_db_config::<OneCap>(label, &context);
-                        let db = TestDb::init(context, config).await.unwrap();
+                        let db = TestDb::init(context, config, None).await.unwrap();
 
                         let mut seed = db.new_batch();
                         for i in 0..100u64 {
@@ -4685,7 +4685,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_db = colliding_digest(0x30, 0);
             let value_db = colliding_digest(0x30, 1);
@@ -4807,7 +4807,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4889,7 +4889,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4968,7 +4968,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-basic", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed an initial key.
             let seed = db
@@ -5037,7 +5037,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed an initial key so we have an existing entry.
             let key = colliding_digest(0x10, 0);
@@ -5111,7 +5111,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("fork-after-commit", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed.
             let seed = db
@@ -5192,7 +5192,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ff-cross", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Grandparent: 2 keys.
             let grandparent = db
@@ -5261,7 +5261,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).
             let k0 = colliding_digest(0xAA, 0);
@@ -5338,7 +5338,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-recreate-deleted-collision", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
             let k6 = colliding_digest(0xAA, 6);
@@ -5418,7 +5418,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-redundant-delete-collision", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
             let k6 = colliding_digest(0xAA, 6);
@@ -5489,7 +5489,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-stale-candidates", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let v = |n| colliding_digest(0xB0, n);
             let initial = db
@@ -5578,7 +5578,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-stale-classifier", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let v = |n| colliding_digest(0xB0, n);
             let initial = db
@@ -5666,7 +5666,7 @@ mod tests {
                 Sequential,
             >;
             let config = fixed_db_config::<OneCap>("ordered-stale-sibling-scan", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
             let v = |n| colliding_digest(0xB0, n);
             let initial = db
                 .new_batch()
@@ -5742,7 +5742,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-redundant-delete-underflow", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
             let k6 = colliding_digest(0xAA, 6);
@@ -5816,7 +5816,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-update-only-child", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let v = |n| colliding_digest(0xB0, n);
             let initial = db
@@ -5902,7 +5902,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("get-many-basic", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_db = colliding_digest(0x40, 0);
             let val_db = colliding_digest(0x40, 1);

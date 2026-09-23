@@ -47,8 +47,8 @@ where
     ///   a fresh Merkle structure from the provided `pinned_nodes`
     /// - If the Merkle journal has data but is incomplete (has length < range end), missing
     ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, it is rewound to match the sync
-    ///   target
+    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
+    ///   sync target
     ///
     /// # Returns
     ///
@@ -100,8 +100,12 @@ where
         db.sync().await
     }
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
-        Self::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config, max_size).await
     }
 
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
@@ -181,8 +185,12 @@ where
         .await
     }
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, qmdb::Error<F>> {
-        Self::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, qmdb::Error<F>> {
+        Self::init(context, config, max_size).await
     }
 
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {

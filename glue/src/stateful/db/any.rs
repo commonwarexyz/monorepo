@@ -279,10 +279,6 @@ where
     async fn prune(self, target: &sync::Target<F, H::Digest>) -> Result<Self, Error<F>> {
         self.prune(target.range.start()).await
     }
-
-    async fn rewind(self, size: Location<F>) -> Result<Self, Error<F>> {
-        self.rewind(size).await?.sync().await
-    }
 }
 
 #[cfg(test)]
@@ -304,7 +300,7 @@ mod tests {
     fn unmerkleized_batch_falls_through_to_applied_state() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "unordered-fixed-live-fallback");
-            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -331,7 +327,7 @@ mod tests {
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config(&context, "unordered-fixed-glue-staged");
-            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -421,7 +417,7 @@ mod tests {
             let config = fixed_config(&delayed, "unordered-fixed-deferred");
             let db = drive_pending_syncs(
                 &pending,
-                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
+                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config, None),
             )
             .await
             .unwrap();
