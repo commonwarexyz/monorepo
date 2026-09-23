@@ -35,21 +35,10 @@ where
     type SyncState = authenticated::Frontier<F, E, H::Digest>;
 
     async fn begin_sync(
-        context: Self::Context,
+        context: &Self::Context,
         config: &Self::Config,
     ) -> Result<Self::SyncState, qmdb::Error<F>> {
-        config
-            .merkle
-            .cache
-            .capacity::<H::Digest>()
-            .map_err(authenticated::Error::InvalidConfig)?;
-        Ok(authenticated::Frontier::open(
-            context.child("frontier"),
-            config.merkle.metadata_partition.clone(),
-        )
-        .await?
-        .importing()
-        .await?)
+        Ok(authenticated::Frontier::begin_import(context.child("journal"), &config.merkle).await?)
     }
 
     async fn stage_sync_frontier(
@@ -58,6 +47,14 @@ where
         pins: Vec<Self::Digest>,
     ) -> Result<Self::SyncState, qmdb::Error<F>> {
         Ok(state.stage(location, pins).await?)
+    }
+
+    async fn restart_rejected_import(
+        state: Self::SyncState,
+        journal: Self::Journal,
+        start: Location<F>,
+    ) -> Result<(Self::SyncState, Self::Journal), qmdb::Error<F>> {
+        qmdb::sync::restart_rejected_import(state, journal, start).await
     }
 
     type Context = E;
@@ -123,6 +120,11 @@ where
         Ok(self)
     }
 
+    async fn reject_sync_result(self) -> Result<(), qmdb::Error<F>> {
+        self.journal.frontier.reject().await?;
+        Ok(())
+    }
+
     async fn local_pinned_nodes(
         state: &Self::SyncState,
         config: &Self::Config,
@@ -176,7 +178,7 @@ where
     type SyncState = ();
 
     async fn begin_sync(
-        _context: Self::Context,
+        _context: &Self::Context,
         _config: &Self::Config,
     ) -> Result<(), qmdb::Error<F>> {
         Ok(())
@@ -187,6 +189,13 @@ where
         _pins: Vec<Self::Digest>,
     ) -> Result<(), qmdb::Error<F>> {
         Ok(())
+    }
+    async fn restart_rejected_import(
+        state: (),
+        journal: Self::Journal,
+        _start: Location<F>,
+    ) -> Result<((), Self::Journal), qmdb::Error<F>> {
+        Ok((state, journal))
     }
 
     async fn from_sync_result(
@@ -211,6 +220,10 @@ where
 
     async fn persist_sync_result(self) -> Result<Self, qmdb::Error<F>> {
         self.sync().await
+    }
+
+    async fn reject_sync_result(self) -> Result<(), qmdb::Error<F>> {
+        Ok(())
     }
 
     async fn local_pinned_nodes(

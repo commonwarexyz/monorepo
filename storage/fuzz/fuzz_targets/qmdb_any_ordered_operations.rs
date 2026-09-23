@@ -150,11 +150,11 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             );
             let cfg = Config::<EightCap, Sequential> {
                 merkle_config: MerkleConfig {
-metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
-replay_buffer: NZUsize!(1024),
-strategy: Sequential,
-cache: Default::default(),
-},
+                    metadata_partition: format!("test-qmdb-mmr-metadata-{suffix}"),
+                    replay_buffer: NZUsize!(1024),
+                    strategy: Sequential,
+                    cache: Default::default(),
+                },
                 journal_config: FConfig {
                     partition: format!("test-qmdb-log-journal-{suffix}"),
                     items_per_blob: NZU64!(500000),

@@ -356,6 +356,34 @@ impl<F: Family, D: Digest> Mem<F, D> {
             .collect()
     }
 
+    /// Move the pruning boundary of a structure that retains no nodes forward to `leaves`, pinning
+    /// `peaks` (the nodes [`Family::nodes_to_pin`] returns for `leaves`). Nodes already pinned stay
+    /// pinned.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn skip_to(
+        &mut self,
+        leaves: Location<F>,
+        peaks: impl IntoIterator<Item = (Position<F>, D)>,
+    ) -> Result<(), Error<F>> {
+        let pos = Position::try_from(leaves)?;
+        if !self.nodes.is_empty() || pos < self.pruning_boundary {
+            return Err(Error::DataCorrupted("skip requires a pruned structure"));
+        }
+        self.pruning_boundary = pos;
+        self.pinned_nodes.extend(peaks);
+        Ok(())
+    }
+
+    /// Drop every retained node and pinned node except the peaks at the current size and `keep`.
+    #[cfg(any(feature = "std", test))]
+    pub(crate) fn compact(&mut self, keep: &BTreeMap<Position<F>, D>) {
+        let mut pinned = self.nodes_to_pin(self.leaves());
+        pinned.extend(keep.iter().map(|(&pos, &digest)| (pos, digest)));
+        self.pruning_boundary = self.size();
+        self.nodes.clear();
+        self.pinned_nodes = pinned;
+    }
+
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.
     #[cfg(any(feature = "std", test))]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {

@@ -343,7 +343,7 @@ use crate::{
     translator::Translator,
 };
 use commonware_codec::{Codec, FixedSize};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
@@ -411,6 +411,20 @@ pub type FixedConfig<T, S, B = ()> = Config<T, FConfig, S, B>;
 /// Configuration for a `Current` authenticated db with variable-sized values.
 pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 
+/// Validate `config` as given, then lower its resident height to the grafting height so chunk roots
+/// stay resident.
+fn merkle_config<F: merkle::Family, D: Digest, S: Strategy, const N: usize>(
+    config: &MerkleConfig<S>,
+) -> Result<MerkleConfig<S>, authenticated::Error<F>> {
+    config
+        .cache
+        .capacity::<D>()
+        .map_err(authenticated::Error::InvalidConfig)?;
+    let mut config = config.clone();
+    config.cache.resident_height = config.cache.resident_height.min(grafting::height::<N>());
+    Ok(config)
+}
+
 /// Initialize a `Current` authenticated db from the given config.
 #[boxed]
 pub(super) async fn init<F, E, U, H, I, J, const N: usize, S>(
@@ -446,14 +460,7 @@ where
         assert!(N.is_power_of_two(), "chunk size must be a power of 2");
     }
 
-    if config.merkle_config.cache.resident_height > 8 {
-        return Err(authenticated::Error::InvalidConfig("resident height exceeds eight").into());
-    }
-    config.merkle_config.cache.resident_height = config
-        .merkle_config
-        .cache
-        .resident_height
-        .min(grafting::height::<N>());
+    config.merkle_config = merkle_config::<F, H::Digest, S, N>(&config.merkle_config)?;
     let strategy = config.merkle_config.strategy.clone();
     let metadata_partition = config.grafted_metadata_partition.clone();
 

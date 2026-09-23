@@ -73,7 +73,7 @@ impl<T: Translator, J: Clone, S: Strategy, B> Config for super::Config<T, J, S, 
 #[allow(clippy::too_many_arguments)]
 async fn build_db<F, E, U, I, H, J, const N: usize, S>(
     context: E,
-    mut merkle_config: authenticated::Config<S>,
+    merkle_config: authenticated::Config<S>,
     log: J,
     translator: I::Translator,
     state: authenticated::Frontier<F, E, H::Digest>,
@@ -96,13 +96,7 @@ where
     S: Strategy,
     Operation<F, U>: Codec,
 {
-    if merkle_config.cache.resident_height > 8 {
-        return Err(authenticated::Error::InvalidConfig("resident height exceeds eight").into());
-    }
-    merkle_config.cache.resident_height = merkle_config
-        .cache
-        .resident_height
-        .min(grafting::height::<N>());
+    let merkle_config = super::merkle_config::<F, H::Digest, S, N>(&merkle_config)?;
     // Build authenticated log.
     let expected = pinned_nodes.unwrap_or_default();
     let boundary = state
@@ -234,26 +228,11 @@ where
     type SyncState = authenticated::Frontier<F, E, H::Digest>;
 
     async fn begin_sync(
-        context: Self::Context,
+        context: &Self::Context,
         config: &Self::Config,
     ) -> Result<Self::SyncState, qmdb::Error<F>> {
-        let mut cache = config.merkle_config.cache.clone();
-        if cache.resident_height > 8 {
-            return Err(
-                authenticated::Error::InvalidConfig("resident height exceeds eight").into(),
-            );
-        }
-        cache.resident_height = cache.resident_height.min(grafting::height::<N>());
-        cache
-            .capacity::<H::Digest>()
-            .map_err(authenticated::Error::InvalidConfig)?;
-        Ok(authenticated::Frontier::open(
-            context.child("frontier"),
-            config.merkle_config.metadata_partition.clone(),
-        )
-        .await?
-        .importing()
-        .await?)
+        let context = context.child("any").child("log");
+        Ok(authenticated::Frontier::begin_import(context, &config.merkle_config).await?)
     }
 
     async fn stage_sync_frontier(
@@ -262,6 +241,14 @@ where
         pins: Vec<Self::Digest>,
     ) -> Result<Self::SyncState, qmdb::Error<F>> {
         Ok(state.stage(location, pins).await?)
+    }
+
+    async fn restart_rejected_import(
+        state: Self::SyncState,
+        journal: Self::Journal,
+        start: Location<F>,
+    ) -> Result<(Self::SyncState, Self::Journal), qmdb::Error<F>> {
+        qmdb::sync::restart_rejected_import(state, journal, start).await
     }
 
     async fn from_sync_result(
@@ -296,6 +283,11 @@ where
         self = self.sync_metadata().await?;
         self.any.log = self.any.log.activate().await?;
         Ok(self)
+    }
+
+    async fn reject_sync_result(self) -> Result<(), qmdb::Error<F>> {
+        self.any.log.frontier.reject().await?;
+        Ok(())
     }
 
     async fn local_pinned_nodes(

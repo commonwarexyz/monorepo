@@ -59,9 +59,10 @@ pub trait Database: Sized + Send {
     /// Durable state held while an operation range is being imported.
     type SyncState: Send + Sync;
 
-    /// Mark synchronization in progress before changing the operation journal.
+    /// Mark synchronization in progress before changing the operation journal. `context` is the one
+    /// later passed to [Self::from_sync_result].
     fn begin_sync(
-        context: Self::Context,
+        context: &Self::Context,
         config: &Self::Config,
     ) -> impl Future<Output = Result<Self::SyncState, crate::qmdb::Error<Self::Family>>> + Send;
 
@@ -71,6 +72,17 @@ pub trait Database: Sized + Send {
         location: Location<Self::Family>,
         pins: Vec<Self::Digest>,
     ) -> impl Future<Output = Result<Self::SyncState, crate::qmdb::Error<Self::Family>>> + Send;
+
+    /// Discard retained operations if [Self::reject_sync_result] rejected the previous import, so
+    /// this attempt downloads its whole range.
+    #[allow(clippy::type_complexity)]
+    fn restart_rejected_import(
+        state: Self::SyncState,
+        journal: Self::Journal,
+        start: Location<Self::Family>,
+    ) -> impl Future<
+        Output = Result<(Self::SyncState, Self::Journal), crate::qmdb::Error<Self::Family>>,
+    > + Send;
 
     /// Build a database from the journal and pinned nodes populated by the sync engine.
     fn from_sync_result(
@@ -90,6 +102,12 @@ pub trait Database: Sized + Send {
     fn persist_sync_result(
         self,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
+
+    /// Require the next import to discard retained operations. The engine calls this instead of
+    /// [`Self::persist_sync_result`] when [`Self::root`] does not match the target.
+    fn reject_sync_result(
+        self,
+    ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
 
     /// Return locally available pinned nodes for the target, if persisted local state can
     /// authenticate them.
@@ -115,6 +133,26 @@ pub(crate) fn journal_covers_range<F: Family>(
     range: &NonEmptyRange<Location<F>>,
 ) -> bool {
     Location::new(bounds.start) <= range.start() && Location::new(bounds.end) >= range.end()
+}
+
+/// Shared body of [`Database::restart_rejected_import`] for databases whose sync state is an
+/// [`authenticated::Frontier`].
+pub(crate) async fn restart_rejected_import<F, E, D, J>(
+    frontier: authenticated::Frontier<F, E, D>,
+    journal: J,
+    start: Location<F>,
+) -> Result<(authenticated::Frontier<F, E, D>, J), crate::qmdb::Error<F>>
+where
+    F: Family,
+    E: Context,
+    D: Digest,
+    J: Journal<F>,
+{
+    if !frontier.rejected() {
+        return Ok((frontier, journal));
+    }
+    let journal = journal.clear(start).await.map_err(Into::into)?;
+    Ok((frontier.restart().await?, journal))
 }
 
 /// Authenticate a retained operation prefix and recover the requested pruning frontier.
@@ -156,7 +194,10 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        Runner as _, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{WriteFaultContext, WriteFaults},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range};
 
@@ -223,6 +264,61 @@ mod tests {
                 frontier.active(),
                 Err(authenticated::Error::IncompleteSync)
             ));
+        });
+    }
+
+    #[test]
+    fn restart_rejected_import_keeps_rejection_until_journal_is_cleared() {
+        deterministic::Runner::default().start(|context| async move {
+            type Frontier =
+                authenticated::Frontier<F, deterministic::Context, <Sha256 as Hasher>::Digest>;
+            let frontier = Frontier::open(context.child("rejected"), "frontier".into())
+                .await
+                .unwrap()
+                .reject()
+                .await
+                .unwrap();
+            let raw_config = fixed::Config {
+                partition: "operations".into(),
+                items_per_blob: NZU64!(7),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, NZU16!(111), NZUsize!(5)),
+            };
+            let faults = WriteFaults::default();
+            let faulty = |label| WriteFaultContext {
+                inner: context.child(label),
+                faults: faults.clone(),
+            };
+            let mut journal = fixed::Journal::<_, u64>::init(faulty("first"), raw_config.clone())
+                .await
+                .unwrap();
+            for i in 0..10 {
+                (journal, _) = journal.append(&i).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+
+            // A failed reset must leave the rejection in place.
+            faults.arm();
+            assert!(
+                restart_rejected_import(frontier, journal, Location::new(0))
+                    .await
+                    .is_err()
+            );
+            faults.disarm();
+            let frontier = Frontier::open(context.child("reopened"), "frontier".into())
+                .await
+                .unwrap();
+            assert!(frontier.rejected());
+
+            let journal = fixed::Journal::<_, u64>::init(faulty("retry"), raw_config)
+                .await
+                .unwrap();
+            let (frontier, journal) = restart_rejected_import(frontier, journal, Location::new(0))
+                .await
+                .unwrap();
+            assert!(!frontier.rejected());
+            assert_eq!(journal.bounds(), 0..0);
         });
     }
 }

@@ -120,21 +120,13 @@ where
     type SyncState = authenticated::Frontier<F, E, H::Digest>;
 
     async fn begin_sync(
-        context: Self::Context,
+        context: &Self::Context,
         config: &Self::Config,
     ) -> Result<Self::SyncState, qmdb::Error<F>> {
-        config
-            .merkle_config
-            .cache
-            .capacity::<H::Digest>()
-            .map_err(authenticated::Error::InvalidConfig)?;
-        Ok(authenticated::Frontier::open(
-            context.child("frontier"),
-            config.merkle_config.metadata_partition.clone(),
+        Ok(
+            authenticated::Frontier::begin_import(context.child("log"), &config.merkle_config)
+                .await?,
         )
-        .await?
-        .importing()
-        .await?)
     }
 
     async fn stage_sync_frontier(
@@ -143,6 +135,14 @@ where
         pins: Vec<Self::Digest>,
     ) -> Result<Self::SyncState, qmdb::Error<F>> {
         Ok(state.stage(location, pins).await?)
+    }
+
+    async fn restart_rejected_import(
+        state: Self::SyncState,
+        journal: Self::Journal,
+        start: Location<F>,
+    ) -> Result<(Self::SyncState, Self::Journal), qmdb::Error<F>> {
+        qmdb::sync::restart_rejected_import(state, journal, start).await
     }
 
     async fn from_sync_result(
@@ -173,6 +173,11 @@ where
     async fn persist_sync_result(mut self) -> Result<Self, qmdb::Error<F>> {
         self.log = self.log.activate().await?;
         Ok(self)
+    }
+
+    async fn reject_sync_result(self) -> Result<(), qmdb::Error<F>> {
+        self.log.frontier.reject().await?;
+        Ok(())
     }
 
     async fn local_pinned_nodes(

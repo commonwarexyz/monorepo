@@ -8,7 +8,7 @@ pub struct CacheConfig {
     /// Lowest node height retained unconditionally. Must be at most eight.
     /// Height zero retains every node and disables the lower cache.
     /// Upper digest memory grows with retained operations, approximately `2 / 2^height`
-    /// digests per operation. Current databases also retain their grafting-height nodes.
+    /// digests per operation. Current databases lower it to their grafting height.
     pub resident_height: u32,
     /// Budget for lower-region digest and validity arrays, excluding index bookkeeping.
     /// Zero disables lower caching. Partial regions are charged for their full allocation.
@@ -54,8 +54,7 @@ pub struct Config<S: Strategy> {
     pub metadata_partition: String,
     /// Memory policy for Merkle digests.
     pub cache: CacheConfig,
-    /// Byte budget for replay and reconstruction batches.
-    /// A single encoded item may exceed this budget.
+    /// Read buffer size for replaying operations.
     pub replay_buffer: NonZeroUsize,
     /// Strategy used for Merkle hashing.
     pub strategy: S,

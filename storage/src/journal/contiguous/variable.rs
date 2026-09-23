@@ -1528,7 +1528,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         self.bounds.end
     }
 
-    /// See [Journal::prune].
+    /// Return the pruning boundary that [Self::prune] would reach for `requested`.
     fn prune_target(&self, requested: u64) -> Result<u64, Error> {
         let items_per_blob = self.items_per_blob.get();
         let target = position_to_blob(requested.min(self.bounds.end), items_per_blob);
@@ -1538,6 +1538,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         blob_first_position(target, items_per_blob)
     }
 
+    /// See [Journal::prune].
     pub(crate) async fn prune(
         mut self: Box<Self>,
         min_position: u64,

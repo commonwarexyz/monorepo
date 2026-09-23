@@ -288,13 +288,14 @@ where
             }));
         }
 
-        let mut sync_state =
-            DB::begin_sync(config.context.child("sync_state"), &config.db_config).await?;
+        let sync_state = DB::begin_sync(&config.context, &config.db_config).await?;
         let journal = <DB::Journal as Journal<DB::Family>>::open(
             config.context.child("journal"),
             config.db_config.journal_config(),
         )
         .await?;
+        let (mut sync_state, journal) =
+            DB::restart_rejected_import(sync_state, journal, config.target.range.start()).await?;
         let pinned_nodes = if config.target.range.start() == Location::new(0) {
             Some(Vec::new())
         } else if journal.size() >= *config.target.range.end() {
@@ -432,20 +433,9 @@ where
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
     ) -> Result<Self, Error<DB, S>> {
-        let pins = if self.journal.size() >= *new_target.range.end() {
-            DB::local_pinned_nodes(&self.sync_state, &self.config, &new_target, &self.journal)
-                .await?
-        } else {
-            None
-        };
-        if let Some(pins) = &pins {
-            self.sync_state =
-                DB::stage_sync_frontier(self.sync_state, new_target.range.start(), pins.clone())
-                    .await?;
-        }
         self.journal = self.journal.resize(new_target.range.start()).await?;
         self.fetched_operations.clear();
-        self.pinned_nodes = pins;
+        self.pinned_nodes = None;
 
         // Retain the prior target size so its fetches stay eligible until eviction.
         if self.max_retained_roots > 0 {
@@ -773,6 +763,7 @@ where
         let got_root = database.root();
         let expected_root = self.target.root;
         if got_root != expected_root {
+            database.reject_sync_result().await?;
             return Err(SyncError::Engine(EngineError::RootMismatch {
                 expected: expected_root,
                 actual: got_root,
@@ -855,6 +846,11 @@ mod tests {
             Ok(self)
         }
 
+        async fn clear(mut self, start: Location<MmrFamily>) -> Result<Self, Self::Error> {
+            self.size = *start;
+            Ok(self)
+        }
+
         async fn sync(self) -> Result<Self, Self::Error> {
             Ok(self)
         }
@@ -881,7 +877,7 @@ mod tests {
         type Op = i32;
         type SyncState = ();
         async fn begin_sync(
-            _context: Self::Context,
+            _context: &Self::Context,
             _config: &Self::Config,
         ) -> Result<(), qmdb::Error<MmrFamily>> {
             Ok(())
@@ -892,6 +888,13 @@ mod tests {
             _pins: Vec<Self::Digest>,
         ) -> Result<(), qmdb::Error<MmrFamily>> {
             Ok(())
+        }
+        async fn restart_rejected_import(
+            state: (),
+            journal: Self::Journal,
+            _start: Location<MmrFamily>,
+        ) -> Result<((), Self::Journal), qmdb::Error<MmrFamily>> {
+            Ok((state, journal))
         }
 
         async fn from_sync_result(
@@ -908,6 +911,10 @@ mod tests {
 
         async fn persist_sync_result(self) -> Result<Self, qmdb::Error<Self::Family>> {
             Ok(self)
+        }
+
+        async fn reject_sync_result(self) -> Result<(), qmdb::Error<Self::Family>> {
+            Ok(())
         }
 
         async fn local_pinned_nodes(

@@ -130,11 +130,11 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
         );
         let cfg = Config {
             merkle_config: MerkleConfig {
-metadata_partition: format!("fuzz-current-{suffix}-merkle-metadata"),
-replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
-strategy: Sequential,
-cache: Default::default(),
-},
+                metadata_partition: format!("fuzz-current-{suffix}-merkle-metadata"),
+                replay_buffer: NZUsize!(WRITE_BUFFER_SIZE),
+                strategy: Sequential,
+                cache: Default::default(),
+            },
             journal_config: FConfig {
                 partition: format!("fuzz-current-{suffix}-log-journal"),
                 items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),

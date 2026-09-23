@@ -19,16 +19,28 @@ pub(crate) struct Boundary<F: Family, D: Digest> {
     pub(crate) digests: Vec<D>,
 }
 
+/// Whether the operation journal holds an authenticated database.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Status {
+    /// The boundary and operations form an authenticated database.
+    Active,
+    /// A synchronization is replacing operations and has not been authenticated.
+    Importing,
+    /// A completed import failed root verification. The next import must discard retained
+    /// operations and the boundary.
+    Rejected,
+}
+
 #[derive(Clone)]
 struct Record<F: Family, D: Digest> {
-    importing: bool,
+    status: Status,
     boundary: Option<Boundary<F, D>>,
 }
 
 impl<F: Family, D: Digest> Write for Record<F, D> {
     fn write(&self, buf: &mut impl BufMut) {
         MAGIC.write(buf);
-        self.importing.write(buf);
+        (self.status as u8).write(buf);
         self.boundary.is_some().write(buf);
         if let Some(boundary) = &self.boundary {
             boundary.location.write(buf);
@@ -59,7 +71,17 @@ impl<F: Family, D: Digest> Read for Record<F, D> {
                 "unsupported format",
             ));
         }
-        let importing = bool::read(buf)?;
+        let status = match u8::read(buf)? {
+            0 => Status::Active,
+            1 => Status::Importing,
+            2 => Status::Rejected,
+            _ => {
+                return Err(commonware_codec::Error::Invalid(
+                    "Frontier",
+                    "unknown status",
+                ));
+            }
+        };
         let boundary = if bool::read(buf)? {
             let location = Location::<F>::read(buf)?;
             let digests = F::nodes_to_pin(location)
@@ -69,16 +91,22 @@ impl<F: Family, D: Digest> Read for Record<F, D> {
         } else {
             None
         };
-        if !importing && boundary.is_none() {
-            return Err(commonware_codec::Error::Invalid(
-                "Frontier",
-                "active boundary missing",
-            ));
+        match (status, &boundary) {
+            (Status::Active, None) => {
+                return Err(commonware_codec::Error::Invalid(
+                    "Frontier",
+                    "active boundary missing",
+                ));
+            }
+            (Status::Rejected, Some(_)) => {
+                return Err(commonware_codec::Error::Invalid(
+                    "Frontier",
+                    "rejected boundary retained",
+                ));
+            }
+            _ => {}
         }
-        Ok(Self {
-            importing,
-            boundary,
-        })
+        Ok(Self { status, boundary })
     }
 }
 
@@ -140,6 +168,19 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         ))
     }
 
+    /// Validate `config`, then open the frontier [super::Journal::new] would open under `context`
+    /// and mark an import in progress.
+    pub(crate) async fn begin_import<S: commonware_parallel::Strategy>(
+        context: E,
+        config: &super::Config<S>,
+    ) -> Result<Self, Error<F>> {
+        config.cache.capacity::<D>().map_err(Error::InvalidConfig)?;
+        Self::open(context.child("frontier"), config.metadata_partition.clone())
+            .await?
+            .importing()
+            .await
+    }
+
     pub(crate) async fn open(context: E, partition: String) -> Result<Self, Error<F>> {
         // MMB can pin two nodes at each of the at most 64 heights.
         let max_size = D::SIZE
@@ -178,10 +219,20 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
 
     pub(crate) const fn active(&self) -> Result<Option<&Boundary<F, D>>, Error<F>> {
         match &self.record {
-            Some(record) if record.importing => Err(Error::IncompleteSync),
-            Some(record) => Ok(record.boundary.as_ref()),
+            Some(Record {
+                status: Status::Active,
+                boundary,
+            }) => Ok(boundary.as_ref()),
+            Some(_) => Err(Error::IncompleteSync),
             None => Ok(None),
         }
+    }
+
+    /// Whether the last completed import failed root verification.
+    pub(crate) fn rejected(&self) -> bool {
+        self.record
+            .as_ref()
+            .is_some_and(|record| record.status == Status::Rejected)
     }
 
     pub(crate) fn candidate(&self) -> Option<&Boundary<F, D>> {
@@ -195,11 +246,34 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         Ok(self)
     }
 
+    /// Mark an import in progress, keeping the boundary for local authentication. A rejected
+    /// import stays rejected until [Self::restart].
     pub(crate) async fn importing(self) -> Result<Self, Error<F>> {
+        if self.rejected() {
+            return Ok(self);
+        }
         let boundary = self.candidate().cloned();
         self.store(Record {
-            importing: true,
+            status: Status::Importing,
             boundary,
+        })
+        .await
+    }
+
+    /// Require the next import to discard retained operations and the boundary.
+    pub(crate) async fn reject(self) -> Result<Self, Error<F>> {
+        self.store(Record {
+            status: Status::Rejected,
+            boundary: None,
+        })
+        .await
+    }
+
+    /// Resume a rejected import once its retained operations have been durably discarded.
+    pub(crate) async fn restart(self) -> Result<Self, Error<F>> {
+        self.store(Record {
+            status: Status::Importing,
+            boundary: None,
         })
         .await
     }
@@ -209,7 +283,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         location: Location<F>,
         digests: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        self.set(true, location, digests).await
+        self.set(Status::Importing, location, digests).await
     }
 
     pub(crate) async fn activate(
@@ -217,12 +291,12 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
         location: Location<F>,
         digests: Vec<D>,
     ) -> Result<Self, Error<F>> {
-        self.set(false, location, digests).await
+        self.set(Status::Active, location, digests).await
     }
 
     async fn set(
         self,
-        importing: bool,
+        status: Status,
         location: Location<F>,
         digests: Vec<D>,
     ) -> Result<Self, Error<F>> {
@@ -233,7 +307,7 @@ impl<F: Family, E: Context, D: Digest> Frontier<F, E, D> {
             return Err(crate::merkle::Error::InvalidPinnedNodes.into());
         }
         self.store(Record {
-            importing,
+            status,
             boundary: Some(Boundary { location, digests }),
         })
         .await
@@ -265,9 +339,9 @@ mod tests {
     fn codec<F: Family>() {
         for location in [0, 1, 31, 32, 33, 46, 47, 48, *F::MAX_LEAVES] {
             let location = Location::new(location);
-            for importing in [false, true] {
+            for status in [Status::Active, Status::Importing] {
                 let record = Record::<F, D> {
-                    importing,
+                    status,
                     boundary: Some(Boundary {
                         location,
                         digests: pins(location),
@@ -275,7 +349,7 @@ mod tests {
                 };
                 let encoded = record.encode();
                 let decoded = Record::<F, D>::decode(encoded.clone()).unwrap();
-                assert_eq!(decoded.importing, importing);
+                assert_eq!(decoded.status, status);
                 assert_eq!(decoded.boundary.unwrap().digests, pins(location));
                 for end in 0..encoded.len() {
                     assert!(Record::<F, D>::decode(encoded.slice(..end)).is_err());
@@ -286,21 +360,35 @@ mod tests {
             }
         }
         let invalid = Record::<F, D> {
-            importing: false,
+            status: Status::Active,
             boundary: None,
         };
         assert!(Record::<F, D>::decode(invalid.encode()).is_err());
-        let importing = Record::<F, D> {
-            importing: true,
-            boundary: None,
+        let invalid = Record::<F, D> {
+            status: Status::Rejected,
+            boundary: Some(Boundary {
+                location: Location::new(1),
+                digests: pins::<F>(Location::new(1)),
+            }),
         };
-        assert!(
-            Record::<F, D>::decode(importing.encode())
-                .unwrap()
-                .importing
-        );
-        let mut invalid = importing.encode().to_vec();
-        invalid[8] = 2;
+        assert!(Record::<F, D>::decode(invalid.encode()).is_err());
+        for status in [Status::Importing, Status::Rejected] {
+            let record = Record::<F, D> {
+                status,
+                boundary: None,
+            };
+            assert_eq!(
+                Record::<F, D>::decode(record.encode()).unwrap().status,
+                status
+            );
+        }
+        let mut invalid = Record::<F, D> {
+            status: Status::Importing,
+            boundary: None,
+        }
+        .encode()
+        .to_vec();
+        invalid[8] = 3;
         assert!(Record::<F, D>::decode(invalid).is_err());
     }
 
@@ -373,6 +461,37 @@ mod tests {
                 frontier.active().unwrap().unwrap().location,
                 Location::new(47)
             );
+        });
+    }
+
+    #[test]
+    fn rejected_import_persists_until_restart() {
+        deterministic::Runner::default().start(|context| async move {
+            type F = mmr::Family;
+            let frontier = Frontier::<F, _, D>::open(context.child("fresh"), "frontier".into())
+                .await
+                .unwrap()
+                .activate(Location::new(31), pins::<F>(Location::new(31)))
+                .await
+                .unwrap();
+            drop(frontier.importing().await.unwrap().reject().await.unwrap());
+            let frontier = Frontier::<F, _, D>::open(context.child("rejected"), "frontier".into())
+                .await
+                .unwrap();
+            assert!(frontier.rejected());
+            assert!(frontier.candidate().is_none());
+            assert!(matches!(frontier.active(), Err(Error::IncompleteSync)));
+
+            // A new import keeps the rejection until retained operations are discarded.
+            let frontier = frontier.importing().await.unwrap();
+            assert!(frontier.rejected());
+            drop(frontier.restart().await.unwrap());
+            let frontier = Frontier::<F, _, D>::open(context.child("restarted"), "frontier".into())
+                .await
+                .unwrap();
+            assert!(!frontier.rejected());
+            assert!(frontier.candidate().is_none());
+            assert!(matches!(frontier.active(), Err(Error::IncompleteSync)));
         });
     }
 

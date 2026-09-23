@@ -1570,7 +1570,7 @@ where
         let (_, journal) = db.into_log_components();
 
         let state =
-            <DbOf<H> as qmdb::sync::Database>::begin_sync(context.child("import"), &db_config)
+            <DbOf<H> as qmdb::sync::Database>::begin_sync(&context.child("import"), &db_config)
                 .await
                 .unwrap();
         let state = <DbOf<H> as qmdb::sync::Database>::stage_sync_frontier(
@@ -1653,10 +1653,12 @@ where
         let (mmr, journal) = target_db.into_log_components();
 
         // Re-open `sync_db` using from_sync_result
-        let state =
-            <DbOf<H> as qmdb::sync::Database>::begin_sync(context.child("import"), &sync_db_config)
-                .await
-                .unwrap();
+        let state = <DbOf<H> as qmdb::sync::Database>::begin_sync(
+            &context.child("import"),
+            &sync_db_config,
+        )
+        .await
+        .unwrap();
         let state = <DbOf<H> as qmdb::sync::Database>::stage_sync_frontier(
             state,
             sync_lower_bound,
@@ -1726,7 +1728,7 @@ where
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
 
         let state =
-            <DbOf<H> as qmdb::sync::Database>::begin_sync(context.child("import"), &new_db_config)
+            <DbOf<H> as qmdb::sync::Database>::begin_sync(&context.child("import"), &new_db_config)
                 .await
                 .unwrap();
         let state = <DbOf<H> as qmdb::sync::Database>::stage_sync_frontier(
@@ -1783,7 +1785,7 @@ where
         let new_db_config = H::config(&context.next_u64().to_string(), &context);
 
         let state =
-            <DbOf<H> as qmdb::sync::Database>::begin_sync(context.child("import"), &new_db_config)
+            <DbOf<H> as qmdb::sync::Database>::begin_sync(&context.child("import"), &new_db_config)
                 .await
                 .unwrap();
         let state = <DbOf<H> as qmdb::sync::Database>::stage_sync_frontier(

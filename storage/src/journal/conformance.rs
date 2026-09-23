@@ -25,10 +25,7 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(4096);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-fn authenticated_merkle_config(
-    prefix: &str,
-    _pooler: &impl BufferPooler,
-) -> crate::journal::authenticated::Config<Sequential> {
+fn authenticated_merkle_config(prefix: &str) -> crate::journal::authenticated::Config<Sequential> {
     crate::journal::authenticated::Config {
         metadata_partition: format!("{prefix}-merkle-metadata"),
         replay_buffer: REPLAY_BUFFER,
@@ -59,7 +56,7 @@ where
     let mut journal =
         authenticated::Journal::<F, _, fixed::Journal<_, u64>, Sha256, Sequential>::new(
             context.child("authenticated"),
-            authenticated_merkle_config(&prefix, &context),
+            authenticated_merkle_config(&prefix),
             authenticated_journal_config(&prefix, &context),
             |_| true,
             crate::merkle::Bagging::ForwardFold,

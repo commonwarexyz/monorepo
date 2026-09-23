@@ -1,9 +1,9 @@
 use super::{CacheConfig, metrics::Metrics};
 use crate::{
-    journal::contiguous::Contiguous,
+    journal::{Error as JournalError, contiguous::Contiguous},
     merkle::{self, Family, Location, Position, Readable, batch, hasher::Hasher, mem::Mem},
 };
-use commonware_codec::{Encode, EncodeShared};
+use commonware_codec::{Encode, EncodeShared, EncodeSize as _};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{ReadOptions, telemetry::metrics::GaugeExt as _};
@@ -12,10 +12,11 @@ use commonware_utils::{
     cache::Cache,
     sync::{AsyncMutex, RwLock},
 };
-use futures::{StreamExt as _, TryStreamExt as _, stream};
+use futures::{Stream, StreamExt as _, TryStreamExt as _, stream};
 use std::{
     collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
+    ops::Range,
     sync::Arc,
 };
 
@@ -63,6 +64,99 @@ impl<D: Digest> Region<D> {
 
 type LowerCache<D> = RwLock<Option<Box<Cache<u64, Arc<Region<D>>>>>>;
 
+/// The node runs `batch` appends past `size`, in position order, or `None` if it also overwrites
+/// nodes. Rejects the batch against `size` like [`Mem::apply_batch`].
+fn appended_since<F: Family, D: Digest, S: Strategy>(
+    batch: &batch::MerkleizedBatch<F, D, S>,
+    size: Position<F>,
+) -> Result<Option<Vec<&[D]>>, merkle::Error<F>> {
+    let skip_ancestors = if size == batch.base_size {
+        false
+    } else if size > batch.base_size && size < batch.size() {
+        true
+    } else if size == batch.size() && batch.appended.is_empty() {
+        return Ok(None);
+    } else {
+        return Err(merkle::Error::StaleBatch {
+            expected: batch.base_size,
+            actual: size,
+        });
+    };
+    if size < batch.ancestor_base_size {
+        return Err(merkle::Error::AncestorDropped {
+            expected: batch.size(),
+            actual: size,
+        });
+    }
+    let mut runs = Vec::new();
+    let mut batch_pos = *batch.ancestor_base_size;
+    for (appended, overwrites) in batch
+        .ancestor_appended
+        .iter()
+        .zip(&batch.ancestor_overwrites)
+    {
+        batch_pos += appended.len() as u64;
+        let applied = if appended.is_empty() {
+            skip_ancestors && batch_pos < *size
+        } else {
+            skip_ancestors && batch_pos <= *size
+        };
+        if applied {
+            continue;
+        }
+        if !overwrites.is_empty() {
+            return Ok(None);
+        }
+        runs.push(appended.as_slice());
+    }
+    if !batch.overwrites.is_empty() {
+        return Ok(None);
+    }
+    runs.push(batch.appended.as_slice());
+    let appended: u64 = runs.iter().map(|run| run.len() as u64).sum();
+    if *size + appended != *batch.size() {
+        return Ok(None);
+    }
+    Ok(Some(runs))
+}
+
+/// Leaf encodings packed into one buffer, so hashing a batch allocates nothing per leaf.
+struct Encoded<F: Family> {
+    bytes: Vec<u8>,
+    leaves: Vec<(Position<F>, Range<usize>)>,
+}
+
+impl<F: Family> Encoded<F> {
+    const fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            leaves: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, pos: Position<F>, item: &impl Encode) {
+        let start = self.bytes.len();
+        item.write(&mut self.bytes);
+        self.leaves.push((pos, start..self.bytes.len()));
+    }
+
+    /// Hash each leaf, in push order.
+    fn hash<D: Digest, H: Hasher<F, Digest = D> + Clone>(
+        &self,
+        strategy: &impl Strategy,
+        hasher: &H,
+    ) -> Vec<D> {
+        strategy.map_init_collect_vec(
+            &self.leaves,
+            || hasher.clone(),
+            |h, (pos, range)| h.leaf_digest(*pos, &self.bytes[range.clone()]),
+        )
+    }
+}
+
+/// Default for [`Tree::hash_batch_bytes`].
+const HASH_BATCH_BYTES: usize = 8 << 20;
+
 /// Volatile operation-tree state. Only the working frontier is shared with batch snapshots.
 pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     mem: Arc<Mem<F, D>>,
@@ -70,12 +164,18 @@ pub(crate) struct Tree<F: Family, D: Digest, S: Strategy> {
     boundary: Location<F>,
     pins: BTreeMap<Position<F>, D>,
     levels: Vec<Level<D>>,
+    /// Digests held in `levels`.
+    upper_len: usize,
+    /// Digest slots allocated by `levels`.
+    upper_capacity: usize,
     lower: LowerCache<D>,
     fills: Box<[AsyncMutex<()>; 64]>,
     height: u32,
     slots: usize,
-    pub(crate) strategy: S,
-    pub(crate) replay_buffer: NonZeroUsize,
+    strategy: S,
+    replay_buffer: NonZeroUsize,
+    /// Encoded bytes hashed per batch. A larger item forms its own batch.
+    hash_batch_bytes: usize,
 }
 
 impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
@@ -102,42 +202,40 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                     nodes: VecDeque::new(),
                 })
                 .collect(),
+            upper_len: 0,
+            upper_capacity: 0,
             lower: RwLock::new(capacity.map(|capacity| Box::new(Cache::new(capacity)))),
             fills: Box::new(std::array::from_fn(|_| AsyncMutex::new(()))),
             height: config.resident_height,
             slots,
             strategy,
             replay_buffer,
+            hash_batch_bytes: HASH_BATCH_BYTES,
         })
     }
 
     pub(super) fn with_metrics(mut self, metrics: Metrics) -> Self {
         self.metrics = Arc::new(metrics);
-        let capacity = self
+        let (capacity, len) = self
             .lower
-            .read()
+            .get_mut()
             .as_ref()
-            .map_or(0, |cache| cache.capacity());
+            .map_or((0, 0), |cache| (cache.capacity(), cache.len()));
         let _ = self.metrics.cache_capacity.try_set(capacity);
+        let _ = self.metrics.cached_regions.try_set(len);
         self.update_metrics();
         self
     }
 
     fn update_metrics(&self) {
-        let count: usize = self.levels.iter().map(|level| level.nodes.len()).sum();
-        let capacity: usize = self.levels.iter().map(|level| level.nodes.capacity()).sum();
         let _ = self
             .metrics
             .upper_payload_bytes
-            .try_set(count.saturating_mul(size_of::<D>()));
+            .try_set(self.upper_len.saturating_mul(size_of::<D>()));
         let _ = self
             .metrics
             .upper_capacity_bytes
-            .try_set(capacity.saturating_mul(size_of::<D>()));
-        let _ = self
-            .metrics
-            .cached_regions
-            .try_set(self.lower.read().as_ref().map_or(0, |cache| cache.len()));
+            .try_set(self.upper_capacity.saturating_mul(size_of::<D>()));
     }
 
     pub(crate) async fn replay<C, H>(
@@ -167,50 +265,85 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 self.replay_buffer,
                 ReadOptions::default(),
             )
-            .await?;
+            .await?
+            .fuse();
         futures::pin_mut!(replay);
-        let mut items = Vec::new();
-        let mut bytes = 0usize;
-        while let Some((loc, item)) = replay.try_next().await? {
-            let item = item.encode();
-            if !items.is_empty()
-                && (items.len() as u64 >= batch_size
-                    || item.len() > self.replay_buffer.get().saturating_sub(bytes))
-            {
-                self = self
-                    .apply_encoded(hasher, std::mem::take(&mut items))
-                    .await?;
-                bytes = 0;
-            }
-            bytes += item.len();
-            items.push((F::location_to_position(Location::new(loc)), item));
+        let max_bytes = self.hash_batch_bytes;
+        let mut carry = None;
+        let mut next =
+            Self::read_encoded(&mut replay, &mut carry, *end, batch_size, max_bytes).await?;
+        // Read each batch while the previous one hashes.
+        while !next.leaves.is_empty() {
+            let encoded = std::mem::replace(&mut next, Encoded::new());
+            (self, next) = futures::try_join!(
+                self.apply_encoded(hasher, encoded),
+                Self::read_encoded(&mut replay, &mut carry, *end, batch_size, max_bytes),
+            )?;
         }
-        self.apply_encoded(hasher, items).await
+        Ok(self)
+    }
+
+    /// Read the next replay batch, ending before `end`. An item that would overflow a non-empty
+    /// batch is held in `carry` for the next one.
+    async fn read_encoded<T: Encode>(
+        replay: &mut (impl Stream<Item = Result<(u64, T), JournalError>> + Unpin),
+        carry: &mut Option<(u64, T)>,
+        end: u64,
+        max_items: u64,
+        max_bytes: usize,
+    ) -> Result<Encoded<F>, super::Error<F>> {
+        let mut encoded = Encoded::new();
+        loop {
+            let (loc, item) = match carry.take() {
+                Some(next) => next,
+                None => match replay.try_next().await? {
+                    Some(next) => next,
+                    None => break,
+                },
+            };
+            let size = item.encode_size();
+            if encoded.leaves.is_empty() {
+                // Size the batch from its first item, within the byte budget, to avoid regrowth.
+                let items = end
+                    .saturating_sub(loc)
+                    .min(max_items)
+                    .min((max_bytes / size.max(1)) as u64) as usize;
+                encoded.leaves.reserve(items);
+                encoded
+                    .bytes
+                    .reserve(size.saturating_mul(items).min(max_bytes));
+            } else if encoded.leaves.len() as u64 >= max_items
+                || size > max_bytes.saturating_sub(encoded.bytes.len())
+            {
+                *carry = Some((loc, item));
+                break;
+            }
+            encoded.push(F::location_to_position(Location::new(loc)), &item);
+        }
+        Ok(encoded)
     }
 
     async fn apply_encoded<H>(
         mut self,
         hasher: &H,
-        items: Vec<(Position<F>, bytes::Bytes)>,
+        encoded: Encoded<F>,
     ) -> Result<Self, super::Error<F>>
     where
         H: Hasher<F, Digest = D> + Clone + Send + Sync + 'static,
     {
-        if items.is_empty() {
+        if encoded.leaves.is_empty() {
             return Ok(self);
         }
-        self.metrics.replayed_leaves.inc_by(items.len() as u64);
+        self.metrics
+            .replayed_leaves
+            .inc_by(encoded.leaves.len() as u64);
         let mem = self.snapshot();
         let hasher = hasher.clone();
         let batch = self.new_batch();
         let batch = self
             .strategy
-            .spawn(items.len(), move |strategy| {
-                let digests = strategy.map_init_collect_vec(
-                    items,
-                    || hasher.clone(),
-                    |h, (pos, bytes)| h.leaf_digest(pos, &bytes),
-                );
+            .spawn(encoded.leaves.len(), move |strategy| {
+                let digests = encoded.hash(&strategy, &hasher);
                 batch.add_leaf_digests(digests).merkleize(&mem, &hasher)
             })
             .await;
@@ -255,28 +388,82 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         mut self,
         batch: &batch::MerkleizedBatch<F, D, S>,
     ) -> Result<Self, merkle::Error<F>> {
-        let start = self.leaves();
-        Arc::make_mut(&mut self.mem).apply_batch(batch)?;
-        let mut pos = F::location_to_position(start);
-        for leaf in *start..*self.leaves() {
-            for height in std::iter::once(0).chain(F::parent_heights(Location::new(leaf))) {
-                if height >= self.height {
-                    let ordinal = *F::leftmost_leaf(pos, height) >> height;
-                    let level = &mut self.levels[height as usize];
-                    if level.nodes.is_empty() {
-                        level.first = ordinal;
+        let start_leaves = *self.leaves();
+        let start = self.size();
+        // Without unflushed nodes, keep only the new peaks: lower nodes can be rebuilt from
+        // operations, and batches keep their own nodes for speculative proofs.
+        let runs = if self.mem.bounds().is_empty() {
+            appended_since(batch, start)?
+        } else {
+            None
+        };
+        if runs.is_none() {
+            Arc::make_mut(&mut self.mem).apply_batch(batch)?;
+        }
+        let mem = &self.mem;
+        let node = |pos: Position<F>| match &runs {
+            Some(runs) => {
+                let mut index = (*pos).checked_sub(*start)?;
+                for run in runs {
+                    if let Some(digest) = usize::try_from(index).ok().and_then(|i| run.get(i)) {
+                        return Some(*digest);
                     }
-                    if ordinal != level.first + level.nodes.len() as u64 {
-                        return Err(merkle::Error::DataCorrupted("noncontiguous upper level"));
-                    }
-                    level.nodes.push_back(
-                        self.mem
-                            .get_node(pos)
-                            .ok_or(merkle::Error::MissingNode(pos))?,
-                    );
+                    index -= run.len() as u64;
                 }
-                pos += 1;
+                None
             }
+            None => mem.get_node(pos),
+        };
+        let end = batch.size();
+        let leaves = *Location::try_from(end)?;
+        // Nodes at each height are born in ordinal order, so each resident height gains a
+        // contiguous run of ordinals ending before `end`.
+        for height in self.height..64 {
+            if 1u64 << height > leaves {
+                break;
+            }
+            let root =
+                |ordinal: u64| F::subtree_root_position(Location::new(ordinal << height), height);
+            let level = &mut self.levels[height as usize];
+            let mut ordinal = if level.nodes.is_empty() {
+                // The subtree holding the next leaf is unborn; MMB may also delay earlier ones.
+                let mut ordinal = start_leaves >> height;
+                while ordinal > 0 && root(ordinal - 1) >= start {
+                    ordinal -= 1;
+                }
+                level.first = ordinal;
+                ordinal
+            } else {
+                level.first + level.nodes.len() as u64
+            };
+            loop {
+                let pos = root(ordinal);
+                if pos >= end {
+                    break;
+                }
+                if pos < start {
+                    return Err(merkle::Error::DataCorrupted("noncontiguous upper level"));
+                }
+                let capacity = level.nodes.capacity();
+                level
+                    .nodes
+                    .push_back(node(pos).ok_or(merkle::Error::MissingNode(pos))?);
+                self.upper_len += 1;
+                self.upper_capacity += level.nodes.capacity() - capacity;
+                ordinal += 1;
+            }
+        }
+        if runs.is_some() {
+            // Older peaks are already pinned as part of the previous frontier.
+            let peaks = F::nodes_to_pin(Location::new(leaves))
+                .filter(|&pos| pos >= start)
+                .map(|pos| {
+                    node(pos)
+                        .map(|digest| (pos, digest))
+                        .ok_or(merkle::Error::MissingNode(pos))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Arc::make_mut(&mut self.mem).skip_to(Location::new(leaves), peaks)?;
         }
         self.update_metrics();
         Ok(self)
@@ -284,6 +471,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
 
     pub(crate) fn flush(&mut self) {
         let leaves = self.leaves();
+        // Compact in place when no snapshot shares `mem`, keeping its node allocation for reuse.
+        if let Some(mem) = Arc::get_mut(&mut self.mem) {
+            mem.compact(&self.pins);
+            return;
+        }
         let pins = F::nodes_to_pin(leaves)
             .map(|p| self.mem.get_node(p).expect("working frontier present"))
             .collect();
@@ -299,6 +491,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         self.trim_levels();
         if let Some(cache) = self.lower.get_mut() {
             cache.retain(|region, _| (*region << self.height) >= *boundary);
+            let _ = self.metrics.cached_regions.try_set(cache.len());
         }
         self.flush();
         self.update_metrics();
@@ -314,6 +507,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         self.trim_levels();
         if let Some(cache) = self.lower.get_mut() {
             cache.clear();
+            let _ = self.metrics.cached_regions.try_set(0);
         }
         self.update_metrics();
         Ok(())
@@ -322,6 +516,7 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
     fn trim_levels(&mut self) {
         let lower = F::location_to_position(self.boundary);
         let upper = self.size();
+        let (mut len, mut capacity) = (0, 0);
         for (height, level) in self.levels.iter_mut().enumerate() {
             while !level.nodes.is_empty() {
                 let pos =
@@ -343,7 +538,11 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
             if level.nodes.len() <= level.nodes.capacity() / 4 {
                 level.nodes.shrink_to_fit();
             }
+            len += level.nodes.len();
+            capacity += level.nodes.capacity();
         }
+        self.upper_len = len;
+        self.upper_capacity = capacity;
     }
 
     fn available(&self, pos: Position<F>) -> bool {
@@ -545,35 +744,29 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
                 }
             }
         }
+        // A region holds at most 256 leaves, so read them directly rather than streaming a replay.
         leaves.sort_unstable_by_key(|&(loc, _)| loc);
-        let mut offset = 0;
-        while offset < leaves.len() {
-            let start = offset;
-            offset += 1;
-            while offset < leaves.len() && leaves[offset].0 == leaves[offset - 1].0 + 1 {
-                offset += 1;
-            }
-            let range = *leaves[start].0..*leaves[offset - 1].0 + 1;
-            let replay = journal
-                .replay_range(range, self.replay_buffer, ReadOptions::default())
+        let locations: Vec<u64> = leaves.iter().map(|&(loc, _)| *loc).collect();
+        let items = if locations.is_empty() {
+            Vec::new()
+        } else {
+            journal.read_many(&locations).await?
+        };
+        let mut encoded = Encoded::new();
+        for (&(_, pos), item) in leaves.iter().zip(items) {
+            if !encoded.leaves.is_empty()
+                && item.encode_size() > self.hash_batch_bytes.saturating_sub(encoded.bytes.len())
+            {
+                self.hash_leaves(
+                    hasher,
+                    &mut entry,
+                    std::mem::replace(&mut encoded, Encoded::new()),
+                )
                 .await?;
-            futures::pin_mut!(replay);
-            let mut encoded = Vec::new();
-            let mut bytes = 0;
-            while let Some((loc, item)) = replay.try_next().await? {
-                let item = item.encode();
-                if !encoded.is_empty()
-                    && item.len() > self.replay_buffer.get().saturating_sub(bytes)
-                {
-                    self.hash_leaves(hasher, &mut entry, std::mem::take(&mut encoded))
-                        .await?;
-                    bytes = 0;
-                }
-                bytes += item.len();
-                encoded.push((F::location_to_position(Location::new(loc)), item));
             }
-            self.hash_leaves(hasher, &mut entry, encoded).await?;
+            encoded.push(pos, &item);
         }
+        self.hash_leaves(hasher, &mut entry, encoded).await?;
         self.metrics
             .reconstructed_parents
             .inc_by(parents.len() as u64);
@@ -612,27 +805,26 @@ impl<F: Family, D: Digest, S: Strategy> Tree<F, D, S> {
         &self,
         hasher: &H,
         entry: &mut Region<D>,
-        items: Vec<(Position<F>, bytes::Bytes)>,
+        encoded: Encoded<F>,
     ) -> Result<(), merkle::Error<F>> {
-        if items.is_empty() {
+        if encoded.leaves.is_empty() {
             return Ok(());
         }
-        self.metrics.reconstructed_leaves.inc_by(items.len() as u64);
+        self.metrics
+            .reconstructed_leaves
+            .inc_by(encoded.leaves.len() as u64);
         self.metrics
             .reconstructed_bytes
-            .inc_by(items.iter().map(|(_, bytes)| bytes.len() as u64).sum());
+            .inc_by(encoded.bytes.len() as u64);
         let hasher = hasher.clone();
-        let digests = self
+        let (encoded, digests) = self
             .strategy
-            .spawn(items.len(), move |strategy| {
-                strategy.map_init_collect_vec(
-                    items,
-                    || hasher.clone(),
-                    |h, (pos, bytes)| (pos, h.leaf_digest(pos, &bytes)),
-                )
+            .spawn(encoded.leaves.len(), move |strategy| {
+                let digests = encoded.hash(&strategy, &hasher);
+                (encoded, digests)
             })
             .await;
-        for (pos, digest) in digests {
+        for ((pos, _), digest) in encoded.leaves.into_iter().zip(digests) {
             entry.put::<F>(self.slot(pos), digest)?;
         }
         Ok(())
@@ -761,10 +953,12 @@ mod tests {
                         NZUsize!(73),
                         Sequential,
                     )
-                    .unwrap()
-                    .replay(&ops, &hasher, Location::new(513), 17)
-                    .await
                     .unwrap();
+                    tree.hash_batch_bytes = 73;
+                    let mut tree = tree
+                        .replay(&ops, &hasher, Location::new(513), 17)
+                        .await
+                        .unwrap();
                     assert_eq!(
                         tree.root(&hasher, 0).unwrap(),
                         expected.root(&hasher, 0).unwrap()
@@ -835,10 +1029,12 @@ mod tests {
             NZUsize!(31),
             Sequential,
         )
-        .unwrap()
-        .replay(&ops, &hasher, Location::new(128), 7)
-        .await
         .unwrap();
+        tree.hash_batch_bytes = 31;
+        let mut tree = tree
+            .replay(&ops, &hasher, Location::new(128), 7)
+            .await
+            .unwrap();
         ops.clear_reads();
         let pos = F::location_to_position(Location::new(0));
         let first = tree.get_node(&ops, &hasher, pos).await.unwrap().unwrap();

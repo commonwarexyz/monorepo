@@ -37,6 +37,9 @@ pub trait Journal<F: Family>: Sized + Send {
     /// Otherwise prune data before the given location.
     fn resize(self, start: Location<F>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
+    /// Durably discard all operations and reposition the journal at `start`.
+    fn clear(self, start: Location<F>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+
     /// Persist the journal.
     fn sync(self) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 
@@ -73,6 +76,10 @@ where
             let (journal, _) = self.prune(*start).await?;
             Ok(journal)
         }
+    }
+
+    async fn clear(self, start: Location<F>) -> Result<Self, Self::Error> {
+        self.clear_to_size(*start).await
     }
 
     async fn sync(self) -> Result<Self, Self::Error> {
@@ -143,6 +150,10 @@ where
         }
     }
 
+    async fn clear(self, start: Location<F>) -> Result<Self, Self::Error> {
+        self.clear_to_size(*start).await
+    }
+
     async fn sync(self) -> Result<Self, Self::Error> {
         Self::sync(self).await
     }
@@ -207,6 +218,12 @@ where
             self.ops.drain(..(*start - *self.start) as usize);
             self.start = start;
         }
+        Ok(self)
+    }
+
+    async fn clear(mut self, start: Location<F>) -> Result<Self, Self::Error> {
+        self.start = start;
+        self.ops.clear();
         Ok(self)
     }
 

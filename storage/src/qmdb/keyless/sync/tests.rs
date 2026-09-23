@@ -1269,6 +1269,11 @@ mod compact_variable_mmr {
     use crate::qmdb::sync::source::tests::{SequenceSource, fetch_compact_state};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        mocks::{DelayedSyncContext, PendingSyncs},
+        reschedule,
+    };
+    use futures::FutureExt as _;
 
     type SourceDb = variable::Db<mmr::Family, deterministic::Context, Vec<u8>, Sha256, Sequential>;
     type ClientDb = variable::CompactDb<
@@ -1919,6 +1924,199 @@ mod compact_variable_mmr {
                 .unwrap();
             assert_eq!(reopened.root(), target.root);
             reopened.destroy().await.unwrap();
+        });
+    }
+
+    /// A completed import that fails root verification makes the next attempt discard the
+    /// divergent operations it would otherwise reuse. Interrupting later attempts at their first
+    /// durability operation or at any started sync leaves the database either blocked or
+    /// authenticated at the target.
+    #[test_traced("WARN")]
+    fn test_full_sync_rejected_import_discards_divergent_operations() {
+        type DelayedDb = variable::Db<
+            mmr::Family,
+            DelayedSyncContext<deterministic::Context>,
+            Vec<u8>,
+            Sha256,
+            Sequential,
+        >;
+
+        fn engine_config<DB>(
+            context: DB::Context,
+            source: Arc<SourceDb>,
+            target: sync::Target<mmr::Family, sha256::Digest>,
+            db_config: DB::Config,
+        ) -> sync::engine::Config<DB, Arc<SourceDb>>
+        where
+            DB: sync::Database<Family = mmr::Family, Digest = sha256::Digest>,
+            Arc<SourceDb>: sync::SourceFor<DB>,
+            DB::Op: Encode,
+        {
+            sync::engine::Config {
+                context,
+                db_config,
+                fetch_batch_size: NZU64!(2),
+                target,
+                source,
+                apply_batch_size: NZU64!(1024),
+                max_outstanding_requests: 1,
+                update_rx: None,
+                finish_rx: None,
+                reached_target_tx: None,
+                max_retained_roots: 0,
+            }
+        }
+
+        deterministic::Runner::default().start(|context| async move {
+            let source = SourceDb::init(
+                context.child("source"),
+                source_config("rejected-source", &context),
+            )
+            .await
+            .unwrap();
+            let batch = source
+                .new_batch()
+                .append(vec![2])
+                .append(vec![3])
+                .append(vec![4])
+                .merkleize(&source, None, Location::new(0))
+                .await;
+            let (source, _) = source.apply_batch(batch).await.unwrap();
+            let source = Arc::new(source.commit().await.unwrap());
+            let target = sync::Target {
+                root: source.root(),
+                range: non_empty_range!(Location::new(0), source.bounds().end),
+            };
+
+            // Retain operations that diverge from the source at the same locations.
+            let config = source_config("rejected-client", &context);
+            let client = SourceDb::init(context.child("divergent"), config.clone())
+                .await
+                .unwrap();
+            let batch = client
+                .new_batch()
+                .append(vec![7])
+                .append(vec![8])
+                .append(vec![9])
+                .merkleize(&client, None, Location::new(0))
+                .await;
+            let (client, _) = client.apply_batch(batch).await.unwrap();
+            let client = client.commit().await.unwrap();
+            assert_eq!(client.bounds(), source.bounds());
+            assert_ne!(client.root(), target.root);
+            drop(client);
+
+            let result: Result<SourceDb, _> = sync::sync(engine_config(
+                context.child("first"),
+                source.clone(),
+                target.clone(),
+                config.clone(),
+            ))
+            .await;
+            assert!(matches!(
+                result,
+                Err(sync::Error::Engine(sync::EngineError::RootMismatch { .. }))
+            ));
+            assert!(matches!(
+                SourceDb::init(context.child("blocked"), config.clone()).await,
+                Err(qmdb::Error::Authenticated(
+                    crate::journal::authenticated::Error::IncompleteSync
+                ))
+            ));
+
+            // Interrupt the restarted attempt at its first durability operation. The rejection
+            // survives until the divergent operations have been durably discarded.
+            {
+                let pending = PendingSyncs::default();
+                pending.arm();
+                let delayed = DelayedSyncContext {
+                    inner: context.child("gated"),
+                    pending: pending.clone(),
+                };
+                let mut attempt = std::pin::pin!(sync::sync(engine_config::<DelayedDb>(
+                    delayed,
+                    source.clone(),
+                    target.clone(),
+                    config.clone(),
+                )));
+                assert!(attempt.as_mut().now_or_never().is_none());
+                assert!(
+                    pending.calls() > 0,
+                    "attempt stalled before any durability operation"
+                );
+            }
+            let frontier = crate::journal::authenticated::Frontier::<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+            >::open(
+                context.child("gated_frontier"),
+                config.merkle.metadata_partition.clone(),
+            )
+            .await
+            .unwrap();
+            assert!(frontier.rejected());
+            drop(frontier);
+
+            // Drop successive attempts after releasing 0, 1, 2, ... started syncs.
+            for released in 0usize.. {
+                assert!(released < 1000, "import never completed");
+                let pending = PendingSyncs::default();
+                let delayed = DelayedSyncContext {
+                    inner: context
+                        .child("attempt")
+                        .with_attribute("released", released),
+                    pending: pending.clone(),
+                };
+                let result = {
+                    let mut attempt = std::pin::pin!(sync::sync(engine_config::<DelayedDb>(
+                        delayed,
+                        source.clone(),
+                        target.clone(),
+                        config.clone(),
+                    )));
+                    let (mut releases, mut idle) = (0, 0);
+                    loop {
+                        if let Some(result) = attempt.as_mut().now_or_never() {
+                            break Some(result);
+                        }
+                        if pending.lock().is_empty() {
+                            idle += 1;
+                            assert!(idle < 1000, "attempt stalled without a parked sync");
+                            reschedule().await;
+                            continue;
+                        }
+                        if releases == released {
+                            break None;
+                        }
+                        releases += 1;
+                        let sync = pending.lock().remove(0);
+                        let _ = sync.release.send(Ok(()));
+                    }
+                };
+                let completed = result.map(|db| db.unwrap().root());
+                match SourceDb::init(
+                    context.child("check").with_attribute("released", released),
+                    config.clone(),
+                )
+                .await
+                {
+                    Ok(db) => assert_eq!(db.root(), target.root),
+                    Err(qmdb::Error::Authenticated(
+                        crate::journal::authenticated::Error::IncompleteSync,
+                    )) => {}
+                    Err(err) => panic!("interrupted import exposed an invalid database: {err}"),
+                }
+                if let Some(root) = completed {
+                    assert_eq!(root, target.root);
+                    break;
+                }
+            }
+            let client = SourceDb::init(context.child("reopened"), config)
+                .await
+                .unwrap();
+            assert_eq!(client.root(), target.root);
+            client.destroy().await.unwrap();
         });
     }
 
