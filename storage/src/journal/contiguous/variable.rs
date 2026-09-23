@@ -1596,9 +1596,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 }
             }
         }
-        // Compression reserves worst-case room per record, which callers holding the batch keep
+
+        // Limit oversized reservations retained by deferred appends.
         let spare = encoded.capacity() - encoded.len();
-        if self.compression.is_some() && spare > PREPARED_SPARE_LIMIT && spare > 3 * encoded.len() {
+        if self.compression.is_some()
+            && spare > PREPARED_SPARE_LIMIT
+            && spare > encoded.len().saturating_mul(3)
+        {
             encoded.shrink_to_fit();
         }
         Ok(PreparedAppend {
@@ -4028,7 +4032,7 @@ mod tests {
                 let len = prepared.encoded.len();
                 let spare = prepared.encoded.capacity() - len;
                 assert!(
-                    spare <= PREPARED_SPARE_LIMIT.max(3 * len),
+                    spare <= PREPARED_SPARE_LIMIT.max(len.saturating_mul(3)),
                     "{spare} unused bytes for {len} encoded bytes"
                 );
             }

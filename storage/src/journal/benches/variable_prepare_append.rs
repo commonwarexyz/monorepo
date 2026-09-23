@@ -38,6 +38,9 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
             }
             let values = &values[..items];
             for compression in [None, Some(3)] {
+                if compression.is_none() && random {
+                    continue;
+                }
                 let level = compression.map_or("none".into(), |level| level.to_string());
                 c.bench_function(
                     &format!(

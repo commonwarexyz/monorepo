@@ -9,11 +9,14 @@ use commonware_codec::{
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
-use commonware_utils::Cached;
+use commonware_utils::{Cached, Widen};
 use std::{future::Future, io::Cursor};
-use zstd::{bulk::Compressor, decode_all, zstd_safe::compress_bound};
+use zstd::{
+    decode_all,
+    zstd_safe::{CCtx, compress_bound},
+};
 
-commonware_utils::thread_local_cache!(static COMPRESSOR: Compressor<'static>);
+commonware_utils::thread_local_cache!(static COMPRESSOR: CCtx<'static>);
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
@@ -181,17 +184,15 @@ pub(super) async fn read_frame_at<V: Codec>(
 pub(super) fn compress_into(level: u8, data: &[u8], buf: &mut Vec<u8>) -> Result<usize, Error> {
     let start = buf.len();
     buf.reserve(compress_bound(data.len()));
-    let level = i32::from(level);
     let mut compressor = Cached::take(
         &COMPRESSOR,
-        || Compressor::new(level),
-        |compressor| compressor.set_compression_level(level),
-    )
-    .map_err(|_| Error::CompressionFailed)?;
+        || CCtx::try_create().ok_or(Error::CompressionFailed),
+        |_| Ok(()),
+    )?;
     let mut tail = Cursor::new(buf);
     tail.set_position(start as u64);
     compressor
-        .compress_to_buffer(data, &mut tail)
+        .compress(&mut tail, data, level.into())
         .map_err(|_| Error::CompressionFailed)
 }
 
@@ -212,29 +213,24 @@ pub(super) fn encode_frame_into<V: Codec>(
         let start = buf.len();
         let max_len = compress_bound(encoded.len());
         let max_size_len = UInt(u32::try_from(max_len).unwrap_or(u32::MAX)).encode_size();
-        buf.reserve(max_size_len + max_len);
+        let max_entry_len = max_size_len
+            .checked_add(max_len)
+            .ok_or(Error::OffsetOverflow)?;
+        buf.reserve(max_entry_len);
         buf.resize(start + max_size_len, 0);
-        let item_len = match compress_into(compression, &encoded, buf) {
-            Ok(len) => len,
-            Err(err) => {
-                buf.truncate(start);
-                return Err(err);
-            }
-        };
-        let Ok(item_len_u32) = u32::try_from(item_len) else {
-            buf.truncate(start);
-            return Err(Error::ItemTooLarge(item_len));
-        };
+        let item_len = compress_into(compression, &encoded, buf)
+            .and_then(|len| u32::try_from(len).map_err(|_| Error::ItemTooLarge(len)))
+            .inspect_err(|_| buf.truncate(start))?;
 
         // Shift the payload down if its size needs a shorter prefix
-        let size_len = UInt(item_len_u32).encode_size();
+        let size_len = UInt(item_len).encode_size();
         if size_len < max_size_len {
             buf.copy_within(start + max_size_len.., start + size_len);
-            buf.truncate(start + size_len + item_len);
+            buf.truncate(start + size_len + Widen::widen(item_len));
         }
-        UInt(item_len_u32).write(&mut &mut buf[start..start + size_len]);
+        UInt(item_len).write(&mut &mut buf[start..start + size_len]);
 
-        Ok(item_len_u32)
+        Ok(item_len)
     } else {
         // Uncompressed: pre-allocate exact size to avoid copying
         let item_len = item.encode_size();
@@ -262,7 +258,7 @@ mod tests {
     use bytes::{BufMut, Bytes};
     use commonware_codec::{Copying, Encode, Read, Write};
     use commonware_utils::test_rng;
-    use rand::Rng as _;
+    use rand::{Rng as _, RngExt as _};
 
     /// Frame a single item and return the raw frame bytes.
     fn frame<V: Codec>(compression: Option<u8>, item: &V) -> Vec<u8> {
@@ -319,8 +315,10 @@ mod tests {
             ("small record", 64, 19),
             ("grow to 1 KiB", 1024, 3),
             ("grow to 16 KiB", 16 * 1024, 1),
+            ("row match finder", 64 * 1024, 7),
             ("cross a 128 KiB block", 130 * 1024, 3),
             ("small after large", 64, 0),
+            ("clamped level", 1024, 255),
             ("empty after nonempty", 0, 9),
         ];
         let mut rng = test_rng();
@@ -331,7 +329,12 @@ mod tests {
             let repeated = vec![0xAB; len];
             let mut random = vec![0; len];
             rng.fill_bytes(&mut random);
-            for (pattern, item) in [("repeated", repeated), ("random", random)] {
+            let partial = (0..len).map(|_| rng.random_range(0..16u8)).collect();
+            for (pattern, item) in [
+                ("repeated", repeated),
+                ("random", random),
+                ("partly compressible", partial),
+            ] {
                 // Each reference frame uses a fresh context.
                 let compressed = zstd::bulk::compress(&item.encode(), level.into()).unwrap();
                 UInt(compressed.len() as u32).write(&mut independent_frames);
@@ -340,7 +343,11 @@ mod tests {
                 let frame_start = cached_frames.len();
                 let compressed_len =
                     encode_frame_into(Some(level), &item, &mut cached_frames).unwrap();
-                assert_eq!(compressed_len as usize, compressed.len());
+                assert_eq!(
+                    compressed_len as usize,
+                    compressed.len(),
+                    "{case}, {pattern}, compression level {level}"
+                );
                 assert_eq!(
                     cached_frames, independent_frames,
                     "{case}, {pattern}, compression level {level}"
