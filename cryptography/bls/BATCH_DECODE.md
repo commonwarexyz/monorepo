@@ -125,5 +125,60 @@ selection uses one canonical comparison with the field midpoint.
 
 Root extraction and subgroup validation use separate bulk backend entries.
 This shares their machine code across charts and root widths while keeping
-arithmetic inside the selected target-feature context. These are candidates
-until the pinned C8a measurements establish their end-to-end effect.
+arithmetic inside the selected target-feature context.
+
+## Measured results (C8a, AVX-512 IFMA)
+
+C8a.2xlarge (AMD EPYC 9R45, AVX-512F and IFMA), one process pinned to CPU 0,
+Rust 1.97.1, release `opt-level=3` with overflow checks, runtime backend
+selection, no `target-cpu` flag, and no concurrent compilation. Criterion means
+for the whole batch, in milliseconds, at revision `22387a75c`. Every method's
+output matched the fixture oracle before timing. `blst_individual` returns blst
+points; every other method returns native G1 values.
+
+| Method | 1,000 | 6,000 | 100,000 |
+| --- | ---: | ---: | ---: |
+| `blst_individual` | 38.632 | 231.938 | 3,864.126 |
+| `standard_individual` | 33.641 | 201.643 | 3,367.988 |
+| `standard_batch` | 21.870 | 121.817 | 1,962.162 |
+| `triple_roots8` | 6.269 | 27.196 | 380.029 |
+| Speedup vs `standard_batch` | 3.49x | 4.48x | 5.16x |
+
+The 95% interval for `triple_roots8` at 100,000 points is 379.65-380.42 ms;
+for `standard_batch`, 1,961.73-1,962.72 ms. The triple speedup requires the
+experimental sender encoding and does not apply to standard compressed bytes.
+
+Progression of `triple_roots8` on the same host:
+
+| Revision | Change | 1,000 | 6,000 | 100,000 |
+| --- | --- | ---: | ---: | ---: |
+| `a4dfe90c5` | Arithmetic kept inside the AVX-512 entry | 6.442 | 29.178 | 442.254 |
+| `3a4800a44` | Constant `four`, one canonical projection per equality, product-folded nonzero checks | 5.872 | 25.613 | 377.397 |
+| `d90dd97a7` | Vroom scalar conversion helpers inlinable across crates | 5.790 | 25.245 | 374.977 |
+| `22387a75c` | Inner scatter skips empty outer buckets | 6.269 | 27.196 | 380.029 |
+
+The last row is a code-placement artifact, not a regression. Sizes 1,000 and
+6,000 never execute the graph scatter, yet they slowed by 8%. Perf shows the
+same 990-instruction `canonical` function taking about 45% more cycles at its
+new address, while the checker's own cycles fell by 11% at 100,000 points.
+With `-C llvm-args=-align-all-functions=6` on all three builds, the same
+revisions measure 379.21, 374.05, and 359.83 ms at 100,000 points.
+Differences below about 8% therefore need a layout-controlled comparison or a
+per-function profile before they are trusted.
+
+Rejected on this host: 16 interleaved root chains (460.15 ms at 100,000
+points), and the packed IFMA correction quotient from `d523e6f8d`
+(514.93 ms, against 442.25 ms for the scalar version at the time).
+
+Native AVX-512 validation at `22387a75c` (opt-level 0 test binary): all 19
+`subgroup::` tests pass, including the four decoder tests and
+`scatter_skips_only_known_identities`, and the ignored 100,000-point
+`large_receiver_uses_certified_subgroup_check` passes. The Vroom unit tests
+passed on the portable backend only after `d90dd97a7`. That change adds
+inlining attributes and nothing else.
+
+At 100,000 points after these changes, the timed profile is roughly: sixth-root
+chains 33%, subgroup checker 29%, scalar `canonical` 13%, triple decode loop
+9%, and parsing base conversions 3.5%. The remaining canonical projections are
+about 12 per triple. Three are root ranking, one is sign selection, and the
+rest are zero tests that an RNS residue test could replace.
