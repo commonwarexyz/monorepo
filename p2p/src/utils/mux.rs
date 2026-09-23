@@ -212,7 +212,7 @@ impl<S: Sender, R: Receiver> MuxHandle<S, R> {
 
         Ok((
             SubSender {
-                subchannel,
+                prefix: IoBuf::encode(&UInt(subchannel)),
                 inner: GlobalSender::new(self.sender.clone()),
             },
             SubReceiver {
@@ -225,10 +225,12 @@ impl<S: Sender, R: Receiver> MuxHandle<S, R> {
 }
 
 /// Sender that routes messages to the `subchannel`.
+///
+/// Clones and sends share the encoded subchannel prefix.
 #[derive(Clone, Debug)]
 pub struct SubSender<S: Sender> {
     inner: GlobalSender<S>,
-    subchannel: Channel,
+    prefix: IoBuf,
 }
 
 impl<S: Sender> LimitedSender for SubSender<S> {
@@ -239,9 +241,13 @@ impl<S: Sender> LimitedSender for SubSender<S> {
         &mut self,
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
+        let prefix = &self.prefix;
         self.inner
             .check(recipients)
-            .map(|checked| checked.with_subchannel(self.subchannel))
+            .map(|checked| CheckedGlobalSender {
+                subchannel: Some(Subchannel::Encoded(prefix)),
+                ..checked
+            })
     }
 }
 
@@ -326,16 +332,22 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
     }
 }
 
+/// A dynamically selected channel or a registered sender's cached prefix.
+enum Subchannel<'a> {
+    Id(Channel),
+    Encoded(&'a IoBuf),
+}
+
 /// A checked sender for a [GlobalSender].
 pub struct CheckedGlobalSender<'a, S: Sender> {
-    subchannel: Option<Channel>,
+    subchannel: Option<Subchannel<'a>>,
     inner: S::Checked<'a>,
 }
 
 impl<'a, S: Sender> CheckedGlobalSender<'a, S> {
     /// Set the subchannel for this sender.
     pub const fn with_subchannel(mut self, subchannel: Channel) -> Self {
-        self.subchannel = Some(subchannel);
+        self.subchannel = Some(Subchannel::Id(subchannel));
         self
     }
 }
@@ -348,9 +360,12 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     }
 
     fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
-        let subchannel = UInt(self.subchannel.expect("subchannel not set"));
+        let prefix = match self.subchannel.expect("subchannel not set") {
+            Subchannel::Id(subchannel) => IoBuf::encode(&UInt(subchannel)),
+            Subchannel::Encoded(prefix) => prefix.clone(),
+        };
         let mut message = message.into();
-        message.prepend(IoBuf::encode(&subchannel));
+        message.prepend(prefix);
         self.inner.send(message, priority)
     }
 }
@@ -505,9 +520,10 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set, probability};
+    use commonware_utils::{NZUsize, ordered::Set, probability, sync::Mutex};
     use std::{
         num::NonZeroU32,
+        sync::Arc,
         time::{Duration, SystemTime},
     };
 
@@ -704,6 +720,67 @@ mod tests {
         let feedback = sender.send(0, Recipients::One(pk(0)), b"rate-limited", false);
         assert_eq!(feedback, Unreliable::Rejected);
         assert!(!feedback.accepted());
+    }
+
+    #[derive(Clone)]
+    struct RecordingSender(Arc<Mutex<Vec<IoBufs>>>);
+
+    impl LimitedSender for RecordingSender {
+        type PublicKey = PublicKey;
+        type Checked<'a> = Self;
+
+        fn check(
+            &mut self,
+            _: Recipients<Self::PublicKey>,
+        ) -> Result<Self::Checked<'_>, SystemTime> {
+            Ok(self.clone())
+        }
+    }
+
+    impl CheckedSender for RecordingSender {
+        type PublicKey = PublicKey;
+
+        fn recipients(&self) -> Vec<Self::PublicKey> {
+            Vec::new()
+        }
+
+        fn send(self, message: impl Into<IoBufs> + Send, _: bool) -> Unreliable<Feedback> {
+            self.0.lock().push(message.into());
+            Unreliable::new(Feedback::Ok)
+        }
+    }
+
+    #[test]
+    fn test_subsender_shares_prefix_and_allows_override() {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let prefix = IoBuf::encode(&UInt(128u64));
+        let prefix_ptr = prefix.as_ref().as_ptr();
+        let mut sender = SubSender {
+            inner: GlobalSender::new(RecordingSender(messages.clone())),
+            prefix,
+        };
+        let mut clone = sender.clone();
+        for sender in [&mut sender, &mut clone] {
+            sender.check(Recipients::All).unwrap().send(b"payload", false);
+        }
+        sender
+            .check(Recipients::All)
+            .unwrap()
+            .with_subchannel(u64::MAX)
+            .send(b"payload", false);
+        drop(sender);
+        drop(clone);
+
+        let messages = messages.lock();
+        assert_eq!(messages.len(), 3);
+        for (message, expected_channel) in messages.iter().zip([128, 128, u64::MAX]) {
+            if expected_channel == 128 {
+                assert_eq!(message.chunk_at(0).unwrap().as_ptr(), prefix_ptr);
+            }
+            let (channel, payload) = parse(message.clone().coalesce()).unwrap();
+            assert_eq!(channel, expected_channel);
+            assert_eq!(payload, b"payload");
+        }
     }
 
     #[test]

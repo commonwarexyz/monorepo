@@ -100,7 +100,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
             let len = value.encode_size();
-            let mut buf = IoBufMut::with_capacity(len + CHECKSUM_SIZE);
+            let entry_size = len
+                .checked_add(CHECKSUM_SIZE)
+                .and_then(|size| u32::try_from(size).ok())
+                .ok_or(Error::ValueTooLarge)?;
+            let mut buf = IoBufMut::with_capacity(entry_size as usize);
             value.write(&mut buf);
             assert_eq!(buf.len(), len, "write() did not write expected bytes");
             let checksum = Crc32::checksum(buf.as_ref());
@@ -284,6 +288,9 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     /// The returned offset is the byte offset where the entry was written.
     /// The returned size is the total bytes written (compressed_data + crc32).
     /// Both should be stored in the index entry for later retrieval.
+    ///
+    /// Returns [Error::ValueTooLarge] if the stored entry, including its checksum,
+    /// exceeds `u32::MAX` bytes. Uncompressed sizes are checked before allocation.
     ///
     /// # Panics
     ///
@@ -487,6 +494,7 @@ pub async fn corrupt_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::codec::MisreportedSize;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, probability};
@@ -527,6 +535,35 @@ mod tests {
             codec_config: (),
             write_buffer: NZUsize!(1024),
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_glob_uncompressed_rejects_short_write() {
+        deterministic::Runner::default().start(|context| async move {
+            let glob = Glob::<_, MisreportedSize<4>>::init(context, test_cfg())
+                .await
+                .unwrap();
+            let _ = glob.append(1, &MisreportedSize(3)).await;
+        });
+    }
+
+    fn reject_oversized_uncompressed<const SIZE: usize>() {
+        deterministic::Runner::default().start(|context| async move {
+            let glob = Glob::<_, MisreportedSize<SIZE>>::init(context, test_cfg())
+                .await
+                .unwrap();
+            assert!(matches!(
+                glob.append(1, &MisreportedSize(0)).await,
+                Err(Error::ValueTooLarge)
+            ));
+        });
+    }
+
+    #[test]
+    fn test_glob_uncompressed_rejects_size_before_encoding() {
+        reject_oversized_uncompressed::<{ u32::MAX as usize - CHECKSUM_SIZE + 1 }>();
+        reject_oversized_uncompressed::<{ usize::MAX }>();
     }
 
     #[test_traced]

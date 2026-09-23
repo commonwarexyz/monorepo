@@ -104,9 +104,11 @@ impl IoBuf {
 
     /// Create a buffer by encoding `value`.
     ///
-    /// The encoding lands in one exactly-sized native heap allocation. Prefer
-    /// this over `IoBuf::from(value.encode())`, which also allocates an owner
-    /// for the intermediate [`Bytes`].
+    /// The payload capacity is exactly [`EncodeSize::encode_size`]. Nonempty
+    /// encodings use one native heap allocation, including the inline owner
+    /// header; empty encodings allocate nothing. This avoids the external owner
+    /// allocation in `IoBuf::from(value.encode())`, but the inline header can
+    /// increase allocator space at size-class boundaries (see [module docs](crate::iobuf)).
     ///
     /// # Panics
     ///

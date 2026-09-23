@@ -1254,21 +1254,29 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
         // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
         let len = items.len() * A::SIZE;
         let mut buf = IoBufMut::with_capacity(len);
+        let mut write_item = |item: &A| {
+            let start = buf.len();
+            item.write(&mut buf);
+            assert_eq!(
+                buf.len() - start,
+                A::SIZE,
+                "write() did not write expected bytes"
+            );
+        };
         match items {
             Many::Flat(items) => {
                 for item in items {
-                    item.write(&mut buf);
+                    write_item(item);
                 }
             }
             Many::Nested(nested_items) => {
                 for items in nested_items {
                     for item in *items {
-                        item.write(&mut buf);
+                        write_item(item);
                     }
                 }
             }
         }
-        assert_eq!(buf.len(), len, "write() did not write expected bytes");
         PreparedAppend {
             buf: buf.freeze(),
             _marker: PhantomData,
@@ -1615,7 +1623,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// # Panics
     ///
-    /// Panics if the total bytes written do not match the items' declared encoded size.
+    /// Panics if any item writes a different number of bytes than its declared encoded size.
     pub fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
         self.0.prepare_append(items)
     }
@@ -2142,7 +2150,10 @@ impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{journal::contiguous::Contiguous as _, utils::codec::View};
+    use crate::{
+        journal::contiguous::Contiguous as _,
+        utils::codec::{MisreportedSize, View},
+    };
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -2180,6 +2191,59 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    fn prepare_misreported_items(written: &[usize], nested: bool) {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(7));
+            let journal = Journal::<_, MisreportedSize<4>>::init(context, cfg)
+                .await
+                .unwrap();
+            let items: Vec<_> = written.iter().copied().map(MisreportedSize::<4>).collect();
+            let nested_items: Vec<_> = items.chunks(1).collect();
+            let items = if nested {
+                Many::Nested(&nested_items)
+            } else {
+                Many::Flat(&items)
+            };
+            let _ = journal.prepare_append(items);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_prepare_append_rejects_short_flat_item() {
+        prepare_misreported_items(&[3], false);
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_prepare_append_rejects_short_nested_item() {
+        prepare_misreported_items(&[3], true);
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_prepare_append_rejects_compensating_flat_sizes() {
+        prepare_misreported_items(&[3, 5], false);
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_prepare_append_rejects_compensating_nested_sizes() {
+        prepare_misreported_items(&[3, 5], true);
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_prepare_append_rejects_long_flat_item_with_spare_capacity() {
+        prepare_misreported_items(&[5, 3], false);
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_prepare_append_rejects_long_nested_item_with_spare_capacity() {
+        prepare_misreported_items(&[5, 3], true);
     }
 
     #[test]
