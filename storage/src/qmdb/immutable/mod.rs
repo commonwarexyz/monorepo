@@ -785,7 +785,8 @@ pub(super) mod tests {
     use commonware_runtime::{Supervisor as _, deterministic};
     use commonware_utils::NZU64;
     use core::{future::Future, pin::Pin};
-    use std::ops::Range;
+    use futures::FutureExt as _;
+    use std::{ops::Range, panic::AssertUnwindSafe};
 
     const ITEMS_PER_SECTION: u64 = 5;
 
@@ -796,7 +797,7 @@ pub(super) mod tests {
                 #[test_traced]
                 fn $name() {
                     deterministic::Runner::default().start(|ctx| async move {
-                        tests::$scenario(ctx, $open::<mmr::Family>).await;
+                        immutable_tests!(@fixture $open, $scenario, mmr, ctx);
                     });
                 }
             )*
@@ -805,11 +806,23 @@ pub(super) mod tests {
                     #[test_traced]
                     fn [<$name _mmb>]() {
                         deterministic::Runner::default().start(|ctx| async move {
-                            tests::$scenario(ctx, $open::<mmb::Family>).await;
+                            immutable_tests!(@fixture $open, $scenario, mmb, ctx);
                         });
                     }
                 )*
             }
+        };
+        (@fixture pair, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = Db::<$family::Family, _, Digest, Digest, Sha256, TwoCap, Sequential>::init(
+                $ctx.child("db"), config("db", &$ctx), None,
+            ).await.unwrap();
+            let foreign = Db::<$family::Family, _, Digest, Digest, Sha256, TwoCap, Sequential>::init(
+                $ctx.child("foreign"), config("foreign", &$ctx), None,
+            ).await.unwrap();
+            tests::$scenario(db, foreign).await;
+        };
+        (@fixture $open:ident, $scenario:ident, $family:ident, $ctx:ident) => {
+            tests::$scenario($ctx, $open::<$family::Family>).await;
         };
     }
 
@@ -2487,6 +2500,51 @@ pub(super) mod tests {
     }
 
     #[boxed]
+    pub(crate) async fn run_merkleize_foreign_db<F: Family, V, C>(
+        db: TestDb<F, V, C>,
+        foreign: TestDb<F, V, C>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let key = Sha256::fill(1);
+        let batch = db
+            .new_batch()
+            .set(key, Sha256::fill(11))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let batch = foreign
+            .new_batch()
+            .set(key, Sha256::fill(99))
+            .merkleize(&foreign, None, Location::new(0))
+            .await;
+        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        assert_eq!(db.size(), foreign.size());
+        assert_ne!(db.root(), foreign.root());
+
+        let direct = db.new_batch().set(Sha256::fill(2), Sha256::fill(22));
+        let direct = AssertUnwindSafe(direct.merkleize(&foreign, None, Location::new(0)))
+            .catch_unwind()
+            .await;
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(3), Sha256::fill(33))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(4), Sha256::fill(44));
+        let child = AssertUnwindSafe(child.merkleize(&foreign, None, Location::new(0)))
+            .catch_unwind()
+            .await;
+        assert_eq!((direct.is_err(), child.is_err()), (true, true));
+        db.destroy().await.unwrap();
+        foreign.destroy().await.unwrap();
+    }
+
+    #[boxed]
     pub(crate) async fn run_stale_batch_rejected<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
@@ -2682,11 +2740,33 @@ pub(super) mod tests {
             .set(key2, v2)
             .merkleize(&db, None, Location::new(0))
             .await;
+        let pending = b
+            .new_batch::<Sha256>()
+            .set(key3, v3)
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let expected_root = pending.root();
         let c = b.new_batch::<Sha256>().set(key3, v3);
 
-        let (db, _) = db.apply_batch(a).await.unwrap();
+        // The database may advance to a live intermediate ancestor.
+        let (db, _) = db.apply_batch(Arc::clone(&a)).await.unwrap();
+        let live = b
+            .new_batch::<Sha256>()
+            .set(key3, v3)
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        assert_eq!(live.root(), expected_root);
+
+        // Retiring that ancestor advances the effective database boundary.
+        drop(a);
+        let retired = c.merkleize(&db, None, Location::new(0)).await;
+        assert_eq!(retired.bounds().db, db.commitment());
+        assert_eq!(retired.root(), expected_root);
+
+        let c = b.new_batch::<Sha256>().set(key3, v3);
+        let (db, _) = db.apply_batch(b).await.unwrap();
         let c = c.merkleize(&db, None, Location::new(0)).await;
-        let expected_root = c.root();
+        assert_eq!(c.root(), expected_root);
         let (db, _) = db.apply_batch(c).await.unwrap();
 
         assert_eq!(db.root(), expected_root);

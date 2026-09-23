@@ -239,6 +239,11 @@ where
     ///
     /// `inactivity_floor` declares that all operations before this location are inactive.
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `db` does not match this batch's database boundary or a live ancestor
+    /// commitment (both size and root).
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C, T>(
         self,
@@ -261,6 +266,19 @@ where
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
+
+        // Compute the batch chain bounds.
+        let mut ancestor_diffs = Vec::new();
+        let mut ancestors = Vec::new();
+        for batch in &live_ancestors {
+            ancestor_diffs.push(Arc::clone(&batch.diff));
+            ancestors.push(chain::AncestorBounds {
+                floor: batch.bounds.inactivity_floor,
+                state: batch.commitment(),
+            });
+        }
+        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)
+            .expect("merkleization requires a database on the batch's branch");
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
@@ -287,16 +305,8 @@ where
             .await
             .expect("inactive_peaks computed from batch size");
 
-        // Compute the batch chain bounds.
-        let mut ancestor_diffs = Vec::new();
-        let mut ancestors = Vec::new();
-        for batch in live_ancestors {
-            ancestor_diffs.push(Arc::clone(&batch.diff));
-            ancestors.push(chain::AncestorBounds {
-                floor: batch.bounds.inactivity_floor,
-                state: batch.commitment(),
-            });
-        }
+        // Keep ancestor batches alive until the journal has captured their operations and nodes.
+        drop(live_ancestors);
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,

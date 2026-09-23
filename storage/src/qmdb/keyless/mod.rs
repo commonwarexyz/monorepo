@@ -727,7 +727,7 @@ pub(crate) mod tests {
             .merkleize(&db, None, Location::new(0))
             .await;
 
-        // The committed database may advance to a live intermediate ancestor.
+        // The database may advance to a live intermediate ancestor.
         let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
         let applied = parent
             .new_batch::<Sha256>()

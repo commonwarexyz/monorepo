@@ -214,6 +214,7 @@ mod tests {
     }
 
     immutable_tests! {
+        test_variable_merkleize_foreign_db => run_merkleize_foreign_db, pair;
         test_variable_empty => run_empty, open;
         test_variable_build_basic => run_build_basic, open;
         test_variable_proof_verify => run_proof_verify, open;

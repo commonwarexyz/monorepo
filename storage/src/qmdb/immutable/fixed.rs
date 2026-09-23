@@ -480,6 +480,8 @@ mod tests {
     }
 
     immutable_tests! {
+        test_fixed_merkleize_foreign_db => run_merkleize_foreign_db, pair;
+        test_fixed_delayed_merkleize_after_ancestor_apply => run_delayed_merkleize_after_ancestor_apply, open;
         test_fixed_empty => run_empty, open;
         test_fixed_build_basic => run_build_basic, open;
         test_fixed_proof_verify => run_proof_verify, open;

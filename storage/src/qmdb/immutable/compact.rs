@@ -285,6 +285,11 @@ where
     /// (monotonically non-decreasing) and at most the batch's commit location
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `db` does not match this batch's database boundary or a live ancestor
+    /// commitment (both size and root).
     #[tracing::instrument(
         name = "qmdb.immutable.compact.batch.merkleize",
         level = "info",
@@ -310,6 +315,14 @@ where
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
+        let ancestors = chain::collect_ancestor_bounds(
+            live_ancestors.iter().cloned(),
+            |batch| batch.bounds.inactivity_floor,
+            |batch| batch.commitment(),
+        );
+        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)
+            .expect("merkleization requires a database on the batch's branch");
+
         let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
         for (key, value) in self.mutations {
             ops.push(Operation::Set(key, value));
@@ -328,11 +341,8 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors,
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
+        // Keep ancestor batches alive until their operations and nodes have been captured.
+        drop(live_ancestors);
 
         Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
@@ -704,7 +714,11 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::VecU64};
     use core::future::Future;
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use futures::FutureExt as _;
+    use std::{
+        num::{NonZeroU16, NonZeroUsize},
+        panic::AssertUnwindSafe,
+    };
 
     type TestDb<F> =
         Db<F, deterministic::Context, Digest, FixedEncoding<Digest>, Sha256, (), Sequential>;
@@ -732,6 +746,126 @@ mod tests {
             commit_codec_config: (),
         };
         Db::init(context, cfg, None).await.unwrap()
+    }
+
+    async fn compact_merkleize_foreign_db_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "immutable-merkleize-foreign-db").await;
+        let foreign = open_db::<F>(
+            context.child("foreign"),
+            "immutable-merkleize-foreign-db-foreign",
+        )
+        .await;
+
+        let batch = db
+            .new_batch()
+            .set(Sha256::fill(1), Sha256::fill(11))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let batch = foreign
+            .new_batch()
+            .set(Sha256::fill(2), Sha256::fill(99))
+            .merkleize(&foreign, None, Location::new(0))
+            .await;
+        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        assert_eq!(db.size(), foreign.size());
+        assert_ne!(db.root(), foreign.root());
+
+        let batch = db.new_batch().set(Sha256::fill(3), Sha256::fill(22));
+        let direct_rejected = AssertUnwindSafe(batch.merkleize(&foreign, None, Location::new(0)))
+            .catch_unwind()
+            .await
+            .is_err();
+
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(4), Sha256::fill(33))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(5), Sha256::fill(44));
+        let child_rejected = AssertUnwindSafe(child.merkleize(&foreign, None, Location::new(0)))
+            .catch_unwind()
+            .await
+            .is_err();
+
+        assert!(
+            direct_rejected && child_rejected,
+            "foreign database rejection: direct={direct_rejected}, child={child_rejected}"
+        );
+        db.destroy().await.unwrap();
+        foreign.destroy().await.unwrap();
+    }
+
+    async fn compact_merkleize_ancestor_states_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "immutable-merkleize-ancestor-states").await;
+
+        let grandparent = db
+            .new_batch()
+            .set(Sha256::fill(1), Sha256::fill(11))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let parent = grandparent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(2), Sha256::fill(22))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let pending = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(3), Sha256::fill(33))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+
+        let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+        let applied = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(3), Sha256::fill(33))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        assert_eq!(pending.root(), applied.root());
+
+        drop(grandparent);
+        let retired = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(3), Sha256::fill(33))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        assert_eq!(retired.bounds().db, db.commitment());
+        assert_eq!(pending.root(), retired.root());
+
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(3), Sha256::fill(33));
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let child = child.merkleize(&db, None, Location::new(0)).await;
+        assert_eq!(pending.root(), child.root());
+        let expected_root = child.root();
+        let (db, _) = db.apply_batch(child).await.unwrap();
+        assert_eq!(db.root(), expected_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_foreign_db_mmr() {
+        deterministic::Runner::default().start(compact_merkleize_foreign_db_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_foreign_db_mmb() {
+        deterministic::Runner::default().start(compact_merkleize_foreign_db_inner::<mmb::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_ancestor_states_mmr() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_ancestor_states_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_ancestor_states_mmb() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_ancestor_states_inner::<mmb::Family>);
     }
 
     async fn open_bounded<F: Family>(

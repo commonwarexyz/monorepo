@@ -273,6 +273,11 @@ where
     /// (monotonically non-decreasing) and at most the batch's commit location
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `db` does not match this batch's database boundary or a live ancestor
+    /// commitment (both size and root).
     #[tracing::instrument(
         name = "qmdb.keyless.compact.batch.merkleize",
         level = "info",
@@ -298,6 +303,14 @@ where
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
+        let ancestors = chain::collect_ancestor_bounds(
+            live_ancestors.iter().cloned(),
+            |batch| batch.bounds.inactivity_floor,
+            |batch| batch.commitment(),
+        );
+        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)
+            .expect("merkleization requires a database on the batch's branch");
+
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
             ops.push(Operation::Append(value));
@@ -316,11 +329,8 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors,
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
+        // Keep ancestor batches alive until their operations and nodes have been captured.
+        drop(live_ancestors);
 
         Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
@@ -683,7 +693,10 @@ mod tests {
     };
     use core::future::Future;
     use futures::FutureExt as _;
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use std::{
+        num::{NonZeroU16, NonZeroUsize},
+        panic::AssertUnwindSafe,
+    };
 
     type TestDb<F> = Db<F, deterministic::Context, FixedEncoding<U64>, Sha256, (), Sequential>;
 
@@ -723,6 +736,122 @@ mod tests {
             commit_codec_config: (),
         };
         Db::init(context, cfg, None).await.unwrap()
+    }
+
+    async fn compact_merkleize_foreign_db_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "keyless-merkleize-foreign-db").await;
+        let foreign = open_db::<F>(
+            context.child("foreign"),
+            "keyless-merkleize-foreign-db-foreign",
+        )
+        .await;
+
+        let batch = db
+            .new_batch()
+            .append(U64::new(11))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let batch = foreign
+            .new_batch()
+            .append(U64::new(99))
+            .merkleize(&foreign, None, Location::new(0))
+            .await;
+        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        assert_eq!(db.size(), foreign.size());
+        assert_ne!(db.root(), foreign.root());
+
+        let batch = db.new_batch().append(U64::new(22));
+        let direct_rejected = AssertUnwindSafe(batch.merkleize(&foreign, None, Location::new(0)))
+            .catch_unwind()
+            .await
+            .is_err();
+
+        let parent = db
+            .new_batch()
+            .append(U64::new(33))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let child = parent.new_batch::<Sha256>().append(U64::new(44));
+        let child_rejected = AssertUnwindSafe(child.merkleize(&foreign, None, Location::new(0)))
+            .catch_unwind()
+            .await
+            .is_err();
+
+        assert!(
+            direct_rejected && child_rejected,
+            "foreign database rejection: direct={direct_rejected}, child={child_rejected}"
+        );
+        db.destroy().await.unwrap();
+        foreign.destroy().await.unwrap();
+    }
+
+    async fn compact_merkleize_ancestor_states_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "keyless-merkleize-ancestor-states").await;
+
+        let grandparent = db
+            .new_batch()
+            .append(U64::new(1))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let parent = grandparent
+            .new_batch::<Sha256>()
+            .append(U64::new(2))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let pending = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+
+        let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+        let applied = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        assert_eq!(pending.root(), applied.root());
+
+        drop(grandparent);
+        let retired = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        assert_eq!(retired.bounds().db, db.commitment());
+        assert_eq!(pending.root(), retired.root());
+
+        let child = parent.new_batch::<Sha256>().append(U64::new(3));
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let child = child.merkleize(&db, None, Location::new(0)).await;
+        assert_eq!(pending.root(), child.root());
+        let expected_root = child.root();
+        let (db, _) = db.apply_batch(child).await.unwrap();
+        assert_eq!(db.root(), expected_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_foreign_db_mmr() {
+        deterministic::Runner::default().start(compact_merkleize_foreign_db_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_foreign_db_mmb() {
+        deterministic::Runner::default().start(compact_merkleize_foreign_db_inner::<mmb::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_ancestor_states_mmr() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_ancestor_states_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_ancestor_states_mmb() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_ancestor_states_inner::<mmb::Family>);
     }
 
     /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
