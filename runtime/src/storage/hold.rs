@@ -34,11 +34,12 @@ const HOLD_NAME: &str = ".hold";
 /// cleanup. Every thread of the process shares that description, so a blocking
 /// pool thread holds the lock through the same file, and exit releases it only
 /// after every thread has stopped, so an operation still running when the
-/// process dies cannot land under a successor. Child processes do not inherit
-/// it, since the file is opened close-on-exec. The file is empty and never
-/// deleted, so a contended holder is found with `lsof` or `fuser`. The lock is
-/// bound to the inode: removing or recreating the directory while a run may
-/// still be alive voids the exclusion.
+/// process dies cannot land under a successor. A forked child inherits the
+/// description and keeps the hold until it closes the descriptor or exits.
+/// An exec closes the inherited descriptor because it is close-on-exec. The
+/// file is empty and never deleted, so a contended holder is found with `lsof`
+/// or `fuser`. The lock is bound to the inode: removing or recreating the
+/// directory while a run may still be alive voids the exclusion.
 ///
 /// The guarantee is scoped to one machine and to filesystems with real
 /// advisory locks. On network filesystems (NFS, SMB, FUSE) the lock may be
@@ -85,8 +86,8 @@ impl Hold {
 
 /// A blob's file bundled with the hold on its storage directory.
 ///
-/// Each request retains this owner, keeping the directory hold alive while any
-/// blob or request still owns the file.
+/// Each open retains this owner and each request retains its open, keeping the
+/// directory hold alive while any blob or request still owns the file.
 pub(crate) struct Held {
     /// Open file shared by every request on the blob.
     file: File,
