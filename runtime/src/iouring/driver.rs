@@ -2023,11 +2023,9 @@ pub mod tests {
         let held = Held::new(file, hold);
 
         // More than one iovec batch forces a follow-up write before the sync.
-        let bufs = IoBufs::from(
-            (0..IOVEC_BATCH_SIZE + 1)
-                .map(|_| IoBuf::from(b"x"))
-                .collect::<Vec<_>>(),
-        );
+        let bufs = (0..IOVEC_BATCH_SIZE + 1)
+            .map(|_| IoBuf::from(b"x"))
+            .collect::<IoBufs>();
         let id = harness.admit(
             Request::WriteAt(WriteAtRequest {
                 file: held.clone(),

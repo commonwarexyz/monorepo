@@ -1173,8 +1173,7 @@ mod tests {
                     blob.write_at(offset, IoBufs::default(), options)
                         .await
                         .unwrap();
-                    let bufs =
-                        IoBufs::from((0..chunks).map(|_| IoBuf::from(b"x")).collect::<Vec<_>>());
+                    let bufs = (0..chunks).map(|_| IoBuf::from(b"x")).collect::<IoBufs>();
                     assert!(matches!(
                         blob.write_at(offset, bufs, options).await,
                         Err(Error::OffsetOverflow)

@@ -7,6 +7,18 @@
 //! - Use partial signatures that can be combined to form a threshold signature
 //! - Require a quorum of signatures to recover the full signature
 //! - Are **non-attributable**: partial signatures can be forged by holders of enough other partials
+//!
+//! For a fixed, securely generated sharing, threshold unforgeability implies that, except with
+//! negligible probability, a coalition producing a fresh certificate in the standard corruption and
+//! partial-signing model has a transcript containing exposed shares or valid responses for the exact
+//! subject covering a quorum of distinct participants. Those shares and responses suffice to compute
+//! valid partials for that quorum. This is not a public proof of knowledge or a guarantee about a
+//! later recipient.
+//!
+//! Certificate verification does not validate the partials supplied to assembly. Invalid partials
+//! can have cancelling interpolation errors, even with exactly a quorum of inputs. A valid
+//! certificate therefore authenticates quorum authorization without proving input validity or
+//! identifying which participants signed.
 
 #[cfg(feature = "mocks")]
 pub mod mocks;
@@ -337,7 +349,10 @@ impl<P: PublicKey, V: Variant, N: Namespace> Generic<P, V, N> {
         Verification::new(verified, invalid.into_iter().collect())
     }
 
-    /// Assembles a certificate from a non-empty collection of attestations.
+    /// Assembles a candidate certificate from a non-empty collection of attestations.
+    ///
+    /// Checks encoding, signer bounds, uniqueness, and quorum, but does not verify partials.
+    /// Call [`Self::verify_certificate`] before accepting a result assembled from unverified inputs.
     pub fn assemble<S, I, T>(
         &self,
         attestations: NonEmpty<I>,
@@ -732,6 +747,27 @@ macro_rules! impl_certificate_bls12381_threshold {
             {
                 self.generic
                     .verify_attestations::<_, _, D, _, _>(rng, subject, attestations, strategy)
+            }
+
+            fn optimistic_assemble<'a, R, D, I, J>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                pending: I,
+                verified: J,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> Result<Self::Certificate, $crate::certificate::Verification<Self>>
+            where
+                R: rand_core::CryptoRng,
+                D: $crate::Digest,
+                I: IntoIterator<Item = $crate::certificate::Attestation<Self>>,
+                I::IntoIter: ExactSizeIterator + Send,
+                J: IntoIterator<Item = &'a $crate::certificate::Attestation<Self>>,
+                J::IntoIter: Send,
+            {
+                $crate::certificate::optimistic_assemble::<Self, _, D, _, _>(
+                    self, rng, subject, pending, verified, strategy,
+                )
             }
 
             fn assemble<I>(

@@ -457,15 +457,12 @@ impl<O: Sink> Sender<O> {
             return Ok(());
         }
 
-        let mut chunks = Vec::with_capacity(plans.len());
-        for plan in plans {
-            chunks.push(self.build_chunk(plan.messages, plan.total_len)?);
-        }
+        let chunks = plans
+            .into_iter()
+            .map(|plan| self.build_chunk(plan.messages, plan.total_len))
+            .collect::<Result<IoBufs, Error>>()?;
 
-        self.sink
-            .send(IoBufs::from(chunks))
-            .await
-            .map_err(Error::SendFailed)
+        self.sink.send(chunks).await.map_err(Error::SendFailed)
     }
 }
 
@@ -942,28 +939,31 @@ mod test {
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
-            sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().clear();
 
-            // The first two framed messages fit together under the 256-byte cap,
-            // but the third must spill into a second chunk. We still hand the
-            // runtime one chunked `IoBufs`, so there is only one sink call.
-            let payload = vec![7u8; 100];
-            dialer_sender
-                .send_many(vec![
-                    IoBufs::from(IoBuf::from(payload.clone())),
-                    IoBufs::from(IoBuf::from(payload.clone())),
-                    IoBufs::from(IoBuf::from(payload.clone())),
-                ])
-                .await?;
+            // Each frame is 117 bytes: 100 payload + 16 tag + 1 length prefix.
+            // Two fit under the 256-byte cap. Zero through nine messages cover
+            // empty, inline, and deque-backed batches with at most one sink call.
+            for count in 0..=9usize {
+                sends.store(0, Ordering::Relaxed);
+                chunk_counts.lock().clear();
+                dialer_sender
+                    .send_many((0..count).map(|index| IoBuf::from(vec![index as u8; 100])))
+                    .await?;
 
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock(), vec![2]);
-            for _ in 0..3 {
-                assert_eq!(
-                    listener_receiver.recv().await?.coalesce(),
-                    payload.as_slice()
-                );
+                if count == 0 {
+                    assert_eq!(sends.load(Ordering::Relaxed), 0);
+                    assert!(chunk_counts.lock().is_empty());
+                } else {
+                    assert_eq!(sends.load(Ordering::Relaxed), 1);
+                    assert_eq!(*chunk_counts.lock(), vec![count.div_ceil(2)]);
+                }
+                for index in 0..count {
+                    let expected = [index as u8; 100];
+                    assert_eq!(
+                        listener_receiver.recv().await?.coalesce(),
+                        expected.as_slice()
+                    );
+                }
             }
             Ok(())
         })
