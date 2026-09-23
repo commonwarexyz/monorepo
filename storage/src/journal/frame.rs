@@ -30,7 +30,7 @@ pub(super) trait FrameReader {
     ) -> impl Future<Output = Result<IoBufs, Error>> + Send;
 }
 
-impl<B: Blob> FrameReader for Writer<B> {
+impl<B: Blob, Phase: Send + Sync> FrameReader for Writer<B, Phase> {
     async fn read_up_to(
         &self,
         offset: u64,

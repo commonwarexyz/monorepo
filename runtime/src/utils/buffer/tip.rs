@@ -15,8 +15,6 @@ use std::ops::{Bound, RangeBounds};
 ///   caller and reset the tip to a detached empty state.
 /// - Subsequent writes are copy-on-write: [Self::writable] recovers mutable ownership when
 ///   backing is unique, otherwise allocates from the pool and copies existing bytes.
-/// - Prefix drains in [Self::drop_prefix] update the logical view and preserve backing whenever
-///   possible.
 pub(super) struct Buffer {
     /// The data to be written to the blob.
     ///
@@ -33,7 +31,7 @@ pub(super) struct Buffer {
     pub(super) offset: u64,
 
     /// The maximum size of the buffer.
-    pub(super) capacity: usize,
+    capacity: usize,
 
     /// Pool used to allocate backing buffers.
     pool: BufferPool,
@@ -44,15 +42,9 @@ impl Buffer {
     ///
     /// The buffer starts detached, mutable, and allocates backing on first write.
     pub(super) fn new(offset: u64, capacity: usize, pool: BufferPool) -> Self {
-        Self::from(offset, IoBuf::default(), capacity, pool)
-    }
-
-    /// Creates a new buffer seeded with existing logical bytes.
-    pub(super) const fn from(offset: u64, data: IoBuf, capacity: usize, pool: BufferPool) -> Self {
-        let len = data.len();
         Self {
-            data,
-            len,
+            data: IoBuf::default(),
+            len: 0,
             offset,
             capacity,
             pool,
@@ -64,11 +56,6 @@ impl Buffer {
         self.offset + self.len as u64
     }
 
-    /// Returns the logical number of buffered bytes.
-    pub(super) const fn len(&self) -> usize {
-        self.len
-    }
-
     /// Returns true if the buffer is empty.
     pub(super) const fn is_empty(&self) -> bool {
         self.len == 0
@@ -78,7 +65,7 @@ impl Buffer {
     ///
     /// # Panics
     ///
-    /// Panics if `range` falls outside `[0, len()]`.
+    /// Panics if `range` falls outside the buffered bytes.
     pub(super) fn slice(&self, range: impl RangeBounds<usize>) -> IoBuf {
         let start = match range.start_bound() {
             Bound::Included(&n) => n,
@@ -216,58 +203,6 @@ impl Buffer {
 
         true
     }
-
-    /// Replaces the buffered contents with `data` positioned at blob offset `offset`, without
-    /// copying. The capacity and pool are preserved; a later mutation recovers or reallocates
-    /// backing via [Self::writable].
-    pub(super) fn replace(&mut self, offset: u64, data: IoBuf) {
-        self.len = data.len();
-        self.data = data;
-        self.offset = offset;
-    }
-
-    /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
-    /// after the append.
-    ///
-    /// If the buffer is above capacity, the caller is responsible for using `take` to bring it back
-    /// under. Further appends are safe, but will continue growing the buffer beyond its capacity.
-    pub(super) fn append(&mut self, data: &[u8]) -> bool {
-        let end = self.len + data.len();
-        let mut writable = self.writable(end);
-        writable.put_slice(data);
-        let over_capacity = writable.len() > self.capacity;
-        self.len = writable.len();
-        self.data = writable.freeze();
-        over_capacity
-    }
-
-    /// Removes `len` leading bytes from the buffered data while preserving the remaining suffix.
-    ///
-    /// The remaining suffix stays as a logical prefix in the updated view.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `len` exceeds current buffer length.
-    pub(super) fn drop_prefix(&mut self, len: usize) {
-        assert!(len <= self.len);
-        if len == 0 {
-            return;
-        }
-        let current_len = self.len;
-        if len == current_len {
-            self.len = 0;
-            return;
-        }
-        self.data = self.data.slice(len..current_len);
-        self.len = current_len - len;
-    }
-
-    /// Clears buffered data while preserving offset.
-    ///
-    /// This resets logical length and keeps backing allocation for reuse.
-    pub(super) const fn clear(&mut self) {
-        self.len = 0;
-    }
 }
 
 impl AsRef<[u8]> for Buffer {
@@ -287,44 +222,32 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_append() {
-        let pool = test_pool();
-        let mut buffer = Buffer::new(50, 100, pool);
+    fn test_tip_take() {
+        let mut buffer = Buffer::new(50, 100, test_pool());
         assert_eq!(buffer.size(), 50);
         assert!(buffer.is_empty());
         assert!(buffer.take().is_none());
 
-        // Add some data to the buffer.
-        assert!(!buffer.append(&[1, 2, 3]));
+        assert!(buffer.merge(&[1, 2, 3], 50));
         assert_eq!(buffer.size(), 53);
-        assert!(!buffer.is_empty());
-
-        // Confirm `take()` works as intended.
-        let taken = buffer.take().unwrap();
-        assert_eq!(taken.0.as_ref(), &[1, 2, 3]);
-        assert_eq!(taken.1, 50);
+        let (data, offset) = buffer.take().unwrap();
+        assert_eq!(data.as_ref(), &[1, 2, 3]);
+        assert_eq!(offset, 50);
         assert_eq!(buffer.size(), 53);
         assert!(buffer.take().is_none());
 
-        // Fill the buffer to capacity.
-        let mut buf = vec![42; 100];
-        assert!(!buffer.append(&buf));
-        assert_eq!(buffer.size(), 153);
-
-        // Add one more byte, which should push it over capacity. The byte should still be appended.
-        assert!(buffer.append(&[43]));
-        assert_eq!(buffer.size(), 154);
-        buf.push(43);
-        let taken = buffer.take().unwrap();
-        assert_eq!(taken.0.as_ref(), buf.as_slice());
-        assert_eq!(taken.1, 53);
+        assert!(buffer.merge(&[42; 100], 53));
+        assert!(!buffer.merge(&[43], 153));
+        let (data, offset) = buffer.take().unwrap();
+        assert_eq!(data.as_ref(), &[42; 100]);
+        assert_eq!(offset, 53);
     }
 
     #[test]
     fn test_tip_resize() {
         let pool = test_pool();
         let mut buffer = Buffer::new(50, 100, pool);
-        buffer.append(&[1, 2, 3]);
+        assert!(buffer.merge(&[1, 2, 3], buffer.size()));
         assert_eq!(buffer.size(), 53);
 
         // Resize the buffer to correspond to a blob resized to size 60. The returned buffer should
@@ -336,7 +259,7 @@ mod tests {
         assert_eq!(buffer.size(), 60);
         assert!(buffer.take().is_none());
 
-        buffer.append(&[4, 5, 6]);
+        assert!(buffer.merge(&[4, 5, 6], buffer.size()));
         assert_eq!(buffer.size(), 63);
 
         // Resize the buffer down to size 61.
@@ -347,7 +270,7 @@ mod tests {
         assert_eq!(taken.1, 60);
         assert_eq!(buffer.size(), 61);
 
-        buffer.append(&[7, 8, 9]);
+        assert!(buffer.merge(&[7, 8, 9], buffer.size()));
 
         // Resize the buffer prior to the current offset of 61. This should simply reset the buffer
         // at the new size.
@@ -392,24 +315,19 @@ mod tests {
     }
 
     #[test]
-    fn test_tip_merge_append_after_drain_and_clear() {
+    fn test_tip_merge_after_take_and_truncate() {
         let mut buffer = Buffer::new(50, 8, test_pool());
         assert!(buffer.merge(b"abcdef", 50));
-        buffer.drop_prefix(3);
-        buffer.offset += 3;
-        assert!(buffer.merge(b"XYZ", 56));
-        assert_eq!(buffer.as_ref(), b"defXYZ");
-
         let (snapshot, offset) = buffer.take().unwrap();
-        assert_eq!(offset, 53);
-        assert!(buffer.merge(b"12", 59));
+        assert_eq!(offset, 50);
+        assert!(buffer.merge(b"12", 56));
         assert_eq!(buffer.as_ref(), b"12");
-        assert_eq!(snapshot.as_ref(), b"defXYZ");
+        assert_eq!(snapshot.as_ref(), b"abcdef");
 
-        buffer.clear();
-        assert!(buffer.merge(b"!", 59));
+        buffer.resize(56);
+        assert!(buffer.merge(b"!", 56));
         assert_eq!(buffer.as_ref(), b"!");
-        assert_eq!(buffer.size(), 60);
+        assert_eq!(buffer.size(), 57);
     }
 
     #[test]
@@ -417,7 +335,7 @@ mod tests {
         let pool = test_pool();
         let mut buffer = Buffer::new(0, 16, pool);
 
-        buffer.append(b"stale");
+        assert!(buffer.merge(b"stale", buffer.size()));
         let _ = buffer.take().expect("buffer should contain data");
 
         assert!(buffer.slice(..).is_empty());
@@ -429,7 +347,7 @@ mod tests {
         let pool = test_pool();
         let mut buffer = Buffer::new(0, 16, pool);
 
-        assert!(!buffer.append(b"abc"));
+        assert!(buffer.merge(b"abc", buffer.size()));
         let snapshot = buffer.slice(..);
 
         let mut writable = buffer.writable(6);
@@ -441,18 +359,5 @@ mod tests {
 
         assert_eq!(snapshot.as_ref(), b"abc");
         assert_eq!(writable.as_ref(), b"Xbcdef");
-    }
-
-    #[test]
-    fn test_tip_from_preserves_seed_bytes_until_mutated() {
-        let pool = test_pool();
-        let mut buffer = Buffer::from(7, IoBuf::from(&b"abc"[..]), 16, pool);
-
-        assert_eq!(buffer.offset, 7);
-        assert_eq!(buffer.len(), 3);
-        assert_eq!(buffer.as_ref(), b"abc");
-
-        assert!(!buffer.append(b"def"));
-        assert_eq!(buffer.as_ref(), b"abcdef");
     }
 }

@@ -9,8 +9,8 @@ use super::{
     *,
 };
 use crate::{
-    Blob as _, IoBufMut, Metrics as _, Resolver as _, Runner as _, Storage as _, WriteOptions,
-    utils::extract_panic_message,
+    Blob as _, IoBufMut, Listener as _, Metrics as _, Network as _, Resolver as _, Runner as _,
+    Storage as _, WriteOptions, utils::extract_panic_message,
 };
 use futures::{
     FutureExt,
@@ -1212,6 +1212,120 @@ fn test_completed_workers_release_tracking_before_subsequent_launches() {
     });
 }
 
+#[rstest::rstest]
+#[case::io(false)]
+#[case::timer(true)]
+fn test_worker_closure_wakes_shared_observers_before_forwarding(#[case] timer: bool) {
+    struct Counter(AtomicUsize);
+
+    impl Wake for Counter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    for cancel in [false, true] {
+        Runner::new(config()).start(|context| async move {
+            // Both registrations stay pending until their dedicated worker closes.
+            let mut future = if timer {
+                let sleep = context.sleep(Duration::from_secs(60));
+                async move {
+                    sleep.await;
+                    Ok(())
+                }
+                .boxed()
+            } else {
+                let mut listener = context.bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+                async move { listener.accept().await.map(|_| ()) }.boxed()
+            };
+
+            // Hold the first inner poll open so another Shared clone can register
+            // its waker without polling the operation or forwarding its observer.
+            let (entered, ready) = oneshot::channel();
+            let mut entered = Some(entered);
+            let (release, wait) = mpsc::channel();
+            let polls = Arc::new(AtomicUsize::new(0));
+            let inner_polls = polls.clone();
+            let mut shared = poll_fn(move |cx| {
+                inner_polls.fetch_add(1, Ordering::Relaxed);
+                let result = future.as_mut().poll(cx);
+
+                // Disconnection releases the gate if the observing task fails.
+                if let Some(entered) = entered.take() {
+                    assert!(result.is_pending());
+                    entered.send(()).unwrap();
+                    let _ = wait.recv_timeout(TEST_TIMEOUT);
+                }
+                result
+            })
+            .boxed()
+            .shared();
+
+            // The source worker exits after its first poll, once the gate is released.
+            let mut source = shared.clone();
+            let task = context
+                .child("source")
+                .dedicated()
+                .spawn(move |_| async move {
+                    assert!(futures::poll!(&mut source).is_pending());
+                });
+            ready.await.unwrap();
+
+            // Register a second observer while Shared's poll lock is held. Count
+            // notifications independently so a wake cannot cause another inner poll.
+            let counter = Arc::new(Counter(AtomicUsize::new(0)));
+            let waker = std::task::Waker::from(counter.clone());
+            assert!(
+                shared
+                    .poll_unpin(&mut std::task::Context::from_waker(&waker))
+                    .is_pending()
+            );
+            assert_eq!(polls.load(Ordering::Relaxed), 1);
+            assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+
+            // In the cancellation case, dropping the external clone removes its waker.
+            // Source exit then drops the last Shared clone and must complete worker cleanup.
+            let mut observer = (!cancel).then_some(shared);
+            release.send(()).unwrap();
+            task.await.unwrap();
+
+            // Task completion can precede worker cleanup. Wait for registrations
+            // to retire before inspecting notifications.
+            poll_fn(|cx| {
+                if context.shared.workers.state.lock().active == 0 {
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+
+            // A surviving observer must be notified of closure and observe it on its next poll.
+            if let Some(observer) = &mut observer {
+                assert!(
+                    counter.0.load(Ordering::Relaxed) > 0,
+                    "worker closure lost observer wake: timer={timer}"
+                );
+
+                // I/O reports closure as an error. Sleep cannot complete before
+                // its deadline.
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    observer.poll_unpin(&mut std::task::Context::from_waker(&waker))
+                }));
+                if timer {
+                    assert!(result.is_err());
+                } else {
+                    assert!(matches!(result.unwrap(), Poll::Ready(Err(_))));
+                }
+            } else {
+                // Shared removed this clone's waker before the source was released.
+                assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+            }
+        });
+    }
+}
+
 #[test]
 fn test_creation_failure_destroys_payload_before_releasing_tracking() {
     for panic_on_drop in [false, true] {
@@ -1412,7 +1526,7 @@ fn test_service_error_preserves_completions_before_cleanup() {
                 fail_after_completion(Local::current().unwrap().borrow().driver.as_ref().unwrap());
 
             // Keep the observer alive beyond root destruction so cleanup must
-            // preserve its terminal resources before closing ordinary observation.
+            // preserve its terminal resources before closing local observation.
             poll_fn(|cx| {
                 assert!(
                     Pin::new(operation.lock().as_mut().unwrap())
