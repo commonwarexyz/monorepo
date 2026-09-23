@@ -619,6 +619,8 @@ pub(crate) fn invert_standard<P: Modulus>(value: Standard<P>) -> Option<Standard
     bool::from(nonzero).then_some(result)
 }
 
+// Generic callers instantiate in other crates; keep this call inlinable there.
+#[inline(always)]
 fn accumulate(accumulator: &mut [u64; 7], coefficient: &[u64; 6], digit: u64) {
     let mut carry = 0u128;
     for (accumulator, &coefficient) in accumulator.iter_mut().zip(coefficient) {

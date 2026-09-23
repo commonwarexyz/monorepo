@@ -86,6 +86,7 @@ impl Kernel for Portable {
     }
 }
 
+#[inline]
 pub(crate) const fn quotient(input: &Lanes, fraction: &Lanes) -> u64 {
     let mut total = 0u128;
     let mut i = 0;
@@ -96,6 +97,7 @@ pub(crate) const fn quotient(input: &Lanes, fraction: &Lanes) -> u64 {
     (total >> 64) as u64
 }
 
+#[inline]
 pub(crate) const fn reduce_lane(high: u64, low: u64, modulus: u64, inverse: u64) -> u64 {
     let high = high.wrapping_add(low >> WORD);
     let q = low.wrapping_mul(inverse) & MASK;
@@ -103,6 +105,7 @@ pub(crate) const fn reduce_lane(high: u64, low: u64, modulus: u64, inverse: u64)
         .wrapping_sub(((q as u128 * modulus as u128) >> WORD) as u64)
 }
 
+#[inline]
 pub(crate) const fn prepare_lane(
     mut value: u64,
     modulus: u64,
@@ -137,6 +140,7 @@ pub(crate) const fn prepare_lane(
     value
 }
 
+#[inline]
 pub(crate) const fn convert_wide(
     input: &Lanes,
     mut out: RawWide,
