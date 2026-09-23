@@ -10,10 +10,7 @@ use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{Family as MerkleFamily, full::Config as MerkleConfig, mmb, mmr},
     qmdb::{
-        any::{
-            FixedConfig as Config,
-            unordered::fixed::{Db, Operation as FixedOperation},
-        },
+        any::{FixedConfig as Config, unordered::fixed::Db},
         sync,
     },
     translator::TwoCap,
@@ -129,12 +126,7 @@ async fn test_sync<F, R>(
 ) -> bool
 where
     F: MerkleFamily,
-    R: sync::source::Source<
-            Family = F,
-            Digest = commonware_cryptography::sha256::Digest,
-            Op = FixedOperation<F, Key, Value>,
-        > + Clone
-        + 'static,
+    R: sync::SourceFor<FixedDb<F>> + Clone,
 {
     let db_config = test_config(test_name, &context);
     let expected_root = target.root;
@@ -173,7 +165,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let cfg = test_config(&test_name, &context);
-        let mut db: FixedDb<F> = Db::init(context.child("storage"), cfg)
+        let mut db: FixedDb<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to init source db");
         let mut restarts = 0usize;
@@ -277,6 +269,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     let db = Db::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("Failed to init source db");

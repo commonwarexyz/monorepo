@@ -10,6 +10,7 @@ mod dkg;
 mod evaluate_point;
 mod hash_to_curve;
 mod msm;
+mod multisig_optimistic_assemble;
 mod scheme_batch_verify_same_message;
 mod scheme_batch_verify_same_signer;
 mod signature_generation;
@@ -17,9 +18,11 @@ mod signature_verification;
 mod threshold_batch_verify_same_message;
 mod threshold_batch_verify_same_message_pre;
 mod threshold_batch_verify_same_signer;
+mod threshold_optimistic_assemble;
 mod threshold_recover;
 mod tle_decrypt;
 mod tle_encrypt;
+mod utils;
 
 criterion_main!(
     batch_to_affine::benches,
@@ -27,6 +30,7 @@ criterion_main!(
     dkg::feldman_desmedt::benches,
     hash_to_curve::benches,
     threshold_recover::benches,
+    threshold_optimistic_assemble::benches,
     combine_public_keys::benches,
     combine_signatures::benches,
     signature_generation::benches,
@@ -38,6 +42,7 @@ criterion_main!(
     scheme_batch_verify_same_message::benches,
     evaluate_point::benches,
     msm::benches,
+    multisig_optimistic_assemble::benches,
     threshold_batch_verify_same_message::benches,
     threshold_batch_verify_same_message_pre::benches,
     threshold_batch_verify_same_signer::benches,

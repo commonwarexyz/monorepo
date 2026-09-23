@@ -1,7 +1,7 @@
 //! Tracker
 
 use crate::authenticated::lookup::actors::listener;
-use commonware_cryptography::Signer;
+use commonware_cryptography::PublicKey;
 use std::{num::NonZeroUsize, time::Duration};
 
 pub mod actor;
@@ -20,8 +20,8 @@ pub use metadata::Metadata;
 pub use reservation::Reservation;
 
 #[derive(Clone, Debug)]
-pub struct Config<C: Signer> {
-    pub crypto: C,
+pub struct Config<C: PublicKey> {
+    pub public_key: C,
     pub mailbox_size: NonZeroUsize,
     pub max_peers_per_set: usize,
     pub tracked_peer_sets: NonZeroUsize,

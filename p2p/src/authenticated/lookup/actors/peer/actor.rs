@@ -10,10 +10,10 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
-    iobuf::EncodeExt, telemetry::metrics::CounterFamily,
+    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
+    telemetry::metrics::CounterFamily,
 };
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
@@ -89,10 +89,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     /// Drains already-queued messages into `batch`.
     ///
     /// Priority order: control > high > low. Only consumes messages that are
-    /// already ready (via `try_recv`), so this reduces runtime write calls
-    /// without introducing a per-connection timer or extra buffering latency.
+    /// already ready, so batching adds no buffering latency.
     #[allow(clippy::too_many_arguments)]
-    fn extend_send_many<V>(
+    fn extend_send_many<V, S, R>(
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
@@ -101,7 +100,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         rate_limits: &HashMap<u64, V>,
         sent_messages: &CounterFamily<metrics::Message<C>>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<S, R>> {
         while batch.len() < batch_size {
             if let Some(msg) = Self::try_recv_control(control) {
                 match msg {
@@ -139,12 +138,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         }
     }
 
-    pub async fn run<Si: Sink, St: Stream>(
+    pub async fn run<S: Sender, R: Receiver>(
         self,
         peer: C,
-        (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
+        (mut conn_sender, mut conn_receiver): (S, R),
         channels: Channels<C>,
-    ) -> Result<(), Error> {
+    ) -> Result<(), Error<S::Error, R::Error>> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
         let mut senders = HashMap::new();
@@ -169,7 +168,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             RateLimiter::direct_with_clock(ping_rate, self.context.child("ping_rate_limiter"));
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
+        let mut send_handler = self.context.child("sender").spawn({
             let peer = peer.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
@@ -184,7 +183,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     on_stopped => {},
                     _ = context.sleep_until(deadline) => {
                         // Periodically send a ping to the peer, batching
-                        // any already-queued messages into the same write.
+                        // any already-queued messages into the same batch.
                         Self::push_batched(
                             &self.sent_messages,
                             &mut batch,
@@ -208,7 +207,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         deadline = context.current() + self.ping_frequency;
                     },
                     // Await any outbound message (control, high, or low), then
-                    // drain already-queued messages into a single runtime write.
+                    // drain already-queued messages into one `send_many` call.
                     // Priority order: control > high > low.
                     msg = Self::recv_prioritized(control, high, low) => {
                         match msg {
@@ -247,73 +246,72 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 Ok(())
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> =
-            self.context
-                .child("receiver")
-                .spawn(move |context| async move {
-                    loop {
-                        // Receive a message from the peer
-                        let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
+        let mut receive_handler = self
+            .context
+            .child("receiver")
+            .spawn(move |context| async move {
+                loop {
+                    // Receive a message from the peer
+                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
-                        // Parse the message
-                        let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
-                        let msg = match types::Message::decode_cfg(msg, &max_data_length) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                debug!(?err, ?peer, "failed to decode message");
+                    // Parse the message
+                    let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
+                    let msg = match types::Message::decode_cfg(msg, &max_data_length) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            debug!(?err, ?peer, "failed to decode message");
+                            self.received_messages
+                                .get_or_create(&metrics::Message::new_invalid(&peer))
+                                .inc();
+                            return Err(Error::DecodeFailed(err));
+                        }
+                    };
+
+                    // Validate channel and resolve rate limiter before emitting
+                    // any channel-labeled metrics (to avoid unbounded cardinality
+                    // from attacker-controlled channel values).
+                    let (metric, rate_limiter) = match &msg {
+                        types::Message::Data(data) => match rate_limits.get(&data.channel) {
+                            Some(rate_limit) => {
+                                (metrics::Message::new_data(&peer, data.channel), rate_limit)
+                            }
+                            None => {
+                                debug!(?peer, channel = data.channel, "invalid channel");
                                 self.received_messages
                                     .get_or_create(&metrics::Message::new_invalid(&peer))
                                     .inc();
-                                return Err(Error::DecodeFailed(err));
+                                return Err(Error::InvalidChannel);
                             }
-                        };
-
-                        // Validate channel and resolve rate limiter before emitting
-                        // any channel-labeled metrics (to avoid unbounded cardinality
-                        // from attacker-controlled channel values).
-                        let (metric, rate_limiter) = match &msg {
-                            types::Message::Data(data) => match rate_limits.get(&data.channel) {
-                                Some(rate_limit) => {
-                                    (metrics::Message::new_data(&peer, data.channel), rate_limit)
-                                }
-                                None => {
-                                    debug!(?peer, channel = data.channel, "invalid channel");
-                                    self.received_messages
-                                        .get_or_create(&metrics::Message::new_invalid(&peer))
-                                        .inc();
-                                    return Err(Error::InvalidChannel);
-                                }
-                            },
-                            types::Message::Ping => {
-                                (metrics::Message::new_ping(&peer), &ping_rate_limiter)
-                            }
-                        };
-                        self.received_messages.get_or_create(&metric).inc();
-                        if let Err(wait_until) = rate_limiter.check() {
-                            self.rate_limited.get_or_create(&metric).inc();
-                            let wait_duration = wait_until.wait_time_from(context.now());
-                            context.sleep(wait_duration).await;
+                        },
+                        types::Message::Ping => {
+                            (metrics::Message::new_ping(&peer), &ping_rate_limiter)
                         }
+                    };
+                    self.received_messages.get_or_create(&metric).inc();
+                    if let Err(wait_until) = rate_limiter.check() {
+                        self.rate_limited.get_or_create(&metric).inc();
+                        let wait_duration = wait_until.wait_time_from(context.now());
+                        context.sleep(wait_duration).await;
+                    }
 
-                        match msg {
-                            types::Message::Data(data) => {
-                                // Send message to application without blocking.
-                                //
-                                // We intentionally drop messages when the application buffer is
-                                // full rather than blocking. Blocking here would also block
-                                // processing of Ping messages, causing the peer connection to
-                                // stall and potentially disconnect.
-                                let sender = senders.get_mut(&data.channel).unwrap();
-                                let _ =
-                                    sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                            }
-                            types::Message::Ping => {
-                                // We ignore ping messages, they are only used to keep
-                                // the connection alive
-                            }
+                    match msg {
+                        types::Message::Data(data) => {
+                            // Send message to application without blocking.
+                            //
+                            // We intentionally drop messages when the application buffer is
+                            // full rather than blocking. Blocking here would also block
+                            // processing of Ping messages, causing the peer connection to
+                            // stall and potentially disconnect.
+                            let sender = senders.get_mut(&data.channel).unwrap();
+                            let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
+                        }
+                        types::Message::Ping => {
+                            // We ignore ping messages, they are only used to keep
+                            // the connection alive
                         }
                     }
-                });
+                }
+            });
 
         // Wait for one of the handlers to finish or shutdown
         let mut shutdown = self.context.stopped();
@@ -348,7 +346,9 @@ mod tests {
         BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::encrypted::Config as StreamConfig;
+    use commonware_stream::{
+        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
+    };
     use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,
@@ -391,15 +391,15 @@ mod tests {
         }
     }
 
-    fn stream_config<S: Signer>(key: S) -> StreamConfig<S> {
-        StreamConfig {
-            signing_key: key,
-            namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(10),
-            max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(10),
-        }
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
+        Timeout::new(
+            StreamHandshake {
+                signer,
+                synchrony_bound: Duration::from_secs(10),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            Duration::from_secs(10),
+        )
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
@@ -417,46 +417,50 @@ mod tests {
     fn test_invalid_channel_no_unbounded_metric_cardinality() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Establish an encrypted connection between local (attacker) and
             // remote (victim) peers via mock channels.
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -526,46 +530,50 @@ mod tests {
     fn test_batches_outbound_sends_into_single_runtime_write() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
             let sends = Arc::new(AtomicUsize::new(0));
 
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 let sends = sends.clone();
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        CountingSink::new(remote_sink, sends),
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            CountingSink::new(remote_sink, sends),
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (_local_sender, mut local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (_local_sender, mut local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await

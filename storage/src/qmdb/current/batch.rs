@@ -955,7 +955,7 @@ impl<'a, const N: usize> BitmapView<'a, N> {
     }
 
     /// Drop the overlays the committed bitmap already contains. Returns `None` when the oldest
-    /// remaining overlay was not built on the committed bitmap: a rewind onto an ancestor state
+    /// remaining overlay was not built on the committed bitmap: a bounded reopen at an ancestor state
     /// removed an applied overlay from under it, so reads would mix two bitmaps.
     fn trim_committed(mut self) -> Option<Self> {
         let committed = self.committed.len();
@@ -1933,15 +1933,15 @@ mod tests {
     }
 
     /// The oldest kept overlay must have been built on the committed bitmap. Viewing overlays
-    /// built on a 64-bit bitmap over a 32-bit one is what a rewind onto an ancestor state looks
+    /// built on a 64-bit bitmap over a 32-bit one is what a bounded reopen at an ancestor state looks
     /// like, and must be refused.
     #[test]
-    fn trim_committed_rejects_rewound_committed() {
+    fn trim_committed_rejects_earlier_committed_prefix() {
         let committed = make_bitmap(&[true; 64]);
         let overlays = make_view(&committed, &[96]).overlays;
-        let rewound = make_bitmap(&[true; 32]);
+        let recovered = make_bitmap(&[true; 32]);
         assert!(
-            BitmapView::over(overlays, &rewound)
+            BitmapView::over(overlays, &recovered)
                 .trim_committed()
                 .is_none()
         );

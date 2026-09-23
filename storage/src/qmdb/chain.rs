@@ -38,7 +38,7 @@ use std::{
 /// and [`Commitment::on_chain`], which check whatever commitment the caller supplies, so
 /// callers must pair the database with its own commitment (every current caller does).
 /// Holding the wrapped reference also freezes the database for the duration of the call.
-/// Every state mutation takes the database by value, so no apply, prune, or rewind can
+/// Every state mutation takes the database by value, so no apply or prune can
 /// interleave with a checked read.
 pub(crate) struct OnChain<'a, T>(&'a T);
 
@@ -143,7 +143,7 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     /// Check that the live state is one this chain accounts for -- the batch's own tip
     /// (reads through an already applied batch stay valid), the chain's database
     /// boundary, or an ancestor's tip. Anything else means a foreign batch was applied
-    /// or the database was rewound off the chain, so the read is refused with
+    /// or the database was reinitialized off the chain, so the read is refused with
     /// [`Error::StaleRead`] rather than mixing two forks.
     ///
     /// A passing read is exact, since member states are reachable only by applying this

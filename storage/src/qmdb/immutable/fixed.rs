@@ -4,21 +4,9 @@
 
 use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
-    Context,
-    journal::{
-        authenticated,
-        contiguous::fixed::{self, Config as JournalConfig},
-    },
-    merkle::Family,
-    qmdb::{
-        Error, ROOT_BAGGING,
-        any::{FixedValue, value::FixedEncoding},
-    },
-    translator::Translator,
+    journal::contiguous::fixed::{self, Config as JournalConfig},
+    qmdb::any::value::FixedEncoding,
 };
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_utils::Array;
 
 /// Type alias for a fixed-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
@@ -30,62 +18,37 @@ pub type Db<F, E, K, V, H, T, S> =
 /// Type alias for the fixed-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
 
-type Journal<F, E, K, V, H, S> =
-    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H, S>;
-
 /// Configuration for a fixed-size immutable authenticated db.
 pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
 
 /// Configuration for a fixed-size compact immutable db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
-{
-    /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, K, V, H, S> = Journal::new(
-            context.child("journal"),
-            cfg.merkle_config,
-            cfg.log,
-            Operation::<F, K, V>::is_commit,
-            ROOT_BAGGING,
-        )
-        .await?;
-        Self::init_from_journal(journal, context, cfg.translator, cfg.init_buffer).await
-    }
-}
-
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
-    CompactDb<F, E, K, V, H, S>
-{
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        merkle::{Location, full::Config as MmrConfig, mmb, mmr},
-        qmdb::immutable::tests::{self, immutable_tests},
+        merkle::{Family, Location, full::Config as MmrConfig, mmb, mmr},
+        qmdb::{
+            Error,
+            immutable::tests::{self, immutable_tests},
+        },
         translator::TwoCap,
     };
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         BufferPooler, Metrics, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
-        deterministic,
+        deterministic::{
+            self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
+        },
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use core::{future::Future, pin::Pin};
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -121,7 +84,7 @@ mod tests {
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_compact<F: Family>(
@@ -140,7 +103,7 @@ mod tests {
             },
             commit_codec_config: (),
         };
-        CompactDb::init(context, cfg).await.unwrap()
+        CompactDb::init(context, cfg, None).await.unwrap()
     }
 
     /// An immutable db over a delayed-sync storage backend.
@@ -178,6 +141,7 @@ mod tests {
                 pending: pending.clone(),
             },
             cfg,
+            None,
         )
     }
 
@@ -355,37 +319,6 @@ mod tests {
         });
     }
 
-    /// Rewinding drains the in-flight sync before mutating storage.
-    #[test_traced]
-    fn test_fixed_start_sync_rewind_waits() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-rewind", &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
-            db = drive_pending_syncs(&pending, db.commit()).await.unwrap();
-            let committed_root = db.root();
-            let committed_size = db.bounds().end;
-            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(0)).await;
-
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-
-            let db = {
-                let mut rewind = std::pin::pin!(db.rewind(committed_size));
-                assert!(
-                    rewind.as_mut().now_or_never().is_none(),
-                    "rewind proceeded while the started sync was pending"
-                );
-                pending.unblock();
-                rewind.await.unwrap()
-            };
-            handle.await.unwrap();
-            assert_eq!(db.root(), committed_root);
-            db.destroy().await.unwrap();
-        });
-    }
-
     #[test_traced("INFO")]
     fn test_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -457,6 +390,26 @@ mod tests {
         Box::pin(open_db::<F>(ctx))
     }
 
+    #[allow(clippy::type_complexity)]
+    fn open_with_max<F: Family>(
+        ctx: deterministic::Context,
+        cap: Option<Location<F>>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let cfg = config("partition", &ctx);
+            Db::init(ctx, cfg, cap).await
+        })
+    }
+
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -469,14 +422,6 @@ mod tests {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_rewind_is_send(
-        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
-        loc: crate::merkle::mmr::Location,
-    ) {
-        is_send(db.rewind(loc));
     }
 
     fn small_sections_config(
@@ -492,7 +437,7 @@ mod tests {
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = small_sections_config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
@@ -514,6 +459,26 @@ mod tests {
         >,
     > {
         Box::pin(open_small_sections_db::<F>(ctx))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn open_small_sections_with_max<F: Family>(
+        ctx: deterministic::Context,
+        cap: Option<Location<F>>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let cfg = small_sections_config("partition", &ctx);
+            Db::init(ctx, cfg, cap).await
+        })
     }
 
     immutable_tests! {
@@ -547,32 +512,39 @@ mod tests {
         test_fixed_stale_batch_child_applied_before_parent => run_stale_batch_child_applied_before_parent, open;
         test_fixed_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, open;
         test_fixed_to_batch => run_to_batch, open;
-        test_fixed_rewind_recovery => run_rewind_recovery, open;
-        test_fixed_rewind_pruned_target_errors => run_rewind_pruned_target_errors, open_small_sections;
+        test_fixed_bounded_initialization_recovery => run_bounded_initialization_recovery, open_with_max;
+        test_fixed_bounded_initialization_pruned_target_errors =>
+            run_bounded_initialization_pruned_target_errors, open_small_sections_with_max;
         test_fixed_inactivity_floor_tracking => run_inactivity_floor_tracking, open;
         test_fixed_floor_monotonicity => run_floor_monotonicity, open;
         test_fixed_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
         test_fixed_floor_beyond_size => run_floor_beyond_size, open;
         test_fixed_chained_ancestor_floor_regression => run_chained_ancestor_floor_regression, open;
         test_fixed_chained_ancestor_floor_beyond_size => run_chained_ancestor_floor_beyond_size, open;
-        test_fixed_rewind_restores_floor => run_rewind_restores_floor, open;
+        test_fixed_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
         test_fixed_single_commit_live_set => run_single_commit_live_set, open;
-        test_fixed_rewind_after_reopen_with_floor_change => run_rewind_after_reopen_with_floor_change, open;
-        test_fixed_rewind_after_reopen_partial_floor_gap => run_rewind_after_reopen_partial_floor_gap, open;
+        test_fixed_bounded_initialization_after_reopen_with_floor_change =>
+            run_bounded_initialization_after_reopen_with_floor_change, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_partial_floor_gap =>
+            run_bounded_initialization_after_reopen_partial_floor_gap, open_with_max;
         test_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, open;
         test_fixed_prune_after_uncommitted_apply_batch_recovery => run_prune_after_uncommitted_apply_batch_recovery, open;
-        test_fixed_rewind_preserves_collision_bucket => run_rewind_preserves_collision_bucket, open;
+        test_fixed_bounded_initialization_preserves_collision_bucket =>
+            run_bounded_initialization_preserves_collision_bucket, open_with_max;
         test_fixed_get_many => run_get_many, open;
         test_fixed_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
         test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
-        test_fixed_rewind_after_reopen_repeated_key_gap => run_rewind_after_reopen_repeated_key_gap, open;
-        test_fixed_rewind_after_reopen_mixed_gap_retained => run_rewind_after_reopen_mixed_gap_retained, open;
+        test_fixed_bounded_initialization_after_reopen_repeated_key_gap =>
+            run_bounded_initialization_after_reopen_repeated_key_gap, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_mixed_gap_retained =>
+            run_bounded_initialization_after_reopen_mixed_gap_retained, open_with_max;
+        test_fixed_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_repeated_key_retained =>
+            run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
         test_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
         test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
         test_fixed_stale_fork_refuses => run_stale_fork_refuses, open;
         test_fixed_snapshot => run_snapshot, open;
-        test_fixed_rewind_repeated_key_live => run_rewind_repeated_key_live, open;
-        test_fixed_rewind_after_reopen_repeated_key_retained => run_rewind_after_reopen_repeated_key_retained, open;
     }
 
     #[boxed]
@@ -635,6 +607,167 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
             assert_compact_root_compatibility::<mmb::Family>(ctx).await;
+        });
+    }
+
+    /// Reopen at an earlier commit, apply an uncommitted batch over the discarded suffix, then
+    /// crash before any sync. Recovery must yield one legitimate history and never splice the new
+    /// batch onto the discarded suffix.
+    #[test_traced]
+    fn test_immutable_fixed_bounded_init_then_set_crash_recovers_history() {
+        type TestDb =
+            Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+        fn key(i: u8) -> Digest {
+            Digest::from([i; 32])
+        }
+
+        fn value(branch: u8, i: u8) -> Digest {
+            let mut bytes = [branch; 32];
+            bytes[31] = i;
+            Digest::from(bytes)
+        }
+
+        // One operation per page makes the initialization truncation page aligned and one blob
+        // keeps both histories' writes overlapping.
+        fn rebranch_config(pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
+            let page_size =
+                NonZeroU16::new(<Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16)
+                    .unwrap();
+            let mut cfg = config("rebranch", pooler);
+            cfg.merkle_config.items_per_blob = NZU64!(100_000);
+            cfg.log.items_per_blob = NZU64!(100_000);
+            cfg.log.page_cache = CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE);
+            cfg
+        }
+
+        // Keep unsynced writes and drop unsynced resizes at the crash.
+        let runtime = DeterministicConfig::default().with_storage_fault_config(
+            FaultConfig::default().write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            }),
+        );
+        let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
+            .start_and_recover(|context| async move {
+                let db = TestDb::init(context.child("initial"), rebranch_config(&context), None)
+                    .await
+                    .unwrap();
+
+                // A: set k1..k100 and commit.
+                let mut batch = db.new_batch();
+                for i in 1..=100 {
+                    batch = batch.set(key(i), value(1, i));
+                }
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                assert_eq!(*db.bounds().end, 102);
+                let root_a = db.root();
+
+                // B: set k101..k200 and commit.
+                let mut batch = db.new_batch();
+                for i in 101..=200 {
+                    batch = batch.set(key(i), value(2, i));
+                }
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                assert_eq!(*db.bounds().end, 203);
+                let root_b = db.root();
+                drop(db);
+
+                // Reopen at A, discarding B.
+                let db = TestDb::init(
+                    context.child("bounded"),
+                    rebranch_config(&context),
+                    Some(Location::new(102)),
+                )
+                .await
+                .unwrap();
+                assert_eq!(*db.bounds().end, 102);
+                assert_eq!(db.root(), root_a);
+
+                // N: set k201..k250 over B's bytes, then crash without committing. A commit would
+                // sync the log and hide a missing initialization sync.
+                let mut batch = db.new_batch();
+                for i in 201..=250 {
+                    batch = batch.set(key(i), value(3, i));
+                }
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
+                let root_n = batch.root();
+                let (db, range) = db.apply_batch(batch).await.unwrap();
+                assert_eq!((*range.start, *range.end), (102, 153));
+                drop(db);
+
+                (root_a, root_b, root_n)
+            });
+
+        let ((size, root), checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                let db = TestDb::init(context.child("reopen"), rebranch_config(&context), None)
+                    .await
+                    .unwrap();
+
+                // Only A, or N applied on A, is a legitimate history. A splice would keep B's tail
+                // and serve B's keys.
+                let size = *db.bounds().end;
+                let root = db.root();
+                assert_ne!(root, root_b);
+                for i in 1..=100 {
+                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(value(1, i)));
+                }
+                for i in 101..=200 {
+                    assert_eq!(db.get(&key(i)).await.unwrap(), None);
+                }
+                match size {
+                    102 => {
+                        assert_eq!(root, root_a);
+                        for i in 201..=250 {
+                            assert_eq!(db.get(&key(i)).await.unwrap(), None);
+                        }
+                    }
+                    153 => {
+                        assert_eq!(root, root_n);
+                        for i in 201..=250 {
+                            assert_eq!(db.get(&key(i)).await.unwrap(), Some(value(3, i)));
+                        }
+                    }
+                    other => panic!("recovered {other} operations from neither history"),
+                }
+
+                // Commit on the recovered history so the next restart must reproduce it.
+                let batch = db
+                    .new_batch()
+                    .set(key(255), value(5, 255))
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                let size = *db.bounds().end;
+                let root = db.root();
+                drop(db);
+                (size, root)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = TestDb::init(context.child("restart"), rebranch_config(&context), None)
+                .await
+                .unwrap();
+            assert_eq!(*db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key(255)).await.unwrap(), Some(value(5, 255)));
+            db.destroy().await.unwrap();
         });
     }
 }

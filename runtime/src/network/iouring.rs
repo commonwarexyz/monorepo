@@ -3,9 +3,11 @@
 //!
 //! ## Architecture
 //!
-//! Every ring-backed operation binds to the current worker on its first poll.
-//! Connected socket halves and listeners retain descriptors and buffering policy,
-//! so they can move between workers between operations. No resource owns a ring.
+//! Ring-backed operations register requests with the worker that first polls them.
+//! Requests stay on that worker, with completion forwarded when their futures are
+//! polled elsewhere. Connected socket halves and listeners retain descriptors and
+//! buffering policy. They own no ring and can move between workers. Moving a future
+//! does not keep its original worker alive.
 //!
 //! Accept first tries a nonblocking syscall. Only an empty accept queue registers
 //! a single-shot readiness request, and cancellation cannot consume a connection.
@@ -334,7 +336,7 @@ enum SinkState {
 }
 
 impl Sink {
-    /// Construct a sink whose sends bind to their current worker.
+    /// Construct an open sink with a timeout for each send.
     const fn new(fd: Arc<OwnedFd>, timeout: Duration) -> Self {
         Self {
             fd,

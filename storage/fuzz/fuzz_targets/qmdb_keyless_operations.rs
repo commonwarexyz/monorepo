@@ -100,12 +100,15 @@ enum Operation {
         max_ops: u16,
     },
     SimulateFailure {},
+    ReopenAtMost {
+        cap: u64,
+    },
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 13 {
+        match choice % 14 {
             0 => {
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
@@ -156,6 +159,9 @@ impl<'a> Arbitrary<'a> for Operation {
                 })
             }
             11 => Ok(Operation::SimulateFailure {}),
+            13 => Ok(Operation::ReopenAtMost {
+                cap: u.arbitrary()?,
+            }),
             12 => {
                 // Only Bad* kinds make sense here — the ancestor is guaranteed unapplied.
                 let ancestor_kind = match u.arbitrary::<bool>()? {
@@ -228,6 +234,7 @@ async fn reopen<F: Family, S: Strategy>(
     let db = Db::init(
         context.child("db").with_attribute("instance", *restarts),
         cfg,
+        None,
     )
     .await
     .expect("Failed to init keyless db");
@@ -245,14 +252,16 @@ fn fuzz_family<F: Family, S: Strategy>(
     runner.start(|context| async move {
         let strategy = strategy(&context);
         let cfg = test_config(suffix, &context, strategy.clone());
-        let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
+        let mut db: Db<F, S> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to init keyless db");
         let mut restarts = 0usize;
 
         let mut pending_appends: Vec<Vec<u8>> = Vec::new();
+        let mut commits = std::collections::BTreeMap::new();
 
         for op in &input.ops {
+            commits.insert(db.bounds().end, (db.root(), db.inactivity_floor_loc()));
             db = match op {
                 Operation::Append { value_bytes } => {
                     pending_appends.push(value_bytes.clone());
@@ -520,6 +529,49 @@ fn fuzz_family<F: Family, S: Strategy>(
                             );
                         }
                     db
+                }
+
+                Operation::ReopenAtMost { cap } => {
+                    pending_appends.clear();
+                    let before_bounds = db.bounds();
+                    let before_root = db.root();
+                    let cap = Location::<F>::new(*cap % (*before_bounds.end + 3));
+                    let selected = commits.range(..=cap).next_back().map(|(end, state)| (*end, *state));
+                    _ = db.sync().await.expect("sync before cap");
+                    let opened = Db::<F, S>::init(
+                        context.child("capped").with_attribute("instance", restarts),
+                        test_config(suffix, &context, strategy.clone()), Some(cap),
+                    ).await;
+                    restarts += 1;
+                    match opened {
+                        Ok(opened) => {
+                            let (end, (root, floor)) = selected.expect("cap must select a modeled commit");
+                            assert_eq!(opened.bounds().end, end);
+                            assert_eq!(opened.root(), root);
+                            assert_eq!(opened.inactivity_floor_loc(), floor);
+                            drop(opened);
+                            let reopened = reopen(&context, suffix, &strategy, &mut restarts).await;
+                            assert_eq!(reopened.bounds().end, end);
+                            assert_eq!(reopened.root(), root);
+                            commits.retain(|candidate, _| *candidate <= end);
+                            reopened
+                        }
+                        Err(error @ (Error::InvalidInitializationBound
+                            | Error::Journal(commonware_storage::journal::Error::ItemPruned(_)))) => {
+                            match error {
+                                Error::InvalidInitializationBound => assert_eq!(cap, 0),
+                                Error::Journal(_) => {
+                                    assert_ne!(cap, 0);
+                                    assert!(selected.is_none_or(|(end, _)| end <= before_bounds.start));
+                                }
+                                _ => unreachable!(),
+                            }
+                            let reopened = reopen(&context, suffix, &strategy, &mut restarts).await;
+                            assert_eq!(reopened.root(), before_root);
+                            reopened
+                        }
+                        Err(err) => panic!("unexpected bounded initialization error. {err:?}"),
+                    }
                 }
 
                 Operation::SimulateFailure{} => {

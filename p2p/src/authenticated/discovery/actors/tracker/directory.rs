@@ -611,15 +611,17 @@ mod tests {
         SocketAddr::from(([8, 8, 8, 8], 8080))
     }
 
-    fn create_myself_info<S>(
-        signer: &S,
-        socket: SocketAddr,
-        timestamp: u64,
-    ) -> types::Info<S::PublicKey>
+    fn create_info<S>(signer: &S, socket: SocketAddr, timestamp: u64) -> types::Info<S::PublicKey>
     where
         S: commonware_cryptography::Signer,
     {
-        types::Info::sign(signer, NAMESPACE, socket, timestamp)
+        types::Info::sign(
+            signer.public_key(),
+            NAMESPACE,
+            socket,
+            timestamp,
+            |namespace, message| signer.sign(namespace, message),
+        )
     }
 
     fn metric_value(metrics: &str, name: &str, peer: &str) -> Option<i64> {
@@ -641,7 +643,7 @@ mod tests {
     fn test_track_kills_connected_peer_removed_from_sets() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -687,7 +689,7 @@ mod tests {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
         let my_pk = signer.public_key();
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let block_duration = Duration::from_secs(100);
         let config = Config {
             allow_private_ips: false,
@@ -732,7 +734,7 @@ mod tests {
     fn test_secondary_sets_remain_until_eviction() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
@@ -795,7 +797,7 @@ mod tests {
     fn test_track_primary_secondary_overlap_deduplicates() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
@@ -848,7 +850,7 @@ mod tests {
     fn test_demotion_from_primary_to_secondary() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
@@ -938,7 +940,7 @@ mod tests {
     fn test_all_cross_index_primary_wins_for_overlap_peer() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
@@ -999,7 +1001,7 @@ mod tests {
     fn test_block_nonexistent_peer_then_add_to_set() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let unknown_pk = PrivateKey::from_seed(99).public_key();
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1083,7 +1085,7 @@ mod tests {
     fn test_connected_metric_tracks_active_peers() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let config = Config {
             allow_private_ips: false,
             allow_dns: true,
@@ -1133,7 +1135,7 @@ mod tests {
     fn test_block_peer_multiple_times() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let unknown_pk = PrivateKey::from_seed(99).public_key();
         let registered_pk = PrivateKey::from_seed(50).public_key();
         let block_duration = Duration::from_secs(100);
@@ -1209,7 +1211,7 @@ mod tests {
     fn test_blocked_peer_remains_blocked_on_update() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let block_duration = Duration::from_secs(100);
@@ -1244,7 +1246,7 @@ mod tests {
             );
 
             // Update with peer info while blocked
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info.clone()]);
 
             // Peer should still be blocked
@@ -1281,7 +1283,7 @@ mod tests {
     fn test_unblock_expired() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_pk = PrivateKey::from_seed(1).public_key();
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1360,7 +1362,7 @@ mod tests {
     fn test_unblock_expired_peer_removed_and_readded() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let pk_1 = PrivateKey::from_seed(1).public_key();
         let pk_2 = PrivateKey::from_seed(2).public_key();
         let block_duration = Duration::from_secs(100);
@@ -1444,7 +1446,7 @@ mod tests {
     fn test_blocked_metric_multiple_peers() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let pk_1 = PrivateKey::from_seed(1).public_key();
         let pk_2 = PrivateKey::from_seed(2).public_key();
         let pk_3 = PrivateKey::from_seed(3).public_key();
@@ -1503,7 +1505,7 @@ mod tests {
     fn test_blocked_peer_not_dialable() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let block_duration = Duration::from_secs(100);
@@ -1531,7 +1533,7 @@ mod tests {
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Update with peer info so it has a dialable address
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
             // Peer should be dialable before blocking
@@ -1565,7 +1567,7 @@ mod tests {
     fn test_blocked_peer_not_acceptable() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let block_duration = Duration::from_secs(100);
@@ -1593,7 +1595,7 @@ mod tests {
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Update with peer info
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
             // Peer should be acceptable before blocking
@@ -1627,7 +1629,7 @@ mod tests {
     fn test_blocked_peer_not_eligible() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_pk = PrivateKey::from_seed(1).public_key();
         let block_duration = Duration::from_secs(100);
         let config = Config {
@@ -1684,7 +1686,7 @@ mod tests {
     fn test_blocked_peer_info_not_sharable() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let block_duration = Duration::from_secs(100);
@@ -1712,7 +1714,7 @@ mod tests {
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Update with peer info
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
             // Reserve and connect to make peer Active (so info would be sharable)
@@ -1757,7 +1759,7 @@ mod tests {
     fn test_bootstrapper_remains_persistent_after_blocking() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let bootstrapper_pk = PrivateKey::from_seed(1).public_key();
         let bootstrapper_ingress = Ingress::Socket(SocketAddr::from(([1, 2, 3, 4], 8080)));
         let block_duration = Duration::from_secs(100);
@@ -1820,7 +1822,7 @@ mod tests {
     fn test_infos_excludes_blocked_peers() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer_1 = PrivateKey::from_seed(1);
         let peer_pk_1 = peer_signer_1.public_key();
         let peer_signer_2 = PrivateKey::from_seed(2);
@@ -1853,13 +1855,9 @@ mod tests {
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
 
             // Update with peer info for both (use timestamp 0 to pass the epoch_millis filter)
-            let peer_info_1 = types::Info::sign(&peer_signer_1, NAMESPACE, test_socket(), 0);
-            let peer_info_2 = types::Info::sign(
-                &peer_signer_2,
-                NAMESPACE,
-                SocketAddr::from(([9, 9, 9, 9], 9090)),
-                0,
-            );
+            let peer_info_1 = create_info(&peer_signer_1, test_socket(), 0);
+            let peer_info_2 =
+                create_info(&peer_signer_2, SocketAddr::from(([9, 9, 9, 9], 9090)), 0);
             directory.update_peers(vec![peer_info_1, peer_info_2]);
 
             // Connect both peers to make them Active (sharable)
@@ -1906,7 +1904,7 @@ mod tests {
     fn test_reservation_rate_limits_redial() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let cooldown = Duration::from_secs(1);
@@ -1931,7 +1929,7 @@ mod tests {
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
             let reservation = directory.dial(&peer_pk).expect("first dial should succeed");
@@ -1963,7 +1961,7 @@ mod tests {
     fn test_dialable_next_query_at_reflects_rate_limit() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let cooldown = Duration::from_secs(1);
@@ -1988,7 +1986,7 @@ mod tests {
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
             let reservation = directory.dial(&peer_pk).expect("first dial should succeed");
@@ -2012,7 +2010,7 @@ mod tests {
     fn test_dialable_empty() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let config = Config {
             allow_private_ips: true,
             allow_dns: true,
@@ -2042,7 +2040,7 @@ mod tests {
     fn test_dialable_next_query_at_includes_blocked() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let block_duration = Duration::from_secs(3600);
@@ -2067,7 +2065,7 @@ mod tests {
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
             directory.block(&peer_pk);
@@ -2084,7 +2082,7 @@ mod tests {
     fn test_dialable_expired_block_without_unblock() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let block_duration = Duration::from_secs(1);
@@ -2109,7 +2107,7 @@ mod tests {
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
             directory.block(&peer_pk);
@@ -2140,7 +2138,7 @@ mod tests {
     fn test_reblock_after_expired_block_without_unblock() {
         let runtime = deterministic::Runner::default();
         let signer = PrivateKey::from_seed(0);
-        let my_info = create_myself_info(&signer, test_socket(), 100);
+        let my_info = create_info(&signer, test_socket(), 100);
         let peer_signer = PrivateKey::from_seed(1);
         let peer_pk = peer_signer.public_key();
         let block_duration = Duration::from_secs(1);
@@ -2165,7 +2163,7 @@ mod tests {
 
             let peer_set: OrderedSet<_> = [peer_pk.clone()].into_iter().try_collect().unwrap();
             directory.track(0, TrackedPeers::from(peer_set)).unwrap();
-            let peer_info = types::Info::sign(&peer_signer, NAMESPACE, test_socket(), 200);
+            let peer_info = create_info(&peer_signer, test_socket(), 200);
             directory.update_peers(vec![peer_info]);
 
             directory.block(&peer_pk);
