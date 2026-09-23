@@ -202,7 +202,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             init_concurrency: (),
         };
 
-        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
+        let mut db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to initialize Current database");
 
@@ -518,10 +518,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                     expected.sort_unstable_by_key(|(key, _)| *key);
 
                     let actual = {
-                        let stream = db
-                            .stream_range(Key::new(*start))
-                            .await
-                            .expect("range stream should not fail");
+                        let stream = db.stream_range(Key::new(*start)..);
                         pin_mut!(stream);
                         let mut actual = Vec::new();
                         while let Some(item) = stream.next().await {

@@ -801,6 +801,7 @@ mod tests {
         let databases = Databases::<B>::init(
             context.child("db"),
             B::config(&format!("backend-test-{}", B::NAME), page_cache),
+            None,
         )
         .await;
         let batches = databases.new_batches().await;
@@ -918,6 +919,7 @@ mod tests {
                 let databases = Databases::<B>::init(
                     context.child("db"),
                     B::config(&format!("initial-{}", B::NAME), page_cache),
+                    None,
                 )
                 .await;
                 assert!(

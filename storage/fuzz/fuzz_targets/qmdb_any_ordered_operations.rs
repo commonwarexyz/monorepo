@@ -208,7 +208,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
             };
 
             let mut db: GenericDb<F> =
-                commonware_storage::qmdb::any::init(context.child("storage"), cfg)
+                commonware_storage::qmdb::any::init(context.child("storage"), cfg, None)
                     .await
                     .expect("init qmdb");
 
@@ -502,10 +502,7 @@ fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
                         let ordered: BTreeMap<_, _> =
                             committed_state.iter().map(|(k, v)| (*k, *v)).collect();
                         let actual = {
-                            let stream = db
-                                .stream_range(Key::new(*start))
-                                .await
-                                .expect("stream range should not fail");
+                            let stream = db.stream_range(Key::new(*start)..);
                             futures::pin_mut!(stream);
                             let mut actual = Vec::new();
                             while let Some(entry) = stream.next().await {

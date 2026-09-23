@@ -57,7 +57,6 @@ enum Operation {
     OpCount,
     Root,
     SimulateFailure,
-    Rewind,
     Strategy {
         values: [u8; 4],
     },
@@ -66,7 +65,7 @@ enum Operation {
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 16 {
+        match choice % 15 {
             0 => {
                 let key = u.arbitrary()?;
                 let value_len: u16 = u.arbitrary()?;
@@ -117,8 +116,7 @@ impl<'a> Arbitrary<'a> for Operation {
             10 => Ok(Operation::OpCount),
             11 => Ok(Operation::Root),
             12 => Ok(Operation::SimulateFailure {}),
-            13 => Ok(Operation::Rewind),
-            14 | 15 => Ok(Operation::Strategy {
+            13 | 14 => Ok(Operation::Strategy {
                 values: u.arbitrary()?,
             }),
             _ => unreachable!(),
@@ -188,6 +186,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
             context.child("storage"),
             cfg,
+            None,
         )
         .await
         .expect("Failed to init source db");
@@ -409,28 +408,6 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     db
                 }
 
-                Operation::Rewind => {
-                    let expected_root = db.root();
-                    let expected_bounds = db.bounds();
-                    let expected_metadata_before = db
-                        .get_metadata()
-                        .await
-                        .expect("Metadata read should not fail");
-                    let db = db
-                        .rewind(expected_bounds.end)
-                        .await
-                        .expect("Rewinding to the current tip should not fail");
-                    assert_eq!(db.root(), expected_root);
-                    assert_eq!(db.bounds(), expected_bounds);
-                    assert_eq!(
-                        db.get_metadata()
-                            .await
-                            .expect("Metadata read should not fail"),
-                        expected_metadata_before,
-                    );
-                    db
-                }
-
                 Operation::Strategy { values } => {
                     let expected = values.iter().map(|value| u64::from(*value)).sum::<u64>();
                     let actual = db.strategy().fold(
@@ -496,6 +473,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     let db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("Failed to init source db");

@@ -74,7 +74,6 @@ enum CurrentOperation {
         max_ops: NonZeroU64,
         chunk_xor: [u8; 32],
     },
-    Rewind,
     Strategy {
         values: [u8; 4],
     },
@@ -178,7 +177,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
             init_concurrency: (),
         };
 
-        let mut db: Db<F> = Db::init(context.child("storage"), cfg)
+        let mut db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to initialize Current database");
 
@@ -449,20 +448,6 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
                         metadata,
                         "sync should preserve metadata"
                     );
-                    db
-                }
-
-                CurrentOperation::Rewind => {
-                    let root = db.root();
-                    let ops_root = db.ops_root();
-                    let bounds = db.bounds();
-                    let db = db
-                        .rewind(bounds.end)
-                        .await
-                        .expect("rewinding to the current tip should not fail");
-                    assert_eq!(db.root(), root);
-                    assert_eq!(db.ops_root(), ops_root);
-                    assert_eq!(db.bounds(), bounds);
                     db
                 }
 

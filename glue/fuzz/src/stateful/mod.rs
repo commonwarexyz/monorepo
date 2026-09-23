@@ -44,8 +44,8 @@
 //!   restarted on a schedule.
 //! - `db_restarts` runs the restart driver over every database backend.
 //! - `db_sync` drives a database set through state sync, pruning, replay,
-//!   and rewind with no consensus above it, against peers that are
-//!   sometimes slow and sometimes serve a divergent history.
+//!   and a reopen at the anchor with no consensus above it, against peers
+//!   that are sometimes slow and sometimes serve a divergent history.
 //! - `state_sync` is the late-joiner driver: three correct engines run from
 //!   genesis, a fourth joins later through peer state sync, and restarts may
 //!   interrupt the sync or follow its completion.

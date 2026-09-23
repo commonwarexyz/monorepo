@@ -97,6 +97,7 @@ enum Operation {
     OpCount,
     OldestRetainedLoc,
     SyncBoundary,
+    /// Recover an earlier retained commit by reopening with its size as the bound.
     Rewind {
         idx: u8,
     },
@@ -116,12 +117,15 @@ enum Operation {
     Strategy {
         values: [u8; 4],
     },
+    ReopenAtMost {
+        cap: u64,
+    },
 }
 
 impl<'a> Arbitrary<'a> for Operation {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let choice: u8 = u.arbitrary()?;
-        match choice % 20 {
+        match choice % 21 {
             0 => {
                 let value_len: u16 = u.arbitrary()?;
                 let actual_len = ((value_len as usize) % 10000) + 1;
@@ -196,6 +200,9 @@ impl<'a> Arbitrary<'a> for Operation {
             19 => Ok(Operation::Strategy {
                 values: u.arbitrary()?,
             }),
+            20 => Ok(Operation::ReopenAtMost {
+                cap: u.arbitrary()?,
+            }),
             _ => unreachable!(),
         }
     }
@@ -263,6 +270,7 @@ async fn reopen<F: Family, S: Strategy>(
     let db = Db::init(
         context.child("db").with_attribute("instance", *restarts),
         cfg,
+        None,
     )
     .await
     .expect("Failed to init keyless db");
@@ -282,7 +290,7 @@ fn fuzz_family<F: Family, S: Strategy>(
     runner.start(|context| async move {
         let strategy = strategy(&context);
         let cfg = test_config(suffix, &context, strategy.clone());
-        let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
+        let mut db: Db<F, S> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to init keyless db");
         let mut restarts = 0usize;
@@ -295,8 +303,10 @@ fn fuzz_family<F: Family, S: Strategy>(
             db.inactivity_floor_loc(),
             db.get_metadata().await.unwrap(),
         )];
+        let mut commits = std::collections::BTreeMap::new();
 
         for op in &input.ops {
+            commits.insert(db.bounds().end, (db.root(), db.inactivity_floor_loc()));
             db = match op {
                 Operation::Append { value_bytes } => {
                     pending_appends.push(value_bytes.clone());
@@ -580,9 +590,26 @@ fn fuzz_family<F: Family, S: Strategy>(
                     if candidates.len() < 2 {
                         db
                     } else {
-                        let expected = candidates[*idx as usize % (candidates.len() - 1)];
+                        let expected = candidates[*idx as usize % (candidates.len() - 1)].clone();
                         let target = expected.0;
-                        let db = db.rewind(target).await.expect("Rewind should not fail");
+                        // A bounded reopen recovers the commit in place of the removed rewind,
+                        // and the recovered prefix must survive an unbounded reopen.
+                        pending_appends.clear();
+                        _ = db.sync().await.expect("sync before rewind");
+                        let rewound = Db::<F, S>::init(
+                            context.child("rewound").with_attribute("instance", restarts),
+                            test_config(suffix, &context, strategy.clone()),
+                            Some(target),
+                        )
+                        .await
+                        .expect("reopening at a retained commit should not fail");
+                        restarts += 1;
+                        assert_eq!(rewound.bounds().end, expected.0);
+                        assert_eq!(rewound.root(), expected.1);
+                        assert_eq!(rewound.inactivity_floor_loc(), expected.2);
+                        assert_eq!(rewound.get_metadata().await.unwrap(), expected.3);
+                        drop(rewound);
+                        let db = reopen(&context, suffix, &strategy, &mut restarts).await;
                         assert_eq!(db.bounds().end, expected.0);
                         assert_eq!(db.root(), expected.1);
                         assert_eq!(db.inactivity_floor_loc(), expected.2);
@@ -590,6 +617,7 @@ fn fuzz_family<F: Family, S: Strategy>(
                         expected_metadata = expected.3.clone();
                         let db = db.commit().await.expect("Rewind commit should not fail");
                         commit_history.retain(|(size, _, _, _)| *size <= target);
+                        commits.retain(|candidate, _| *candidate <= target);
                         db
                     }
                 }
@@ -755,6 +783,49 @@ fn fuzz_family<F: Family, S: Strategy>(
                         "Failed to verify historical proof for start loc{start_loc} with max ops {max_ops}",
                     );
                     db
+                }
+
+                Operation::ReopenAtMost { cap } => {
+                    pending_appends.clear();
+                    let before_bounds = db.bounds();
+                    let before_root = db.root();
+                    let cap = Location::<F>::new(*cap % (*before_bounds.end + 3));
+                    let selected = commits.range(..=cap).next_back().map(|(end, state)| (*end, *state));
+                    _ = db.sync().await.expect("sync before cap");
+                    let opened = Db::<F, S>::init(
+                        context.child("capped").with_attribute("instance", restarts),
+                        test_config(suffix, &context, strategy.clone()), Some(cap),
+                    ).await;
+                    restarts += 1;
+                    match opened {
+                        Ok(opened) => {
+                            let (end, (root, floor)) = selected.expect("cap must select a modeled commit");
+                            assert_eq!(opened.bounds().end, end);
+                            assert_eq!(opened.root(), root);
+                            assert_eq!(opened.inactivity_floor_loc(), floor);
+                            drop(opened);
+                            let reopened = reopen(&context, suffix, &strategy, &mut restarts).await;
+                            assert_eq!(reopened.bounds().end, end);
+                            assert_eq!(reopened.root(), root);
+                            commits.retain(|candidate, _| *candidate <= end);
+                            reopened
+                        }
+                        Err(error @ (Error::InvalidInitializationBound
+                            | Error::Journal(commonware_storage::journal::Error::ItemPruned(_)))) => {
+                            match error {
+                                Error::InvalidInitializationBound => assert_eq!(cap, 0),
+                                Error::Journal(_) => {
+                                    assert_ne!(cap, 0);
+                                    assert!(selected.is_none_or(|(end, _)| end <= before_bounds.start));
+                                }
+                                _ => unreachable!(),
+                            }
+                            let reopened = reopen(&context, suffix, &strategy, &mut restarts).await;
+                            assert_eq!(reopened.root(), before_root);
+                            reopened
+                        }
+                        Err(err) => panic!("unexpected bounded initialization error. {err:?}"),
+                    }
                 }
 
                 Operation::SimulateFailure{} => {

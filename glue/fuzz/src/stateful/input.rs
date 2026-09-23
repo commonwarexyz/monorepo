@@ -508,7 +508,7 @@ impl Arbitrary<'_> for PeerControls {
 }
 
 /// One run of the database-set target: a state sync of one set shape from a
-/// serving set, followed by pruning, replay, and rewind of the result.
+/// serving set, followed by pruning, replay, and a reopen of the result at the anchor.
 #[derive(Clone)]
 pub struct StatefulDbSyncFuzzInput {
     /// The set shape to sync.

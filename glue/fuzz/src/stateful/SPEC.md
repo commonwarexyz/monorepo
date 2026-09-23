@@ -94,7 +94,7 @@ produces, and on whether a block verifies.
 - **G9 — Retention.** Exercise periodic marshal and database pruning under restarts, so that a
   prune reaching into the state a restarted node still needs is a detectable defect.
 - **G10 — State sync.** Exercise one-time peer state sync at both of its layers: the database-set
-  coordinator, sync engines, prune, and rewind over every adapter class and over multi-database
+  coordinator, sync engines, prune, and recovery over every adapter class and over multi-database
   tuples with no consensus above them; and the full late-joiner path through the probe, the p2p
   sync source, the stateful actor's syncing mode, and its handoff to marshal-driven processing,
   including a sync interrupted by a crash and a node restarted after its sync completed.
@@ -236,7 +236,7 @@ produces, and on whether a block verifies.
   decide: an interrupted sync resumes from its persisted floor or a newer discovered one, and a
   completed sync is never repeated.
 - **R26 — Database-set state sync.** The database-set target MUST drive a `DatabaseSet` through
-  `StateSyncSet::sync`, `prune`, `rewind_to_targets`, and re-execution with no consensus above
+  `StateSyncSet::sync`, `prune`, `init` at the anchor, and re-execution with no consensus above
   it. A serving set of the selected shape applies a tape-driven history and serves the sync
   through the `Source` implemented by its `Shared` databases; a divergent set applies a different
   workload over the same history. The set shapes MUST cover the single-database implementation
@@ -299,7 +299,7 @@ and is not itself a requirement. The target names in §5.2 are normative (R1, R2
   and Probe-specific oracles.
 - `state_sync.rs` — the late-joiner driver of R25.
 - `db_sync.rs` — the database-set driver of R26: set shapes, the serving and divergent history,
-  the peer wrapper, and the convergence, prune, replay, and rewind checks.
+  the peer wrapper, and the convergence, prune, replay, and reopen checks.
 - `runner.rs` — deterministic cluster execution and measurement shared by the Twins, restart, and
   database-adapter targets.
 - `invariants.rs` — the checks in §8.
@@ -537,8 +537,8 @@ I10 to the state-sync target, and I11 to the database-set target.
   database's root MUST equal the serving set's at that anchor; the engine MUST NOT reject an
   answer served from the serving set; pruning to the anchor MUST leave its targets and roots
   unchanged; re-executing the serving set's later history on the synced set MUST reproduce the
-  recorded targets and roots at every height; and rewinding to the anchor MUST restore its
-  targets and roots exactly, after which re-execution MUST reproduce them again.
+  recorded targets and roots at every height; and reopening the set at the anchor MUST restore
+  its targets and roots exactly, after which re-execution MUST reproduce them again.
 
 An invariant MUST NOT be disabled, weakened, or narrowed to make a configuration pass. A
 configuration that cannot satisfy one is either a reportable defect or an exclusion recorded in §9;
@@ -559,7 +559,7 @@ no exclusion may be introduced in code.
   unsupported by Stateful. The restart, database-adapter, and state-sync targets run the standard
   marshal only.
 - **Multi-database sets under consensus.** Each cluster node manages a single database; the
-  database-set target syncs, prunes, and rewinds tuple sets with no consensus above them.
+  database-set target syncs, prunes, and reopens tuple sets with no consensus above them.
 - **Pruning in the Twins targets.** The restart, database-adapter, and state-sync targets prune
   per R24.
 - **Liveness of the late joiner.** A joiner whose sync never completes, because its serving

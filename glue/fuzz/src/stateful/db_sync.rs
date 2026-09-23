@@ -1,4 +1,4 @@
-//! The database-set driver: one-time state sync, pruning, and rewind over a
+//! The database-set driver: one-time state sync, pruning, and recovery over a
 //! [`DatabaseSet`] with no consensus above it.
 //!
 //! A serving set applies a tape-driven history and stands in for the peers
@@ -14,7 +14,8 @@
 //! anchor the serving set actually reached, with that anchor's exact targets
 //! and roots, and then keeps using it: it prunes to the anchor, re-executes
 //! the serving set's later history on top and requires every height to
-//! reproduce the serving set's targets, rewinds back to the anchor, and
+//! reproduce the serving set's targets, reopens the set at the anchor's
+//! targets, which recovers that checkpoint and discards the later heights, and
 //! re-executes forward again. That is the sequence a late joiner's database
 //! set goes through once the stateful actor hands it over.
 //!
@@ -677,11 +678,13 @@ async fn run<S: Shape>(
         serving: S::Set::init(
             context.child("serving"),
             S::config("serving", page_cache.clone()),
+            None,
         )
         .await,
         divergent: S::Set::init(
             context.child("divergent"),
             S::config("divergent", page_cache.clone()),
+            None,
         )
         .await,
         heights: Vec::new(),
@@ -710,7 +713,7 @@ async fn run<S: Shape>(
         tip_updates += 1;
     }
     let sync = context.child("syncing").spawn({
-        let config = S::config("syncing", page_cache);
+        let config = S::config("syncing", page_cache.clone());
         move |context| async move {
             S::Set::sync(
                 context,
@@ -816,23 +819,30 @@ async fn run<S: Shape>(
     assert_eq!(S::roots(&synced).await, reached.roots);
 
     // The serving set moves on after the sync, and the synced set reproduces
-    // the serving set's later history, rewinds to the anchor, and reproduces
-    // it again.
+    // the serving set's later history, is reopened at the anchor, which
+    // recovers that checkpoint and discards the later heights, and reproduces
+    // the history again.
     for _ in 0..input.post_heights {
         history.advance().await;
     }
     let reached = history.at(anchor.height);
     let mut reproduced = 0;
     reproduced += replay::<S>(&synced, &history, anchor.height).await;
-    synced.rewind_to_targets(reached.targets.clone()).await;
+    drop(synced);
+    let synced = S::Set::init(
+        context.child("reopened"),
+        S::config("syncing", page_cache),
+        Some(reached.targets.clone()),
+    )
+    .await;
     assert!(
         synced.committed_targets().await == reached.targets,
-        "rewinding to the converged anchor did not restore its targets"
+        "reopening at the converged anchor did not restore its targets"
     );
     assert_eq!(
         S::roots(&synced).await,
         reached.roots,
-        "rewinding to the converged anchor did not restore its roots"
+        "reopening at the converged anchor did not restore its roots"
     );
     reproduced += replay::<S>(&synced, &history, anchor.height).await;
 
