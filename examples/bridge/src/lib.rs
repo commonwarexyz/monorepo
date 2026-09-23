@@ -169,3 +169,5 @@ pub const P2P_SUFFIX: &[u8] = b"_P2P";
 pub const CONSENSUS_SUFFIX: &[u8] = b"_CONSENSUS";
 #[doc(hidden)]
 pub const INDEXER_NAMESPACE: &[u8] = b"_COMMONWARE_EXAMPLES_BRIDGE_INDEXER";
+#[doc(hidden)]
+pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;

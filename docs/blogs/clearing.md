@@ -3,13 +3,15 @@ title: "Keep the Change"
 description: "$0.000001 payments cost more to replicate, settle onchain, and index than they're worth. Yet your agent will need to make millions of them over the coming years."
 date: "August 19th, 2026"
 published-time: "2026-08-19T00:00:00Z"
-modified-time: "2026-09-16T00:00:00Z"
+modified-time: "2026-09-18T00:00:00Z"
 author: "Patrick O'Grady"
 author_twitter: "https://x.com/_patrickogrady"
 url: "https://commonware.xyz/blogs/clearing"
 image: "https://commonware.xyz/imgs/clearing.png"
 katex: true
 ---
+
+*Update (9/18/26): Settlement certificates require at least $f+1$ signatures: every signer validates and retains the complete close. The settlement chain selects the canonical close.*
 
 *Update (9/16/26): Operators can process payments to the same recipient in parallel across payers, with one signature check covering each payer's batch. Validators keep account balances and settlement records in [QMDB](https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/), updating only what changes at each settlement.*
 
@@ -213,25 +215,25 @@ The settlement chain holds deposited funds and tracks commitments, counts, pendi
 
 ## Certifying Settlement
 
-A committee of $n=3f+1$ validators tolerates at most $f$ faulty or malicious members. Every signer checks the complete close, computes the new balances and roots, and signs the resulting commitment. A certificate combines $q=2f+1$ signatures on that commitment.
+Assume at most $f$ of the committee's $n$ validators are faulty or malicious. Before signing, every validator checks the complete close, computes the new balances and roots, and durably retains the full account and log data. A certificate requires at least $q=f+1$ signatures on the resulting commitment, ensuring at least one honest validator checked and holds the complete close.
 
 The operator hashes the dealing with the epoch's registered parameters to identify its proposal. Validators include this hash in the commitment they sign, tying their settlement results to the operator's proposal and the previous state.
 
 The operator can then verify the certificate and check that the proposal hash matches, without rebuilding the validators' logs.
 
 ```{=html}
-<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 67-of-100 certificate.">
+<img class="clearing-benchmark-plot" src="/imgs/clearing-full-validation.svg" alt="The operator sends the same dealing to 100 validators. The blue callout expands c's sender record: final sequence 2, a total of 4 to b and 7 to d, each with count 1, bound by c's signature. Four cards show the operator accepting the final payer states of a, b, c, and d, then aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form its 34-of-100 certificate.">
 ```
 
 ::: {.image-caption}
-Figure 4: Every validator derives the same three QMDB roots before signing one close commitment.
+Figure 4: Every signer derives the same three QMDB roots before signing one close commitment. For 100 validators with at most 33 faulty members, 34 signatures suffice.
 :::
 
-The certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked at committee registration. Including the 32-byte commitment and an eight-byte bitmap-length prefix, the total for 100 validators is 101 bytes.
+Deployments can choose their certificate scheme. With [BLS12-381 multisignatures (MinSig)](https://docs.rs/commonware-cryptography/latest/commonware_cryptography/bls12381/certificate/multisig/index.html), the certificate is one 48-byte aggregate signature plus a $\lceil n/8\rceil$-byte signer bitmap, with proofs of possession checked at committee registration. Including the 32-byte commitment and an eight-byte bitmap-length prefix, the total for 100 validators is 101 bytes.
 
 The validator-derived root bundle is 184 bytes. With the eight-byte withdrawal total, it forms a 192-byte close descriptor. Sending that descriptor with the commitment and certificate takes 293 bytes before chain transaction framing. The operator's dealing is separate.
 
-The settlement chain accepts the certified close into an ordered queue, a step called **admission**. A close can become **finalized** only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. A successful challenge invalidates that close and any later pending closes that depend on it. Their withdrawal outputs never enter the finalized payout root and cannot be claimed.
+The settlement chain selects one certified close for each epoch and adds it to an ordered queue, a step called **admission**. A close can become **finalized** only after its challenge deadline $\Delta_e$ has passed and every earlier close has finalized. A successful challenge invalidates that close and any later pending closes that depend on it. Their withdrawal outputs never enter the finalized payout root and cannot be claimed.
 
 ## The Unavoidable Challenge
 

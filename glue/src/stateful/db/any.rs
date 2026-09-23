@@ -7,8 +7,8 @@
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -521,8 +521,19 @@ where
     type Config = FixedConfig<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -566,18 +577,6 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -629,8 +628,19 @@ where
     >;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -674,18 +684,6 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -840,7 +838,7 @@ mod tests {
     fn unmerkleized_batch_refuses_after_competing_finalization() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("unordered-fixed-stale-refusal", &context);
-            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -881,7 +879,7 @@ mod tests {
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("unordered-fixed-glue-staged", &context);
-            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -982,7 +980,7 @@ mod tests {
             let config = fixed_config("unordered-fixed-deferred", &delayed);
             let db = drive_pending_syncs(
                 &pending,
-                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
+                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config, None),
             )
             .await
             .unwrap();

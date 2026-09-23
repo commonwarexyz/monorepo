@@ -143,7 +143,7 @@ impl<F: Family, D: Digest> Bounds<F, D> {
     /// Check that the live state is one this chain accounts for -- the batch's own tip
     /// (reads through an already applied batch stay valid), the chain's database
     /// boundary, or an ancestor's tip. Anything else means a foreign batch was applied
-    /// or the database was rewound off the chain, so the read is refused with
+    /// or the database was reinitialized off the chain, so the read is refused with
     /// [`Error::StaleRead`] rather than mixing two forks.
     ///
     /// A passing read is exact, since member states are reachable only by applying this
