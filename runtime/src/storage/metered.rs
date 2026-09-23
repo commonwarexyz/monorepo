@@ -32,22 +32,22 @@ impl Metrics {
             ),
             storage_reads: registry.register(
                 "storage_reads",
-                "Total number of disk reads",
+                "Total number of storage reads",
                 raw::Counter::default(),
             ),
             storage_read_bytes: registry.register(
                 "storage_read_bytes",
-                "Total amount of data read from disk",
+                "Total amount of data read from storage",
                 raw::Counter::default(),
             ),
             storage_writes: registry.register(
                 "storage_writes",
-                "Total number of disk writes",
+                "Total number of storage writes",
                 raw::Counter::default(),
             ),
             storage_write_bytes: registry.register(
                 "storage_write_bytes",
-                "Total amount of data written to disk",
+                "Total amount of data written to storage",
                 raw::Counter::default(),
             ),
             storage_syncs: registry.register(
@@ -57,7 +57,7 @@ impl Metrics {
             ),
             storage_resizes: registry.register(
                 "storage_resizes",
-                "Total number of disk resizes",
+                "Total number of storage resizes",
                 raw::Counter::default(),
             ),
         }

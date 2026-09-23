@@ -21,10 +21,9 @@ use super::{
     timeout::Tick,
 };
 use crate::Error;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
 use io_uring::squeue::Entry as SqueueEntry;
 use std::{mem, task::Waker, time::Instant};
-use tokio::sync::OwnedMutexGuard;
 
 /// Kernel completion identity packed into an SQE's `user_data` field.
 pub type UserData = u64;
@@ -99,7 +98,7 @@ struct Waiter {
     /// The active request state machine.
     request: Request,
     /// Held across every SQE until terminal durability accounting finishes.
-    durability: Option<OwnedMutexGuard<()>>,
+    durability: Option<OwnedAsyncMutexGuard<()>>,
 }
 
 /// One identity retained from registration through result consumption.
@@ -206,7 +205,7 @@ impl Waiters {
     pub fn acquire_durability(
         &mut self,
         id: WaiterId,
-        permit: OwnedMutexGuard<()>,
+        permit: OwnedAsyncMutexGuard<()>,
     ) -> Option<Result<(), Error>> {
         let waiter = self.get_mut(id).expect("durability waiter missing");
         assert!(

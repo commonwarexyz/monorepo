@@ -54,7 +54,7 @@ use super::{
     waker::{WAKE_USER_DATA, Waker},
 };
 use crate::Error;
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::OwnedAsyncMutexGuard};
 use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
 use io_uring::{
     IoUring,
@@ -70,7 +70,6 @@ use std::{
     task::{Context, Poll, Waker as TaskWaker},
     time::{Duration, Instant},
 };
-use tokio::sync::OwnedMutexGuard;
 use tracing::warn;
 
 /// Shared acknowledgement token for cancellation SQEs.
@@ -95,7 +94,7 @@ struct State {
     /// FIFO of initial and follow-up operation SQEs, with lazily removed stale IDs.
     ready_queue: VecDeque<WaiterId>,
     /// Accepted durability requests awaiting their open's permit, absent from the FIFO.
-    acquiring: FuturesUnordered<BoxFuture<'static, (WaiterId, OwnedMutexGuard<()>)>>,
+    acquiring: FuturesUnordered<BoxFuture<'static, (WaiterId, OwnedAsyncMutexGuard<()>)>>,
     /// Permit grants wake ring service even after the ordinary mailbox closes.
     acquisition_waker: TaskWaker,
     /// New requests whose deadlines must be registered after advancing the wheel.
@@ -384,7 +383,12 @@ impl Driver {
 
 impl State {
     /// Make a granted request eligible only after checking the open's retained outcome.
-    fn acquired(&mut self, id: WaiterId, permit: OwnedMutexGuard<()>, deferred: &mut Deferred) {
+    fn acquired(
+        &mut self,
+        id: WaiterId,
+        permit: OwnedAsyncMutexGuard<()>,
+        deferred: &mut Deferred,
+    ) {
         if let Some(result) = self.waiters.acquire_durability(id, permit) {
             self.complete(id, result, deferred);
         } else {
