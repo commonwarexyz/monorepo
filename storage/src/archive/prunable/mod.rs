@@ -1436,7 +1436,7 @@ mod tests {
             let record_size = u64::SIZE + FixedBytes::<64>::SIZE + u64::SIZE + u32::SIZE;
             assert!(record_size < page_size);
             let old_page = context
-                .durable(&cfg.key_partition, &0u64.to_be_bytes())
+                .logical_blob(&cfg.key_partition, &0u64.to_be_bytes())
                 .unwrap();
             assert_eq!(old_page.len(), physical_page_size);
             let old_len =

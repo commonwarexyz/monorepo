@@ -294,7 +294,7 @@ async fn assert_blob_sizes(
 
         // The archive holds the blobs open, so inspect their durable bytes directly.
         let size = context
-            .durable(partition, &name)
+            .logical_blob(partition, &name)
             .expect("blob section missing")
             .len() as u64;
         actual.insert(section, size);

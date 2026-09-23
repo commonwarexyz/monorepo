@@ -5998,7 +5998,7 @@ mod tests {
             // Data blob 0 holds 30 9-byte frames (270 bytes) across 5 pages; tear page 2.
             corrupt_page(&context, &cfg.data_partition(), &0u64.to_be_bytes(), 2, 64).await;
             let size_before = context
-                .durable(&cfg.data_partition(), &0u64.to_be_bytes())
+                .logical_blob(&cfg.data_partition(), &0u64.to_be_bytes())
                 .unwrap()
                 .len();
 
@@ -6009,7 +6009,7 @@ mod tests {
                 .await
                 .expect("acknowledged damage must not fail recovery");
             let size_after = context
-                .durable(&cfg.data_partition(), &0u64.to_be_bytes())
+                .logical_blob(&cfg.data_partition(), &0u64.to_be_bytes())
                 .unwrap()
                 .len();
             assert_eq!(
@@ -6034,7 +6034,7 @@ mod tests {
                 .await
                 .unwrap();
             let size_retry = context
-                .durable(&cfg.data_partition(), &0u64.to_be_bytes())
+                .logical_blob(&cfg.data_partition(), &0u64.to_be_bytes())
                 .unwrap()
                 .len();
             assert_eq!(size_retry, size_before);

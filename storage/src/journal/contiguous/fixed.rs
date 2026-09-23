@@ -5386,7 +5386,7 @@ mod tests {
             )
             .await;
             let size_before = context
-                .durable(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .logical_blob(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .unwrap()
                 .len();
 
@@ -5397,7 +5397,7 @@ mod tests {
             // Adoption must not mutate the torn blob. Items on the torn page fail lazily at
             // read while every item beyond the damaged blob remains readable.
             let size_after = context
-                .durable(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .logical_blob(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .unwrap()
                 .len();
             assert_eq!(
@@ -5422,7 +5422,7 @@ mod tests {
                 .await
                 .unwrap();
             let size_retry = context
-                .durable(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .logical_blob(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .unwrap()
                 .len();
             assert_eq!(size_retry, size_before);

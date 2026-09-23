@@ -58,8 +58,8 @@ impl MemoryStorage {
 
     /// Return a copy of a blob's durable logical contents, or `None` when the blob is missing or
     /// its container header does not resolve.
-    pub fn durable(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
-        self.inner.durable(partition, name)
+    pub fn logical_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.inner.logical_blob(partition, name)
     }
 
     /// Install durable raw contents without validating the blob's container header.

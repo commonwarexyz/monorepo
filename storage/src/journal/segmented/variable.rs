@@ -2323,7 +2323,7 @@ mod tests {
             // read or repair this later section.
             let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
             let original_size = context
-                .durable(PARTITION, &TORN_SECTION.to_be_bytes())
+                .logical_blob(PARTITION, &TORN_SECTION.to_be_bytes())
                 .unwrap()
                 .len();
             let mut replay = journal
@@ -2332,7 +2332,7 @@ mod tests {
                 .unwrap();
 
             let size = context
-                .durable(PARTITION, &TORN_SECTION.to_be_bytes())
+                .logical_blob(PARTITION, &TORN_SECTION.to_be_bytes())
                 .unwrap()
                 .len();
             assert_eq!(
@@ -2343,7 +2343,7 @@ mod tests {
             let (section, offset, _, value) = replay.next().await.unwrap().unwrap();
             assert_eq!((section, offset, value), (FIRST_SECTION, 0, u64::MAX));
             let size = context
-                .durable(PARTITION, &TORN_SECTION.to_be_bytes())
+                .logical_blob(PARTITION, &TORN_SECTION.to_be_bytes())
                 .unwrap()
                 .len();
             assert_eq!(
@@ -2378,7 +2378,7 @@ mod tests {
 
             let journal = journal_with_torn_interior_page(&context, PARTITION, false).await;
             let original_size = context
-                .durable(PARTITION, &SECTION.to_be_bytes())
+                .logical_blob(PARTITION, &SECTION.to_be_bytes())
                 .unwrap()
                 .len();
             let mut replay = journal
@@ -2396,7 +2396,7 @@ mod tests {
                 Some(Err(Error::ItemOutOfRange(START_OFFSET)))
             ));
             let size = context
-                .durable(PARTITION, &SECTION.to_be_bytes())
+                .logical_blob(PARTITION, &SECTION.to_be_bytes())
                 .unwrap()
                 .len();
             assert_eq!(
@@ -3225,7 +3225,7 @@ mod tests {
 
             // Verify that valid data before start_offset was NOT lost
             let physical_size_after = context
-                .durable(&cfg.partition, &1u64.to_be_bytes())
+                .logical_blob(&cfg.partition, &1u64.to_be_bytes())
                 .unwrap()
                 .len() as u64;
 

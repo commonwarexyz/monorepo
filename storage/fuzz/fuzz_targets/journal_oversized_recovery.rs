@@ -414,7 +414,7 @@ async fn blob_sizes(context: &deterministic::Context) -> BTreeMap<(bool, u64), u
 
             // Read the durable size without opening: a recovered journal may hold these blobs.
             let size = context
-                .durable(partition, &name)
+                .logical_blob(partition, &name)
                 .expect("size blob missing")
                 .len() as u64;
             sizes.insert((is_index, section), size);

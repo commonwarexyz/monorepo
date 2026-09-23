@@ -173,7 +173,7 @@ impl Storage {
     /// Return a copy of a blob's durable logical contents, or `None` when the blob is missing or
     /// its container header does not resolve.
     #[cfg(any(test, feature = "test-utils"))]
-    pub fn durable(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+    pub fn logical_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
         let content = self.raw_blob(partition, name)?;
         let versions = BlobVersion::new(0)..=BlobVersion::new(u16::MAX);
         let (_, _, data_offset) = resolve_header(&content, &versions, partition, name).ok()??;

@@ -5116,7 +5116,7 @@ mod tests {
                     Err(Error::ItemOutOfRange(0))
                 ));
                 let recovered_size = context
-                    .durable(&cfg.index_partition, &section.to_be_bytes())
+                    .logical_blob(&cfg.index_partition, &section.to_be_bytes())
                     .unwrap()
                     .len();
                 assert_eq!(recovered_size, 0);
