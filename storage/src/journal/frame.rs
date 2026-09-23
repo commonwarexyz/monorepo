@@ -118,18 +118,17 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
 
 /// Decompress a zstd payload.
 ///
-/// A payload whose first frame declares its content size, as every payload this crate writes
-/// does, decompresses in one call into an exactly sized buffer, reusing one context per thread.
-/// Any payload that path cannot decode is streamed instead, so every payload the streaming
-/// decoder accepts still decodes.
+/// Journal writers produce a single frame with a declared content size. These payloads decompress
+/// in one call into an exactly sized buffer, reusing one context per thread. Payloads without a
+/// declared size or that the bulk path cannot decode fall back to streaming decompression.
 pub(super) fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
     if let Some(size) = get_frame_content_size(compressed)
         .ok()
         .flatten()
         .and_then(|size| usize::try_from(size).ok())
     {
-        // The declared size covers only the first frame, so a payload with more than one frame
-        // fails here and streams below.
+        // The declared size covers only the first frame. Additional frames may require more
+        // output space, in which case the payload streams below.
         let decompressed = Cached::take(&DECOMPRESSOR, Decompressor::new, |_| Ok(()))
             .and_then(|mut decompressor| decompressor.decompress(compressed, size));
         if let Ok(decompressed) = decompressed {
@@ -596,8 +595,8 @@ mod tests {
             let item: Vec<u8> = (0..len).map(|i| (i % 7) as u8).collect();
             let payload = compress(&item.encode(), level).unwrap();
 
-            // A payload in one chunk decompresses in place. Decoding consumes exactly the
-            // payload and leaves the following bytes for the next frame.
+            // A payload in one chunk decompresses without copying its compressed bytes. Decoding
+            // consumes exactly the payload and leaves the following bytes for the next frame.
             let mut source = Bytes::from([payload.as_slice(), &[9, 9]].concat());
             let decoded =
                 decode_item::<Vec<u8>>((&mut source).take(payload.len()), &cfg, true).unwrap();
