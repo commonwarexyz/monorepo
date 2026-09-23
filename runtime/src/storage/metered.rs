@@ -52,7 +52,7 @@ impl Metrics {
             ),
             storage_syncs: registry.register(
                 "storage_syncs",
-                "Total number of disk syncs",
+                "Total number of storage sync requests",
                 raw::Counter::default(),
             ),
             storage_resizes: registry.register(
