@@ -17,9 +17,10 @@ use crate::{
     Context,
     journal::{
         Error as JError,
+        authenticated::{Backing as _, BackingRecovery as _},
         contiguous::{
             Contiguous, Many,
-            fixed::{Config as JConfig, Journal},
+            fixed::{Config as JConfig, Journal, Recovery as JournalRecovery},
         },
     },
     merkle::{
@@ -39,7 +40,6 @@ use std::{
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
 };
-use tracing::{debug, error, warn};
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
 ///
@@ -132,7 +132,8 @@ pub struct Config<S: Strategy> {
 /// Determines how to handle existing persistent data based on sync boundaries:
 /// - **Fresh Start**: Existing data < range start -> discard and start fresh
 /// - **Prune and Reuse**: range contains existing data -> prune and reuse
-/// - **Ahead**: retained data extends beyond range end -> rewind to range end
+/// - **Ahead**: retained data extends beyond range end -> truncate to range end during
+///   initialization
 /// - **Incompatible**: retained data starts after range start -> discard and start fresh
 pub struct SyncConfig<F: Family, D: Digest, S: Strategy> {
     /// Base configuration (journal, metadata, etc.)
@@ -171,11 +172,60 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
-    /// True while the journal may contain flushed nodes that have not yet been made durable.
+    /// True while flushed nodes or a started sync still require a full journal sync.
     pub(crate) journal_dirty: bool,
 
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
+}
+
+/// A validated Merkle prefix whose storage has not yet been deliberately truncated.
+pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
+    /// Node journal that may extend beyond the greatest complete tree.
+    journal: Box<JournalRecovery<E, D>>,
+    /// Persisted pruning boundary and pinned nodes used to reconstruct retained history.
+    metadata: Metadata<E, U64, Vec<u8>>,
+    /// Complete tree reconstructed from tip pins, including any recoverable orphan leaf.
+    mem: Mem<F, D>,
+    /// Node count of the greatest complete prefix of the recovered journal, excluding nodes
+    /// rebuilt from an orphan leaf.
+    retained_size: Position<F>,
+    /// Persisted leaf pruning boundary expressed as a node position.
+    metadata_prune_pos: Position<F>,
+    /// Stricter of the persisted pruning boundary and the journal's leaf-aligned start.
+    effective_prune_pos: Position<F>,
+    /// Parallelization strategy for the recovered Merkle structure.
+    strategy: S,
+}
+
+impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
+    /// Number of leaves available before operation replay.
+    pub(crate) fn leaves(&self) -> Location<F> {
+        self.mem.leaves()
+    }
+
+    /// Finalize a validated prefix and publish its Merkle handle.
+    pub(crate) async fn finish(mut self) -> Result<Merkle<F, E, D, S>, Error<F>> {
+        // Reconcile the journal with the validated complete size and durable metadata boundary.
+        self.journal = self.journal.truncate(*self.retained_size).await?;
+        if *self.metadata_prune_pos > self.journal.bounds().start {
+            (self.journal, _) = self.journal.prune(*self.metadata_prune_pos).await?;
+        }
+
+        // Publish the selected journal prefix. The append path owns rollover synchronization for
+        // any reconstructed nodes.
+        let journal = (*self.journal).finish(*self.retained_size).await?;
+        Merkle {
+            mem: Arc::new(self.mem),
+            pruned_to_pos: self.effective_prune_pos,
+            journal,
+            metadata: self.metadata,
+            journal_dirty: false,
+            strategy: self.strategy,
+        }
+        .sync()
+        .await
+    }
 }
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> std::fmt::Debug for Merkle<F, E, D, S> {
@@ -205,65 +255,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.mem.leaves()
     }
 
-    /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
-    /// Assumes the node should exist in at least one of these sources and returns a `MissingNode`
-    /// error otherwise.
-    async fn get_from_metadata_or_journal(
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        pos: Position<F>,
-    ) -> Result<D, Error<F>> {
-        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
-            debug!(?pos, "read node from metadata");
-            let digest = D::decode(Copying(bytes));
-            let Ok(digest) = digest else {
-                error!(
-                    ?pos,
-                    err = %digest.expect_err("digest is Err in else branch"),
-                    "could not convert node from metadata bytes to digest"
-                );
-                return Err(Error::DataCorrupted(
-                    "could not read digest at requested pos",
-                ));
-            };
-            return Ok(digest);
-        }
-
-        // If a node isn't found in the metadata, it might still be in the journal.
-        debug!(?pos, "reading node from journal");
-        let node = journal.read(*pos).await;
-        match node {
-            Ok(node) => Ok(node),
-            Err(JError::ItemPruned(_)) => {
-                error!(?pos, "node is missing from metadata and journal");
-                Err(Error::MissingNode(pos))
-            }
-            Err(e) => Err(Error::Journal(e)),
-        }
-    }
-
     /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
     /// count.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")..self.mem.leaves()
-    }
-
-    /// Adds the pinned nodes based on `prune_pos` to `mem`.
-    async fn add_extra_pinned_nodes(
-        mem: &mut Mem<F, D>,
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        journal: &Journal<E, D>,
-        prune_pos: Position<F>,
-    ) -> Result<(), Error<F>> {
-        let prune_loc = Location::try_from(prune_pos).expect("valid prune_pos");
-        let mut pinned_nodes = BTreeMap::new();
-        for pos in F::nodes_to_pin(prune_loc) {
-            let digest = Self::get_from_metadata_or_journal(metadata, journal, pos).await?;
-            pinned_nodes.insert(pos, digest);
-        }
-        mem.add_pinned_nodes(pinned_nodes);
-
-        Ok(())
     }
 
     /// Initialize a new `Merkle` instance.
@@ -272,179 +267,161 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         cfg: Config<S>,
     ) -> Result<Self, Error<F>> {
-        let journal_cfg = JConfig {
-            partition: cfg.journal_partition,
-            items_per_blob: cfg.items_per_blob,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.write_buffer,
-            replay_buffer: cfg.replay_buffer,
-        };
-        let mut journal =
-            Journal::<E, D>::init(context.child("merkle_journal"), journal_cfg).await?;
-        let mut journal_size = Position::<F>::new(journal.size());
+        Self::prepare(context, hasher, cfg, None)
+            .await?
+            .finish()
+            .await
+    }
 
-        let metadata_cfg = MConfig {
-            partition: cfg.metadata_partition,
-            codec_config: ((0..).into(), ()),
-        };
-        let metadata =
-            Metadata::<_, U64, Vec<u8>>::init(context.child("merkle_metadata"), metadata_cfg)
-                .await?;
+    /// Recover at most `max_leaves` leaves and durably discard the remaining suffix.
+    ///
+    /// A cap above the recovered end preserves that end. The cap must permit the persisted
+    /// pruning boundary. All previous storage-dependent readers must be dropped before open.
+    pub async fn init_at_most(
+        context: E,
+        hasher: &impl Hasher<F, Digest = D>,
+        cfg: Config<S>,
+        max_leaves: Location<F>,
+    ) -> Result<Self, Error<F>> {
+        Self::prepare(context, hasher, cfg, Some(max_leaves))
+            .await?
+            .finish()
+            .await
+    }
 
-        if journal_size == 0 {
-            let mem = Mem::init(MemConfig {
-                nodes: vec![],
-                pruning_boundary: Location::new(0),
-                pinned_nodes: vec![],
-            })?;
-            return Ok(Self {
-                mem: Arc::new(mem),
-                pruned_to_pos: Position::new(0),
-                journal,
-                metadata,
-                journal_dirty: false,
-                strategy: cfg.strategy,
-            });
-        }
-
-        // Metadata stores the pruning boundary as a leaf index. Journal recovery compares node
-        // positions.
-        let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        let metadata_pruned_to = Location::<F>::new(metadata.get(&key).map_or(0, |bytes| {
-            u64::from_be_bytes(
+    /// Validate reconstruction anchors before authorizing deliberate history deletion.
+    ///
+    /// A persisted pruning boundary beyond the available journal is corruption, including
+    /// when the journal is empty.
+    pub(crate) async fn prepare(
+        context: E,
+        hasher: &impl Hasher<F, Digest = D>,
+        cfg: Config<S>,
+        max_leaves: Option<Location<F>>,
+    ) -> Result<Recovery<F, E, D, S>, Error<F>> {
+        // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
+        // opening the node journal.
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
+            context.child("merkle_metadata"),
+            MConfig {
+                partition: cfg.metadata_partition,
+                codec_config: ((0..).into(), ()),
+            },
+        )
+        .await?;
+        let key = U64::new(PRUNED_TO_PREFIX, 0);
+        let metadata_pruned_to = match metadata.get(&key) {
+            Some(bytes) => Location::<F>::new(u64::from_be_bytes(
                 bytes
                     .as_slice()
                     .try_into()
-                    .expect("metadata pruned_to is not 8 bytes"),
-            )
-        }));
-        let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
-        let journal_bounds_start = journal.bounds().start;
-
-        // Use the more restrictive (higher) pruning boundary between metadata and journal.
-        // This handles both cases: metadata ahead (crash during prune) and metadata stale.
-        //
-        // The journal boundary may not be leaf-aligned (it's blob-aligned), so round up to the
-        // position of the first leaf after the boundary.
-        let journal_boundary_pos = Position::<F>::new(journal_bounds_start);
-        let journal_boundary_floor = F::to_nearest_size(journal_boundary_pos);
-        let journal_boundary_leaf_aligned_pos = if journal_boundary_floor == journal_boundary_pos {
-            // `to_nearest_size` rounds down, so equality means the boundary is already
-            // leaf-aligned.
-            journal_boundary_floor
-        } else {
-            // If flooring backed up over the boundary, round up to the next leaf position, which
-            // is guaranteed to be above it.
-            Position::try_from(Location::try_from(journal_boundary_floor)? + 1)?
+                    .map_err(|_| Error::DataCorrupted("invalid Merkle pruning boundary"))?,
+            )),
+            None => Location::new(0),
         };
-        let effective_prune_pos =
-            std::cmp::max(metadata_prune_pos, journal_boundary_leaf_aligned_pos);
+        let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
+        if let Some(cap) = max_leaves
+            && cap < metadata_pruned_to
+        {
+            return Err(Error::ElementPruned(Position::try_from(cap)?));
+        }
 
-        let last_valid_size = F::to_nearest_size(journal_size);
-        if effective_prune_pos > last_valid_size {
-            error!(
-                ?effective_prune_pos,
-                ?last_valid_size,
-                "pruning boundary exceeds recovered journal size"
-            );
+        // Translate the leaf cap to a node ceiling. An unrepresentably large cap cannot constrain
+        // any representable persisted tree.
+        let node_cap = max_leaves
+            .map(|leaves| Position::<F>::try_from(leaves).map_or(u64::MAX, |position| *position));
+        let journal = Box::new(
+            Journal::<E, D>::recover(
+                context.child("merkle_journal"),
+                JConfig {
+                    partition: cfg.journal_partition,
+                    items_per_blob: cfg.items_per_blob,
+                    page_cache: cfg.page_cache,
+                    write_buffer: cfg.write_buffer,
+                    replay_buffer: cfg.replay_buffer,
+                },
+                node_cap,
+            )
+            .await?,
+        );
+
+        let journal_size = Position::<F>::new(journal.bounds().end);
+
+        // Journal pruning is blob-aligned and may fall between complete trees. Round its boundary
+        // up to the first leaf position, then honor the more restrictive durable boundary.
+        let boundary = Position::<F>::new(journal.bounds().start);
+        let boundary_floor = F::to_nearest_size(boundary);
+        let aligned_boundary = if boundary_floor == boundary {
+            boundary
+        } else {
+            Position::try_from(Location::try_from(boundary_floor)? + 1)?
+        };
+        let effective_prune_pos = metadata_prune_pos.max(aligned_boundary);
+        let retained_size = F::to_nearest_size(journal_size);
+        if effective_prune_pos > retained_size {
             return Err(Error::MissingNode(effective_prune_pos));
         }
 
-        // Make sure the journal's oldest retained node is as expected based on the last pruning
-        // boundary stored in metadata. If they don't match, prune the journal to the appropriate
-        // location.
-        if *metadata_prune_pos > journal_bounds_start {
-            // Metadata is ahead of journal (crashed before completing journal prune).
-            // Prune the journal to match metadata.
-            (journal, _) = journal.prune(*metadata_prune_pos).await?;
-            if journal.bounds().start != journal_bounds_start {
-                // This should only happen in the event of some failure during the last attempt to
-                // prune the journal.
-                warn!(
-                    journal_bounds_start,
-                    ?metadata_prune_pos,
-                    "journal pruned to match metadata"
-                );
-            }
-        } else if *metadata_prune_pos < journal_bounds_start {
-            // Metadata is stale (e.g., missing/corrupted while journal has valid state).
-            // Use the journal's state as authoritative.
-            warn!(
-                ?metadata_prune_pos,
-                journal_bounds_start, "metadata stale, using journal pruning boundary"
-            );
-        }
-
-        let mut orphaned_leaf: Option<D> = None;
-        if last_valid_size != journal_size {
-            warn!(
-                ?last_valid_size,
-                "encountered invalid structure, recovering from last valid size"
-            );
-            // Check if there is an intact leaf following the last valid size, from which we can
-            // recover its missing parents.
-            let recovered_item = journal.read(*last_valid_size).await;
-            if let Ok(item) = recovered_item {
-                orphaned_leaf = Some(item);
-            }
-            journal = journal.rewind(*last_valid_size).await?.sync().await?;
-            journal_size = last_valid_size
-        }
-
-        // Initialize the mem in the "prune_all" state.
-        let journal_leaves = Location::try_from(journal_size)?;
+        // Reconstruct the greatest complete tree from its tip pins before any truncation.
+        let leaves = Location::try_from(retained_size)?;
         let mut pinned_nodes = Vec::new();
-        for pos in F::nodes_to_pin(journal_leaves) {
-            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
-            pinned_nodes.push(digest);
+        for pos in F::nodes_to_pin(leaves) {
+            pinned_nodes.push(Self::get_from_recovery(&metadata, &journal, pos).await?);
         }
         let mut mem = Mem::init(MemConfig {
             nodes: vec![],
-            pruning_boundary: journal_leaves,
+            pruning_boundary: leaves,
             pinned_nodes,
         })?;
-        Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, effective_prune_pos).await?;
 
-        if let Some(leaf) = orphaned_leaf {
-            // Recover the orphaned leaf and any missing parents.
-            let pos = mem.size();
-            warn!(?pos, "recovering orphaned leaf");
+        // Add the anchors required by the effective pruning boundary.
+        let prune_loc = Location::try_from(effective_prune_pos)?;
+        let mut extra_pinned = BTreeMap::new();
+        for pos in F::nodes_to_pin(prune_loc) {
+            extra_pinned.insert(
+                pos,
+                Self::get_from_recovery(&metadata, &journal, pos).await?,
+            );
+        }
+        mem.add_pinned_nodes(extra_pinned);
+
+        // An intact orphan leaf can reconstruct missing parents within the leaf cap.
+        if retained_size != journal_size
+            && max_leaves.is_none_or(|cap| leaves < cap)
+            && let Ok(leaf) = journal.read(*retained_size).await
+        {
             let batch = mem
                 .new_batch()
                 .add_leaf_digest(leaf)
                 .merkleize(&mem, hasher);
             mem.apply_batch(&batch)?;
-            assert_eq!(pos, journal_size);
-
-            // Inline sync: flush recovered nodes to journal.
-            for p in journal.size()..*mem.size() {
-                let p = Position::new(p);
-                let node = *mem.get_node_unchecked(p);
-                (journal, _) = journal.append(&node).await?;
-            }
-            journal = journal.sync().await?;
-            assert_eq!(mem.size(), journal.size());
-
-            // Prune mem and reinstate pinned nodes.
-            let effective_prune_loc =
-                Location::try_from(effective_prune_pos).expect("valid effective_prune_pos");
-            let mut pn = BTreeMap::new();
-            for p in F::nodes_to_pin(effective_prune_loc) {
-                let d = mem.get_node_unchecked(p);
-                pn.insert(p, *d);
-            }
-            mem.prune_all();
-            mem.add_pinned_nodes(pn);
         }
-
-        Ok(Self {
-            mem: Arc::new(mem),
-            pruned_to_pos: effective_prune_pos,
+        Ok(Recovery {
             journal,
             metadata,
-            journal_dirty: false,
+            mem,
+            retained_size,
+            metadata_prune_pos,
+            effective_prune_pos,
             strategy: cfg.strategy,
         })
+    }
+
+    /// Read a pinned node from metadata or initialization-owned journal storage.
+    async fn get_from_recovery(
+        metadata: &Metadata<E, U64, Vec<u8>>,
+        journal: &JournalRecovery<E, D>,
+        pos: Position<F>,
+    ) -> Result<D, Error<F>> {
+        if let Some(bytes) = metadata.get(&U64::new(NODE_PREFIX, *pos)) {
+            return D::decode(Copying(bytes))
+                .map_err(|_| Error::DataCorrupted("could not read digest at requested pos"));
+        }
+        match journal.read(*pos).await {
+            Ok(node) => Ok(node),
+            Err(JError::ItemPruned(_)) => Err(Error::MissingNode(pos)),
+            Err(err) => Err(Error::Journal(err)),
+        }
     }
 
     /// Initialize a structure for synchronization, reusing existing data if possible.
@@ -460,7 +437,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     ///    - Prunes the journal toward `range.start` (section-aligned)
     ///
     /// 3. **Ahead**: retained data covers range.start but ends after range.end
-    ///    - Rewinds the journal to `range.end`
+    ///    - Truncates the journal to `range.end` during initialization
     ///
     /// 4. **Incompatible**: retained data starts after range.start
     ///    - Discards existing data and creates a new [Journal] at `range.start`
@@ -475,49 +452,21 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             page_cache: cfg.config.page_cache.clone(),
         };
 
-        // Open the journal, performing a rewind if necessary for crash recovery.
-        let mut journal: Journal<E, D> =
-            Journal::init(context.child("merkle_journal"), journal_cfg).await?;
-        let mut journal_size = Position::<F>::new(journal.size());
+        let mut journal = Box::new(
+            Journal::<E, D>::recover(context.child("merkle_journal"), journal_cfg, Some(u64::MAX))
+                .await?,
+        );
+        let bounds = journal.bounds();
+        let recovered_size = F::to_nearest_size(Position::<F>::new(bounds.end));
+        let reset = bounds.start > *prune_pos || (recovered_size <= prune_pos && *prune_pos != 0);
+        let journal_size = if reset {
+            prune_pos
+        } else {
+            recovered_size.min(end_pos)
+        };
 
-        // If a crash left the journal at an invalid size (e.g., a leaf was written
-        // but its parent nodes were not), rewind to the last valid size.
-        let last_valid_size = F::to_nearest_size(journal_size);
-        if last_valid_size != journal_size {
-            warn!(
-                ?last_valid_size,
-                "init_sync: encountered invalid structure, recovering from last valid size"
-            );
-            journal = journal.rewind(*last_valid_size).await?.sync().await?;
-            journal_size = last_valid_size;
-        }
-
-        // A pruned start cannot be reconstructed from the retained suffix.
-        let journal_bounds = journal.bounds();
-        let missing_start = journal_bounds.start > *prune_pos;
-        let ahead = journal_size > *end_pos;
-        let reinitialized = missing_start || ahead || journal_size <= *prune_pos;
-        if missing_start {
-            debug!(
-                journal_size = *journal_size,
-                journal_start = journal_bounds.start,
-                range_start = *prune_pos,
-                range_end = *end_pos,
-                "existing Merkle journal is incompatible with sync range, resetting"
-            );
-            journal = journal.clear_to_size(*prune_pos).await?;
-            journal_size = Position::new(journal.size());
-        } else if ahead {
-            // Sync targets describe the same append-only tree, so a later target retains every
-            // node through this target's end.
-            journal = journal.rewind(*end_pos).await?.sync().await?;
-            journal_size = Position::new(journal.size());
-        } else if journal_size <= *prune_pos && *prune_pos != 0 {
-            journal = journal.clear_to_size(*prune_pos).await?;
-            journal_size = Position::new(journal.size());
-        }
-
-        // Open the metadata.
+        // An interrupted sync can leave metadata ahead of the journal. Retain only this
+        // boundary's pins so recovery cannot prefer abandoned pins over journal nodes.
         let metadata_cfg = MConfig {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
@@ -526,18 +475,12 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         let prune_loc = Location::try_from(prune_pos)?;
         let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
-        if reinitialized {
-            let retained_node_keys: BTreeSet<_> = nodes_to_pin_persisted
-                .iter()
-                .map(|pos| U64::new(NODE_PREFIX, **pos))
-                .collect();
-            // Reinitializing the journal invalidates pins from an abandoned target. Retain only
-            // boundary pins so supplied values can replace them, and so a retry after a crash
-            // cannot prefer stale metadata over rebuilt journal nodes.
-            metadata.retain(|key: &U64, _| {
-                key.prefix() != NODE_PREFIX || retained_node_keys.contains(key)
-            });
-        }
+        let retained_node_keys: BTreeSet<_> = nodes_to_pin_persisted
+            .iter()
+            .map(|pos| U64::new(NODE_PREFIX, **pos))
+            .collect();
+        metadata
+            .retain(|key: &U64, _| key.prefix() != NODE_PREFIX || retained_node_keys.contains(key));
 
         // Write the pruning boundary.
         let pruning_boundary_key = U64::new(PRUNED_TO_PREFIX, 0);
@@ -558,6 +501,13 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             for (pos, digest) in nodes_to_pin_persisted.into_iter().zip(pinned_nodes.iter()) {
                 metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             }
+        } else {
+            // Recovery may delete the journal nodes supplying these pins. Preserve every
+            // boundary pin in metadata before synchronizing it and removing its source.
+            for pos in nodes_to_pin_persisted {
+                let digest = Self::get_from_recovery(&metadata, &journal, pos).await?;
+                metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
+            }
         }
 
         // Create the in-memory structure with the pinned nodes required for its size. This must be
@@ -566,7 +516,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let nodes_to_pin_mem = F::nodes_to_pin(journal_leaves);
         let mut mem_pinned_nodes = Vec::new();
         for pos in nodes_to_pin_mem {
-            let digest = Self::get_from_metadata_or_journal(&metadata, &journal, pos).await?;
+            let digest = Self::get_from_recovery(&metadata, &journal, pos).await?;
             mem_pinned_nodes.push(digest);
         }
         let mut mem = Mem::init(MemConfig {
@@ -578,14 +528,29 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Add the additional pinned nodes required for the pruning boundary, if applicable.
         // This must also be done before pruning.
         if prune_pos < journal_size {
-            Self::add_extra_pinned_nodes(&mut mem, &metadata, &journal, prune_pos).await?;
+            let mut extra = BTreeMap::new();
+            for pos in F::nodes_to_pin(prune_loc) {
+                extra.insert(
+                    pos,
+                    Self::get_from_recovery(&metadata, &journal, pos).await?,
+                );
+            }
+            mem.add_pinned_nodes(extra);
         }
 
         // Sync metadata before pruning so pinned nodes are persisted for crash recovery.
         let metadata = metadata.sync().await?;
 
-        // Prune the journal to range.start.
+        // Sync targets refer to the same append-only history, so retained journal nodes may
+        // supply pins even when the journal must reset. Persist those pins before clearing it.
+        // Mutate the selected storage only after all required pins have been validated.
+        journal = if reset {
+            journal.clear_to_size(*prune_pos).await?
+        } else {
+            journal.truncate(*journal_size).await?
+        };
         (journal, _) = journal.prune(*prune_pos).await?;
+        let journal = (*journal).finish(*journal_size).await?;
 
         Ok(Self {
             mem: Arc::new(mem),
@@ -712,8 +677,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn sync(mut self) -> Result<Self, Error<F>> {
         self = self.flush_internal().await?;
 
-        // Sync the journal to ensure durability before returning. This covers nodes appended by
-        // the flush above as well as nodes left non-durable by earlier [Self::flush] calls.
+        // Observe pending sync failures and persist nodes from this or earlier flushes.
         if self.journal_dirty {
             self.journal = self.journal.sync().await?;
             self.journal_dirty = false;
@@ -728,11 +692,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// The handle covers only nodes flushed so far. A later [Self::sync] still performs a full
     /// durable sync.
     pub async fn start_sync(mut self) -> Result<(Self, Handle<()>), Error<F>> {
-        // `journal_dirty` is deliberately not cleared: the started sync covers only nodes
-        // flushed so far, and sync() remains the durability authority.
         self = self.flush_internal().await?;
         let (journal, handle) = self.journal.start_sync().await?;
         self.journal = journal;
+        self.journal_dirty = true;
         Ok((self, handle))
     }
 
@@ -941,75 +904,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         &self.strategy
     }
 
-    /// Rewind the structure by the given number of leaves.
-    ///
-    /// Adds go through the batch API ([`Self::new_batch`] / [`Self::apply_batch`]), but removing
-    /// leaves requires `rewind`. After `init` or `sync`, the in-memory structure is pruned to O(log
-    /// n) pinned nodes. A batch pop would expose new peaks that are not in memory, and `merkleize`
-    /// cannot load them because [`Readable::get_node`] is synchronous. `rewind` performs async
-    /// journal I/O to rebuild state at the target position.
-    pub(crate) async fn rewind(mut self, leaves_to_remove: usize) -> Result<Self, Error<F>> {
-        if leaves_to_remove == 0 {
-            return Ok(self);
-        }
-
-        let current_leaves = *self.leaves();
-        let destination_leaf = match current_leaves.checked_sub(leaves_to_remove as u64) {
-            Some(dest) => dest,
-            None => {
-                let pruned_to_pos = self.pruned_to_pos;
-                return Err(if pruned_to_pos == 0 {
-                    Error::Empty
-                } else {
-                    Error::ElementPruned(pruned_to_pos - 1)
-                });
-            }
-        };
-
-        let destination_loc = Location::new(destination_leaf);
-        let new_size = Position::try_from(destination_loc).expect("valid leaf");
-
-        if new_size < self.pruned_to_pos {
-            return Err(Error::ElementPruned(new_size));
-        }
-
-        // Rewind the journal if needed.
-        let journal_size = Position::<F>::new(self.journal.size());
-        if new_size < journal_size {
-            self.journal = self.journal.rewind(*new_size).await?.sync().await?;
-        }
-
-        // Truncate the in-memory structure to the target size.
-        // If the in-memory structure has been pruned past the target (e.g. after sync),
-        // rebuild from the journal/metadata instead.
-        if new_size >= Position::try_from(self.mem.bounds().start).expect("valid mem bounds start")
-        {
-            Arc::make_mut(&mut self.mem).truncate(new_size);
-        } else {
-            let mut pinned_nodes = Vec::new();
-            for pos in F::nodes_to_pin(destination_loc) {
-                pinned_nodes.push(
-                    Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
-                );
-            }
-            let mut mem = Mem::init(MemConfig {
-                nodes: vec![],
-                pruning_boundary: destination_loc,
-                pinned_nodes,
-            })?;
-            Self::add_extra_pinned_nodes(
-                &mut mem,
-                &self.metadata,
-                &self.journal,
-                self.pruned_to_pos,
-            )
-            .await?;
-            self.mem = Arc::new(mem);
-        }
-
-        Ok(self)
-    }
-
     /// Return an inclusion proof for the element at the location `loc` against a historical
     /// state with `leaves` leaves.
     ///
@@ -1173,7 +1067,10 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        BufferPooler, Runner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+        BufferPooler, Runner, Supervisor as _,
+        buffer::paged::CacheRef,
+        deterministic,
+        mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs, fail_pending_syncs},
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, sequence::prefixed_u64::U64};
     use std::{
@@ -1200,6 +1097,39 @@ mod tests {
         }
     }
 
+    async fn empty_journal_rejects_pruned_metadata<F: Family>(context: deterministic::Context) {
+        let cfg = test_config(&context);
+        let metadata = Metadata::<_, U64, Vec<u8>>::init(
+            context.child("metadata"),
+            MConfig {
+                partition: cfg.metadata_partition.clone(),
+                codec_config: ((0..).into(), ()),
+            },
+        )
+        .await
+        .unwrap();
+        metadata
+            .put_sync(U64::new(PRUNED_TO_PREFIX, 0), 1u64.to_be_bytes().to_vec())
+            .await
+            .unwrap();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let result =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("open"), &hasher, cfg).await;
+        assert!(matches!(result, Err(Error::MissingNode(_))));
+    }
+
+    #[test]
+    fn test_empty_journal_rejects_pruned_metadata_mmr() {
+        deterministic::Runner::default()
+            .start(empty_journal_rejects_pruned_metadata::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_empty_journal_rejects_pruned_metadata_mmb() {
+        deterministic::Runner::default()
+            .start(empty_journal_rejects_pruned_metadata::<mmb::Family>);
+    }
+
     async fn full_empty_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -1217,7 +1147,7 @@ mod tests {
         assert_eq!(bounds.start, 0);
         mmr = mmr.prune(Location::<F>::new(0)).await.unwrap();
         mmr = mmr.sync().await.unwrap();
-        assert!(matches!(mmr.rewind(1).await, Err(Error::Empty)));
+        drop(mmr);
 
         // Reopen the same partitions.
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -1233,7 +1163,15 @@ mod tests {
         assert_eq!(mmr.size(), 1);
         mmr = mmr.sync().await.unwrap();
         assert!(mmr.get_node(Position::<F>::new(0)).await.is_ok());
-        mmr = mmr.rewind(1).await.unwrap();
+        drop(mmr);
+        mmr = Merkle::<F, _, Digest, Sequential>::init_at_most(
+            context.child("cap_empty"),
+            &hasher,
+            test_config(&context),
+            Location::new(0),
+        )
+        .await
+        .unwrap();
         assert_eq!(mmr.size(), 0);
         mmr.sync().await.unwrap();
 
@@ -1282,6 +1220,140 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_full_sync_observes_clean_start_sync_failure() {
+        deterministic::Runner::default().start(|context| async move {
+            let pending = PendingSyncs::default();
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let cfg = test_config(&context);
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let merkle = drive_pending_syncs(
+                &pending,
+                Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                    context.child("seed"),
+                    &hasher,
+                    cfg.clone(),
+                ),
+            )
+            .await
+            .unwrap();
+
+            // Complete the data sync after the checkpoint has sampled its durable boundary.
+            let batch = merkle.new_batch().add(&hasher, &test_digest(0));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
+            let merkle = merkle.apply_batch(&batch).unwrap();
+            let (merkle, handle) = merkle.start_sync().await.unwrap();
+            assert!(!pending.lock().is_empty());
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            drop(merkle);
+
+            let merkle = drive_pending_syncs(
+                &pending,
+                Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                    context.child("reopen"),
+                    &hasher,
+                    cfg,
+                ),
+            )
+            .await
+            .unwrap();
+
+            // The reopened tree has no new nodes, but a started sync can still fail.
+            assert!(!merkle.journal_dirty);
+            let (merkle, handle) = merkle.start_sync().await.unwrap();
+            assert!(!pending.lock().is_empty());
+            fail_pending_syncs(&pending);
+            drop(handle);
+
+            // Full sync must report a failure from an unobserved completion handle.
+            let error = merkle.sync().await.expect_err("sync failure was lost");
+            assert!(matches!(
+                error,
+                Error::Journal(JError::Metadata(crate::metadata::Error::Runtime(_)))
+            ));
+        });
+    }
+
+    /// Build a tree whose nodes are all durable while the journal's recovery watermark still
+    /// lags. `start_sync` advances the watermark with the durable size sampled before its data
+    /// sync completes, so a delayed first sync leaves the watermark at 0. Returns the node count.
+    async fn seed_lagging_watermark(context: &deterministic::Context) -> u64 {
+        let pending = PendingSyncs::default();
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let delayed = DelayedSyncContext {
+            inner: context.child("delayed"),
+            pending: pending.clone(),
+        };
+        let merkle = drive_pending_syncs(
+            &pending,
+            Merkle::<mmr::Family, _, Digest, Sequential>::init(
+                delayed.child("seed"),
+                &hasher,
+                test_config(context),
+            ),
+        )
+        .await
+        .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..50 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        let merkle = merkle.apply_batch(&batch).unwrap();
+        let size = *merkle.size();
+
+        // Flush first so the appends' own blob syncs complete, then start a sync whose data
+        // fsync is still in flight when the watermark samples the durable size.
+        let merkle = drive_pending_syncs(&pending, merkle.flush()).await.unwrap();
+        let (merkle, handle) = merkle.start_sync().await.unwrap();
+        drive_pending_syncs(&pending, handle).await.unwrap();
+        drop(merkle);
+
+        let lagging = persisted_watermark(context).await.unwrap();
+        assert!(
+            lagging < size,
+            "watermark {lagging} covers all {size} nodes"
+        );
+        size
+    }
+
+    /// Read the recovery watermark persisted for the test journal partition.
+    async fn persisted_watermark(context: &deterministic::Context) -> Option<u64> {
+        Journal::<_, Digest>::persisted_watermark(
+            context.child("probe"),
+            &test_config(context).journal_partition,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[test_traced]
+    fn test_init_sync_publishes_watermark() {
+        deterministic::Runner::default().start(|context| async move {
+            let size = seed_lagging_watermark(&context).await;
+
+            // Reusing durable nodes must publish the recovery watermark without a later data sync.
+            let leaves = Location::<mmr::Family>::try_from(Position::new(size)).unwrap();
+            let merkle = Merkle::<mmr::Family, _, Digest, Sequential>::init_sync(
+                context.child("sync"),
+                SyncConfig {
+                    config: test_config(&context),
+                    range: non_empty_range!(Location::new(0), leaves),
+                    pinned_nodes: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(*merkle.size(), size);
+            drop(merkle);
+
+            assert_eq!(persisted_watermark(&context).await, Some(size));
+        });
+    }
+
+    #[test_traced]
     fn test_full_empty_mmr() {
         let executor = deterministic::Runner::default();
         executor.start(full_empty_inner::<mmr::Family>);
@@ -1327,12 +1399,12 @@ mod tests {
         executor.start(full_prune_out_of_bounds_returns_error_inner::<mmb::Family>);
     }
 
-    async fn full_rewind_error_leaves_valid_state_inner<F: Family>(
+    async fn full_initialization_bounds_preserve_state_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
-        // Case 1: rewind partially succeeds, then returns ElementPruned.
+        // A cap below the pruning boundary fails without changing the retained tree.
         let element_pruned_context = context.child("element_pruned_case");
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             element_pruned_context.child("element_pruned"),
@@ -1349,12 +1421,19 @@ mod tests {
         mmr = mmr.apply_batch(&batch).unwrap();
         let mmr = mmr.prune(Location::<F>::new(8)).await.unwrap();
         let leaves_before = mmr.leaves();
+        drop(mmr);
         assert!(matches!(
-            mmr.rewind(128).await,
+            Merkle::<F, _, Digest, Sequential>::init_at_most(
+                element_pruned_context.child("cap"),
+                &hasher,
+                test_config(&element_pruned_context),
+                Location::new(7)
+            )
+            .await,
             Err(Error::ElementPruned(_))
         ));
 
-        // The failed rewind mutated nothing durable; reopening recovers the synced state.
+        // Reopening after the rejected cap preserves the synced tree.
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             element_pruned_context.child("element_pruned_reopen"),
             &hasher,
@@ -1365,50 +1444,82 @@ mod tests {
         assert_eq!(mmr.leaves(), leaves_before);
         mmr.destroy().await.unwrap();
 
-        // Case 2: rewind underflows and returns Empty without removing any leaves.
-        let empty_context = context.child("empty_case");
+        // A bound above the end preserves the complete tree, including after another open.
+        let bounded_context = context.child("overshooting_cap");
         let cfg = Config {
-            journal_partition: "empty-journal-partition".into(),
-            metadata_partition: "empty-metadata-partition".into(),
-            ..test_config(&empty_context)
+            journal_partition: "overshooting-journal-partition".into(),
+            metadata_partition: "overshooting-metadata-partition".into(),
+            ..test_config(&bounded_context)
         };
-        let mut mmr =
-            Merkle::<F, _, Digest, Sequential>::init(empty_context.child("open"), &hasher, cfg)
-                .await
-                .unwrap();
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+            bounded_context.child("open"),
+            &hasher,
+            cfg.clone(),
+        )
+        .await
+        .unwrap();
         let mut batch = mmr.new_batch();
         for i in 0u64..8 {
             batch = batch.add(&hasher, &i.to_be_bytes());
         }
         let batch = batch.merkleize(mmr.mem(), &hasher);
         mmr = mmr.apply_batch(&batch).unwrap();
-        mmr = mmr.sync().await.unwrap();
-        assert!(matches!(mmr.rewind(9).await, Err(Error::Empty)));
+        let root = mmr.root(&hasher, 0).unwrap();
+        _ = mmr.sync().await.unwrap();
+        let mmr = Merkle::<F, _, Digest, Sequential>::init_at_most(
+            bounded_context.child("cap"),
+            &hasher,
+            cfg.clone(),
+            Location::new(u64::MAX),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mmr.leaves(), Location::new(8));
+        assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
+        drop(mmr);
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+            bounded_context.child("reopen"),
+            &hasher,
+            cfg.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mmr.leaves(), Location::new(8));
+        assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
+        drop(mmr);
 
-        // Reopen: the underflowing rewind persisted nothing.
-        let cfg = Config {
-            journal_partition: "empty-journal-partition".into(),
-            metadata_partition: "empty-metadata-partition".into(),
-            ..test_config(&empty_context)
-        };
-        let mmr =
-            Merkle::<F, _, Digest, Sequential>::init(empty_context.child("reopen"), &hasher, cfg)
-                .await
-                .unwrap();
-        assert_eq!(mmr.leaves(), Location::<F>::new(8));
+        // A zero cap publishes and preserves an empty tree.
+        let mmr = Merkle::<F, _, Digest, Sequential>::init_at_most(
+            bounded_context.child("empty"),
+            &hasher,
+            cfg.clone(),
+            Location::new(0),
+        )
+        .await
+        .unwrap();
+        assert_eq!(mmr.leaves(), Location::new(0));
+        drop(mmr);
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+            bounded_context.child("empty_reopen"),
+            &hasher,
+            cfg,
+        )
+        .await
+        .unwrap();
+        assert_eq!(mmr.leaves(), Location::new(0));
         mmr.destroy().await.unwrap();
     }
 
     #[test_traced]
-    fn test_full_rewind_error_leaves_valid_state_mmr() {
+    fn test_full_initialization_bounds_preserve_state_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(full_rewind_error_leaves_valid_state_inner::<mmr::Family>);
+        executor.start(full_initialization_bounds_preserve_state_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_full_rewind_error_leaves_valid_state_mmb() {
+    fn test_full_initialization_bounds_preserve_state_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(full_rewind_error_leaves_valid_state_inner::<mmb::Family>);
+        executor.start(full_initialization_bounds_preserve_state_inner::<mmb::Family>);
     }
 
     async fn full_basic_inner<F: Family>(context: deterministic::Context) {
@@ -2412,7 +2523,9 @@ mod tests {
     async fn full_init_sync_empty_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
-        // Test fresh start scenario with completely new structure (no existing data)
+        // Fresh initialization must not reset or remove any journal storage.
+        context.storage_fault_config().write().remove_rate =
+            Some(commonware_utils::probability!(1.0));
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
             config: test_config(&context),
             range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(52)),
@@ -2423,6 +2536,8 @@ mod tests {
             Merkle::<F, _, Digest, Sequential>::init_sync(context.child("storage"), sync_cfg)
                 .await
                 .unwrap();
+
+        context.storage_fault_config().write().remove_rate = None;
 
         // Should be fresh structure starting empty
         assert_eq!(sync_mmr.size(), 0);
@@ -2616,7 +2731,349 @@ mod tests {
         executor.start(full_init_sync_partial_overlap_inner::<mmb::Family>);
     }
 
-    async fn full_init_sync_rewinds_state_beyond_range_inner<F: Family>(
+    /// Build and sync a complete tree for initialization recovery tests.
+    async fn seed_recovery_tree<F: Family>(
+        context: &deterministic::Context,
+        cfg: Config<Sequential>,
+        leaves: u64,
+    ) -> Merkle<F, deterministic::Context, Digest, Sequential> {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("seed"), &hasher, cfg)
+                .await
+                .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..leaves {
+            batch = batch.add(&hasher, &test_digest(i as usize));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+        merkle.sync().await.unwrap()
+    }
+
+    async fn init_sync_recovered_pins_reopen_inner<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+
+        // Exercise reset at an exact end and reuse of a retained suffix.
+        for (leaves, start, end) in [(16, 16, 32), (100, 32, 128)] {
+            let context = context.child(if leaves == 16 { "reset" } else { "reuse" });
+            let cfg = test_config(&context);
+            let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), leaves).await;
+            let root = merkle.root(&hasher, 0).unwrap();
+            drop(merkle);
+
+            // Persist the synchronization boundary using pins recovered from local storage.
+            let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
+                context.child("sync"),
+                SyncConfig {
+                    config: cfg.clone(),
+                    range: non_empty_range!(Location::new(start), Location::new(end)),
+                    pinned_nodes: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+            _ = merkle.sync().await.unwrap();
+
+            // Reopen the synchronized prefix and extend it by one leaf.
+            let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("reopen"),
+                &hasher,
+                cfg.clone(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(merkle.bounds(), Location::new(start)..Location::new(leaves));
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+            let batch = merkle
+                .new_batch()
+                .add(&hasher, &test_digest(leaves as usize));
+            let batch = batch.merkleize(merkle.mem(), &hasher);
+            let merkle = merkle.apply_batch(&batch).unwrap();
+            let appended_root = merkle.root(&hasher, 0).unwrap();
+            _ = merkle.sync().await.unwrap();
+
+            // A second reopen must recover the extended root.
+            let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("after_append"),
+                &hasher,
+                cfg,
+            )
+            .await
+            .unwrap();
+            assert_eq!(merkle.leaves(), leaves + 1);
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), appended_root);
+            merkle.destroy().await.unwrap();
+        }
+    }
+
+    #[test]
+    fn test_init_sync_recovered_pins_reopen_mmr() {
+        deterministic::Runner::default()
+            .start(init_sync_recovered_pins_reopen_inner::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_init_sync_recovered_pins_reopen_mmb() {
+        deterministic::Runner::default()
+            .start(init_sync_recovered_pins_reopen_inner::<mmb::Family>);
+    }
+
+    fn init_sync_metadata_ahead_of_journal_inner<F: Family>() {
+        let (root, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let hasher = Standard::<Sha256>::new(ForwardFold);
+                let mut source_cfg = test_config(&context);
+                source_cfg.journal_partition = "source-journal".into();
+                source_cfg.metadata_partition = "source-metadata".into();
+                let source = seed_recovery_tree::<F>(&context, source_cfg, 16).await;
+                let root = source.root(&hasher, 0).unwrap();
+                let pins = source.pinned_nodes_at(Location::new(16)).await.unwrap();
+                source.destroy().await.unwrap();
+
+                let cfg = test_config(&context);
+                drop(seed_recovery_tree::<F>(&context, cfg.clone(), 4).await);
+
+                // Persist state at the interruption point between sync metadata and reset intent.
+                let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+                    context.child("metadata"),
+                    MConfig {
+                        partition: cfg.metadata_partition,
+                        codec_config: ((0..).into(), ()),
+                    },
+                )
+                .await
+                .unwrap();
+                metadata.put(U64::new(PRUNED_TO_PREFIX, 0), 16u64.to_be_bytes().to_vec());
+                for (pos, pin) in F::nodes_to_pin(Location::new(16)).zip(pins) {
+                    metadata.put(U64::new(NODE_PREFIX, *pos), pin.to_vec());
+                }
+                _ = metadata.sync().await.unwrap();
+                root
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let hasher = Standard::<Sha256>::new(ForwardFold);
+            let cfg = test_config(&context);
+            assert!(matches!(
+                Merkle::<F, _, Digest, Sequential>::init(
+                    context.child("ordinary"),
+                    &hasher,
+                    cfg.clone()
+                )
+                .await,
+                Err(Error::MissingNode(_))
+            ));
+            let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
+                context.child("retry"),
+                SyncConfig {
+                    config: cfg.clone(),
+                    range: non_empty_range!(Location::new(16), Location::new(32)),
+                    pinned_nodes: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(merkle.bounds(), Location::new(16)..Location::new(16));
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+            drop(merkle);
+            let merkle =
+                Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                    .await
+                    .unwrap();
+            assert_eq!(merkle.bounds(), Location::new(16)..Location::new(16));
+            assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+            merkle.destroy().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_init_sync_metadata_ahead_of_journal_mmr() {
+        init_sync_metadata_ahead_of_journal_inner::<mmr::Family>();
+    }
+
+    #[test]
+    fn test_init_sync_metadata_ahead_of_journal_mmb() {
+        init_sync_metadata_ahead_of_journal_inner::<mmb::Family>();
+    }
+
+    fn init_sync_recovered_pins_crash_inner<F: Family>() {
+        for (leaves, start, end) in [(16, 16, 32), (100, 32, 128)] {
+            for seed in 0..16 {
+                let ((root, succeeded), checkpoint) = deterministic::Runner::seeded(seed)
+                    .start_and_recover(move |context| async move {
+                        let hasher = Standard::<Sha256>::new(ForwardFold);
+                        let cfg = test_config(&context);
+                        let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), leaves).await;
+                        let root = merkle.root(&hasher, 0).unwrap();
+                        drop(merkle);
+                        *context.storage_fault_config().write() = deterministic::FaultConfig {
+                            write_rate: Some(deterministic::WriteConfig {
+                                failure_rate: commonware_utils::probability!(0.2),
+                                retention_rate: commonware_utils::probability!(0.5),
+                                mode: deterministic::PartialWriteMode::Subset,
+                            }),
+                            sync_rate: Some(commonware_utils::probability!(0.2)),
+                            remove_rate: Some(commonware_utils::probability!(0.2)),
+                            resize_rate: Some(deterministic::ResizeConfig {
+                                failure_rate: commonware_utils::probability!(0.2),
+                                partial_rate: commonware_utils::probability!(0.5),
+                            }),
+                            ..Default::default()
+                        };
+                        let result = Merkle::<F, _, Digest, Sequential>::init_sync(
+                            context.child("interrupted"),
+                            SyncConfig {
+                                config: cfg,
+                                range: non_empty_range!(Location::new(start), Location::new(end)),
+                                pinned_nodes: None,
+                            },
+                        )
+                        .await;
+                        let succeeded = result.is_ok();
+                        drop(result);
+                        (root, succeeded)
+                    });
+                deterministic::Runner::from(checkpoint).start(move |context| async move {
+                    *context.storage_fault_config().write() = deterministic::FaultConfig::default();
+                    let hasher = Standard::<Sha256>::new(ForwardFold);
+                    let cfg = test_config(&context);
+                    let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                        context.child("reopen"),
+                        &hasher,
+                        cfg.clone(),
+                    )
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!("seed={seed} leaves={leaves} succeeded={succeeded}: {err:?}")
+                    });
+                    assert_eq!(merkle.leaves(), leaves);
+                    assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+                    drop(merkle);
+                    let merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
+                        context.child("retry"),
+                        SyncConfig {
+                            config: cfg,
+                            range: non_empty_range!(Location::new(start), Location::new(end)),
+                            pinned_nodes: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(merkle.bounds(), Location::new(start)..Location::new(leaves));
+                    assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn test_init_sync_recovered_pins_crash_mmr() {
+        init_sync_recovered_pins_crash_inner::<mmr::Family>();
+    }
+
+    #[test]
+    fn test_init_sync_recovered_pins_crash_mmb() {
+        init_sync_recovered_pins_crash_inner::<mmb::Family>();
+    }
+
+    fn init_recovery_prune_crash_inner<F: Family>() {
+        let boundary = Position::try_from(Location::<F>::new(8)).unwrap();
+        for per_blob in [1, 5, 7, *boundary] {
+            for unbounded in [false, true] {
+                let (root, checkpoint) =
+                    deterministic::Runner::default().start_and_recover(move |context| async move {
+                        let hasher = Standard::<Sha256>::new(ForwardFold);
+                        let mut cfg = test_config(&context);
+                        cfg.items_per_blob = NonZeroU64::new(per_blob).unwrap();
+                        let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), 16).await;
+
+                        // Stop a prune after its boundary and pins become durable.
+                        let (merkle, _) = merkle.update_metadata(boundary).await.unwrap();
+                        drop(merkle);
+                        let mut pending = Merkle::<F, _, Digest, Sequential>::prepare(
+                            context.child("cap"),
+                            &hasher,
+                            cfg.clone(),
+                            Some(Location::new(8)),
+                        )
+                        .await
+                        .unwrap();
+                        let root = pending.mem.root(&hasher, 0).unwrap();
+                        pending.journal = pending
+                            .journal
+                            .truncate(*pending.retained_size)
+                            .await
+                            .unwrap();
+                        if unbounded {
+                            // An interrupted bounded open can leave no empty tail for ordinary
+                            // recovery.
+                            drop(pending);
+                            pending = Merkle::<F, _, Digest, Sequential>::prepare(
+                                context.child("ordinary"),
+                                &hasher,
+                                cfg,
+                                None,
+                            )
+                            .await
+                            .unwrap();
+                            pending.journal = pending
+                                .journal
+                                .truncate(*pending.retained_size)
+                                .await
+                                .unwrap();
+                        }
+                        (pending.journal, _) = pending
+                            .journal
+                            .prune(*pending.metadata_prune_pos)
+                            .await
+                            .unwrap();
+
+                        // Crash before publication opens the retained tail.
+                        drop(pending);
+                        root
+                    });
+                deterministic::Runner::from(checkpoint).start(move |context| async move {
+                    let hasher = Standard::<Sha256>::new(ForwardFold);
+                    let mut cfg = test_config(&context);
+                    cfg.items_per_blob = NonZeroU64::new(per_blob).unwrap();
+                    let merkle = Merkle::<F, _, Digest, Sequential>::init(
+                        context.child("reopen"),
+                        &hasher,
+                        cfg.clone(),
+                    )
+                    .await
+                    .unwrap_or_else(|err| {
+                        panic!("per_blob={per_blob} unbounded={unbounded}: {err:?}")
+                    });
+                    assert_eq!(merkle.bounds(), Location::new(8)..Location::new(8));
+                    assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+                    drop(merkle);
+                    let merkle = Merkle::<F, _, Digest, Sequential>::init_at_most(
+                        context.child("retry"),
+                        &hasher,
+                        cfg,
+                        Location::new(8),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn test_init_recovery_prune_crash_mmr() {
+        init_recovery_prune_crash_inner::<mmr::Family>();
+    }
+
+    #[test]
+    fn test_init_recovery_prune_crash_mmb() {
+        init_recovery_prune_crash_inner::<mmb::Family>();
+    }
+
+    async fn full_init_sync_truncates_state_beyond_range_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
@@ -2670,15 +3127,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_full_init_sync_rewinds_state_beyond_range_mmr() {
+    fn test_full_init_sync_truncates_state_beyond_range_mmr() {
         deterministic::Runner::default()
-            .start(full_init_sync_rewinds_state_beyond_range_inner::<mmr::Family>);
+            .start(full_init_sync_truncates_state_beyond_range_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_full_init_sync_rewinds_state_beyond_range_mmb() {
+    fn test_full_init_sync_truncates_state_beyond_range_mmb() {
         deterministic::Runner::default()
-            .start(full_init_sync_rewinds_state_beyond_range_inner::<mmb::Family>);
+            .start(full_init_sync_truncates_state_beyond_range_inner::<mmb::Family>);
     }
 
     async fn full_init_sync_discards_state_pruned_past_range_inner<F: Family>(
@@ -2944,15 +3401,23 @@ mod tests {
             write_buffer: cfg.write_buffer,
             replay_buffer: cfg.replay_buffer,
         };
-        let journal = Journal::<_, Digest>::init(context.child("interrupted_reset"), journal_cfg)
-            .await
-            .unwrap();
+        let journal =
+            Journal::<_, Digest>::init(context.child("interrupted_reset"), journal_cfg.clone())
+                .await
+                .unwrap();
         let recovered_size = Position::<F>::try_from(Location::<F>::new(8)).unwrap();
         assert!(
             journal.bounds().start > *recovered_size,
             "test reset must discard a pruned prefix"
         );
-        let journal = journal.clear_to_size(*recovered_size).await.unwrap();
+        drop(journal);
+        let journal = Journal::<_, Digest>::init_at_size(
+            context.child("reset"),
+            journal_cfg,
+            *recovered_size,
+        )
+        .await
+        .unwrap();
         drop(journal);
 
         match Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg).await
@@ -3666,7 +4131,7 @@ mod tests {
             assert_eq!(journal.size(), valid_size + 1);
         }
 
-        // init_sync should recover by rewinding to the last valid size.
+        // Recovery truncates to the last valid size.
         let sync_cfg = SyncConfig::<F, Digest, Sequential> {
             config: test_config(&context),
             range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(100)),
@@ -3808,5 +4273,167 @@ mod tests {
     fn test_update_leaf_after_sync_returns_pruned_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_update_leaf_after_sync_returns_pruned_inner::<mmb::Family>);
+    }
+
+    // A genesis sync onto a node journal that is empty at zero must drop the pins an interrupted
+    // sync to a pruned range persisted, or a later init reads them ahead of the rebuilt nodes.
+    async fn init_sync_genesis_drops_stale_pins_inner<F: Family>(context: deterministic::Context) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let boundary = Location::<F>::new(16);
+        let cfg = test_config(&context);
+
+        // Model a crash after `init_sync(boundary..)` persists its boundary and pins but before
+        // it resets the fresh node journal. The pins describe another history.
+        let metadata_cfg = MConfig {
+            partition: cfg.metadata_partition.clone(),
+            codec_config: ((0..).into(), ()),
+        };
+
+        let mut metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg)
+                .await
+                .unwrap();
+        metadata.put(
+            U64::new(PRUNED_TO_PREFIX, 0),
+            boundary.as_u64().to_be_bytes().to_vec(),
+        );
+        for (i, pos) in F::nodes_to_pin(boundary).enumerate() {
+            metadata.put(U64::new(NODE_PREFIX, *pos), test_digest(1_000 + i).to_vec());
+        }
+        _ = metadata.sync().await.unwrap();
+
+        // Genesis sync, then rebuild the first leaves of the local history.
+        let mut merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
+            context.child("sync"),
+            SyncConfig {
+                config: cfg.clone(),
+                range: non_empty_range!(Location::<F>::new(0), boundary),
+                pinned_nodes: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(merkle.bounds(), Location::new(0)..Location::new(0));
+        let mut batch = merkle.new_batch();
+        for i in 0..16 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let root = merkle.root(&hasher, 0).unwrap();
+        _ = merkle.sync().await.unwrap();
+
+        // Reopening must recover the root of the rebuilt journal.
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_init_sync_genesis_drops_stale_pins_mmr() {
+        deterministic::Runner::default()
+            .start(init_sync_genesis_drops_stale_pins_inner::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_init_sync_genesis_drops_stale_pins_mmb() {
+        deterministic::Runner::default()
+            .start(init_sync_genesis_drops_stale_pins_inner::<mmb::Family>);
+    }
+
+    // A lower-range sync can reuse the journal after a higher-range sync persisted only its
+    // metadata. Reopening must authenticate any replacement suffix from journal nodes.
+    async fn init_sync_lower_range_drops_future_pins_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher = Standard::<Sha256>::new(ForwardFold);
+        let abandoned = Location::<F>::new(16);
+        let lower = Location::<F>::new(2);
+        let cfg = test_config(&context);
+
+        // Keep the abandoned boundary metadata separate from the local node journal.
+        let metadata_cfg = MConfig {
+            partition: cfg.metadata_partition.clone(),
+            codec_config: ((0..).into(), ()),
+        };
+
+        // A local tree of eight leaves.
+        let mut merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("local"), &hasher, cfg.clone())
+                .await
+                .unwrap();
+        let mut batch = merkle.new_batch();
+        for i in 0..8 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+        _ = merkle.sync().await.unwrap();
+
+        // The higher boundary extends the same local history. Its pins can reach metadata
+        // before an interrupted init_sync changes the local journal.
+        let mut source_cfg = cfg.clone();
+        source_cfg.journal_partition.push_str("-source");
+        source_cfg.metadata_partition.push_str("-source");
+        let source = seed_recovery_tree::<F>(&context, source_cfg, *abandoned).await;
+        let pins = source.pinned_nodes_at(abandoned).await.unwrap();
+        source.destroy().await.unwrap();
+
+        let mut metadata =
+            Metadata::<_, U64, Vec<u8>>::init(context.child("metadata"), metadata_cfg)
+                .await
+                .unwrap();
+        metadata.put(
+            U64::new(PRUNED_TO_PREFIX, 0),
+            abandoned.as_u64().to_be_bytes().to_vec(),
+        );
+        for (pos, pin) in F::nodes_to_pin(abandoned).zip(pins) {
+            metadata.put(U64::new(NODE_PREFIX, *pos), pin.to_vec());
+        }
+        _ = metadata.sync().await.unwrap();
+
+        // Recover the lower range and append a replacement suffix through the abandoned boundary.
+        let mut merkle = Merkle::<F, _, Digest, Sequential>::init_sync(
+            context.child("sync"),
+            SyncConfig {
+                config: cfg.clone(),
+                range: non_empty_range!(lower, Location::<F>::new(8)),
+                pinned_nodes: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(merkle.bounds(), lower..Location::new(8));
+        let mut batch = merkle.new_batch();
+        for i in 8..16 {
+            batch = batch.add(&hasher, &test_digest(1_000 + i));
+        }
+        let batch = batch.merkleize(merkle.mem(), &hasher);
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let root = merkle.root(&hasher, 0).unwrap();
+        _ = merkle.sync().await.unwrap();
+
+        // Reopening must recover the root of the replacement journal.
+        let merkle =
+            Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
+                .await
+                .unwrap();
+        assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
+        merkle.destroy().await.unwrap();
+    }
+
+    #[test]
+    fn test_init_sync_lower_range_drops_future_pins_mmr() {
+        deterministic::Runner::default()
+            .start(init_sync_lower_range_drops_future_pins_inner::<mmr::Family>);
+    }
+
+    #[test]
+    fn test_init_sync_lower_range_drops_future_pins_mmb() {
+        deterministic::Runner::default()
+            .start(init_sync_lower_range_drops_future_pins_inner::<mmb::Family>);
     }
 }

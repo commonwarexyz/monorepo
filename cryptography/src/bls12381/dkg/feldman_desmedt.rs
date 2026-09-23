@@ -1888,26 +1888,14 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
             .try_collect()
             .expect("players are unique");
 
-        // Extract dealers before consuming selected
-        let dealers: Set<P> = selected
-            .keys()
-            .iter()
-            .cloned()
-            .try_collect()
-            .expect("selected dealers are unique");
-
         // Recover the public polynomial
-        let (public, weights) = if let Some(previous) = info.previous.as_ref() {
+        let (dealers, public, weights) = if let Some(previous) = info.previous.as_ref() {
             let weights = previous
                 .public()
                 .mode()
                 .subset_interpolator(previous.players(), selected.keys())
                 .expect("the result of select should produce a valid subset");
-            let commitments = selected
-                .into_iter()
-                .map(|(dealer, log)| (dealer, log.pub_msg.commitment))
-                .try_collect::<Map<_, _>>()
-                .expect("Map should have unique keys");
+            let commitments = selected.map_values_into(|_, log| log.pub_msg.commitment);
             let public = weights
                 .interpolate(&commitments, strategy)
                 .expect("select checks that enough points have been provided");
@@ -1919,13 +1907,13 @@ impl<V: Variant, P: PublicKey> Observe<V, P> {
                 public.constant(),
                 "selected reshare commitments must preserve the previous public key",
             );
-            (public, Some(weights))
+            (commitments.into_keys(), public, Some(weights))
         } else {
             let mut public = Poly::zero();
             for log in selected.values() {
                 public += &log.pub_msg.commitment;
             }
-            (public, None)
+            (selected.into_keys(), public, None)
         };
         let n = info.players.len() as u32;
         let output = Output {
@@ -2129,32 +2117,24 @@ impl<V: Variant, S: Signer> Player<V, S> {
         // arithmetic. The extracted scalars are scoped to this function and
         // will be zeroized on drop (i.e. the secrets are only exposed for the
         // duration of this function).
-        let dealings = selected
-            .iter_pairs()
-            .map(|(dealer, log)| {
-                // A selected ack carries no share and requires the exact persisted
-                // dealing. A validated reveal can replace missing or stale local state.
-                let persisted = self.view.get(dealer);
-                let share = match persisted {
-                    Some((pub_msg, priv_msg)) if pub_msg == &log.pub_msg => {
-                        priv_msg.share.clone().expose_unwrap()
+        let dealings = selected.try_map_values(|dealer, log| {
+            // A selected ack carries no share and requires the exact persisted
+            // dealing. A validated reveal can replace missing or stale local state.
+            let persisted = self.view.get(dealer);
+            let priv_msg = match persisted {
+                Some((pub_msg, priv_msg)) if pub_msg == &log.pub_msg => priv_msg,
+                _ => match log.get_reveal(&self.me_pub) {
+                    Some(priv_msg) => priv_msg,
+                    None if persisted.is_some() => {
+                        return Err(Error::InvalidPersistedDealing {
+                            dealer: format!("{dealer:?}"),
+                        });
                     }
-                    _ => match log.get_reveal(&self.me_pub) {
-                        Some(priv_msg) => priv_msg.share.clone().expose_unwrap(),
-                        None if persisted.is_some() => {
-                            return Err(Error::InvalidPersistedDealing {
-                                dealer: format!("{dealer:?}"),
-                            });
-                        }
-                        None => return Err(Error::MissingPlayerDealing),
-                    },
-                };
-                Ok((dealer.clone(), share))
-            })
-            .collect::<Result<Vec<_>, Error>>()?
-            .into_iter()
-            .try_collect::<Map<_, _>>()
-            .expect("Logs::select produces at most one entry per dealer");
+                    None => return Err(Error::MissingPlayerDealing),
+                },
+            };
+            Ok(priv_msg.share.clone().expose_unwrap())
+        })?;
         let Observe { output, weights } =
             Observe::<V, S::PublicKey>::reckon::<M>(self.info, selected, strategy);
         let private = weights.map_or_else(

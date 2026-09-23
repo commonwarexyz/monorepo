@@ -2306,9 +2306,9 @@ where
 ///
 /// # Verification
 ///
-/// Some activities issued by consensus are not guaranteed to be cryptographically verified (i.e. if not needed
-/// to produce a minimum quorum certificate). Use [`Activity::verified`] to check if an activity may not be verified,
-/// and [`Activity::verify`] to perform verification.
+/// Some activities issued by consensus are not guaranteed to be cryptographically verified. Use
+/// [`Activity::verified`] to check whether an activity may be unverified, and [`Activity::verify`] to
+/// perform verification.
 ///
 /// # Activity Filtering
 ///

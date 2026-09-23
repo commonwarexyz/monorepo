@@ -1,4 +1,7 @@
-use super::{Verifier, verifier::ProposalState};
+use super::{
+    Verifier,
+    verifier::{Batch, ProposalState},
+};
 use crate::{
     Reporter,
     simplex::{
@@ -361,23 +364,37 @@ impl<
         Some(proposal)
     }
 
-    /// Batch verifies the first kind of vote worth verifying (notarizes, then
-    /// nullifies, then finalizes), or `None` if no kind is worthwhile.
+    /// Attempts to construct a certificate from the first ready kind (notarizes,
+    /// nullifies, then finalizes), recording it before returning it to the caller.
     ///
-    /// Returns the number of votes processed and the signers that failed
-    /// verification.
-    pub async fn try_verify<E: CryptoRng>(
+    /// Once polled, construction moves the buffered votes into the worker. Do not
+    /// cancel unless the round will also be discarded.
+    pub async fn try_construct<E: CryptoRng>(
         &mut self,
         rng: &mut E,
         strategy: &impl Strategy,
-    ) -> Option<(usize, Vec<Participant>)> {
-        if let Some(result) = self.verifier.try_verify_notarizes(rng, strategy).await {
-            return Some(result);
+    ) -> Option<Batch<Certificate<S, D>>> {
+        let result = if let Some(result) = self
+            .verifier
+            .try_construct_notarization(rng, strategy)
+            .await
+        {
+            result
+        } else if let Some(result) = self
+            .verifier
+            .try_construct_nullification(rng, strategy)
+            .await
+        {
+            result
+        } else {
+            self.verifier
+                .try_construct_finalization(rng, strategy)
+                .await?
+        };
+        if let Some(certificate) = &result.certificate {
+            self.record_certificate(certificate);
         }
-        if let Some(result) = self.verifier.try_verify_nullifies(rng, strategy).await {
-            return Some(result);
-        }
-        self.verifier.try_verify_finalizes(rng, strategy).await
+        Some(result)
     }
 
     /// Returns whether `signer` has a nullify vote.
@@ -408,20 +425,5 @@ impl<
             .map(Participant::from_usize)
             .filter(|&p| self.is_missing_voter(proposal, p))
             .collect()
-    }
-
-    /// Attempts to construct a certificate from verified votes: the first kind
-    /// (notarization, then nullification, then finalization) with a verified
-    /// quorum. Call repeatedly to drain every constructible kind.
-    ///
-    /// Once recovery starts, it consumes the verified votes. Do not cancel unless the round will
-    /// also be discarded.
-    pub async fn try_construct_certificate(
-        &mut self,
-        strategy: &impl Strategy,
-    ) -> Option<Certificate<S, D>> {
-        let certificate = self.verifier.try_construct_certificate(strategy).await?;
-        self.record_certificate(&certificate);
-        Some(certificate)
     }
 }

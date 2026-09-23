@@ -264,7 +264,7 @@ pub(crate) mod tests {
             }
         }
         f(&mut entries[0]);
-        let mut journal = journal.rewind(pos).await.unwrap();
+        let mut journal = journal.test_truncate(pos).await.unwrap();
         for entry in &entries {
             (journal, _) = journal.append(entry).await.unwrap();
         }
@@ -322,7 +322,7 @@ pub(crate) mod tests {
         O: Operation<F>,
     {
         let entries = journal.size();
-        let journal = journal.rewind(entries - 1).await.unwrap();
+        let journal = journal.test_truncate(entries - 1).await.unwrap();
         let (journal, _) = journal
             .append(&Witness {
                 commit,

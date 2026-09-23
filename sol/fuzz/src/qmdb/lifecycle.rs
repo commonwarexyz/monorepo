@@ -162,7 +162,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
     )
     .start(|context| async move {
         let initial = FixedBytes::new(leaf(seed, 0));
-        let db = Database::<F, H>::init(context.child("initial"), config(&context)).await?;
+        let db = Database::<F, H>::init(context.child("initial"), config(&context), None).await?;
         let batch = db
             .new_batch()
             .write(key(2), Some(initial.clone()))
@@ -176,7 +176,8 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
         let root = db.root();
         drop(db);
 
-        let mut db = Database::<F, H>::init(context.child("overwrite"), config(&context)).await?;
+        let mut db =
+            Database::<F, H>::init(context.child("overwrite"), config(&context), None).await?;
         assert_eq!(db.root(), root);
         for round in 0..OVERWRITES {
             let batch = db
@@ -197,7 +198,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
         assert!(retained_start > 0);
         drop(db);
 
-        let db = Database::<F, H>::init(context.child("pruned"), config(&context)).await?;
+        let db = Database::<F, H>::init(context.child("pruned"), config(&context), None).await?;
         assert_eq!(db.root(), root);
         assert_eq!(*db.bounds().start, retained_start);
         assert_eq!(db.get(&key(6)).await?, Some(FixedBytes::new(leaf(seed, 2))));
@@ -215,7 +216,7 @@ fn generate<F: Graftable, H: Hasher>(seed: u64) -> Result<Vec<u8>, String> {
         let root = db.root();
         drop(db);
 
-        let db = Database::<F, H>::init(context.child("empty"), config(&context)).await?;
+        let db = Database::<F, H>::init(context.child("empty"), config(&context), None).await?;
         assert_eq!(db.root(), root);
         assert!(db.is_empty());
         assert_eq!(
