@@ -356,10 +356,10 @@ where
 
     /// Retains only the fetches whose keys satisfy the predicate.
     pub fn retain(&mut self, predicate: impl Fn(&Key) -> bool) {
-        for (id, _) in self.requests.extract_if(|_, req| !predicate(&req.key)) {
+        for (id, req) in self.requests.extract_if(|_, req| !predicate(&req.key)) {
             self.active.remove(&id);
+            self.key_to_id.remove(&req.key);
         }
-        self.key_to_id.retain(|k, _| predicate(k));
         self.pending.retain(&predicate);
         self.targets.retain(|k, _| predicate(k));
 

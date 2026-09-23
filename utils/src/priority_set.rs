@@ -78,23 +78,22 @@ impl<I: Ord + Hash + Clone, P: Ord + Copy> PrioritySet<I, P> {
 
     /// Updates an existing item's priority using its current priority.
     ///
-    /// Returns the updated priority, or `None` if the item is absent. The closure is
-    /// only called if the item exists. If it panics, the set is unchanged.
+    /// Returns the updated priority, or `None` if the item is absent. The closure's result is
+    /// stored even if it compares equal to the current priority. The closure is only called if
+    /// the item exists. If it panics, the set is unchanged.
     pub fn update(&mut self, item: &I, f: impl FnOnce(P) -> P) -> Option<P> {
         let priority = self.keys.get_mut(item)?;
         let next = f(*priority);
-        if next != *priority {
-            let mut entry = self
-                .entries
-                .take(&Entry {
-                    item: item.clone(),
-                    priority: *priority,
-                })
-                .expect("item missing from priority set");
-            entry.priority = next;
-            self.entries.insert(entry);
-            *priority = next;
-        }
+        let mut entry = self
+            .entries
+            .take(&Entry {
+                item: item.clone(),
+                priority: *priority,
+            })
+            .expect("item missing from priority set");
+        entry.priority = next;
+        self.entries.insert(entry);
+        *priority = next;
         Some(next)
     }
 
@@ -315,6 +314,48 @@ mod tests {
         assert_eq!(pq.len(), 1);
         assert!(Arc::ptr_eq(pq.peek().unwrap().0, &item));
         assert!(Arc::ptr_eq(pq.keys.keys().next().unwrap(), &item));
+    }
+
+    /// A priority whose ordering ignores `tag`.
+    #[derive(Clone, Copy)]
+    struct Tagged {
+        rank: u32,
+        tag: u32,
+    }
+
+    impl PartialEq for Tagged {
+        fn eq(&self, other: &Self) -> bool {
+            self.rank == other.rank
+        }
+    }
+
+    impl Eq for Tagged {}
+
+    impl PartialOrd for Tagged {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for Tagged {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.rank.cmp(&other.rank)
+        }
+    }
+
+    #[test]
+    fn test_update_stores_equal_priority() {
+        let mut pq = PrioritySet::new();
+        pq.put("a", Tagged { rank: 1, tag: 10 });
+
+        let updated = pq.update(&"a", |priority| Tagged {
+            tag: 20,
+            ..priority
+        });
+        assert_eq!(updated.map(|priority| priority.tag), Some(20));
+        assert_eq!(pq.get(&"a").map(|priority| priority.tag), Some(20));
+        assert_eq!(pq.peek().map(|(_, priority)| priority.tag), Some(20));
+        assert_eq!(pq.pop().map(|(_, priority)| priority.tag), Some(20));
     }
 
     #[test]

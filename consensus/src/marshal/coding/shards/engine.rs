@@ -1094,7 +1094,7 @@ where
                 (record, block)
             }
         };
-        Self::notify_block_subscribers(&mut self.block_subscriptions, Arc::clone(&cached));
+        Self::notify_block_subscribers(&mut self.block_subscriptions, &cached);
         Ok((record, cached))
     }
 
@@ -1313,11 +1313,11 @@ where
     /// Notifies and cleans up any subscriptions waiting for assigned shard
     /// verification.
     fn notify_assigned_shard_verified_subscribers(&mut self, commitment: Commitment<B, C, H>) {
-        if let Some(mut subscribers) = self
+        if let Some(subscribers) = self
             .assigned_shard_verified_subscriptions
             .remove(&commitment)
         {
-            for subscriber in subscribers.drain(..) {
+            for subscriber in subscribers {
                 subscriber.send_lossy(());
             }
         }
@@ -1326,26 +1326,25 @@ where
     /// Notifies and cleans up any subscriptions for a reconstructed block.
     fn notify_block_subscribers(
         block_subscriptions: &mut BlockSubscriptions<B, C, H>,
-        block: Arc<CodedBlock<B, C, H>>,
+        block: &Arc<CodedBlock<B, C, H>>,
     ) {
         let commitment = block.commitment();
         let digest = block.digest();
 
         // Notify by-commitment subscribers.
-        if let Some(mut subscribers) =
+        if let Some(subscribers) =
             block_subscriptions.remove(&BlockSubscriptionKey::Commitment(commitment))
         {
-            for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
+            for subscriber in subscribers {
+                subscriber.send_lossy(Arc::clone(block));
             }
         }
 
         // Notify by-digest subscribers.
-        if let Some(mut subscribers) =
-            block_subscriptions.remove(&BlockSubscriptionKey::Digest(digest))
+        if let Some(subscribers) = block_subscriptions.remove(&BlockSubscriptionKey::Digest(digest))
         {
-            for subscriber in subscribers.drain(..) {
-                subscriber.send_lossy(Arc::clone(&block));
+            for subscriber in subscribers {
+                subscriber.send_lossy(Arc::clone(block));
             }
         }
     }
