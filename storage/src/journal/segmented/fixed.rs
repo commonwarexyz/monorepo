@@ -1100,20 +1100,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::codec::View;
+    use crate::utils::{codec::View, storage_pool_allocated_bytes};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
+        BufferPoolConfig, BufferPooler, Error as RError, Runner, Spawner as _, Supervisor as _,
         buffer::paged::{CacheRef, corrupt_page},
         deterministic,
         mocks::{
             DelayedSyncContext, PendingSyncs, RecordingContext, fail_pending_syncs,
             release_pending_syncs,
         },
+        telemetry::metrics::{has_metric_value, metric_samples},
     };
-    use commonware_utils::{NZU16, NZUsize};
+    use commonware_utils::{NZU16, NZU32, NZUsize};
     use core::num::NonZeroU16;
     use std::{
         ops::RangeInclusive,
@@ -1478,6 +1479,83 @@ mod tests {
             assert!(matches!(err, Err(Error::SectionOutOfRange(3))));
 
             journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    /// Eight-byte items form a sub-page section, 64 KiB plus one item, or two 128 KiB buffers
+    /// plus one item. Every case leaves a partial page after sync.
+    #[rstest::rstest]
+    #[case(100)]
+    #[case(8193)]
+    #[case(32769)]
+    fn test_segmented_fixed_synced_sections_bound_pooled_backing(#[case] items: u64) {
+        const PAGE_SIZE: usize = 4096;
+        const WRITE_BUFFER: usize = 131072;
+        const SECTIONS: u64 = 8;
+        const CACHE_PAGES: usize = 4;
+
+        // Keep every workload allocation tracked so heap fallbacks cannot hide retained bytes.
+        let runtime = deterministic::Config::default().with_storage_buffer_pool_config(
+            BufferPoolConfig::for_storage()
+                .with_size_class_range(NZUsize!(PAGE_SIZE), NZUsize!(2 * WRITE_BUFFER), NZU32!(64))
+                .with_pool_min_size(0)
+                .with_alignment(NZUsize!(PAGE_SIZE))
+                .with_thread_cache_disabled(),
+        );
+        deterministic::Runner::new(runtime).start(move |context| async move {
+            let cfg = Config {
+                partition: "segmented-fixed-buffers".into(),
+                page_cache: CacheRef::from_pooler(
+                    &context,
+                    NZU16!(PAGE_SIZE as u16),
+                    NZUsize!(CACHE_PAGES),
+                ),
+                write_buffer: NZUsize!(WRITE_BUFFER),
+            };
+            let mut journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for section in 0..SECTIONS {
+                for value in 0..items {
+                    (journal, _) = journal.append(section, &value).await.unwrap();
+                }
+                journal = journal.sync_all().await.unwrap();
+            }
+
+            let metrics = context.encode();
+            assert!(
+                has_metric_value(
+                    &metrics,
+                    "storage_buffer_pool_buffer_pool_oversized_total",
+                    0
+                ),
+                "oversized requests bypass the pool and would hide retained bytes"
+            );
+            assert_eq!(
+                metric_samples(&metrics, "storage_buffer_pool_buffer_pool_exhausted_total").count(),
+                0,
+                "exhausted classes fall back to untracked backing"
+            );
+            let created = storage_pool_allocated_bytes(&metrics);
+
+            // Sequential writes reuse their geometric growth and flush allocations. Allow that
+            // fixed scratch plus page-sized backing per retained section and cache entry.
+            assert!(
+                (CACHE_PAGES * PAGE_SIZE
+                    ..=2 * WRITE_BUFFER + (SECTIONS as usize + CACHE_PAGES) * PAGE_SIZE)
+                    .contains(&created),
+                "unexpected synced section backing creation: items={items}, \
+                 created={created}"
+            );
+            for section in 0..SECTIONS {
+                assert_eq!(journal.get(section, 0).await.unwrap(), 0);
+                assert_eq!(journal.get(section, items - 1).await.unwrap(), items - 1);
+                (journal, _) = journal.append(section, &items).await.unwrap();
+            }
+            journal = journal.sync_all().await.unwrap();
+            for section in 0..SECTIONS {
+                assert_eq!(journal.get(section, items).await.unwrap(), items);
+            }
         });
     }
 

@@ -404,7 +404,15 @@ where
             true,
         )?;
 
-        // Finishing recovery publishes the selected offset prefix before releasing later value bytes.
+        // Finishing recovery publishes the selected offset prefix before releasing later
+        // value bytes.
+        if size < bounds.end {
+            warn!(
+                journal_size = bounds.end,
+                rewound_items = bounds.end - size,
+                "rewinding journal items"
+            );
+        }
         let mut log = pending.finish(size).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");
@@ -574,7 +582,7 @@ mod test {
         Hasher as _,
         blake3::{Blake3, Digest},
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{test_collect_traces, test_traced};
     use commonware_math::algebra::Random;
     use commonware_runtime::{
         Runner, Spawner as _, Supervisor as _,
@@ -582,6 +590,7 @@ mod test {
         deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
+        telemetry::traces::collector::TraceStorage,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize};
     use core::future::Future;
@@ -911,6 +920,36 @@ mod test {
                 "the surfaced error is the retained failure, not a fresh sync's"
             );
         });
+    }
+
+    #[test_collect_traces("WARN")]
+    fn test_store_recovery_warns_when_discarding_uncommitted_suffix(traces: TraceStorage) {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = create_test_store(context.child("seed")).await;
+            let key = Blake3::hash(&[b"uncommitted"]);
+
+            // A crash during apply_batch can persist an update before its trailing commit.
+            (db.log, _) = db
+                .log
+                .append(&Operation::Update(Update(key, vec![7])))
+                .await
+                .unwrap();
+            db.log = db.log.sync().await.unwrap();
+            drop(db);
+
+            let db = create_test_store(context.child("recover")).await;
+            assert_eq!(*db.size(), 1);
+            assert_eq!(db.get(&key).await.unwrap(), None);
+        });
+        traces
+            .get_by_level(tracing::Level::WARN)
+            .expect_event(|event| {
+                let metadata = &event.metadata;
+                metadata.content == "rewinding journal items"
+                    && metadata.expect_field_exact("journal_size", "2").is_ok()
+                    && metadata.expect_field_exact("rewound_items", "1").is_ok()
+            })
+            .unwrap();
     }
 
     /// State persisted via an awaited start_sync handle is recovered on reopen.

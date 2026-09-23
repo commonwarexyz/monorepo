@@ -418,26 +418,32 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// - Panics if `offset` is not page aligned.
-    /// - If the buffer is not the size of a page.
-    pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
+    /// Panics if `offset` is not page aligned.
+    pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
+        let page_size: usize = self.page_size.widen();
+        buf.len() - self.cache_pages(blob_id, buf.chunks_exact(page_size), offset)
+    }
+
+    /// Insert whole logical pages under one cache lock, returning the number of bytes cached.
+    pub(super) fn cache_pages<'a>(
+        &self,
+        blob_id: u64,
+        pages: impl Iterator<Item = &'a [u8]>,
+        offset: u64,
+    ) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
-        {
-            // Write lock the page cache.
-            let page_size: usize = self.page_size.widen();
-            let mut page_cache = self.cache.write();
-            while buf.len() >= page_size {
-                page_cache.cache(blob_id, &buf[..page_size], page_num);
-                buf = &buf[page_size..];
-                page_num = match page_num.checked_add(1) {
-                    Some(next) => next,
-                    None => break,
-                };
-            }
+        let mut cached = 0;
+        let mut page_cache = self.cache.write();
+        for page in pages {
+            page_cache.cache(blob_id, page, page_num);
+            cached += page.len();
+            page_num = match page_num.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
         }
-
-        buf.len()
+        cached
     }
 
     /// Drop all cached pages while retaining the backing page buffers for reuse.

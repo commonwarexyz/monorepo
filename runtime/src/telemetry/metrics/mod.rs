@@ -188,32 +188,63 @@ fn matches_metric_name(full: &str, name: &str) -> bool {
 #[must_use]
 pub fn has_metric_value(metrics: &str, name: &str, value: impl std::fmt::Display) -> bool {
     let value = value.to_string();
-    metrics.lines().any(|line| {
+    metric_samples(metrics, name).any(|(_, sample_value)| sample_value == value)
+}
+
+/// Iterate over the label set and value of encoded Prometheus samples matching `name`.
+///
+/// `name` may be either the full encoded metric name or its unprefixed suffix. Label sets are
+/// returned without their surrounding braces and are empty for unlabeled samples.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn metric_samples<'a>(
+    metrics: &'a str,
+    name: &'a str,
+) -> impl Iterator<Item = (&'a str, &'a str)> + 'a {
+    metrics.lines().filter_map(move |line| {
         let line = line.trim();
         if line.starts_with('#') {
-            return false;
+            return None;
         }
 
-        let Some(sample_end) = line.find(|c: char| c == '{' || c.is_whitespace()) else {
-            return false;
-        };
+        let sample_end = line.find(|c: char| c == '{' || c.is_whitespace())?;
         let sample_name = &line[..sample_end];
         if !matches_metric_name(sample_name, name) {
-            return false;
+            return None;
         }
 
         let mut rest = &line[sample_end..];
-        if let Some(labeled) = rest.strip_prefix('{') {
-            let Some(labels_end) = labeled.find('}') else {
-                return false;
-            };
+        let labels = if let Some(labeled) = rest.strip_prefix('{') {
+            // Label values may contain braces and escaped quotes. Only an unquoted brace ends
+            // the label set.
+            let mut quoted = false;
+            let mut escaped = false;
+            let labels_end = labeled.bytes().position(|byte| {
+                if quoted {
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        quoted = false;
+                    }
+                    false
+                } else if byte == b'"' {
+                    quoted = true;
+                    false
+                } else {
+                    byte == b'}'
+                }
+            })?;
             rest = &labeled[labels_end + 1..];
-        }
+            &labeled[..labels_end]
+        } else {
+            ""
+        };
         if !rest.chars().next().is_some_and(char::is_whitespace) {
-            return false;
+            return None;
         }
 
-        rest.split_whitespace().next() == Some(value.as_str())
+        Some((labels, rest.split_whitespace().next()?))
     })
 }
 
@@ -882,6 +913,33 @@ mod tests {
         let metrics = r#"storage_init_items_tracked{index="2"} 2"#;
         assert!(has_metric_value(metrics, "items_tracked", 2));
         assert!(has_metric_value(metrics, "storage_init_items_tracked", 2));
+    }
+
+    #[test]
+    fn test_metric_samples() {
+        let metrics = r#"
+            # HELP storage_items_tracked items
+            storage_items_tracked 2
+            storage_init_items_tracked{index="2",path="a}b",quote="a\"b"} 3
+            storage_other_items_tracked{index="4"} 5 123
+            otheritems_tracked 6
+            storage_items_tracked_extra 6
+            storage_items_tracked{broken="label} 7
+            storage_items_tracked{index="8"}
+        "#;
+
+        assert_eq!(
+            metric_samples(metrics, "items_tracked").collect::<Vec<_>>(),
+            vec![
+                ("", "2"),
+                (r#"index="2",path="a}b",quote="a\"b""#, "3"),
+                (r#"index="4""#, "5"),
+            ]
+        );
+        assert_eq!(
+            metric_samples(metrics, "storage_init_items_tracked").collect::<Vec<_>>(),
+            vec![(r#"index="2",path="a}b",quote="a\"b""#, "3")]
+        );
     }
 
     #[test_traced]

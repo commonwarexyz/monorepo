@@ -12,7 +12,11 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{CHECKSUM_SIZE, CacheRef, Replay, read::PageReader, view::View};
+use super::{
+    CHECKSUM_SIZE, CacheRef, Replay,
+    read::PageReader,
+    view::{Tail, View},
+};
 use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
 use commonware_utils::Widen;
 use std::{num::NonZeroUsize, sync::Arc};
@@ -96,11 +100,12 @@ impl<B: Blob> Sealed<B> {
             id: self.inner.id,
             size: self.inner.size,
             tail_offset: self.partial_offset(),
-            tail: self
-                .inner
-                .partial_page
-                .as_ref()
-                .map_or(&[][..], |p| p.as_ref()),
+            tail: Tail::Sealed(
+                self.inner
+                    .partial_page
+                    .as_ref()
+                    .map_or(&[][..], |p| p.as_ref()),
+            ),
         }
     }
 
