@@ -704,6 +704,8 @@ mod tests {
 
     keyless_tests! {
         test_keyless_fixed_empty => run_empty, reopen_indexed;
+        test_keyless_fixed_merkleize_foreign_db => run_merkleize_foreign_db, pair;
+        test_keyless_fixed_merkleize_ancestor_states => run_merkleize_ancestor_states, db;
         test_keyless_fixed_build_basic => run_build_basic, reopen_indexed;
         test_keyless_fixed_recovery => run_recovery, reopen_indexed;
         test_keyless_fixed_non_empty_recovery => run_non_empty_recovery, reopen_indexed;

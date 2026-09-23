@@ -247,6 +247,11 @@ where
     /// be monotonically non-decreasing across the chain (enforced on `apply_batch`) and must
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `db` does not match this batch's database boundary or a live ancestor
+    /// commitment (both size and root).
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C>(
         self,
@@ -266,6 +271,14 @@ where
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
 
+        let ancestors = chain::collect_ancestor_bounds(
+            live_ancestors.iter().cloned(),
+            |batch| batch.bounds.inactivity_floor,
+            |batch| batch.commitment(),
+        );
+        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)
+            .expect("merkleization requires a database on the batch's branch");
+
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
@@ -284,12 +297,8 @@ where
             .await
             .expect("inactive_peaks computed from batch size");
 
-        // Compute the batch chain bounds.
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors,
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
+        // Keep ancestor batches alive until the journal has captured their operations and nodes.
+        drop(live_ancestors);
 
         Arc::new(MerkleizedBatch {
             journal_batch: journal,

@@ -566,7 +566,8 @@ pub(crate) mod tests {
     use commonware_parallel::Strategy;
     use commonware_runtime::{Supervisor as _, deterministic};
     use commonware_utils::NZU64;
-    use std::{future::Future, pin::Pin};
+    use futures::FutureExt as _;
+    use std::{future::Future, panic::AssertUnwindSafe, pin::Pin};
 
     pub(crate) type Reopen<D> =
         Box<dyn Fn(deterministic::Context) -> Pin<Box<dyn Future<Output = D> + Send>>>;
@@ -635,6 +636,11 @@ pub(crate) mod tests {
             let db = open_db::<$family::Family>($ctx.child("db")).await;
             tests::$scenario(db).await;
         };
+        (@fixture pair, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db")).await;
+            let foreign = open_db_with_suffix::<$family::Family>("foreign", $ctx.child("foreign")).await;
+            tests::$scenario(db, foreign).await;
+        };
         (@fixture reopen, $scenario:ident, $family:ident, $ctx:ident) => {
             let db = open_db::<$family::Family>($ctx.child("db")).await;
             tests::$scenario($ctx, db, reopen::<$family::Family>()).await;
@@ -647,6 +653,114 @@ pub(crate) mod tests {
     }
 
     pub(super) use keyless_tests;
+
+    #[boxed]
+    pub(crate) async fn run_merkleize_foreign_db<F: Family, V, C, S: Strategy>(
+        db: TestKeyless<F, V, C, Sha256, S>,
+        foreign: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared,
+    {
+        let batch = db
+            .new_batch()
+            .append(V::Value::make(11))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let batch = foreign
+            .new_batch()
+            .append(V::Value::make(99))
+            .merkleize(&foreign, None, Location::new(0))
+            .await;
+        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        assert_eq!(db.bounds().end, foreign.bounds().end);
+        assert_ne!(db.root(), foreign.root());
+
+        let batch = db.new_batch().append(V::Value::make(22));
+        assert!(
+            AssertUnwindSafe(batch.merkleize(&foreign, None, Location::new(0)))
+                .catch_unwind()
+                .await
+                .is_err()
+        );
+
+        // A child must also reject a database outside its ancestor chain.
+        let parent = db
+            .new_batch()
+            .append(V::Value::make(33))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let child = parent.new_batch::<Sha256>().append(V::Value::make(44));
+        assert!(
+            AssertUnwindSafe(child.merkleize(&foreign, None, Location::new(0)))
+                .catch_unwind()
+                .await
+                .is_err()
+        );
+        db.destroy().await.unwrap();
+        foreign.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleize_ancestor_states<F: Family, V, C, S: Strategy>(
+        db: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared,
+    {
+        let grandparent = db
+            .new_batch()
+            .append(V::Value::make(1))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let parent = grandparent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(2))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        let pending = parent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+
+        // The committed database may advance to a live intermediate ancestor.
+        let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+        let applied = parent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        assert_eq!(pending.root(), applied.root());
+
+        // Once that ancestor is freed, its commitment becomes the effective DB boundary.
+        drop(grandparent);
+        let retired = parent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, Location::new(0))
+            .await;
+        assert_eq!(retired.bounds().db, db.commitment());
+        assert_eq!(pending.root(), retired.root());
+
+        // A child created before applying its immediate parent remains valid afterward.
+        let child = parent.new_batch::<Sha256>().append(V::Value::make(3));
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let child = child.merkleize(&db, None, Location::new(0)).await;
+        assert_eq!(pending.root(), child.root());
+        let (db, _) = db.apply_batch(child).await.unwrap();
+        let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &db.root()
+        ));
+        db.destroy().await.unwrap();
+    }
 
     #[boxed]
     pub(crate) async fn run_empty<F: Family, V, C, H, S: Strategy>(
