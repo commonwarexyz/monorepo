@@ -74,7 +74,6 @@ use crate::{
     qmdb::{
         Error as QmdbError,
         any::operation::{Operation, Update},
-        bitmap::Shared,
         metrics::Metrics,
         single_operation_root,
     },
@@ -85,8 +84,8 @@ use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::Spawner;
+use commonware_utils::bitmap;
 use core::num::NonZeroUsize;
-use std::sync::Arc;
 use tracing::warn;
 
 pub mod batch;
@@ -180,7 +179,7 @@ where
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
     cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
-    bitmap: Option<Arc<Shared<N>>>,
+    bitmap: Option<bitmap::Prunable<N>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
 ) -> Result<db::Db<F, E, J, I, H, U, N, S>, QmdbError<F>>
@@ -269,6 +268,7 @@ pub(crate) mod test {
     use std::{
         collections::HashMap,
         num::{NonZeroU16, NonZeroUsize},
+        sync::Arc,
     };
 
     pub(crate) fn colliding_digest(prefix: u8, suffix: u64) -> Digest {
@@ -3067,7 +3067,6 @@ mod bitmap_tests {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::bitmap::Readable as _;
 
     /// Open a fresh test DB.
     async fn open_db(context: Context) -> AnyTest {

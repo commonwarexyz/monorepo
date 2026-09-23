@@ -38,7 +38,7 @@ use std::{
 /// and [`Commitment::on_chain`], which check whatever commitment the caller supplies, so
 /// callers must pair the database with its own commitment (every current caller does).
 /// Holding the wrapped reference also freezes the database for the duration of the call.
-/// Every state mutation takes the database by value, so no apply, prune, or rewind can
+/// Every state mutation takes the database by value, so no apply or prune can
 /// interleave with a checked read.
 pub(crate) struct OnChain<'a, T>(&'a T);
 
