@@ -53,7 +53,7 @@ use crate::{
     Blob, Error, Handle, IoBuf, IoBufMut, IoBufs, ReadOptions, WriteOptions,
     buffer::{
         SyncState,
-        paged::{ActiveChecksum, CHECKSUM_SIZE, CacheRef, Checksum, Slot},
+        paged::{ActiveChecksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE, CacheRef, Checksum, Slot},
     },
 };
 use bytes::BufMut;
@@ -283,7 +283,7 @@ impl<B: Blob> Recovery<B> {
             .write_at(
                 &self.blob,
                 old_slot_offset,
-                IoBuf::copy_from_slice(&Checksum::slot_bytes(0, 0)),
+                IoBuf::from(&[0; CHECKSUM_SLOT_SIZE]),
                 WriteOptions::SYNC | WriteOptions::DONT_CACHE,
             )
             .await?;
@@ -1361,7 +1361,7 @@ mod tests {
     use crate::{
         Buf, BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
-        buffer::{paged::CHECKSUM_SLOT_SIZE, tests::SyncTrackingBlob},
+        buffer::tests::SyncTrackingBlob,
         deterministic,
         mocks::{
             DelayedSyncBlob, RecordingContext, WriteFaultContext, WriteFaults, next_pending_sync,

@@ -1252,7 +1252,8 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
         // Encode all items into a single contiguous buffer up front.
         // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
-        let mut buf = IoBufMut::with_capacity(items.len() * A::SIZE);
+        let len = items.len() * A::SIZE;
+        let mut buf = IoBufMut::with_capacity(len);
         match items {
             Many::Flat(items) => {
                 for item in items {
@@ -1267,6 +1268,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
                 }
             }
         }
+        assert_eq!(buf.len(), len, "write() did not write expected bytes");
         PreparedAppend {
             buf: buf.freeze(),
             _marker: PhantomData,
@@ -1610,6 +1612,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// This lets callers serialize borrowed items synchronously, release those borrows, and
     /// perform the append without holding unrelated locks across journal I/O.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the total bytes written do not match the items' declared encoded size.
     pub fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
         self.0.prepare_append(items)
     }

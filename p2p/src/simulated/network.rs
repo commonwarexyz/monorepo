@@ -20,8 +20,8 @@ use commonware_codec::{DecodeExt, FixedSize};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufMut as _, Clock, ContextCell, Handle, IoBuf, IoBufMut, IoBufs, Listener as _, Metrics,
-    Network as RNetwork, Quota, Spawner, spawn_cell,
+    Clock, ContextCell, Handle, IoBuf, IoBufs, Listener as _, Metrics, Network as RNetwork, Quota,
+    Spawner, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
 use commonware_stream::utils::codec::{recv_frame, send_frame};
@@ -1497,10 +1497,7 @@ impl Link {
                 context.sleep_until(receive_complete_at).await;
 
                 // Send the message
-                let channel_bytes = channel.to_be_bytes();
-                let mut data = IoBufMut::with_capacity(channel_bytes.len() + message.len());
-                data.put_slice(&channel_bytes);
-                data.put_slice(message.as_ref());
+                let data = [IoBuf::encode(&channel), message];
                 let _ = send_frame(&mut sink, data, max_frame_size).await;
 
                 // Bump received messages metric

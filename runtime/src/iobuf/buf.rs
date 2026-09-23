@@ -1228,7 +1228,15 @@ mod tests {
         let buf = IoBuf::encode(&value);
         assert_eq!(buf.as_ref(), value.encode().as_ref());
         // A native heap buffer, not a wrapped `Bytes`, supports mutable recovery.
-        assert!(buf.try_into_mut().is_ok());
+        let buf = buf.try_into_mut().unwrap();
+        assert_eq!(buf.capacity(), value.encode_size());
+    }
+
+    #[test]
+    fn test_iobuf_encode_empty() {
+        let buf = IoBuf::encode(&[0u8; 0]);
+        assert!(buf.is_empty());
+        assert_eq!(buf.try_into_mut().unwrap().capacity(), 0);
     }
 
     /// Claims a larger encoding than `write` produces.

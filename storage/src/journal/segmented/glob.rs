@@ -99,9 +99,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             IoBuf::from(compressed)
         } else {
             // Uncompressed: pre-allocate exact size to avoid copying
-            let entry_size = value.encode_size() + CHECKSUM_SIZE;
-            let mut buf = IoBufMut::with_capacity(entry_size);
+            let len = value.encode_size();
+            let mut buf = IoBufMut::with_capacity(len + CHECKSUM_SIZE);
             value.write(&mut buf);
+            assert_eq!(buf.len(), len, "write() did not write expected bytes");
             let checksum = Crc32::checksum(buf.as_ref());
             buf.put_u32(checksum);
             buf.freeze()
@@ -283,6 +284,10 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     /// The returned offset is the byte offset where the entry was written.
     /// The returned size is the total bytes written (compressed_data + crc32).
     /// Both should be stored in the index entry for later retrieval.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bytes written do not match the value's declared encoded size.
     pub async fn append(mut self, section: u64, value: &V) -> Result<(Self, u64, u32), Error> {
         let (offset, size) = self.0.append(section, value).await?;
         Ok((self, offset, size))

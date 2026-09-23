@@ -583,18 +583,16 @@ mod tests {
     #[test]
     fn test_record_preserves_owned_byte_fields() {
         let value = View::new(7);
-        let encoded = Vec::from(Record::encode(&value));
-        let source = IoBuf::from(encoded.clone());
-        let decoded = Record::<View>::decode_valid(source).unwrap();
+        let encoded = Record::encode(&value);
+        let decoded = Record::<View>::decode_valid(encoded.clone()).unwrap();
         assert_eq!(decoded.bytes, value.bytes);
         decoded.assert_shared();
 
-        let mut corrupt = encoded.clone();
+        let mut corrupt = Vec::from(encoded.clone());
         corrupt[0] ^= 1;
         assert!(Record::<View>::decode_valid(corrupt.into()).is_none());
-        let mut truncated = encoded;
-        truncated.pop();
-        assert!(Record::<View>::decode_valid(truncated.into()).is_none());
+        let truncated = encoded.slice(..encoded.len() - 1);
+        assert!(Record::<View>::decode_valid(truncated).is_none());
     }
 
     type TestOrdinal = Ordinal<Context, u64>;
