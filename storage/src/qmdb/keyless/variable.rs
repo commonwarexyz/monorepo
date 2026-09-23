@@ -131,6 +131,7 @@ mod tests {
     keyless_tests! {
         test_keyless_variable_empty => run_empty, reopen_indexed;
         test_keyless_variable_merkleize_foreign_db => run_merkleize_foreign_db, pair;
+        test_keyless_variable_merkleize_stale_sibling => run_merkleize_stale_sibling, db;
         test_keyless_variable_merkleize_ancestor_states => run_merkleize_ancestor_states, db;
         test_keyless_variable_build_basic => run_build_basic, reopen_indexed;
         test_keyless_variable_recovery => run_recovery, reopen_indexed;
