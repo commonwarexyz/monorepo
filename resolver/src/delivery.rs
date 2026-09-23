@@ -175,15 +175,7 @@ where
             value: value.clone(),
             accepted: false,
         });
-        let active = Self::push_delivery(
-            &mut self.next_generation,
-            &self.consumer,
-            &mut self.deliveries,
-            delivery,
-            context,
-            value,
-        );
-        assert!(entry.delivery.replace(active).is_none());
+        self.push_delivery(delivery, context, value);
     }
 
     /// Deliver the cached response to another set of subscribers.
@@ -193,18 +185,12 @@ where
     /// because the consumer dropped the earlier verdict. Panics if the key is not
     /// tracked or no response is cached.
     pub fn redeliver(&mut self, delivery: Delivery<Con::Key, Con::Subscriber>) {
-        let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
-        let response = entry.response.as_ref().expect("response");
-        let (context, value) = (response.context.clone(), response.value.clone());
-        let active = Self::push_delivery(
-            &mut self.next_generation,
-            &self.consumer,
-            &mut self.deliveries,
-            delivery,
-            context,
-            value,
-        );
-        assert!(entry.delivery.replace(active).is_none());
+        let (context, value) = {
+            let entry = self.entries.get(&delivery.key).expect("delivery entry");
+            let response = entry.response.as_ref().expect("response");
+            (response.context.clone(), response.value.clone())
+        };
+        self.push_delivery(delivery, context, value);
     }
 
     /// Returns true if the cached response for this key has been accepted.
@@ -259,26 +245,23 @@ where
         Ok(completed.completion)
     }
 
-    // Start a consumer validation attempt and return it as the active delivery.
+    // Start a consumer validation attempt and record its abort handle.
     fn push_delivery(
-        next_generation: &mut u64,
-        consumer: &Con,
-        deliveries: &mut AbortablePool<
-            'static,
-            PooledCompletion<Con::Key, Con::Subscriber, Context>,
-        >,
+        &mut self,
         delivery: Delivery<Con::Key, Con::Subscriber>,
         context: Context,
         value: Con::Value,
-    ) -> ActiveDelivery {
-        let generation = *next_generation;
-        *next_generation = next_generation
+    ) {
+        let generation = self.next_generation;
+        self.next_generation = self
+            .next_generation
             .checked_add(1)
             .expect("delivery generation overflow");
+        let key = delivery.key.clone();
         let completed = delivery.clone();
-        let mut consumer = consumer.clone();
+        let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
-        let aborter = deliveries.push(async move {
+        let aborter = self.deliveries.push(async move {
             let outcome = match receiver.await {
                 Ok(outcome) => Some(outcome.into()),
                 Err(_) => {
@@ -295,10 +278,16 @@ where
                 },
             }
         });
-        ActiveDelivery {
-            generation,
-            _aborter: aborter,
-        }
+        let entry = self.entries.get_mut(&key).expect("delivery entry");
+        assert!(
+            entry
+                .delivery
+                .replace(ActiveDelivery {
+                    generation,
+                    _aborter: aborter,
+                })
+                .is_none()
+        );
     }
 }
 

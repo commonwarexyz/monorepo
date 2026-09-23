@@ -832,7 +832,7 @@ where
 
         // Construct a coding block with a _trusted_ commitment. `S::decode` verified the blob's
         // integrity against the commitment, so shards can be lazily re-constructed if need be.
-        let (_, block) = self
+        let block = self
             .cache_block(round, Arc::new(CodedBlock::new_trusted(inner, commitment)))
             .expect("reconstruction uses its commitment record's epoch");
         self.metrics.blocks_reconstructed_total.inc();
@@ -1068,34 +1068,30 @@ where
     }
 
     /// Cache a block and notify all subscribers waiting on it.
-    ///
-    /// Returns the block's commitment record and the cached block instance.
-    #[allow(clippy::type_complexity)]
     fn cache_block(
         &mut self,
         round: Round,
         block: Arc<CodedBlock<B, C, H>>,
-    ) -> Result<(&mut CommitmentRecord<B, C, H, P>, Arc<CodedBlock<B, C, H>>), Epoch> {
+    ) -> Result<Arc<CodedBlock<B, C, H>>, Epoch> {
         let commitment = block.commitment();
-        let (record, cached) = match self.records.entry(commitment) {
-            Entry::Occupied(entry) => {
-                let record = entry.into_mut();
-                record.observe(round)?;
-                let newly_cached = record.block().is_none();
-                let cached = record.install_block(block);
+        let cached = match self.records.entry(commitment) {
+            Entry::Occupied(mut entry) => {
+                entry.get_mut().observe(round)?;
+                let newly_cached = entry.get().block().is_none();
+                let cached = entry.get_mut().install_block(block);
                 if newly_cached {
                     self.metrics.reconstructed_blocks_cache_count.inc();
                 }
-                (record, cached)
+                cached
             }
             Entry::Vacant(entry) => {
-                let record = entry.insert(CommitmentRecord::cached(round, Arc::clone(&block)));
+                entry.insert(CommitmentRecord::cached(round, Arc::clone(&block)));
                 self.metrics.reconstructed_blocks_cache_count.inc();
-                (record, block)
+                block
             }
         };
-        Self::notify_block_subscribers(&mut self.block_subscriptions, &cached);
-        Ok((record, cached))
+        self.notify_block_subscribers(&cached);
+        Ok(cached)
     }
 
     /// Broadcasts the shards of a [`CodedBlock`] and caches the block.
@@ -1180,10 +1176,12 @@ where
         }
 
         // Cache the block so we don't have to reconstruct it again.
-        let (record, _) = self
-            .cache_block(round, block)
+        self.cache_block(round, block)
             .expect("local proposal epoch was validated before broadcast");
-        record.mark_proposed();
+        self.records
+            .get_mut(&commitment)
+            .expect("caching a local proposal must create a commitment record")
+            .mark_proposed();
 
         // Local proposals bypass reconstruction, so shard subscribers waiting
         // for "our valid shard arrived" still need a notification.
@@ -1324,16 +1322,14 @@ where
     }
 
     /// Notifies and cleans up any subscriptions for a reconstructed block.
-    fn notify_block_subscribers(
-        block_subscriptions: &mut BlockSubscriptions<B, C, H>,
-        block: &Arc<CodedBlock<B, C, H>>,
-    ) {
+    fn notify_block_subscribers(&mut self, block: &Arc<CodedBlock<B, C, H>>) {
         let commitment = block.commitment();
         let digest = block.digest();
 
         // Notify by-commitment subscribers.
-        if let Some(subscribers) =
-            block_subscriptions.remove(&BlockSubscriptionKey::Commitment(commitment))
+        if let Some(subscribers) = self
+            .block_subscriptions
+            .remove(&BlockSubscriptionKey::Commitment(commitment))
         {
             for subscriber in subscribers {
                 subscriber.send_lossy(Arc::clone(block));
@@ -1341,7 +1337,9 @@ where
         }
 
         // Notify by-digest subscribers.
-        if let Some(subscribers) = block_subscriptions.remove(&BlockSubscriptionKey::Digest(digest))
+        if let Some(subscribers) = self
+            .block_subscriptions
+            .remove(&BlockSubscriptionKey::Digest(digest))
         {
             for subscriber in subscribers {
                 subscriber.send_lossy(Arc::clone(block));
@@ -1739,10 +1737,13 @@ where
     ///   [`ReconstructionState::Ready`] (i.e., batch validation has already
     ///   passed). An assigned shard for our index is still accepted in
     ///   `Ready` state to ensure we verify and re-broadcast it.
-    /// - Shards for a commitment without a record are buffered at the engine level
-    ///   in bounded per-peer queues until [`Mailbox::discovered`] or
-    ///   [`Mailbox::notarized`] creates one. While the leader is unknown, shards
-    ///   that are not sender-indexed stay buffered until [`Mailbox::discovered`].
+    ///
+    /// ## Engine-Level Buffering
+    ///
+    /// Shards for a commitment without a record are buffered in bounded per-peer
+    /// queues until [`Mailbox::discovered`] or [`Mailbox::notarized`] creates one.
+    /// While the leader is unknown, shards that are not sender-indexed stay
+    /// buffered until [`Mailbox::discovered`].
     fn on_network_shard<Sch, S, X>(
         &mut self,
         sender: P,

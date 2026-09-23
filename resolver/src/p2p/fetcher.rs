@@ -15,7 +15,7 @@ use rand::seq::SliceRandom;
 use rand_core::Rng;
 use std::{
     cmp::Reverse,
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{HashMap, HashSet},
     marker::PhantomData,
     mem,
     time::{Duration, SystemTime},
@@ -424,10 +424,13 @@ where
 
     /// Remove the active request matching `id` and `peer`.
     fn pop_request(&mut self, id: ID, peer: &P) -> Option<ActiveRequest<P, Key>> {
-        let req = match self.requests.entry(id) {
-            Entry::Occupied(entry) if &entry.get().peer == peer => entry.remove(),
-            _ => return None,
-        };
+        // Check with `get` first: `entry` would reserve capacity for an unknown, peer-chosen id
+        let req = self.requests.get(&id)?;
+        if &req.peer != peer {
+            return None;
+        }
+
+        let req = self.requests.remove(&id)?;
         self.active.remove(&id);
         self.key_to_id.remove(&req.key);
         Some(req)

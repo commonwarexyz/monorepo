@@ -511,6 +511,15 @@ mod tests {
         map.insert(u64::MAX - 1);
         assert_eq!(map.get(&(u64::MAX - 1)), Some((u64::MAX - 1, u64::MAX)));
         assert_eq!(map.get(&u64::MAX), Some((u64::MAX - 1, u64::MAX)));
+
+        // Extending a range up to u64::MAX
+        let mut map = RMap::new();
+        map.insert(u64::MAX - 1);
+        map.insert(u64::MAX);
+        assert_eq!(
+            map.iter().collect::<Vec<_>>(),
+            vec![(&(u64::MAX - 1), &u64::MAX)]
+        );
     }
 
     #[test]

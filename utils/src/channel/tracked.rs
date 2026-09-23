@@ -77,7 +77,8 @@ impl<B: Eq + Hash + Clone> Drop for Guard<B> {
         // Mark the message as delivered
         *state.pending.get_mut(&self.sequence).unwrap() = true;
 
-        // Advance past consecutive delivered messages (sequences in (watermark, next) are pending)
+        // Advance past consecutive delivered messages. Every sequence in (watermark, next) has an
+        // entry, so stopping at `next` means `entry` never probes a missing key.
         let mut current_watermark = state.watermark;
         while current_watermark + 1 < state.next
             && let Entry::Occupied(entry) = state.pending.entry(current_watermark + 1)

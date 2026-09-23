@@ -14,10 +14,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use commonware_utils::Array;
-use std::{
-    collections::{BTreeMap, BTreeSet, btree_map},
-    mem,
-};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -423,10 +420,11 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.requested = self.requested.split_off(&min);
 
         // Remove all indices that are less than min
-        let retained = self.indices.split_off(&min);
-        let pruned = mem::replace(&mut self.indices, retained);
+        let before = self.indices.len();
+        self.indices = self.indices.split_off(&min);
         self.extra_indices = self.extra_indices.split_off(&min);
-        self.indices_pruned.inc_by(pruned.len() as u64);
+        self.indices_pruned
+            .inc_by((before - self.indices.len()) as u64);
 
         // Remove pruned indices from the retained range view.
         if min > 0 {
