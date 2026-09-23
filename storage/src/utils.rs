@@ -10,10 +10,10 @@ use commonware_runtime::telemetry::metrics::{GaugeValue, metric_samples};
 use commonware_utils::bitmap::BitMap;
 use std::{collections::BTreeMap, num::NonZeroU64};
 
-/// Tracked backing the storage pool has created, weighted by size class. Returned buffers are
+/// Tracked backing allocated by the storage pool, weighted by size class. Returned buffers are
 /// reused before new ones are created, so each class contributes its allocation high-water mark.
 #[cfg(test)]
-pub(crate) fn created_bytes(metrics: &str) -> usize {
+pub(crate) fn storage_pool_allocated_bytes(metrics: &str) -> usize {
     metric_samples(metrics, "storage_buffer_pool_buffer_pool_created")
         .map(|(labels, count)| {
             let size = labels

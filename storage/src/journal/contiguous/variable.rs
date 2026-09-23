@@ -2655,7 +2655,7 @@ mod tests {
             authenticated::{self, BackingRecovery as _},
             contiguous::{checkpoint::Checkpoint, tests::run_contiguous_tests},
         },
-        utils::{codec::View, created_bytes},
+        utils::{codec::View, storage_pool_allocated_bytes},
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -3173,7 +3173,7 @@ mod tests {
                         0,
                         "exhausted classes fall back to untracked backing"
                     );
-                    let created = created_bytes(&metrics);
+                    let created = storage_pool_allocated_bytes(&metrics);
                     drop(journal);
                     created
                 });
@@ -3215,7 +3215,7 @@ mod tests {
                         0,
                         "exhausted classes fall back to untracked backing"
                     );
-                    let recovery_created = created_bytes(&metrics);
+                    let recovery_created = storage_pool_allocated_bytes(&metrics);
 
                     let journal = Journal(Box::new(pending.publish(size).await.unwrap()));
                     for section in 0..SECTIONS {

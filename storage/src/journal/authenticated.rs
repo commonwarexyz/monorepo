@@ -883,6 +883,8 @@ where
 
     /// Persist the selected operations before the Merkle state acknowledging them.
     pub(crate) async fn finish(self) -> Result<Journal<F, E, C, H, S>, Error<F>> {
+        // Publish and fully sync the selected operations before finalizing Merkle state that
+        // acknowledges them.
         let bounds = self.journal.bounds();
         if self.selected_end < bounds.end {
             warn!(
@@ -891,9 +893,6 @@ where
                 "rewinding journal items"
             );
         }
-
-        // Publish and fully sync the selected operations before finalizing Merkle state that
-        // acknowledges them.
         let journal = self.journal.finish(self.selected_end).await?;
         let journal = journal.sync().await?;
 

@@ -128,14 +128,12 @@ impl Buffer {
             // Chaining writable regions lets the encoder cross an allocation boundary without
             // staging the value in a temporary buffer.
             let mut next = self.allocate_growth(T::SIZE, spare);
-            {
-                let mut dst = (&mut self.tail)
-                    .limit(spare)
-                    .chain_mut(&mut next)
-                    .limit(T::SIZE);
-                value.write(&mut dst);
-                assert_eq!(dst.remaining_mut(), 0, "encoded size must match FixedSize");
-            }
+            let mut dst = (&mut self.tail)
+                .limit(spare)
+                .chain_mut(&mut next)
+                .limit(T::SIZE);
+            value.write(&mut dst);
+            assert_eq!(dst.remaining_mut(), 0, "encoded size must match FixedSize");
             self.retire_tail(next);
         }
         self.len = end;
@@ -210,11 +208,11 @@ impl Buffer {
         // A larger pool class or aligned fallback could retain more than one page for a tiny
         // tail. Reuse only an exact eligible class, with exact native backing as the fallback.
         let config = pool.config();
-        let has_page_class = page_size >= config.pool_min_size()
+        let exact = page_size >= config.pool_min_size()
             && config
                 .class_for(page_size)
                 .is_some_and(|class| class.size.get() == page_size);
-        if has_page_class {
+        if exact {
             pool.try_alloc(page_size)
                 .unwrap_or_else(|_| IoBufMut::with_capacity(page_size))
         } else {
@@ -502,9 +500,9 @@ mod tests {
 
         // Keep the drained owners live while mutating the replacement tail to check that the
         // bytes handed to the writer remain unchanged.
-        let before = drained.clone().coalesce();
+        let before = drained.clone().coalesce().as_ref().to_vec();
         buffer.append(&[100, 101]);
-        assert_eq!(drained.coalesce(), before);
+        assert_eq!(drained.coalesce().as_ref(), before.as_slice());
         assert_eq!(buffer.parts().1, &[99, 100, 101]);
     }
 

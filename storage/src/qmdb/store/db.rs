@@ -404,6 +404,8 @@ where
             true,
         )?;
 
+        // Finishing recovery publishes the selected offset prefix before releasing later
+        // value bytes.
         if size < bounds.end {
             warn!(
                 journal_size = bounds.end,
@@ -411,8 +413,6 @@ where
                 "rewinding journal items"
             );
         }
-
-        // Finishing recovery publishes the selected offset prefix before releasing later value bytes.
         let mut log = pending.finish(size).await?;
         if size == 0 {
             warn!("Log is empty, initializing new db");

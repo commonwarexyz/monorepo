@@ -2,8 +2,8 @@
 //!
 //! [`Writer`](super::Writer) and [`Sealed`](super::Sealed) read the same way: logical bytes in
 //! `[tail_offset, size)` come from in-memory tail chunks (the writer's tip buffer or the sealed
-//! blob's partial last page), and bytes in `[0, tail_offset)` come from the page cache, falling back
-//! to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
+//! blob's partial last page), and bytes in `[0, tail_offset)` come from the page cache, falling
+//! back to a blob read. Each type exposes itself as a borrowed [`View`] so this algorithm lives in
 //! exactly one place.
 
 use super::{CacheRef, tip::Buffer};
@@ -246,8 +246,8 @@ impl<B: Blob> View<'_, B> {
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
     /// non-overlapping, and within bounds.
     ///
-    /// Returns the number of items fully served without a blob read (from the in-memory tail and the
-    /// page cache). The remaining items required at least one blob read.
+    /// Returns the number of items fully served without a blob read (from the in-memory tail and
+    /// the page cache). The remaining items required at least one blob read.
     pub async fn read_many_into(
         &self,
         buf: &mut [u8],
@@ -337,7 +337,8 @@ impl<B: Blob> View<'_, B> {
 /// and ranges that need cache/blob reads.
 ///
 /// Ranges must be sorted and non-overlapping. `buf` holds one slot per range, back to back.
-/// [super::validate_read_ranges] checks these preconditions and bounds every range by the blob size.
+/// [super::validate_read_ranges] checks these preconditions and bounds every range by the
+/// blob size.
 ///
 /// `tail` holds the logical bytes starting at `tail_offset`: the writer's tip buffer or the sealed
 /// blob's partial last page. Tail overlaps are copied into place. Prefixes below `tail_offset` are

@@ -1100,7 +1100,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Replay<E, A> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::{codec::View, created_bytes};
+    use crate::utils::{codec::View, storage_pool_allocated_bytes};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher as _, Sha256, sha256::Digest};
     use commonware_macros::test_traced;
@@ -1536,7 +1536,7 @@ mod tests {
                 0,
                 "exhausted classes fall back to untracked backing"
             );
-            let created = created_bytes(&metrics);
+            let created = storage_pool_allocated_bytes(&metrics);
 
             // Sequential writes reuse their geometric growth and flush allocations. Allow that
             // fixed scratch plus page-sized backing per retained section and cache entry.

@@ -659,7 +659,9 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         item.write(&mut bytes);
         writer.append(&bytes).await?;
 
-        // Release completed write buffers without advancing the recovery watermark.
+        // Completed blobs remain open until publication. Flush them here so each retains at most a
+        // partial page while recovery continues appending. Keep the checkpoint unchanged: flushing
+        // a blob alone does not establish that this prefix is ready to publish.
         if end.is_multiple_of(self.cfg.items_per_blob.get()) {
             writer.sync().await?;
         }
