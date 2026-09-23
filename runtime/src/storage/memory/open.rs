@@ -188,7 +188,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::{
         Blob as _, BufferPooler as _, Runner as _, Storage as _, deterministic::Runner,
-        mocks::MemoryStorage,
+        mocks::Storage,
     };
     use std::{
         env,
@@ -259,7 +259,7 @@ pub(crate) mod tests {
         }
 
         Runner::default().start(|context| async move {
-            let context = MemoryStorage::new(context.storage_buffer_pool().clone());
+            let context = Storage::new(context.storage_buffer_pool().clone());
             let (blob, _) = context.open("partition", b"blob").await.unwrap();
             blob.write_at(0, b"saved", WriteOptions::default())
                 .await

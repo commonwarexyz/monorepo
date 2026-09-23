@@ -2,7 +2,7 @@
 
 use crate::{
     Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
-    Metrics, Name, ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
+    Metrics, Name, ReadOptions, Spawner, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -31,13 +31,13 @@ cfg_if::cfg_if! {
 /// In-memory storage with exclusive logical opens and durable snapshot inspection.
 #[cfg(any(test, feature = "test-utils"))]
 #[derive(Clone)]
-pub struct MemoryStorage {
+pub struct Storage {
     inner: crate::storage::memory::Storage,
     opens: Arc<crate::storage::memory::open::Opens>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl MemoryStorage {
+impl Storage {
     /// Create an empty memory storage backend.
     pub fn new(pool: BufferPool) -> Self {
         Self {
@@ -76,7 +76,7 @@ impl MemoryStorage {
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl Storage for MemoryStorage {
+impl crate::Storage for Storage {
     type Blob = crate::storage::memory::open::Blob<crate::storage::memory::Blob>;
 
     async fn open_versioned(
@@ -682,7 +682,7 @@ impl<E: Spawner> Spawner for RecordingContext<E> {
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl<E: Storage> Storage for RecordingContext<E> {
+impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
     type Blob = RecordingBlob<E::Blob>;
 
     async fn open_versioned(
@@ -896,7 +896,7 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
     }
 }
 
-impl<E: Storage> Storage for DelayedSyncContext<E> {
+impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
     type Blob = DelayedSyncBlob<E::Blob>;
 
     async fn open_versioned(
@@ -1232,7 +1232,7 @@ pub struct WriteFaultContext<E> {
 
 forward_context!(WriteFaultContext, faults);
 
-impl<E: Storage> Storage for WriteFaultContext<E> {
+impl<E: crate::Storage> crate::Storage for WriteFaultContext<E> {
     type Blob = WriteFaultBlob<E::Blob>;
 
     async fn open_versioned(
@@ -1322,7 +1322,7 @@ pub struct SyncFaultContext<E> {
 
 forward_context!(SyncFaultContext, fail_partition);
 
-impl<E: Storage> Storage for SyncFaultContext<E> {
+impl<E: crate::Storage> crate::Storage for SyncFaultContext<E> {
     type Blob = SyncFaultBlob<E::Blob>;
 
     async fn open_versioned(
@@ -1410,7 +1410,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Stream, deterministic};
+    use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Storage as _, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 
@@ -1444,7 +1444,7 @@ mod tests {
         });
     }
 
-    async fn assert_read_options_forwarded<E: Storage>(
+    async fn assert_read_options_forwarded<E: crate::Storage>(
         context: &E,
         recordings: &Recordings,
         partition: &str,

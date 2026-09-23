@@ -667,7 +667,7 @@ mod tests {
     #[case::recording(true)]
     fn test_public_memory_logical_open(#[case] recording: bool) {
         crate::deterministic::Runner::default().start(|_| async move {
-            let storage = crate::mocks::MemoryStorage::new(test_pool());
+            let storage = crate::mocks::Storage::new(test_pool());
             if recording {
                 let (first, _) = crate::mocks::RecordingContext::new(storage.clone());
                 let (second, _) = crate::mocks::RecordingContext::new(storage);
@@ -689,7 +689,7 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let storage = crate::mocks::MemoryStorage::new(test_pool());
+            let storage = crate::mocks::Storage::new(test_pool());
             run_storage_tests(context, storage).await;
         });
     }
@@ -723,7 +723,7 @@ mod tests {
         const NAME: &[u8] = b"blob";
         const INSTALLED: &[u8] = b"current";
 
-        let storage = crate::mocks::MemoryStorage::new(test_pool());
+        let storage = crate::mocks::Storage::new(test_pool());
         let (stale, _) = storage.open(PARTITION, NAME).await.unwrap();
         stale
             .write_at(0, b"stale", WriteOptions::default())
