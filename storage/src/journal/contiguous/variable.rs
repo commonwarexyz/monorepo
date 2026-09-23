@@ -4958,6 +4958,7 @@ mod tests {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
             let journal = journal.sync().await.unwrap();
+            drop(journal);
 
             let (blob, _) = context
                 .open(&cfg.data_partition(), &1u64.to_be_bytes())
@@ -4967,6 +4968,7 @@ mod tests {
                 .await
                 .unwrap();
 
+            drop(blob);
             {
                 let cache = CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10));
                 let mut writers = Vec::new();
@@ -5014,8 +5016,6 @@ mod tests {
                 ));
                 assert!(stream.next().await.is_none());
             }
-
-            journal.destroy().await.unwrap();
         });
     }
 
@@ -5796,10 +5796,10 @@ mod tests {
             data_blobs.sort();
             assert_eq!(data_blobs.len(), 4);
             for name in &data_blobs[..3] {
-                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                let (_, size) = context.open(&data_partition, name).await.unwrap();
                 assert!(size > 0);
             }
-            let (_blob, size) = context.open(&data_partition, &data_blobs[3]).await.unwrap();
+            let (_, size) = context.open(&data_partition, &data_blobs[3]).await.unwrap();
             assert_eq!(size, 0);
 
             // Recovery should preserve the filled predecessors plus the empty tail.
@@ -5863,10 +5863,10 @@ mod tests {
             data_blobs.sort();
             assert_eq!(data_blobs.len(), 3);
             for name in &data_blobs[..2] {
-                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                let (_, size) = context.open(&data_partition, name).await.unwrap();
                 assert!(size > 0);
             }
-            let (_blob, size) = context.open(&data_partition, &data_blobs[2]).await.unwrap();
+            let (_, size) = context.open(&data_partition, &data_blobs[2]).await.unwrap();
             assert_eq!(size, 0);
 
             let cfg = Config {
@@ -5997,10 +5997,10 @@ mod tests {
 
             // Data blob 0 holds 30 9-byte frames (270 bytes) across 5 pages; tear page 2.
             corrupt_page(&context, &cfg.data_partition(), &0u64.to_be_bytes(), 2, 64).await;
-            let (_, size_before) = context
-                .open(&cfg.data_partition(), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_before = context
+                .durable(&cfg.data_partition(), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
 
             // The watermark (33) anchors recovery in blob 1 and every blob-0 page had its
             // covering fsync complete, so recovery never revisits blob 0: the journal is
@@ -6008,10 +6008,10 @@ mod tests {
             let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("acknowledged damage must not fail recovery");
-            let (_, size_after) = context
-                .open(&cfg.data_partition(), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_after = context
+                .durable(&cfg.data_partition(), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(
                 size_after, size_before,
                 "adoption must preserve the evidence"
@@ -6033,10 +6033,10 @@ mod tests {
             let _ = Journal::<_, u64>::init(context.child("third"), cfg.clone())
                 .await
                 .unwrap();
-            let (_, size_retry) = context
-                .open(&cfg.data_partition(), &0u64.to_be_bytes())
-                .await
-                .unwrap();
+            let size_retry = context
+                .durable(&cfg.data_partition(), &0u64.to_be_bytes())
+                .unwrap()
+                .len();
             assert_eq!(size_retry, size_before);
         });
     }
@@ -6077,6 +6077,7 @@ mod tests {
             blob.resize(2 * physical_page_size).await.unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let journal = Journal::<_, u64>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
@@ -6127,6 +6128,7 @@ mod tests {
             blob.resize(physical_page_size).await.unwrap();
             blob.sync().await.unwrap();
 
+            drop(blob);
             let journal = Journal::<_, u64>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
@@ -6231,6 +6233,7 @@ mod tests {
                 .unwrap();
             blob.resize(0).await.unwrap();
             blob.sync().await.unwrap();
+            drop(blob);
 
             // Durable state: blob 0 (10 items), blob 1 (empty, lost), blob 2 (10
             // items), blob 3 (the empty tail).
@@ -6240,7 +6243,7 @@ mod tests {
             let sizes = {
                 let mut sizes = Vec::new();
                 for name in &names {
-                    let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                    let (_, size) = context.open(&data_partition, name).await.unwrap();
                     sizes.push(size);
                 }
                 sizes
@@ -6332,6 +6335,7 @@ mod tests {
                 .unwrap();
 
             // Recovery aligns to an empty journal instead of panicking.
+            drop(blob0);
             let mut journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -6417,6 +6421,7 @@ mod tests {
 
             // Recovery must stop at the short non-tail blob rather than accepting blob 1's
             // items as later logical positions.
+            drop(blob0);
             let mut journal =
                 Journal::<_, FixedBytes<31>>::init(context.child("second"), cfg.clone())
                     .await
@@ -6478,9 +6483,8 @@ mod tests {
                 (journal, _) = journal.append(&(i * 100)).await.unwrap();
             }
 
-            // Explicitly sync blobs 0 and 1 (redundant under the rollover pipeline, but keeps
-            // the durable set independent of it) and drop without flushing blob 2 or the
-            // offsets journal.
+            // Wait for blobs 0 and 1 to become durable, then drop without flushing
+            // blob 2 or the offsets journal.
             journal.test_sync_data_blob(0).await.unwrap();
             journal.test_sync_data_blob(1).await.unwrap();
             drop(journal);
@@ -6492,7 +6496,7 @@ mod tests {
             names.sort();
             assert_eq!(names.len(), 3);
             for (blob, name) in names.iter().enumerate() {
-                let (_blob, size) = context.open(&data_partition, name).await.unwrap();
+                let (_, size) = context.open(&data_partition, name).await.unwrap();
                 if blob < 2 {
                     assert!(size > 0, "blob {blob} should be durable");
                 } else {

@@ -1,7 +1,5 @@
 //! Mock implementations of runtime primitives for testing.
 
-#[cfg(any(test, feature = "test-utils"))]
-pub use crate::storage::memory::Storage as MemoryStorage;
 use crate::{
     Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
     Metrics, Name, ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
@@ -27,6 +25,81 @@ cfg_if::cfg_if! {
         use crate::{IoBufMut, utils::reschedule};
         use futures::poll;
         use std::sync::atomic::{AtomicUsize, Ordering};
+    }
+}
+
+/// In-memory storage with exclusive logical opens and durable snapshot inspection.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct MemoryStorage {
+    inner: crate::storage::memory::Storage,
+    opens: Arc<crate::storage::open::Opens>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl MemoryStorage {
+    /// Create an empty memory storage backend.
+    pub fn new(pool: BufferPool) -> Self {
+        Self {
+            inner: crate::storage::memory::Storage::new(pool),
+            opens: Arc::default(),
+        }
+    }
+
+    /// Compute a SHA-256 digest of all durable blob contents.
+    pub fn audit(&self) -> [u8; 32] {
+        self.inner.audit()
+    }
+
+    /// Return a copy of a blob's durable raw contents without interpreting its container header.
+    pub fn raw_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.inner.raw_blob(partition, name)
+    }
+
+    /// Return a copy of a blob's durable logical contents, or `None` when the blob is missing or
+    /// its container header does not resolve.
+    pub fn durable(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.inner.durable(partition, name)
+    }
+
+    /// Install durable raw contents without validating the blob's container header.
+    ///
+    /// This retires the prior incarnation and permits a new open while old handles remain alive.
+    pub fn set_raw_blob(&self, partition: &str, name: &[u8], content: Vec<u8>) {
+        self.opens
+            .replace(partition, Some(name), || {
+                self.inner.set_raw_blob(partition, name, content);
+                Ok(())
+            })
+            .expect("installing a raw memory image cannot fail");
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Storage for MemoryStorage {
+    type Blob = crate::storage::open::Blob<crate::storage::memory::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        let opened = self.opens.open(
+            partition,
+            name,
+            self.inner.open_versioned(partition, name, versions),
+        )?;
+        Ok(opened.finish())
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.opens
+            .remove(partition, name, self.inner.remove(partition, name))
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
     }
 }
 
