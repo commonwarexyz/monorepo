@@ -33,7 +33,7 @@ cfg_if::cfg_if! {
 #[derive(Clone)]
 pub struct MemoryStorage {
     inner: crate::storage::memory::Storage,
-    opens: Arc<crate::storage::open::Opens>,
+    opens: Arc<crate::storage::memory::open::Opens>,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -77,7 +77,7 @@ impl MemoryStorage {
 
 #[cfg(any(test, feature = "test-utils"))]
 impl Storage for MemoryStorage {
-    type Blob = crate::storage::open::Blob<crate::storage::memory::Blob>;
+    type Blob = crate::storage::memory::open::Blob<crate::storage::memory::Blob>;
 
     async fn open_versioned(
         &self,

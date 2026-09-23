@@ -7,6 +7,8 @@ use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
+pub mod open;
+
 /// Resolves a blob's header from its full contents (see [super::header::resolve]).
 fn resolve_header(
     content: &[u8],
@@ -61,7 +63,7 @@ impl Generations {
 /// Raw memory snapshots used by the deterministic fault model.
 ///
 /// Each open reads an independent durable snapshot. Logical user leases belong to the enclosing
-/// [super::open::Opens] so retained crash mutations can outlive them.
+/// [open::Opens] so retained crash mutations can outlive them.
 #[derive(Clone)]
 pub(crate) struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,

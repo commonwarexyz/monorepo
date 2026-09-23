@@ -56,9 +56,11 @@ use crate::{
     storage::{
         audited::{Blob as AuditedBlob, Storage as AuditedStorage},
         faulty::{Blob as FaultyBlob, Storage as FaultyStorage},
-        memory::{Blob as MemBlob, Snapshot as MemStorageSnapshot, Storage as MemStorage},
+        memory::{
+            Blob as MemBlob, Snapshot as MemStorageSnapshot, Storage as MemStorage,
+            open::{Blob as OpenBlob, Opens},
+        },
         metered::{Blob as MeteredBlob, Storage as MeteredStorage},
-        open::{Blob as OpenBlob, Opens},
     },
     telemetry::metrics::{
         Counter, CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,

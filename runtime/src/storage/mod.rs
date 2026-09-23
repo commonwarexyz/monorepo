@@ -527,7 +527,6 @@ stability_scope!(ALPHA {
     pub mod audited;
     pub mod faulty;
     pub mod memory;
-    pub mod open;
 });
 stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
     pub mod iouring;
