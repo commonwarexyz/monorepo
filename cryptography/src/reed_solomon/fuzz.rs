@@ -13,6 +13,7 @@ use super::{
     rate::{DefaultRate, HighRate, LowRate, Rate, RateDecoder, RateEncoder},
 };
 use arbitrary::Unstructured;
+use fixedbitset::FixedBitSet;
 
 const SHARD_SIZES: [usize; 6] = [2, 62, 64, 66, 126, 130];
 
@@ -51,6 +52,8 @@ pub enum EnginePlan {
     Mul,
     /// Compare FFT and IFFT with offsets, truncation, and sentinel shards.
     Transform,
+    /// Compare short Walsh locator convolution with the full-field evaluator.
+    Locator,
 }
 
 impl EnginePlan {
@@ -59,6 +62,7 @@ impl EnginePlan {
         match self {
             Self::Mul => fuzz_mul(u),
             Self::Transform => fuzz_transform(u),
+            Self::Locator => fuzz_locator(u),
         }
     }
 }
@@ -127,6 +131,30 @@ fn fuzz_transform(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     Ok(())
 }
 
+fn fuzz_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+    let bits = u.int_in_range(0..=15)?;
+    let n = 1usize << bits;
+    let end = u.int_in_range(1..=n)?;
+    let seed = u.arbitrary::<u16>()?;
+    let mut short = [0; GF_ORDER];
+    for (i, value) in short[..end].iter_mut().enumerate() {
+        *value = match (i ^ usize::from(seed)) % 5 {
+            0 => 0,
+            1 => GF_MODULUS,
+            _ => (i as u16).wrapping_mul(257) ^ seed,
+        };
+    }
+    let mut full = short;
+    Naive::eval_poly(&mut full, end);
+    short[n] = 0xa5a5;
+    super::engine::utils::eval_poly_short(&mut short, end, n);
+    for i in 0..n {
+        assert_eq!(short[i] % GF_MODULUS, full[i] % GF_MODULUS);
+    }
+    assert_eq!(short[n], 0xa5a5);
+    Ok(())
+}
+
 /// Encoding rate exercised by the shared checks.
 #[derive(Clone, Copy, Debug, arbitrary::Arbitrary)]
 pub enum RateKind {
@@ -149,11 +177,16 @@ pub enum RatePlan {
     Recovery,
     /// Compare prepared recovery against ordinary decoding across sizes, reuse, and mismatches.
     PreparedRecovery,
+    /// Compare the rate-specific shortened locator against full-field arithmetic.
+    Locator,
 }
 
 impl RatePlan {
     /// Run rate checks on every supported engine, or exercise the public recovery decoder.
     pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        if matches!(self, Self::Locator) {
+            return fuzz_rate_locator(u);
+        }
         let small = u.int_in_range(2..=4)?;
         let large = u.int_in_range(9..=12)?;
         let shard_bytes_a = SHARD_SIZES[u.int_in_range(0..=5)?];
@@ -182,8 +215,77 @@ impl RatePlan {
             }
             Self::Recovery => exercise_recovery_reuse(&case_a, &case_b),
             Self::PreparedRecovery => exercise_prepared_reuse(&case_a, &case_b),
+            Self::Locator => unreachable!(),
         }
         Ok(())
+    }
+}
+
+fn fuzz_rate_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+    let high = u.arbitrary::<bool>()?;
+    let original_count = u.int_in_range(1usize..=64)?;
+    let recovery_count = u.int_in_range(1usize..=64)?;
+    let chunk = if high { recovery_count } else { original_count }.next_power_of_two();
+    let end = chunk + if high { original_count } else { recovery_count };
+    let mut received = FixedBitSet::with_capacity(end);
+    for i in 0..end {
+        if u.arbitrary::<bool>()? {
+            received.insert(i);
+        }
+    }
+    compare_rate_locator(high, original_count, recovery_count, &received);
+    Ok(())
+}
+
+fn compare_rate_locator(
+    high: bool,
+    original_count: usize,
+    recovery_count: usize,
+    received: &fixedbitset::FixedBitSet,
+) {
+    let chunk = if high { recovery_count } else { original_count }.next_power_of_two();
+    let end = chunk + if high { original_count } else { recovery_count };
+    let mut expected = [0; GF_ORDER];
+    if high {
+        for i in 0..recovery_count {
+            expected[i] = u16::from(!received[i]);
+        }
+        expected[recovery_count..chunk].fill(1);
+        for i in chunk..end {
+            expected[i] = u16::from(!received[i]);
+        }
+    } else {
+        for i in 0..original_count {
+            expected[i] = u16::from(!received[i]);
+        }
+        for i in chunk..end {
+            expected[i] = u16::from(!received[i]);
+        }
+        expected[end..].fill(1);
+    }
+    Naive::eval_poly(&mut expected, if high { end } else { GF_ORDER });
+    let mut actual = [0; GF_ORDER];
+    if high {
+        super::rate::rate_high::eval_erasures::<NoSimd>(
+            &mut actual,
+            original_count,
+            recovery_count,
+            received,
+        );
+    } else {
+        super::rate::rate_low::eval_full::<NoSimd>(
+            &mut actual,
+            original_count,
+            recovery_count,
+            received,
+        );
+    }
+    for i in 0..end {
+        assert_eq!(
+            actual[i] % GF_MODULUS,
+            expected[i] % GF_MODULUS,
+            "high={high} original={original_count} recovery={recovery_count} i={i}"
+        );
     }
 }
 
@@ -959,6 +1061,44 @@ mod tests {
             .with_seed(0)
             .with_search_limit(64)
             .test(|u| EnginePlan::Transform.run(u));
+    }
+
+    #[test]
+    fn minifuzz_engine_locator() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(32)
+            .test(|u| EnginePlan::Locator.run(u));
+    }
+
+    #[test]
+    fn minifuzz_rate_locator() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(32)
+            .test(|u| RatePlan::Locator.run(u));
+    }
+
+    #[test]
+    fn locator_domain_boundaries() {
+        for high in [false, true] {
+            for end in [
+                2, 3, 4, 7, 8, 15, 16, 511, 512, 513, 32767, 32768, 32769, 65535, 65536,
+            ] {
+                // Chunk size one places the other group immediately after it.
+                let (original_count, recovery_count) =
+                    if high { (end - 1, 1) } else { (1, end - 1) };
+                for pattern in 0..3 {
+                    let mut received = FixedBitSet::with_capacity(end);
+                    for i in 0..end {
+                        if pattern == 0 || (pattern == 1 && i % 3 != 0) {
+                            received.insert(i);
+                        }
+                    }
+                    compare_rate_locator(high, original_count, recovery_count, &received);
+                }
+            }
+        }
     }
 
     #[test]
