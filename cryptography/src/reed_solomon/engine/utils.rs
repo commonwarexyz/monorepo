@@ -118,8 +118,31 @@ pub(crate) fn ifft_skew_end(
 
 // Formal derivative.
 pub(crate) fn formal_derivative(data: &mut ShardsRefMut<'_>) {
-    for i in 1..data.len() {
+    let fused_end = data.len() / 4 * 4;
+    for base in (0..fused_end).step_by(4) {
+        // This pass reads the next four shards before their leaf passes.
+        if base != 0 {
+            let width = 1 << base.trailing_zeros();
+            let count = width.min(data.len() - base);
+            xor_within(data, base - width, base, count);
+        }
+
+        let (a, b, c, d) = data.dist4_mut(base, 1);
+        for (((a, b), c), d) in a.iter_mut().zip(b).zip(c).zip(d) {
+            for j in 0..SHARD_CHUNK_BYTES {
+                let bj = b[j];
+                let cj = c[j];
+                let dj = d[j];
+                a[j] ^= bj ^ cj;
+                b[j] = bj ^ dj;
+                c[j] = cj ^ dj;
+            }
+        }
+    }
+
+    for i in fused_end.max(1)..data.len() {
         let width: usize = 1 << i.trailing_zeros();
-        xor_within(data, i - width, i, width);
+        let count = width.min(data.len() - i);
+        xor_within(data, i - width, i, count);
     }
 }

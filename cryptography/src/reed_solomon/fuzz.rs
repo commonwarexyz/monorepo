@@ -54,6 +54,8 @@ pub enum EnginePlan {
     Transform,
     /// Compare short Walsh locator convolution with the full-field evaluator.
     Locator,
+    /// Compare the fused formal derivative with the original pass schedule.
+    Derivative,
 }
 
 impl EnginePlan {
@@ -63,6 +65,7 @@ impl EnginePlan {
             Self::Mul => fuzz_mul(u),
             Self::Transform => fuzz_transform(u),
             Self::Locator => fuzz_locator(u),
+            Self::Derivative => fuzz_derivative(u),
         }
     }
 }
@@ -153,6 +156,45 @@ fn fuzz_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     }
     assert_eq!(short[n], 0xa5a5);
     Ok(())
+}
+
+const DERIVATIVE_COUNTS: [usize; 21] = [
+    0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
+];
+const DERIVATIVE_CHUNKS: [usize; 10] = [0, 1, 3, 7, 8, 9, 17, 63, 64, 65];
+
+fn fuzz_derivative(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+    let count = if u.arbitrary::<bool>()? {
+        DERIVATIVE_COUNTS[u.int_in_range(0..=20)?]
+    } else {
+        u.int_in_range(0..=129)?
+    };
+    let chunks = DERIVATIVE_CHUNKS[u.int_in_range(0..=9)?];
+    let mut input = vec![[0; SHARD_CHUNK_BYTES]; count * chunks];
+    fill_chunks(&mut input, &mut Input::new(u.bytes(u.len())?));
+    compare_derivative(&input, count, chunks);
+    Ok(())
+}
+
+fn compare_derivative(input: &[[u8; SHARD_CHUNK_BYTES]], count: usize, chunks: usize) {
+    // Zero extension makes the original full-block pass schedule a reference
+    // for truncated shard counts as well.
+    let padded_count = count.max(1).next_power_of_two();
+    let mut expected = vec![[0; SHARD_CHUNK_BYTES]; padded_count * chunks];
+    expected[..input.len()].copy_from_slice(input);
+    let mut actual = input.to_vec();
+
+    let mut reference = ShardsRefMut::new(padded_count, chunks, &mut expected);
+    for i in 1..padded_count {
+        let width = 1 << i.trailing_zeros();
+        super::engine::utils::xor_within(&mut reference, i - width, i, width);
+    }
+    super::engine::utils::formal_derivative(&mut ShardsRefMut::new(count, chunks, &mut actual));
+    assert_eq!(
+        actual,
+        expected[..input.len()],
+        "count={count}, chunks={chunks}"
+    );
 }
 
 /// Encoding rate exercised by the shared checks.
@@ -1045,6 +1087,25 @@ mod tests {
             input.to_vec().into_boxed_slice().try_into().unwrap();
         E::eval_poly(actual.as_mut(), truncated_size);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn minifuzz_derivative() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| EnginePlan::Derivative.run(u));
+    }
+
+    #[test]
+    fn derivative_boundary_schedule() {
+        for count in [0, 1, 3, 4, 5, 15, 16, 17, 31, 32, 33, 64, 65] {
+            for chunks in [0, 1, 7, 8, 9, 63, 64, 65] {
+                let mut input = vec![[0; SHARD_CHUNK_BYTES]; count * chunks];
+                fill_chunks(&mut input, &mut Input::new(&[3, 0xff, 19, 0x80]));
+                compare_derivative(&input, count, chunks);
+            }
+        }
     }
 
     #[test]
