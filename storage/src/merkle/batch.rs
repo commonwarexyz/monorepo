@@ -309,7 +309,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Encode and hash `items` across the strategy, adding their leaf digests in order.
     #[cfg(feature = "std")]
-    pub(crate) fn add_many<Item: Write + Send + Sync>(
+    pub fn add_many<Item: Write + Send + Sync>(
         mut self,
         hasher: &impl Hasher<F, Digest = D>,
         items: &[Item],
@@ -852,6 +852,8 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 mod tests {
     use super::*;
     use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem};
+    use bytes::Bytes;
+    use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::{Manual, Rayon};
     use commonware_runtime::{Runner as _, deterministic};
@@ -1399,6 +1401,46 @@ mod tests {
             .manual()
     }
 
+    /// Items of very different sizes match adding them one at a time.
+    fn add_many_skewed_sizes<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            let base = build_reference::<F>(&hasher, 30);
+            let large = Bytes::from(vec![7; 16 * 1024]);
+            let small = Bytes::from_static(b"small");
+            for layout in ["dominant", "clustered", "spread"] {
+                let items: Vec<Bytes> = (0..300usize)
+                    .map(|i| match layout {
+                        "dominant" if i == 0 => large.clone(),
+                        "clustered" if i < 16 => large.clone(),
+                        "spread" if i.is_multiple_of(37) => large.clone(),
+                        _ => small.clone(),
+                    })
+                    .collect();
+                let mut expected = base.new_batch();
+                for item in &items {
+                    expected = expected.add(&hasher, &item.encode());
+                }
+                let expected = expected.merkleize(&base, &hasher);
+
+                for parallelism in [2, 8] {
+                    let batch =
+                        MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(parallelism))
+                            .new_batch()
+                            .add_many(&hasher, &items)
+                            .merkleize(&base, &hasher);
+                    assert_eq!(batch.appended, expected.appended, "{layout} {parallelism}");
+                    assert_eq!(
+                        batch.root(&base, &hasher, 0).unwrap(),
+                        expected.root(&base, &hasher, 0).unwrap(),
+                        "{layout} {parallelism}"
+                    );
+                }
+            }
+        });
+    }
+
     /// `add_many` near the maximum leaf count, where some subtree roots can never exist.
     fn add_many_at_limit<F: Family>() {
         let executor = deterministic::Runner::default();
@@ -1591,6 +1633,11 @@ mod tests {
     }
 
     #[test]
+    fn mmr_add_many_skewed_sizes() {
+        add_many_skewed_sizes::<crate::mmr::Family>();
+    }
+
+    #[test]
     fn mmr_add_many_at_limit() {
         add_many_at_limit::<crate::mmr::Family>();
     }
@@ -1687,6 +1734,11 @@ mod tests {
     #[test]
     fn mmb_add_many_then_mutate() {
         add_many_then_mutate::<crate::mmb::Family>();
+    }
+
+    #[test]
+    fn mmb_add_many_skewed_sizes() {
+        add_many_skewed_sizes::<crate::mmb::Family>();
     }
 
     #[test]
