@@ -94,6 +94,9 @@ where
     }
 }
 
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, K, V, S> = Result<Arc<MerkleizedBatch<F, D, K, V, S>>, Error<F>>;
+
 /// A speculative batch for a compact immutable db.
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
@@ -290,7 +293,6 @@ where
     ///
     /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
     /// live ancestor commitment (both size and root).
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.immutable.compact.batch.merkleize",
         level = "info",
@@ -301,7 +303,7 @@ where
         db: &Db<F, E, K, V, H, C, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, K, V, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         F: Family,
         E: Context,

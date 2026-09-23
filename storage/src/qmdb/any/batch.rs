@@ -369,6 +369,21 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
 pub(crate) type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 
+/// Ancestors retained while a batch is merkleized, immediate parent first.
+pub(crate) type RetainedAncestors<F, D, U, S> = Vec<AncestorBatch<F, D, U, S>>;
+
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, U, S> = Result<Arc<MerkleizedBatch<F, D, U, S>>, crate::qmdb::Error<F>>;
+
+/// Result of a prepared merkleization: the batch and the ancestors retained while building it.
+pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
+    (
+        Arc<MerkleizedBatch<F, D, U, S>>,
+        RetainedAncestors<F, D, U, S>,
+    ),
+    crate::qmdb::Error<F>,
+>;
+
 /// Validate `current` against an effective database boundary and retained ancestor chain.
 fn validate_ancestor_chain<F: Family, D: Digest, U: update::Update, S: Strategy>(
     current: Commitment<F, D>,
@@ -425,6 +440,10 @@ where
     mutations: BTreeMap<U::Key, Option<U::Value>>,
     merkleizer: Merkleizer<F, H, U, S>,
 }
+
+/// Result of validating a batch and binding it to the database it will read.
+type PrepareResult<'a, F, E, C, I, H, U, const N: usize, S> =
+    Result<Prepared<'a, F, E, C, I, H, U, N, S>, crate::qmdb::Error<F>>;
 
 /// Look up a key in the ancestor chain (immediate parent first).
 fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
@@ -990,7 +1009,7 @@ where
     /// superseded by `diff` (every `Some` `base_old_loc`), in any order. The floor raise
     /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
     /// caller gathered and read ahead of time, consumed by the raise before scanning live.
-    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     async fn finish<E, C, I, const N: usize>(
         self,
         mut ops: Vec<Operation<F, U>>,
@@ -1002,13 +1021,7 @@ where
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<
-        (
-            Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-            Vec<AncestorBatch<F, H::Digest, U, S>>,
-        ),
-        crate::qmdb::Error<F>,
-    >
+    ) -> RetainedMerkleizeResult<F, H::Digest, U, S>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -1547,7 +1560,6 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize.staged",
         level = "info",
@@ -1560,7 +1572,7 @@ where
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -1701,7 +1713,6 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize.staged",
         level = "info",
@@ -1714,7 +1725,7 @@ where
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -1747,11 +1758,10 @@ where
 
     /// Validate that `current` is a state on this batch's live chain, returning strong ancestor
     /// references that keep the validated chain stable through subsequent asynchronous work.
-    #[allow(clippy::type_complexity)]
     pub(crate) fn validate_commitment(
         &self,
         current: Commitment<F, H::Digest>,
-    ) -> Result<Vec<AncestorBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>> {
+    ) -> Result<RetainedAncestors<F, H::Digest, U, S>, crate::qmdb::Error<F>> {
         let ancestors = self.retain_ancestors();
         let db_state = chain::effective_boundary(
             self.base.db(),
@@ -1791,11 +1801,10 @@ where
 
     /// Validate this batch and bind its retained chain to the exact database used by all
     /// subsequent merkleization reads.
-    #[allow(clippy::type_complexity)]
     pub(crate) fn prepare<'a, E, C, I, const N: usize>(
         self,
         db: &'a Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Prepared<'a, F, E, C, I, H, U, N, S>, crate::qmdb::Error<F>>
+    ) -> PrepareResult<'a, F, E, C, I, H, U, N, S>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -2063,7 +2072,6 @@ where
     /// # Errors
     ///
     /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize",
         level = "info",
@@ -2074,7 +2082,7 @@ where
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -2118,20 +2126,13 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
-    #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan(
         self,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<
-        (
-            Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>,
-            Vec<AncestorBatch<F, H::Digest, update::Unordered<K, V>, S>>,
-        ),
-        crate::qmdb::Error<F>,
-    > {
+    ) -> RetainedMerkleizeResult<F, H::Digest, update::Unordered<K, V>, S> {
         let Self {
             db,
             mut mutations,
@@ -2291,7 +2292,6 @@ where
     /// # Errors
     ///
     /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize",
         level = "info",
@@ -2302,7 +2302,7 @@ where
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -2344,19 +2344,12 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
-    #[allow(clippy::type_complexity)]
     pub(crate) async fn merkleize_with_floor_scan(
         self,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<
-        (
-            Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>,
-            Vec<AncestorBatch<F, H::Digest, update::Ordered<K, V>, S>>,
-        ),
-        crate::qmdb::Error<F>,
-    > {
+    ) -> RetainedMerkleizeResult<F, H::Digest, update::Ordered<K, V>, S> {
         let Self {
             db,
             mut mutations,

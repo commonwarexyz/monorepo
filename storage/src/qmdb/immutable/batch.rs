@@ -32,6 +32,9 @@ pub(crate) struct DiffEntry<F: Family, V> {
     pub(crate) loc: Location<F>,
 }
 
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, K, V, S> = Result<Arc<MerkleizedBatch<F, D, K, V, S>>, Error<F>>;
+
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
@@ -244,14 +247,13 @@ where
     ///
     /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or
     /// a live ancestor commitment (both size and root).
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, K, V, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,

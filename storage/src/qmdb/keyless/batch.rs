@@ -19,6 +19,9 @@ use std::sync::{Arc, Weak};
 /// Strong ref to an ancestor [`MerkleizedBatch`] in the keyless-batch chain.
 type MerkleizedParent<F, H, V, S> = Arc<MerkleizedBatch<F, DigestOf<H>, V, S>>;
 
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, V, S> = Result<Arc<MerkleizedBatch<F, D, V, S>>, Error<F>>;
+
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
@@ -253,14 +256,13 @@ where
     ///
     /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
     /// live ancestor commitment (both size and root).
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(name = "qmdb.keyless.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, V, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, V, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, V>>,

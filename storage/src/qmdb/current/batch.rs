@@ -262,6 +262,10 @@ impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S
     }
 }
 
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, U, const N: usize, S> =
+    Result<Arc<MerkleizedBatch<F, D, U, N, S>>, Error<F>>;
+
 /// A speculative batch of mutations whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
 ///
@@ -515,7 +519,6 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
@@ -528,7 +531,7 @@ where
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -586,7 +589,6 @@ where
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
@@ -599,7 +601,7 @@ where
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -637,7 +639,6 @@ where
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize",
         level = "info",
@@ -647,7 +648,7 @@ where
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -688,7 +689,6 @@ where
     /// # Errors
     ///
     /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize",
         level = "info",
@@ -698,7 +698,7 @@ where
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
