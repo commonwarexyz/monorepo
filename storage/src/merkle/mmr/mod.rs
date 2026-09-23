@@ -218,6 +218,18 @@ impl merkle::Family for Family {
         }
         true
     }
+
+    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
+        let leaf_pos = Self::location_to_position(leaf_start);
+        let shift = 1u64
+            .checked_shl(height + 1)
+            .expect("height excessively large");
+
+        leaf_pos
+            .checked_add(shift)
+            .and_then(|v| v.checked_sub(2))
+            .expect("position overflow")
+    }
 }
 
 impl Graftable for Family {
@@ -242,18 +254,6 @@ impl Graftable for Family {
         let root_pos = Position::new(*first_leaf_pos + (1u64 << (grafting_height + 1)) - 2);
 
         core::iter::once((root_pos, grafting_height))
-    }
-
-    fn subtree_root_position(leaf_start: Location, height: u32) -> Position {
-        let leaf_pos = Self::location_to_position(leaf_start);
-        let shift = 1u64
-            .checked_shl(height + 1)
-            .expect("height excessively large");
-
-        leaf_pos
-            .checked_add(shift)
-            .and_then(|v| v.checked_sub(2))
-            .expect("position overflow")
     }
 
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
