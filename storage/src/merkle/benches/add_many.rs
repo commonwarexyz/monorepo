@@ -92,6 +92,13 @@ fn bench_uniform(c: &mut Criterion) {
         );
         bench_case(
             c,
+            &format!("family=mmb ops={ops} workers=1"),
+            &mmb,
+            &Sequential,
+            &items,
+        );
+        bench_case(
+            c,
             &format!("family=mmb ops={ops} workers={WORKERS}"),
             &mmb,
             &rayon,
@@ -117,6 +124,13 @@ fn bench_skewed(c: &mut Criterion) {
                 _ => small.clone(),
             })
             .collect();
+        bench_case(
+            c,
+            &format!("payload={payload} workers=1"),
+            &mmr,
+            &Sequential,
+            &items,
+        );
         bench_case(
             c,
             &format!("payload={payload} workers={WORKERS}"),

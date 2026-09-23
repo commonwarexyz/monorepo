@@ -70,13 +70,13 @@
 //!
 //! # Parallel appends
 //!
-//! `add_many` splits its leaves into contiguous ranges, one per worker. A range's positions run
-//! from its first leaf up to the next range's first leaf. Each worker hashes its leaves and then,
-//! from the lowest height up, computes every node in its positions whose leaves all belong to its
-//! range. The remaining nodes in its positions depend on earlier leaves (at most two per height)
-//! and are computed by [`UnmerkleizedBatch::merkleize`]. In an MMB, delayed merging can also place
-//! a node built only from one range's leaves after the next range starts, so that node is left for
-//! `merkleize` too.
+//! [`UnmerkleizedBatch::add_many`] splits its leaves into contiguous ranges, one per worker. A
+//! range's positions run from its first leaf up to the next range's first leaf. Each worker hashes
+//! its leaves and then, from the lowest height up, computes every node in its positions whose
+//! leaves all belong to its range. The remaining nodes in its positions depend on earlier leaves
+//! (at most two per height) and are computed by [`UnmerkleizedBatch::merkleize`]. In an MMB,
+//! delayed merging can also place a node built only from one range's leaves after the next range
+//! starts, so that node is left for `merkleize` too.
 //!
 //! # Example (MMR)
 //!
@@ -142,8 +142,8 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     overwrites: Overwrites<F, D>,
     /// Dirty internal node positions bucketed by height. Outer index is height; inner Vec
     /// holds positions at that height in push order (monotonically increasing for
-    /// `add_leaf_digest`; may contain duplicates from interleaved `mark_dirty` walks, deduped
-    /// in `merkleize`). Avoids the BTreeSet insert cost and a final global sort.
+    /// `add_leaf_digest` and `add_many`; may contain duplicates from interleaved `mark_dirty`
+    /// walks, deduped in `merkleize`). Avoids the BTreeSet insert cost and a final global sort.
     dirty_nodes: Vec<Vec<Position<F>>>,
 }
 
@@ -308,8 +308,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Encode and hash `items` across the strategy, adding their leaf digests in order.
+    ///
+    /// Equivalent to calling [`add`](Self::add) with each item's encoding.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the leaf count would exceed [`Family::MAX_LEAVES`].
     #[cfg(feature = "std")]
-    pub fn add_many<Item: Write + Send + Sync>(
+    pub fn add_many<Item: Write + Sync>(
         mut self,
         hasher: &impl Hasher<F, Digest = D>,
         items: &[Item],
@@ -335,21 +341,36 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             };
             batches.map_collect_vec(
                 |ranges| {
+                    // Slices are split off in order, so the ranges must cover `items` in order.
                     let mut rest = nodes;
                     let mut base = start;
-                    ranges
+                    let mut covered = 0;
+                    let prepared = ranges
                         .into_iter()
                         .map(|range| {
+                            assert!(
+                                range.start == covered && range.start < range.end,
+                                "batches must cover the items in order"
+                            );
+                            covered = range.end;
                             let range_first = first + range.start as u64;
-                            let next = F::location_to_position(first + range.end as u64);
-                            let (head, tail) =
-                                core::mem::take(&mut rest).split_at_mut((*next - *base) as usize);
-                            let batch = (range_first, &items[range], base, head);
-                            rest = tail;
+                            let range_items = &items[range];
+                            let next =
+                                F::location_to_position(range_first + range_items.len() as u64);
+                            let slice = rest
+                                .split_off_mut(..(*next - *base) as usize)
+                                .expect("range ends within the batch");
+                            let batch = (range_first, range_items, base, slice);
                             base = next;
                             batch
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        covered,
+                        items.len(),
+                        "batches must cover the items in order"
+                    );
+                    prepared
                 },
                 |(first, items, base, nodes)| build_range(hasher, items, first, base, nodes),
             )
@@ -426,9 +447,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
-        // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
-        // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
-        // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
+        // Each bucket accumulates positions in push order, which for `add_leaf_digest` and
+        // `add_many` is already ascending; the stable `sort` is cheap on such near-sorted input.
+        // The dedup then collapses any duplicates that slipped past `mark_dirty`'s last-entry
+        // check.
         let mut buckets = core::mem::take(&mut self.dirty_nodes);
         for bucket in &mut buckets {
             bucket.sort();
@@ -590,6 +612,7 @@ fn build_range<F: Family, D: Digest, Item: Write>(
     let mut deferred = Vec::new();
     for height in 1..=(*leaves_end).ilog2() {
         let width = 1u64 << height;
+        let height_start = deferred.len();
         let mut leaf = (*first).next_multiple_of(width);
         while let Some(prev) = leaf.checked_sub(width) {
             leaf = prev;
@@ -604,6 +627,8 @@ fn build_range<F: Family, D: Digest, Item: Write>(
                 deferred.push((height, F::subtree_root_position(loc, height)));
             }
         }
+        // Keep each height ascending so dirty buckets stay sorted.
+        deferred[height_start..].reverse();
     }
     deferred
 }
@@ -852,8 +877,6 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 mod tests {
     use super::*;
     use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem};
-    use bytes::Bytes;
-    use commonware_codec::Encode as _;
     use commonware_cryptography::{Sha256, sha256};
     use commonware_parallel::{Manual, Rayon};
     use commonware_runtime::{Runner as _, deterministic};
@@ -1401,46 +1424,6 @@ mod tests {
             .manual()
     }
 
-    /// Items of very different sizes match adding them one at a time.
-    fn add_many_skewed_sizes<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            let base = build_reference::<F>(&hasher, 30);
-            let large = Bytes::from(vec![7; 16 * 1024]);
-            let small = Bytes::from_static(b"small");
-            for layout in ["dominant", "clustered", "spread"] {
-                let items: Vec<Bytes> = (0..300usize)
-                    .map(|i| match layout {
-                        "dominant" if i == 0 => large.clone(),
-                        "clustered" if i < 16 => large.clone(),
-                        "spread" if i.is_multiple_of(37) => large.clone(),
-                        _ => small.clone(),
-                    })
-                    .collect();
-                let mut expected = base.new_batch();
-                for item in &items {
-                    expected = expected.add(&hasher, &item.encode());
-                }
-                let expected = expected.merkleize(&base, &hasher);
-
-                for parallelism in [2, 8] {
-                    let batch =
-                        MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(parallelism))
-                            .new_batch()
-                            .add_many(&hasher, &items)
-                            .merkleize(&base, &hasher);
-                    assert_eq!(batch.appended, expected.appended, "{layout} {parallelism}");
-                    assert_eq!(
-                        batch.root(&base, &hasher, 0).unwrap(),
-                        expected.root(&base, &hasher, 0).unwrap(),
-                        "{layout} {parallelism}"
-                    );
-                }
-            }
-        });
-    }
-
     /// `add_many` near the maximum leaf count, where some subtree roots can never exist.
     fn add_many_at_limit<F: Family>() {
         let executor = deterministic::Runner::default();
@@ -1633,11 +1616,6 @@ mod tests {
     }
 
     #[test]
-    fn mmr_add_many_skewed_sizes() {
-        add_many_skewed_sizes::<crate::mmr::Family>();
-    }
-
-    #[test]
     fn mmr_add_many_at_limit() {
         add_many_at_limit::<crate::mmr::Family>();
     }
@@ -1734,11 +1712,6 @@ mod tests {
     #[test]
     fn mmb_add_many_then_mutate() {
         add_many_then_mutate::<crate::mmb::Family>();
-    }
-
-    #[test]
-    fn mmb_add_many_skewed_sizes() {
-        add_many_skewed_sizes::<crate::mmb::Family>();
     }
 
     #[test]

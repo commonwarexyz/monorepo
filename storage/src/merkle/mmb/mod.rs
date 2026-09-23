@@ -232,15 +232,9 @@ impl merkle::Family for Family {
             return Self::location_to_position(leaf_start);
         }
 
-        // birth_leaf = leaf_start + 3·2^(h-1) - 2 (derived by substituting last_leaf = leaf_start +
-        // 2^h - 1 into birth_leaf = last_leaf + 2^(h-1) - 1)
-        let offset = 3u64
-            .checked_shl(height - 1)
-            .and_then(|v| v.checked_sub(2))
-            .expect("height excessively large");
-        let birth_leaf = leaf_start.checked_add(offset).expect("location overflow");
-
-        let birth_pos = Self::location_to_position(birth_leaf);
+        // A parent is appended right after the leaf that creates it.
+        let birth = Self::subtree_birth_size(leaf_start, height).expect("location overflow");
+        let birth_pos = Self::location_to_position(birth - 1);
         birth_pos.checked_add(1).expect("position overflow")
     }
 
@@ -249,7 +243,7 @@ impl merkle::Family for Family {
             return leaf_start.checked_add(1);
         }
 
-        // One past the birth leaf `leaf_start + 3 * 2^(h-1) - 2`.
+        // Merges lag by 2^(h-1) - 1 leaves: one past birth leaf `leaf_start + 3 * 2^(h-1) - 2`.
         let offset = 1u64
             .checked_shl(height - 1)?
             .checked_mul(3)?
@@ -260,28 +254,6 @@ impl merkle::Family for Family {
 
 impl Graftable for Family {
     type PendingChunk<D: Digest> = Option<D>;
-
-    fn peak_birth_size(pos: Position, height: u32) -> u64 {
-        if height == 0 {
-            // Leaves have no merge delay; born as soon as appended.
-            return *<Self as Graftable>::leftmost_leaf(pos, 0) + 1;
-        }
-
-        let width = 1u64.checked_shl(height).expect("height excessively large");
-        // `base` is the leaf count at which all leaves in the subtree have been appended.
-        let base = <Self as Graftable>::leftmost_leaf(pos, height)
-            .checked_add(width)
-            .expect("birth size overflow");
-
-        // In MMB, a parent at height h is not created when its last leaf is appended.
-        // Instead it is delayed by 2^(h-1) - 1 additional leaf insertions (the
-        // "1-merge-per-leaf" budget). So the node is born at `base + delay` total leaves.
-        let delay = 1u64
-            .checked_shl(height - 1)
-            .and_then(|v| v.checked_sub(1))
-            .expect("height excessively large");
-        *base.checked_add(delay).expect("birth size overflow")
-    }
 
     fn leftmost_leaf(pos: Position, height: u32) -> Location {
         if height == 0 {
