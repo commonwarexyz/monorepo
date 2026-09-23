@@ -36,6 +36,7 @@ Persist data, drop the database, and initialize it again to test clean recovery.
 let (blob, size) = context.open(&partition, &name).await.unwrap();
 blob.resize(size - 1).await.unwrap();
 blob.sync().await.unwrap();
+drop(blob);
 
 let journal = Journal::init(context, cfg).await.unwrap();
 assert_eq!(journal.size().await.unwrap(), expected_size);

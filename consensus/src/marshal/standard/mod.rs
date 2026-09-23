@@ -3872,6 +3872,7 @@ mod tests {
             assert!(marshal.certified(round, block).await);
 
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(marshal);
 
             let setup2 = StandardHarness::setup_validator(

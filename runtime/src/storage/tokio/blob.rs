@@ -26,7 +26,7 @@ use tokio::task;
 
 cfg_if! {
     if #[cfg(test)] {
-        use std::sync::{Barrier, mpsc};
+        use std::sync::mpsc;
         use tokio::sync::oneshot::Sender as OneshotSender;
     }
 }
@@ -89,6 +89,8 @@ struct TestState {
     before_mutation: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next sync after the filesystem operation completes.
     after_sync: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
+    /// Pause the next start_sync worker after publishing its completion.
+    after_start_sync: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
 }
 
 #[cfg(test)]
@@ -232,8 +234,6 @@ pub struct Blob {
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: Arc<AtomicBool>,
-    #[cfg(test)]
-    after_start_sync: Option<Arc<Barrier>>,
 }
 
 impl Blob {
@@ -288,8 +288,6 @@ impl Blob {
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
-            #[cfg(test)]
-            after_start_sync: None,
         }
     }
 
@@ -658,16 +656,16 @@ impl crate::Blob for Blob {
         let file = self.open.shared.clone();
         let seen = self.open.tracker.begin_sync();
         #[cfg(test)]
-        let after_start_sync = self.after_start_sync.clone();
+        let after_start_sync = file.test.after_start_sync.lock().take();
         task::spawn_blocking(move || {
             // Release this operation's blob ownership before publishing its completion.
             let result = file.flush(seen);
             drop(file);
             let _ = tx.send(result);
             #[cfg(test)]
-            if let Some(gate) = after_start_sync {
-                gate.wait();
-                gate.wait();
+            if let Some((entered, release)) = after_start_sync {
+                let _ = entered.send(());
+                let _ = release.recv();
             }
         });
         Handle::from_receiver(rx)
@@ -689,14 +687,7 @@ mod tests {
     use futures::FutureExt as _;
     #[cfg(target_os = "linux")]
     use std::sync::Weak;
-    use std::{
-        env,
-        ops::RangeInclusive,
-        path::PathBuf,
-        process,
-        sync::{Barrier, mpsc},
-        time::Duration,
-    };
+    use std::{env, ops::RangeInclusive, path::PathBuf, process, sync::mpsc, time::Duration};
     use tokio::time::timeout;
 
     fn storage_for_reopen_test(label: &str, layouts: RangeInclusive<Layout>) -> (Storage, PathBuf) {
@@ -1368,24 +1359,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_reopen_after_start_sync_completion() {
-        let storage_directory = std::env::temp_dir().join(format!(
-            "storage_tokio_sync_completion_{}",
-            std::process::id()
-        ));
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
-        let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL), pool);
-        let (mut blob, _) = storage.open("partition", b"blob").await.unwrap();
-        let gate = Arc::new(Barrier::new(2));
-        blob.after_start_sync = Some(gate.clone());
+        let (storage, storage_directory) = storage_for_reopen_test("sync_completion", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let (entered, entering) = ::tokio::sync::oneshot::channel();
+        let (release, released) = mpsc::channel();
+        *blob.open.test.after_start_sync.lock() = Some((entered, released));
 
         // Keep the completed sync worker alive while the caller writes and closes the blob.
         blob.write_at(0, b"before", WriteOptions::default())
             .await
             .unwrap();
-        blob.start_sync().await.await.unwrap();
-        gate.wait();
-        let observed: Result<_, Error> = async {
+        let observed = timeout(Duration::from_secs(10), async {
+            blob.start_sync().await.await?;
+            entering.await.expect("sync worker did not pause");
             blob.write_at(0, b"after sync", WriteOptions::default())
                 .await?;
             drop(blob);
@@ -1393,13 +1379,15 @@ mod tests {
             let bytes = reopened
                 .read_at(0, len as usize, ReadOptions::default())
                 .await?;
-            Ok((len, bytes.coalesce(), storage.pending.completions()))
-        }
+            Ok::<_, Error>((len, bytes.coalesce(), storage.pending.completions()))
+        })
         .await;
 
         // Release the worker before checking results so a failure cannot strand it.
-        gate.wait();
-        let (len, bytes, syncs) = observed.unwrap();
+        let _ = release.send(());
+        let (len, bytes, syncs) = observed
+            .expect("completed sync retained blob ownership")
+            .unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
         assert_eq!(len, 10);
         assert_eq!(bytes.as_ref(), b"after sync");

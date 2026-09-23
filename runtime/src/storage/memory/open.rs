@@ -14,10 +14,6 @@ use std::{
 type Key = (String, Vec<u8>);
 
 /// Couples namespace transactions to logical user-handle lifetimes.
-///
-/// Only the synchronous memory backend and its deterministic wrappers use this owner.
-/// Their namespace futures must complete in one poll while the registry is locked.
-/// The registry lock also covers synchronous raw-image replacement and last-owner cleanup.
 #[derive(Default)]
 pub(crate) struct Opens {
     live: Mutex<BTreeMap<Key, Weak<Live>>>,

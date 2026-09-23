@@ -718,8 +718,8 @@ stability_scope!(BETA {
         /// A blob has one open at a time. Clone the returned blob to share it, and
         /// drop every clone before opening the blob again.
         ///
-        /// Returns [`Error::BlobAlreadyOpen`] if a handle from an earlier open of the blob is
-        /// still alive and the blob has not been removed since.
+        /// An otherwise valid open returns [`Error::BlobAlreadyOpen`] if a handle from an earlier
+        /// open of the blob is still alive and the blob has not been removed since.
         ///
         /// # Durability
         ///
@@ -875,9 +875,8 @@ stability_scope!(BETA {
     ///
     /// Cloning a blob shares one open, similar to wrapping a single file
     /// descriptor in a lock. A blob has one open at a time: opening it again
-    /// while any clone is alive returns [`Error::BlobAlreadyOpen`] unless the
-    /// blob was removed since, see [`Storage::open_versioned`]. Use clones to
-    /// share access to a blob.
+    /// while any clone is alive fails unless the blob was removed since, see
+    /// [`Storage::open_versioned`]. Use clones to share access to a blob.
     ///
     /// When a blob is dropped, any unsynced changes may be discarded. Dropping
     /// does not synchronize the blob. Call [`Blob::sync`] before dropping to

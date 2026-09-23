@@ -265,6 +265,8 @@ mod tests {
             index: usize,
         ) {
             self.nodes[index].abort();
+            let _ = (&mut self.nodes[index].orchestrator_handle).await;
+            let _ = (&mut self.nodes[index].marshal_handle).await;
             self.nodes[index] = Node::start(
                 context,
                 &self.oracle,
