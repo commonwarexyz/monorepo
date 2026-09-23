@@ -1,8 +1,9 @@
 //! Worker-local io_uring submission, completion, and deadlines.
 //!
 //! [`Waiters`] owns each request's descriptors, buffers, progress, and observer.
-//! The driver queues only IDs. New requests and partial completions join the
-//! ready queue, waiting for both SQ space and an available operation slot.
+//! The driver queues only IDs. Durability requests first acquire their open's
+//! permit. Eligible requests and partial completions join the ready queue,
+//! waiting for both SQ space and an available operation slot.
 //! Completion releases that slot even if the local result remains unconsumed
 //! in its waiter. Detached sync results leave through [`Deferred`].
 //!
@@ -39,8 +40,8 @@
 //!
 //! # Cleanup
 //!
-//! All callbacks and resource destruction go through [`Deferred`], outside the
-//! worker borrow. Closure detaches local and forwarded observers and cancels eligible
+//! Observer callbacks and request-resource destruction go through [`Deferred`],
+//! outside the worker borrow. Closure detaches local and forwarded observers and cancels eligible
 //! requests. The worker continues servicing until all requests retire, keeping
 //! the driver in place throughout the drain.
 
@@ -54,6 +55,7 @@ use super::{
 };
 use crate::Error;
 use commonware_utils::channel::oneshot;
+use futures::{Stream, future::BoxFuture, stream::FuturesUnordered};
 use io_uring::{
     IoUring,
     opcode::AsyncCancel,
@@ -63,9 +65,12 @@ use io_uring::{
 use std::{
     collections::VecDeque,
     io,
-    task::Waker as TaskWaker,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, Waker as TaskWaker},
     time::{Duration, Instant},
 };
+use tokio::sync::OwnedMutexGuard;
 use tracing::warn;
 
 /// Shared acknowledgement token for cancellation SQEs.
@@ -89,6 +94,10 @@ struct State {
     in_flight_limit: usize,
     /// FIFO of initial and follow-up operation SQEs, with lazily removed stale IDs.
     ready_queue: VecDeque<WaiterId>,
+    /// Accepted durability requests awaiting their open's permit, absent from the FIFO.
+    acquiring: FuturesUnordered<BoxFuture<'static, (WaiterId, OwnedMutexGuard<()>)>>,
+    /// Permit grants wake ring service even after the ordinary mailbox closes.
+    acquisition_waker: TaskWaker,
     /// New requests whose deadlines must be registered after advancing the wheel.
     pending_deadlines: VecDeque<WaiterId>,
     /// Requests awaiting a cancellation SQE, skipped if their operation finishes first.
@@ -129,6 +138,8 @@ impl Driver {
                 waiters: Waiters::new(size),
                 in_flight_limit: size,
                 ready_queue: VecDeque::with_capacity(size),
+                acquiring: FuturesUnordered::new(),
+                acquisition_waker: Arc::new(waker.clone()).into(),
                 pending_deadlines: VecDeque::with_capacity(size),
                 pending_cancels: VecDeque::with_capacity(size),
                 timeout_wheel: TimeoutWheel::new(max_timeout, cfg.timeout_wheel_tick, now),
@@ -150,8 +161,9 @@ impl Driver {
         deferred: &mut Deferred,
     ) -> WaiterId {
         let deadline = request.deadline();
+        let durability = request.durability().cloned();
 
-        // Transfer ownership once. Both queues below carry only this identity.
+        // Transfer ownership before any wait for staging capacity or durability.
         let id = self.state.waiters.insert(request, observer);
         if let Some(deadline) = deadline {
             if deadline <= now {
@@ -164,8 +176,25 @@ impl Driver {
             self.state.pending_deadlines.push_back(id);
         }
 
-        // First submissions join the same FIFO as follow-ups from partial CQEs.
-        self.state.ready_queue.push_back(id);
+        if let Some(durability) = durability {
+            match durability.clone().try_lock_owned() {
+                Ok(permit) => self.state.acquired(id, permit, deferred),
+                Err(_) => {
+                    // The native driver owns this wait even inside a Tokio task.
+                    // Admission may follow the last service turn before parking, so
+                    // poll now to register the foreign release's wake target.
+                    self.state.acquiring.push(Box::pin(async move {
+                        (
+                            id,
+                            tokio::task::unconstrained(durability.lock_owned()).await,
+                        )
+                    }));
+                    self.state.poll_acquisitions(deferred);
+                }
+            }
+        } else {
+            self.state.ready_queue.push_back(id);
+        }
         id
     }
 
@@ -243,6 +272,7 @@ impl Driver {
         self.state.reap(&mut self.ring, deferred);
         self.state.advance_timeouts(now, deferred);
         self.state.register_deadlines(now, deferred);
+        self.state.poll_acquisitions(deferred);
         self.state.compact_ready_queue();
 
         while self.state.fill_submission_queue(&mut self.ring) {
@@ -353,6 +383,24 @@ impl Driver {
 }
 
 impl State {
+    /// Make a granted request eligible only after checking the open's retained outcome.
+    fn acquired(&mut self, id: WaiterId, permit: OwnedMutexGuard<()>, deferred: &mut Deferred) {
+        if let Some(result) = self.waiters.acquire_durability(id, permit) {
+            self.complete(id, result, deferred);
+        } else {
+            self.ready_queue.push_back(id);
+        }
+    }
+
+    /// Advance only notified permit waits, using a wake path that survives worker closure.
+    fn poll_acquisitions(&mut self, deferred: &mut Deferred) {
+        while let Poll::Ready(Some((id, permit))) = Pin::new(&mut self.acquiring)
+            .poll_next(&mut Context::from_waker(&self.acquisition_waker))
+        {
+            self.acquired(id, permit, deferred);
+        }
+    }
+
     /// Store the terminal result and defer resource destruction and callbacks.
     fn complete(&mut self, id: WaiterId, result: Result<(), Error>, deferred: &mut Deferred) {
         // Finish splits the request into its result and deferred resources.
@@ -423,9 +471,9 @@ impl State {
 
     /// Remove stale queue IDs once they exceed both 64 and the live queued count.
     fn compact_ready_queue(&mut self) {
-        // Every pending request without an in-flight SQE has exactly one ID
-        // in the ready queue. Any additional IDs belong to retired requests.
-        let queued = self.waiters.len() - self.waiters.in_flight();
+        // Requests awaiting a permit have no ready ID. Every other pending
+        // request without an in-flight SQE has exactly one. Extra IDs are stale.
+        let queued = self.waiters.len() - self.waiters.in_flight() - self.acquiring.len();
         let stale = self
             .ready_queue
             .len()
@@ -595,6 +643,7 @@ pub mod tests {
     use crate::{
         IoBuf, IoBufMut, IoBufs,
         iouring::{
+            mailbox::Mailbox,
             request::{
                 Cache, IOVEC_BATCH_SIZE, ReadAtRequest, RecvRequest, RequestOutput, SyncRequest,
                 WriteAtRequest, WriteAtState,
@@ -613,7 +662,8 @@ pub mod tests {
             unix::net::UnixStream,
         },
         panic::{AssertUnwindSafe, catch_unwind},
-        sync::Arc,
+        path::PathBuf,
+        sync::{Arc, atomic::AtomicBool},
         task::Wake,
         thread,
     };
@@ -927,6 +977,21 @@ pub mod tests {
             RequestOutput::Recv(Ok((buf, len))) => &buf.as_ref()[..*len],
             _ => panic!("expected successful recv"),
         }
+    }
+
+    /// Create an isolated open for tests that control durability completion.
+    fn make_file(name: &str) -> (PathBuf, Arc<Shared>) {
+        let directory =
+            std::env::temp_dir().join(format!("commonware_driver_{name}_{}", std::process::id()));
+        let hold = Hold::acquire(&directory).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(directory.join("blob"))
+            .unwrap();
+        (directory, Shared::detached(file, hold))
     }
 
     #[test]
@@ -2004,6 +2069,326 @@ pub mod tests {
         assert_eq!(harness.driver.state.waiters.in_flight(), 0);
 
         harness.drain();
+    }
+
+    #[test]
+    fn test_same_open_sync_waits_for_failure_accounting() {
+        for state in [
+            None,
+            Some(WriteAtState::WritingSync),
+            Some(WriteAtState::WritingBeforeSync),
+        ] {
+            let (directory, held) = make_file("sync_order");
+            held.tracker.write();
+            held.tracker.complete();
+
+            // Both barriers are accepted while staging capacity remains available.
+            let mut harness = Harness::new(2);
+            let first = harness.admit(Request::Sync(SyncRequest::new(held.clone())), 0);
+            let successor = state.map_or_else(
+                || Request::Sync(SyncRequest::new(held.clone())),
+                |state| {
+                    let bufs = if state == WriteAtState::WritingBeforeSync {
+                        (0..IOVEC_BATCH_SIZE + 1)
+                            .map(|_| IoBuf::from(b"x"))
+                            .collect()
+                    } else {
+                        IoBufs::from(IoBuf::from(b"new"))
+                    };
+                    Request::WriteAt(WriteAtRequest {
+                        file: held.clone(),
+                        offset: 0,
+                        write: bufs.into(),
+                        state,
+                        cache: Cache::Enabled,
+                    })
+                },
+            );
+            let second = harness.admit(successor, 1);
+            assert_eq!(harness.driver.len(), 2);
+            assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
+            assert!(
+                !harness.driver.state.ready_queue.contains(&second),
+                "same-open durability request became ready before the preceding barrier was accounted"
+            );
+
+            // Keep the SQE out of the ring so its failure is supplied only by the
+            // synthetic CQE. This models terminal ordering without a disk fault.
+            harness.driver.state.waiters.stage(first);
+            assert_eq!(harness.driver.state.waiters.in_flight(), 1);
+            assert!(!harness.driver.has_pending_submissions());
+            harness.driver.state.handle_cqe(
+                first.user_data(),
+                -libc::EIO,
+                0,
+                &mut harness.deferred,
+            );
+            assert!(matches!(
+                held.tracker.failure(),
+                Some(Error::BlobSyncFailed(_, _, error))
+                    if error.raw_os_error() == Some(libc::EIO)
+            ));
+
+            // The already accepted successor observes the retained failure without
+            // staging a second kernel barrier or consuming the first result.
+            harness
+                .driver
+                .service(Instant::now(), true, &mut harness.deferred)
+                .unwrap();
+            assert!(harness.driver.is_empty());
+            assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+            harness.collect();
+            assert_eq!(harness.completed.len(), 2);
+            assert!(matches!(
+                &harness.completed[0].output,
+                RequestOutput::Sync(Err(Error::Io(error)))
+                    if error.raw_os_error() == Some(libc::EIO)
+            ));
+            assert!(matches!(
+                &harness.completed[1].output,
+                RequestOutput::Sync(Err(Error::BlobSyncFailed(_, _, error)))
+                    | RequestOutput::WriteAt(Err(Error::BlobSyncFailed(_, _, error)))
+                    if error.raw_os_error() == Some(libc::EIO)
+            ));
+
+            harness.drain();
+            drop(harness);
+            drop(held);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_durable_write_keeps_permit_through_follow_up_sqes() {
+        for state in [WriteAtState::WritingSync, WriteAtState::WritingBeforeSync] {
+            let multibatch = state == WriteAtState::WritingBeforeSync;
+            let (directory, file) = make_file("durable_follow_up");
+            file.tracker.write();
+            file.tracker.complete();
+            let mut harness = Harness::new(2);
+            let (bufs, completions) = if !multibatch {
+                (
+                    IoBufs::from(IoBuf::from(b"hello")),
+                    vec![-libc::EOPNOTSUPP, -libc::EINTR, 2, 3],
+                )
+            } else {
+                (
+                    (0..IOVEC_BATCH_SIZE + 1)
+                        .map(|_| IoBuf::from(b"x"))
+                        .collect(),
+                    vec![
+                        -libc::EOPNOTSUPP,
+                        -libc::EAGAIN,
+                        IOVEC_BATCH_SIZE as i32,
+                        1,
+                        0,
+                    ],
+                )
+            };
+            let first = harness.driver.admit(
+                Request::WriteAt(WriteAtRequest {
+                    file: file.clone(),
+                    offset: 0,
+                    write: bufs.into(),
+                    state,
+                    cache: Cache::Disabled(Arc::new(AtomicBool::new(true))),
+                }),
+                Observer::Local(None),
+                harness.start,
+                &mut harness.deferred,
+            );
+            let second = harness.admit(Request::Sync(SyncRequest::new(file.clone())), 1);
+
+            // Orphaned work and unconsumed local outputs have the same permit lifetime.
+            if multibatch {
+                harness.driver.orphan(first, &mut harness.deferred);
+            }
+            for (index, result) in completions.iter().enumerate() {
+                assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
+                assert!(harness.driver.state.ready_queue.is_empty());
+                harness.driver.state.waiters.stage(first);
+                harness.driver.state.handle_cqe(
+                    first.user_data(),
+                    *result,
+                    0,
+                    &mut harness.deferred,
+                );
+                harness
+                    .driver
+                    .state
+                    .poll_acquisitions(&mut harness.deferred);
+
+                if index + 1 < completions.len() {
+                    assert_eq!(harness.driver.state.acquiring.len(), 1);
+                    assert!(!harness.driver.state.ready_queue.contains(&second));
+                    assert!(file.durability.try_lock().is_err());
+                }
+            }
+
+            assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(second));
+            assert!(harness.driver.state.acquiring.is_empty());
+            assert!(!harness.driver.state.waiters.is_pending(first));
+            if !multibatch {
+                assert!(matches!(
+                    harness.driver.observe(first, TaskWaker::noop()),
+                    Observation::Ready(RequestOutput::WriteAt(Ok(())))
+                ));
+            }
+            harness.driver.state.waiters.stage(second);
+            harness.simulated_completion(second, 0);
+            assert!(harness.completed.iter().all(|completion| matches!(
+                completion.output,
+                RequestOutput::WriteAt(Ok(())) | RequestOutput::Sync(Ok(()))
+            )));
+            assert!(!file.tracker.is_dirty());
+            harness.drain();
+            drop(harness);
+            drop(file);
+            fs::remove_dir_all(directory).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_blocked_durability_does_not_count_as_ready_during_compaction() {
+        let (directory, file) = make_file("blocked_compaction");
+        file.tracker.write();
+        file.tracker.complete();
+        let permit = file.durability.clone().try_lock_owned().unwrap();
+        let mut harness = Harness::new(1);
+        let (active, mut active_peer) = UnixStream::pair().unwrap();
+        harness.admit(recv(active, 1, None), 0);
+        harness.service();
+        let (independent, mut independent_peer) = UnixStream::pair().unwrap();
+        independent_peer.write_all(b"x").unwrap();
+        let independent = harness.admit(recv(independent, 1, None), 1);
+        for tag in 2..4 {
+            harness.admit(Request::Sync(SyncRequest::new(file.clone())), tag);
+        }
+        for _ in 0..65 {
+            let (socket, _peer) = UnixStream::pair().unwrap();
+            let stale = harness.admit(recv(socket, 1, None), 4);
+            harness.orphan(stale);
+        }
+        harness.completed.clear();
+        harness.service();
+        assert_eq!(harness.driver.state.ready_queue, [independent]);
+        assert_eq!(harness.driver.state.acquiring.len(), 2);
+        assert_eq!(harness.driver.len(), 4);
+
+        active_peer.write_all(b"x").unwrap();
+        harness.until(2);
+        assert_eq!(harness.driver.len(), 2);
+        assert_eq!(harness.driver.state.waiters.in_flight(), 0);
+        assert!(!harness.driver.has_pending_submissions());
+        assert!(harness.driver.state.ready_queue.is_empty());
+        drop(permit);
+        harness.until(4);
+        for (tag, completed) in harness.completed.iter().enumerate() {
+            assert!(matches!(completed.observer, TestObserver::Local(id) if id == tag as u64));
+        }
+        harness.drain();
+        drop(harness);
+        drop(file);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_durability_admitted_after_service_registers_its_wait() {
+        let (directory, file) = make_file("admission_poll");
+        let permit = file.durability.clone().try_lock_owned().unwrap();
+        let mut harness = Harness::new(2);
+        harness.service();
+
+        // The native driver must progress independently of an enclosing Tokio task's budget.
+        while tokio::task::coop::has_budget_remaining() {
+            tokio::task::consume_budget().await;
+        }
+
+        // A deferred callback can admit work after service, immediately before parking.
+        harness.admit(Request::Sync(SyncRequest::new(file.clone())), 0);
+        drop(permit);
+        assert!(
+            file.durability.try_lock().is_err(),
+            "accepted wait did not reserve the released permit"
+        );
+        harness.until(1);
+        assert!(matches!(
+            harness.completed[0].output,
+            RequestOutput::Sync(Ok(()))
+        ));
+        harness.drain();
+        drop(harness);
+        drop(file);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn test_foreign_durability_release_wakes_closed_worker_park() {
+        let (directory, file) = make_file("closed_permit_wake");
+        let permit = file.durability.clone().try_lock_owned().unwrap();
+        let mailbox = Arc::new(Mailbox::new().unwrap());
+        let mut driver = Driver::new(
+            &RingConfig {
+                size: 2,
+                timeout_wheel_tick: Duration::from_millis(5),
+            },
+            Duration::from_secs(60),
+            mailbox.waker.clone(),
+            Instant::now(),
+        )
+        .unwrap();
+        let mut deferred = Deferred::default();
+        let (sender, receiver) = oneshot::channel();
+        driver.admit(
+            Request::Sync(SyncRequest::new(file.clone())),
+            Observer::DetachedSync(sender),
+            Instant::now(),
+            &mut deferred,
+        );
+        drop(receiver);
+        assert!(mailbox.close().is_empty());
+        driver.close(&mut deferred);
+        driver.service(Instant::now(), true, &mut deferred).unwrap();
+
+        // Consume a latched acquisition-poll wake before the measured park, then service
+        // again as cleanup does after every wait. No operation SQE can produce a CQE.
+        driver.park(0, Some(Instant::now())).unwrap();
+        driver.service(Instant::now(), true, &mut deferred).unwrap();
+        assert_eq!(driver.len(), 1);
+        assert_eq!(driver.state.waiters.in_flight(), 0);
+        assert!(!driver.has_pending_submissions());
+        assert!(driver.ring.completion().is_empty());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let producer = thread::spawn(move || {
+            wait_until_eventfd_armed(&mailbox.waker, deadline);
+            assert!(!mailbox.is_open());
+            drop(permit);
+        });
+        assert!(driver.park(0, Some(deadline)).unwrap());
+        producer.join().unwrap();
+        let cqe = driver
+            .ring
+            .completion()
+            .next()
+            .expect("permit release did not wake the ring");
+        assert_eq!(cqe.user_data(), WAKE_USER_DATA);
+        assert!(
+            !driver.state.waker.pending(0),
+            "permit release published an unmatched mailbox batch"
+        );
+        driver
+            .state
+            .handle_cqe(cqe.user_data(), cqe.result(), cqe.flags(), &mut deferred);
+        driver.service(Instant::now(), true, &mut deferred).unwrap();
+        assert!(driver.is_empty());
+        assert_eq!(deferred.completions.len(), 1);
+        let (sender, result) = deferred.completions.pop().unwrap();
+        assert!(result.is_ok());
+        assert!(sender.send(result).is_err());
+        drop(deferred);
+        drop(driver);
+        drop(file);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

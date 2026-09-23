@@ -1695,30 +1695,6 @@ mod tests {
     use futures::{FutureExt as _, stream::FuturesUnordered};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run_storage_child(child_var: &str, operation: &str) {
-        let thread = std::thread::current();
-        let test = thread.name().expect("test harness thread has a name");
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test])
-            .env(child_var, operation)
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success(), "{test} {operation} failed");
-                return;
-            }
-            if std::time::Instant::now() >= deadline {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("{test} {operation} deadlocked");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-
     #[rstest::rstest]
     #[case::open_named(true, true)]
     #[case::open_partition(true, false)]
@@ -1933,11 +1909,18 @@ mod tests {
                     a.write_at(0, payload, WriteOptions::default())
                         .await
                         .unwrap();
+                    if operation == "remove_partition" {
+                        b.write_at(0, b"second", WriteOptions::default())
+                            .await
+                            .unwrap();
+                    }
                     drop(b);
                     assert!(!released.load(Ordering::SeqCst));
 
                     if operation == "remove" {
                         context.remove("partition", Some(b"a")).await.unwrap();
+                    } else if operation == "remove_partition" {
+                        context.remove("partition", None).await.unwrap();
                     } else {
                         assert_eq!(operation, "admit");
                         drop(a);
@@ -1950,8 +1933,8 @@ mod tests {
             return;
         }
 
-        for operation in ["remove", "admit"] {
-            run_storage_child(CHILD, operation);
+        for operation in ["remove", "remove_partition", "admit"] {
+            crate::storage::tests::shared::run_child(CHILD, operation);
         }
     }
 
@@ -2049,7 +2032,7 @@ mod tests {
         }
 
         for operation in ["sync", "start_sync", "overwrite"] {
-            run_storage_child(CHILD, operation);
+            crate::storage::tests::shared::run_child(CHILD, operation);
         }
     }
 

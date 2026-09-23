@@ -13,9 +13,18 @@
 //!
 //! # Ownership
 //!
-//! Worker-local tasks, requests, timers, and results need no shared locks.
+//! Workers own task, request, timer, and result progress. Each open serializes
+//! durability operations across workers through their terminal accounting.
 //! Forwarded results, mailboxes, task handles, supervision, and metrics are
 //! synchronized across threads.
+//!
+//! # Storage
+//!
+//! Failures of content-sync barriers and fused [SYNC](crate::WriteOptions::SYNC) writes
+//! are retained across opens of the blob, even after every handle is dropped.
+//! Creation failures are retained when the header is complete. Removing or
+//! recreating the blob clears its retained error. A new runtime instance starts
+//! without the error record and still requires normal storage recovery.
 //!
 //! # Requirements and Progress
 //!

@@ -10,7 +10,7 @@
 //! staging capacity. Driver queues and deadlines must also reject these results
 //! even though their IDs still resolve in the slab.
 //!
-//! Wakers, detached publications, and owners ready for destruction are handed
+//! Observer wakers, detached publications, and owners ready for destruction are handed
 //! to [`Deferred`]. The worker invokes callbacks after releasing its local borrow.
 
 use super::{
@@ -24,6 +24,7 @@ use crate::Error;
 use commonware_utils::channel::oneshot;
 use io_uring::squeue::Entry as SqueueEntry;
 use std::{mem, task::Waker, time::Instant};
+use tokio::sync::OwnedMutexGuard;
 
 /// Kernel completion identity packed into an SQE's `user_data` field.
 pub type UserData = u64;
@@ -97,6 +98,8 @@ struct Waiter {
     observer: Observer,
     /// The active request state machine.
     request: Request,
+    /// Held across every SQE until terminal durability accounting finishes.
+    durability: Option<OwnedMutexGuard<()>>,
 }
 
 /// One identity retained from registration through result consumption.
@@ -171,6 +174,7 @@ impl Waiters {
                 in_flight: false,
                 observer,
                 request,
+                durability: None,
             })
         });
         self.pending += 1;
@@ -196,6 +200,21 @@ impl Waiters {
     /// Return whether the ID refers to an unfinished request.
     pub fn is_pending(&self, id: WaiterId) -> bool {
         self.get(id).is_some()
+    }
+
+    /// Install an acquired permit before checking for a local terminal result.
+    pub fn acquire_durability(
+        &mut self,
+        id: WaiterId,
+        permit: OwnedMutexGuard<()>,
+    ) -> Option<Result<(), Error>> {
+        let waiter = self.get_mut(id).expect("durability waiter missing");
+        assert!(
+            waiter.durability.is_none(),
+            "durability permit already held"
+        );
+        waiter.durability = Some(permit);
+        waiter.request.prepare_durability()
     }
 
     /// Original absolute deadline of an unfinished request, if it has one.
@@ -419,7 +438,10 @@ impl Waiters {
             WaiterState::CancelRequested => None,
         };
 
+        // Permit waiters use only the driver's native wake source. Accounting
+        // precedes their release. File and buffer owners remain deferred.
         let (output, resources) = waiter.request.complete(result);
+        drop(waiter.durability);
         deferred.resources.push(resources);
 
         match waiter.observer {
@@ -466,6 +488,10 @@ impl Waiters {
         assert!(
             matches!(waiter.state, WaiterState::Active { .. }),
             "stage called for cancelled waiter"
+        );
+        assert!(
+            waiter.request.durability().is_none() || waiter.durability.is_some(),
+            "durability request staged without its permit"
         );
 
         // Construction can reject an invalid buffer range. Until it
@@ -595,7 +621,10 @@ pub mod tests {
     /// Build a `Sync` request backed by a socket fd so waiter tests can
     /// exercise slot lifecycle without submitting kernel work.
     fn make_sync_request() -> Request {
-        Request::Sync(SyncRequest::new(make_file(File::from(make_socket_fd()))))
+        let file = make_file(File::from(make_socket_fd()));
+        file.tracker.write();
+        file.tracker.complete();
+        Request::Sync(SyncRequest::new(file))
     }
 
     /// Build a send that needs five bytes of progress before completing.
@@ -650,6 +679,18 @@ pub mod tests {
     /// Local observation before the future installs its first waker.
     fn observer() -> Observer {
         Observer::Local(None)
+    }
+
+    /// Supply the driver's permit step before staging a simulated request.
+    fn stage(waiters: &mut Waiters, id: WaiterId) -> SqueueEntry {
+        let waiter = waiters.get(id).unwrap();
+        if waiter.durability.is_none()
+            && let Some(mutex) = waiter.request.durability()
+        {
+            let permit = mutex.clone().try_lock_owned().unwrap();
+            assert!(waiters.acquire_durability(id, permit).is_none());
+        }
+        waiters.stage(id)
     }
 
     /// Apply a terminal simulated CQE and finish its request.
@@ -711,7 +752,7 @@ pub mod tests {
         assert_eq!(current.user_data(), id.user_data());
         assert!(!waiters.is_pending(id));
         assert!(!waiters.cancel(id));
-        waiters.stage(current);
+        stage(&mut waiters, current);
 
         // Neither a different generation nor a duplicate CQE can retire this SQE.
         assert!(
@@ -733,7 +774,7 @@ pub mod tests {
             .is_err()
         );
 
-        waiters.stage(current);
+        stage(&mut waiters, current);
         complete(&mut waiters, current, 0, &mut deferred);
         assert!(waiters.is_empty());
         assert!(matches!(
@@ -751,7 +792,7 @@ pub mod tests {
         let first = waiters.insert(make_sync_request(), observer());
         waiters.set_deadline(first, 5);
         assert_eq!(waiters.len(), 1);
-        waiters.stage(first);
+        stage(&mut waiters, first);
         assert_eq!(complete(&mut waiters, first, 0, &mut deferred), Some(5));
 
         // The live result keeps its ID but must disappear from all I/O queries.
@@ -791,7 +832,7 @@ pub mod tests {
         let id = waiters.insert(make_sync_request(), observer());
         let exhausted = WaiterId(set_generation(&mut waiters.entries, id.0, u64::MAX));
 
-        waiters.stage(exhausted);
+        stage(&mut waiters, exhausted);
         complete(&mut waiters, exhausted, 0, &mut deferred);
         drop(output(&mut waiters, exhausted));
 
@@ -842,7 +883,7 @@ pub mod tests {
         let mut deferred = Deferred::default();
         let id = waiters.insert(make_sync_request(), observer());
         waiters.set_deadline(id, 2);
-        waiters.stage(id);
+        stage(&mut waiters, id);
         assert!(waiters.cancel(id));
         assert!(!waiters.cancel(id));
 
@@ -918,7 +959,7 @@ pub mod tests {
             let mut waiters = Waiters::new(1);
             let mut deferred = Deferred::default();
             let id = waiters.insert(request, observer());
-            waiters.stage(id);
+            stage(&mut waiters, id);
 
             // Exercise cancellation after earlier SQEs have made progress too.
             if let Some(progress) = progress {
@@ -926,7 +967,7 @@ pub mod tests {
                     waiters.on_completion(id.user_data(), progress),
                     CompletionOutcome::Requeue(current) if current == id
                 ));
-                waiters.stage(id);
+                stage(&mut waiters, id);
             }
 
             assert!(waiters.cancel(id));
@@ -960,7 +1001,7 @@ pub mod tests {
         ] {
             let mut waiters = Waiters::new(1);
             let id = waiters.insert(request, observer());
-            waiters.stage(id);
+            stage(&mut waiters, id);
             assert!(waiters.cancel(id));
 
             // Cancellation can lose the race with a successful operation.
@@ -973,7 +1014,7 @@ pub mod tests {
 
         let mut waiters = Waiters::new(1);
         let id = waiters.insert(make_send_request(), observer());
-        waiters.stage(id);
+        stage(&mut waiters, id);
         assert!(waiters.cancel(id));
 
         // An operation's terminal error also takes precedence over Timeout.
@@ -1003,7 +1044,7 @@ pub mod tests {
 
             for result in [-libc::EAGAIN, 2] {
                 let id = waiters.insert(request(), observer());
-                waiters.stage(id);
+                stage(&mut waiters, id);
                 assert!(waiters.orphan(id, &mut deferred));
                 assert!(!waiters.orphan(id, &mut deferred));
                 assert!(waiters.cancel(id));
@@ -1109,14 +1150,14 @@ pub mod tests {
         assert_eq!(waiters.len(), 3);
 
         // Closing removes observers without cancelling committed sync work.
-        waiters.stage(sync);
+        stage(&mut waiters, sync);
         assert!(
             matches!(waiters.on_completion(sync.user_data(), -libc::EINTR), CompletionOutcome::Requeue(id) if id == sync)
         );
-        waiters.stage(sync);
+        stage(&mut waiters, sync);
         complete(&mut waiters, sync, 0, &mut deferred);
 
-        waiters.stage(detached);
+        stage(&mut waiters, detached);
         complete(&mut waiters, detached, 0, &mut deferred);
 
         assert!(waiters.cancel(pending));
@@ -1135,7 +1176,7 @@ pub mod tests {
         let mut waiters = Waiters::new(1);
         let mut deferred = Deferred::default();
         let first = waiters.insert(make_sync_request(), observer());
-        waiters.stage(first);
+        stage(&mut waiters, first);
 
         // Growing the slab cannot change the identity already handed to the kernel.
         for _ in 0..64 {

@@ -15,6 +15,7 @@ use super::{
     waiter::{WaiterId, WaiterState},
 };
 use crate::{Error, IoBuf, IoBufMut, IoBufs, storage::iouring::Shared};
+use commonware_utils::sync::AsyncMutex;
 use io_uring::{opcode, squeue::Entry as SqueueEntry, types::Fd};
 use std::{
     fs::File,
@@ -201,6 +202,28 @@ impl Request {
     /// storage. Cancellation of reads and network requests stops follow-up SQEs.
     pub const fn retains_on_orphan(&self) -> bool {
         matches!(self, Self::WriteAt(_) | Self::Sync(_))
+    }
+
+    /// Gate shared by every durability operation on this open.
+    pub fn durability(&self) -> Option<&Arc<AsyncMutex<()>>> {
+        match self {
+            Self::Sync(r) => Some(&r.file.durability),
+            Self::WriteAt(r) if r.state != WriteAtState::Writing => Some(&r.file.durability),
+            _ => None,
+        }
+    }
+
+    /// Resolve a durability request that needs no SQE, with its permit held.
+    pub fn prepare_durability(&self) -> Option<Result<(), Error>> {
+        match self {
+            Self::Sync(r) => match r.file.needs_sync() {
+                Ok(true) => None,
+                Ok(false) => Some(Ok(())),
+                Err(error) => Some(Err(error)),
+            },
+            Self::WriteAt(r) => r.file.tracker.failure().map(Err),
+            _ => unreachable!("durability permit for another request kind"),
+        }
     }
 
     /// Build the next SQE for this request, tagged with `waiter_id`.
@@ -752,6 +775,9 @@ impl WriteAtRequest {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
             CqeResult::Error(code) if self.cache.fallback(code) => None,
+            CqeResult::Error(code) if self.state == WriteAtState::WritingSync => Some(Err(
+                Error::Io(std::io::Error::from_raw_os_error(-code).into()),
+            )),
             CqeResult::Cancelled | CqeResult::Error(_) | CqeResult::Zero => {
                 Some(Err(Error::WriteFailed))
             }
@@ -1574,14 +1600,40 @@ mod tests {
             ));
         }
 
-        // Per-write durability changes the flags but keeps the same error mapping.
+        let mut write = make_write_request(Cache::Enabled);
+        write.state = WriteAtState::WritingBeforeSync;
+        assert!(matches!(
+            complete(Request::WriteAt(write), ACTIVE, -libc::EIO),
+            RequestOutput::WriteAt(Err(Error::WriteFailed))
+        ));
+
+        // A fused write retains the kernel errno through its durability failure.
         let mut write = make_write_request(Cache::Enabled);
         write.state = WriteAtState::WritingSync;
         assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
+        let file = write.file.clone();
         assert!(matches!(
             complete(Request::WriteAt(write), ACTIVE, -libc::EINVAL),
-            RequestOutput::WriteAt(Err(Error::WriteFailed))
+            RequestOutput::WriteAt(Err(Error::Io(error)))
+                if error.raw_os_error() == Some(libc::EINVAL)
         ));
+        assert!(matches!(
+            file.tracker.failure(),
+            Some(Error::BlobSyncFailed(_, _, error))
+                if error.raw_os_error() == Some(libc::EINVAL)
+        ));
+
+        for (state, result) in [
+            (ACTIVE, 0),
+            (WaiterState::CancelRequested, -libc::ECANCELED),
+        ] {
+            let mut write = make_write_request(Cache::Enabled);
+            write.state = WriteAtState::WritingSync;
+            assert!(matches!(
+                complete(Request::WriteAt(write), state, result),
+                RequestOutput::WriteAt(Err(Error::WriteFailed))
+            ));
+        }
     }
 
     #[test]
@@ -1649,7 +1701,7 @@ mod tests {
     }
 
     #[test]
-    fn test_overlapping_durability_failure() {
+    fn test_durability_completion_retains_failure() {
         for state in [
             None,
             Some(WriteAtState::WritingSync),
@@ -1680,8 +1732,8 @@ mod tests {
                     assert!(successful.on_cqe(ACTIVE, 5).is_none());
                 }
 
-                // Requests are already admitted. Completion accounting runs even when the
-                // observer discards its output, and precedes releasing any retained owner.
+                // Exercise terminal accounting directly, independently of driver admission.
+                // Discarding the output cannot discard a retained durability failure.
                 let finish_failure = || {
                     let result = failed.on_cqe(ACTIVE, -libc::EIO).unwrap();
                     let (output, retired) = failed.complete(result);

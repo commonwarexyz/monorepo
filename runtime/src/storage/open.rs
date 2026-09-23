@@ -10,6 +10,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
+/// Identifies a blob by its partition and name.
 type Key = (String, Vec<u8>);
 
 /// Couples namespace transactions to logical user-handle lifetimes.
@@ -25,6 +26,10 @@ pub(crate) struct Opens {
 }
 
 impl Opens {
+    /// Registers an exclusive open atomically with opening the underlying blob.
+    ///
+    /// The open future must complete in one poll. The returned guard retains the
+    /// namespace lock until [`Opened::finish`] returns the blob.
     pub(crate) fn open<B: crate::Blob>(
         self: &Arc<Self>,
         partition: &str,
@@ -61,6 +66,9 @@ impl Opens {
         })
     }
 
+    /// Retires registrations atomically with a blob or partition removal.
+    ///
+    /// The removal future must complete in one poll. Failed removals leave registrations intact.
     pub(crate) fn remove<R>(
         &self,
         partition: &str,
@@ -184,7 +192,6 @@ pub(crate) mod tests {
     };
     use std::{
         env,
-        process::Command,
         sync::mpsc::{self, Receiver, Sender},
         thread,
         time::{Duration, Instant},
@@ -247,26 +254,8 @@ pub(crate) mod tests {
     fn test_open_racing_last_blob_drop() {
         const CHILD: &str = "COMMONWARE_TEST_OPEN_LAST_DROP";
         if env::var_os(CHILD).is_none() {
-            let thread = thread::current();
-            let test = thread.name().expect("test harness thread has a name");
-            let mut child = Command::new(env::current_exe().unwrap())
-                .args(["--exact", test, "--nocapture"])
-                .env(CHILD, "1")
-                .spawn()
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(15);
-            loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    assert!(status.success(), "open/drop lifecycle check failed");
-                    return;
-                }
-                if Instant::now() >= deadline {
-                    child.kill().unwrap();
-                    child.wait().unwrap();
-                    panic!("open registry deadlocked during final blob drop");
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
+            crate::storage::tests::shared::run_child(CHILD, "1");
+            return;
         }
 
         Runner::default().start(|context| async move {

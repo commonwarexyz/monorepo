@@ -14,7 +14,7 @@
 //! directory hold, and durability debt. Dropping a caller never releases them
 //! while the kernel can still access the file. Registered writes and syncs finish
 //! their logical work after caller cancellation, including requests still queued
-//! for staging capacity.
+//! for staging capacity or another durability operation on the same open.
 //!
 //! Dropping the last handle of an open performs no I/O. It records what the open
 //! left unflushed, and the next open of the blob establishes that durability
@@ -51,13 +51,16 @@ use crate::{
     },
 };
 use commonware_formatting::{from_hex, hex};
-use commonware_utils::sync::Mutex;
+use commonware_utils::{
+    Widen,
+    sync::{AsyncMutex, Mutex},
+};
 use std::{
     fs::{self, File},
     io::{Error as IoError, ErrorKind, Seek, SeekFrom, Write},
     ops::{Deref, RangeInclusive},
     path::PathBuf,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{Arc, OnceLock, atomic::AtomicBool},
 };
 
 /// Configuration for a [Storage].
@@ -313,17 +316,21 @@ pub struct Blob {
 /// Dropping the last reference performs no I/O: it records what the open left unflushed for the
 /// next open of the blob to establish before that open returns.
 pub(crate) struct Shared {
-    file: Arc<Held>,
+    file: Held,
     pub(crate) tracker: Tracker,
+    /// Serializes kernel durability operations through terminal accounting.
+    /// Only driver-owned futures may wait on this mutex. Permits are released while
+    /// the worker is borrowed, so their wakers must not borrow the worker again.
+    pub(crate) durability: Arc<AsyncMutex<()>>,
     pending: Arc<Pending>,
     key: (String, Vec<u8>),
     /// Settles the open once its last handle dropped and every request finished.
-    promise: Mutex<Option<Sender>>,
+    promise: OnceLock<Sender>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        let Some(sender) = self.promise.lock().take() else {
+        let Some(sender) = self.promise.take() else {
             return;
         };
         self.pending.settle(
@@ -336,6 +343,24 @@ impl Drop for Shared {
 }
 
 impl Shared {
+    /// Check whether this open needs a full-file barrier, rejecting retained failures.
+    pub(crate) fn needs_sync(&self) -> Result<bool, Error> {
+        if let Some(error) = self.tracker.failure() {
+            return Err(error);
+        }
+        if !self.tracker.is_dirty() {
+            #[cfg(test)]
+            self.tracker.skip_sync();
+            return Ok(false);
+        }
+        #[cfg(test)]
+        if let Some(error) = self.pending.take_flush_failure() {
+            self.tracker.poison(&error);
+            return Err(error);
+        }
+        Ok(true)
+    }
+
     /// Settle a write's mutation debt from the outcome the ring observed.
     ///
     /// The ring sees every completion, including those the caller stopped waiting for. A plain
@@ -423,9 +448,10 @@ impl Shared {
         Arc::new(Self {
             file: Held::new(file, hold),
             tracker: Tracker::default(),
+            durability: Arc::new(AsyncMutex::new(())),
             pending: Arc::new(Pending::default()),
             key: (String::new(), Vec::new()),
-            promise: Mutex::new(None),
+            promise: OnceLock::new(),
         })
     }
 }
@@ -450,7 +476,7 @@ impl Deref for Open {
 impl Drop for Open {
     fn drop(&mut self) {
         if let Some(sender) = self.generation.release() {
-            *self.shared.promise.lock() = Some(sender);
+            let _ = self.shared.promise.set(sender);
         }
     }
 }
@@ -467,9 +493,10 @@ impl Blob {
         let shared = Arc::new(Shared {
             file: Held::new(file, hold),
             tracker: Tracker::default(),
+            durability: Arc::new(AsyncMutex::new(())),
             pending: generation.pending.clone(),
             key: generation.key.clone(),
-            promise: Mutex::new(None),
+            promise: OnceLock::new(),
         });
         Self {
             open: Arc::new(Open { shared, generation }),
@@ -498,18 +525,8 @@ impl Blob {
     /// Build the ring barrier that covers this open's mutations, returning `None` when clean.
     /// An open with a retained failure rejects every later durability claim.
     fn barrier(&self) -> Result<Option<SyncRequest>, Error> {
-        if let Some(error) = self.open.tracker.failure() {
-            return Err(error);
-        }
-        if !self.open.tracker.is_dirty() {
-            #[cfg(test)]
-            self.open.tracker.skip_sync();
+        if !self.open.needs_sync()? {
             return Ok(None);
-        }
-        #[cfg(test)]
-        if let Some(error) = self.open.pending.take_flush_failure() {
-            self.open.tracker.poison(&error);
-            return Err(error);
         }
 
         Ok(Some(SyncRequest::new(self.open.shared.clone())))
@@ -613,10 +630,11 @@ impl crate::Blob for Blob {
             return Ok(());
         }
 
-        // Validate the entire range before registration. This excludes io_uring's
-        // current-position sentinel and keeps partial-write offsets in range.
+        // Validate the signed file extent before mutation accounting or ring registration.
+        // Each submission after partial progress then avoids the current-position sentinel.
         offset
-            .checked_add(bufs.len() as u64)
+            .checked_add(Widen::widen(bufs.len()))
+            .filter(|end| *end <= i64::MAX as u64)
             .ok_or(Error::OffsetOverflow)?;
 
         let cache = if options.contains(WriteOptions::DONT_CACHE) {
@@ -1503,6 +1521,7 @@ mod tests {
                 iouring::Runner::default().start(|_| async {
                     let (storage, directory) = create_test_storage();
                     let (blob, _) = storage.open("partition", b"range").await.unwrap();
+                    let completed = storage.pending.completions();
 
                     // The physical offset must never become io_uring's current
                     // file-position sentinel, including writes needing restaging.
@@ -1516,6 +1535,28 @@ mod tests {
                         Err(Error::OffsetOverflow)
                     ));
 
+                    // The signed file extent must also fit, including writes
+                    // that would cross it during a later partial submission.
+                    let last = i64::MAX as u64;
+                    for physical in [last - (Widen::widen(chunks) - 1), last + 1] {
+                        let bufs = (0..chunks).map(|_| IoBuf::from(b"x")).collect::<IoBufs>();
+                        assert!(
+                            matches!(
+                                blob.write_at(physical - blob.data_offset, bufs, options)
+                                    .await,
+                                Err(Error::OffsetOverflow)
+                            ),
+                            "physical={physical} chunks={chunks} options={options:?}"
+                        );
+                        assert!(!blob.open.tracker.is_dirty());
+                        assert!(blob.open.tracker.failure().is_none());
+                    }
+
+                    drop(blob);
+                    let (blob, size) = storage.open("partition", b"range").await.unwrap();
+                    assert_eq!(size, 0);
+                    assert_eq!(storage.pending.completions(), completed);
+                    blob.write_at(0, b"ok", WriteOptions::SYNC).await.unwrap();
                     drop(blob);
                     drop(storage);
                     std::fs::remove_dir_all(directory).unwrap();
@@ -1960,7 +2001,8 @@ mod tests {
             let attached = pending.attach("partition", b"readonly");
             if chunks == 1 {
                 assert!(
-                    matches!(attached, Err(Error::WriteFailed)),
+                    matches!(attached, Err(Error::BlobSyncFailed(_, _, error))
+                        if error.raw_os_error() == Some(libc::EBADF)),
                     "chunks={chunks}"
                 );
             } else {
@@ -1987,40 +2029,7 @@ mod tests {
     fn test_remove_live_dirty_owner_leaves_no_debt() {
         iouring::Runner::default().start(|_| async {
             let (storage, storage_directory) = create_test_storage();
-            for by_name in [true, false] {
-                for unlink_first in [false, true] {
-                    let partition = "remove_live_dirty";
-                    let name = b"blob";
-                    let (blob, _) = storage.open(partition, name).await.unwrap();
-                    blob.write_at(0, b"dirty", WriteOptions::default())
-                        .await
-                        .unwrap();
-                    let completions = storage.pending.completions();
-                    let target = by_name.then_some(name.as_slice());
-                    if unlink_first {
-                        storage.remove(partition, target).await.unwrap();
-                        let read = blob
-                            .read_at(0, 5, ReadOptions::default())
-                            .await
-                            .unwrap()
-                            .coalesce();
-                        assert_eq!(read.as_ref(), b"dirty");
-                        drop(blob);
-                    } else {
-                        drop(blob);
-                        storage.remove(partition, target).await.unwrap();
-                    }
-                    settle(&storage.pending).await;
-                    assert!(!storage.pending.owes(partition, name));
-
-                    // The name is fresh again and nothing is flushed on its behalf.
-                    let (blob, size) = storage.open(partition, name).await.unwrap();
-                    assert_eq!(size, 0);
-                    drop(blob);
-                    assert_eq!(storage.pending.completions(), completions);
-                    storage.remove(partition, None).await.unwrap();
-                }
-            }
+            shared::check_remove_live_dirty_owner(&storage, &storage.pending, &storage.pool).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });
@@ -2254,6 +2263,94 @@ mod tests {
             assert!(!storage.pending.owes("partition", b"clean"));
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    #[test]
+    fn test_dirty_sync_waits_without_blocking_other_io() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, directory) = create_test_storage();
+            let (blob, _) = storage.open("gate", b"first").await.unwrap();
+            let (unrelated, _) = storage.open("gate", b"second").await.unwrap();
+            let permit = blob.open.durability.try_lock().unwrap();
+
+            // A fused write leaves the tracker clean until its terminal result.
+            let mut durable = Box::pin(blob.write_at(0, b"durable", WriteOptions::SYNC));
+            assert!(futures::poll!(durable.as_mut()).is_pending());
+            assert!(!blob.open.tracker.is_dirty());
+
+            // Clean syncs owe no barrier for the unfinished fused write.
+            let mut clean = Box::pin(async {
+                blob.sync().await?;
+                blob.start_sync().await.await
+            });
+            assert!(matches!(
+                futures::poll!(clean.as_mut()),
+                std::task::Poll::Ready(Ok(()))
+            ));
+            drop(clean);
+
+            // A completed plain write requires the sync to wait for the permit.
+            blob.write_at(7, b"plain", WriteOptions::default())
+                .await
+                .unwrap();
+            assert!(blob.open.tracker.is_dirty());
+
+            // start_sync must transfer ownership on its first poll, even while
+            // another durability decision for this open owns the permit.
+            let mut start = Box::pin(blob.start_sync());
+            let std::task::Poll::Ready(handle) = futures::poll!(start.as_mut()) else {
+                panic!("start_sync must return its handle on the first poll");
+            };
+            drop(start);
+            let mut handle = Box::pin(handle);
+            assert!(futures::poll!(handle.as_mut()).is_pending());
+
+            unrelated
+                .write_at(0, b"other", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            assert!(futures::poll!(durable.as_mut()).is_pending());
+
+            drop(permit);
+            durable.await.unwrap();
+            handle.await.unwrap();
+            blob.sync().await.unwrap();
+            let bytes = blob.read_at(0, 12, ReadOptions::default()).await.unwrap();
+            assert_eq!(bytes.coalesce().as_ref(), b"durableplain");
+            drop(blob);
+            drop(unrelated);
+            storage.remove("gate", None).await.unwrap();
+            drop(storage);
+            fs::remove_dir_all(directory).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_recreated_blob_does_not_wait_for_removed_opens_gate() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, directory) = create_test_storage();
+            for remove_name in [true, false] {
+                let (old, _) = storage.open("recreated_gate", b"blob").await.unwrap();
+                let permit = old.open.durability.try_lock().unwrap();
+                storage
+                    .remove("recreated_gate", remove_name.then_some(b"blob".as_slice()))
+                    .await
+                    .unwrap();
+                let (current, len) = storage.open("recreated_gate", b"blob").await.unwrap();
+                assert_eq!(len, 0);
+                assert!(!Arc::ptr_eq(&old.open.durability, &current.open.durability));
+                current
+                    .write_at(0, b"new", WriteOptions::SYNC)
+                    .await
+                    .unwrap();
+                drop(permit);
+                drop(current);
+                drop(old);
+                storage.remove("recreated_gate", None).await.unwrap();
+            }
+            drop(storage);
+            fs::remove_dir_all(directory).unwrap();
         });
     }
 

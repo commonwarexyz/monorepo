@@ -723,6 +723,9 @@ stability_scope!(BETA {
         /// Returns [`Error::BlobAlreadyOpen`] if a handle from an earlier open of the blob is
         /// still alive and the blob has not been removed since.
         ///
+        /// A runtime may retain a durability failure across logical opens. Later opens
+        /// can return that failure even after every handle has been dropped.
+        ///
         /// # Versions
         ///
         /// Blobs are versioned. If the blob's version is not in `versions`, returns

@@ -7,14 +7,18 @@ use crate::{
 };
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
-use commonware_utils::{channel::oneshot, sync::Mutex};
+use commonware_utils::{
+    Widen,
+    channel::oneshot,
+    sync::{Mutex, MutexGuard},
+};
 use std::{
     fs::File,
     io::IoSlice,
     ops::Deref,
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -66,12 +70,13 @@ impl Cache {
 /// reference performs no I/O: it records what the open left unflushed for the next open of the
 /// blob to establish before that open returns.
 struct Shared {
-    file: Arc<Held>,
+    file: Held,
     tracker: Tracker,
+    durability: Mutex<()>,
     pending: Arc<Pending>,
     key: (String, Vec<u8>),
     /// Settles the open once its last handle dropped and every operation finished.
-    promise: Mutex<Option<Sender>>,
+    promise: OnceLock<Sender>,
     #[cfg(test)]
     test: TestState,
 }
@@ -115,7 +120,7 @@ impl Deref for Shared {
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        let Some(sender) = self.promise.lock().take() else {
+        let Some(sender) = self.promise.take() else {
             return;
         };
         self.pending.settle(
@@ -128,6 +133,15 @@ impl Drop for Shared {
 }
 
 impl Shared {
+    /// Serialize a blocking barrier with its terminal accounting.
+    fn durability(&self) -> Result<MutexGuard<'_, ()>, Error> {
+        let guard = self.durability.lock();
+        if let Some(error) = self.tracker.failure() {
+            return Err(error);
+        }
+        Ok(guard)
+    }
+
     fn barrier(&self) -> Result<(), Error> {
         // Data durability is the contract. `sync_data` covers the bytes and metadata required to
         // retrieve them, including file size, while avoiding timestamp-only journal commits.
@@ -154,7 +168,7 @@ impl Shared {
     /// Flush this open's mutations, crediting the tracker on success and poisoning it on failure.
     /// A poisoned open rejects every later durability claim.
     fn flush(&self, seen: u64) -> Result<(), Error> {
-        let _durability = self.tracker.durability()?;
+        let _durability = self.durability()?;
         match self.barrier() {
             Ok(()) => self.tracker.end_sync(seen),
             Err(error) => {
@@ -204,7 +218,7 @@ impl Deref for Open {
 impl Drop for Open {
     fn drop(&mut self) {
         if let Some(sender) = self.generation.release() {
-            *self.shared.promise.lock() = Some(sender);
+            let _ = self.shared.promise.set(sender);
         }
     }
 }
@@ -262,9 +276,10 @@ impl Blob {
         let shared = Arc::new(Shared {
             file: Held::new(file, hold),
             tracker: Tracker::default(),
+            durability: Mutex::new(()),
             pending: generation.pending.clone(),
             key: generation.key.clone(),
-            promise: Mutex::new(None),
+            promise: OnceLock::new(),
             #[cfg(test)]
             test: TestState::default(),
         });
@@ -493,13 +508,21 @@ impl crate::Blob for Blob {
         options: WriteOptions,
     ) -> Result<(), Error> {
         let bufs = bufs.into();
-        let file = self.open.shared.clone();
         let offset = offset
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
         if !bufs.has_remaining() {
             return Ok(());
         }
+
+        // Validate the signed file extent before recording debt or entering the blocking pool.
+        // Each submission after partial progress then has a representable offset.
+        offset
+            .checked_add(Widen::widen(bufs.len()))
+            .filter(|end| *end <= i64::MAX as u64)
+            .ok_or(Error::OffsetOverflow)?;
+
+        let file = self.open.shared.clone();
 
         // Derive per-write policy from the requested options and cached backend support.
         let sync = options.contains(WriteOptions::SYNC);
@@ -544,7 +567,7 @@ impl crate::Blob for Blob {
             };
 
             let _durability = if fused {
-                Some(file.tracker.durability()?)
+                Some(file.durability()?)
             } else {
                 None
             };
@@ -556,7 +579,14 @@ impl crate::Blob for Blob {
             if fused && let Err(error) = &result {
                 // A failed fused write may have consumed the kernel's writeback error.
                 file.tracker.write();
-                file.tracker.poison(error);
+                let (partition, name) = &file.key;
+                let error = match error {
+                    Error::Io(error) => {
+                        Error::BlobSyncFailed(partition.clone(), hex(name), error.clone())
+                    }
+                    error => error.clone(),
+                };
+                file.tracker.poison(&error);
             }
             result?;
             if !fused {
@@ -739,7 +769,7 @@ mod tests {
                         assert!((&mut first).now_or_never().is_none());
                         entering.await.unwrap();
                         assert!(
-                            blob.open.tracker.durability.try_lock().is_none(),
+                            blob.open.durability.try_lock().is_none(),
                             "barrier released admission before accounting"
                         );
                         let first = if cancel {
@@ -1163,7 +1193,15 @@ mod tests {
     #[tokio::test]
     async fn test_fused_write_error_is_recorded_before_buffer_drop() {
         let (storage, directory) = storage_for_reopen_test("write_error_order", Layout::ALL);
-        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let path = directory.join("readonly");
+        std::fs::write(&path, b"").unwrap();
+        let blob = Blob::new(
+            File::options().read(true).open(&path).unwrap(),
+            storage.pool.clone(),
+            0,
+            storage.hold.clone(),
+            storage.pending.attach("partition", b"readonly").unwrap().0,
+        );
 
         let accounted = Arc::new(AtomicBool::new(false));
         let bufs = bytes::Bytes::from_owner(WriteErrorObserver {
@@ -1171,18 +1209,76 @@ mod tests {
             accounted: accounted.clone(),
         });
 
-        // The syscall offset is rejected before submission. Terminal error accounting
-        // must precede retirement of the supplied buffers.
-        let offset = i64::MAX as u64 + 1 - blob.data_offset;
-        let result = blob.write_at(offset, bufs, WriteOptions::SYNC).await;
+        // The read-only descriptor makes the fused syscall fail after submission.
+        // Its terminal accounting must precede retirement of the supplied buffer.
+        let result = blob.write_at(0, bufs, WriteOptions::SYNC).await;
         let poisoned = blob.open.tracker.failure().is_some();
         drop(blob);
-        storage.remove("partition", None).await.unwrap();
+        let retained = storage.pending.attach("partition", b"readonly");
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
-        assert!(matches!(result, Err(Error::OffsetOverflow)));
+        assert!(
+            matches!(result, Err(Error::Io(error)) if error.raw_os_error() == Some(libc::EBADF))
+        );
         assert!(accounted.load(Ordering::Acquire));
         assert!(poisoned, "a failed fused write must poison the open");
+        assert!(
+            matches!(retained, Err(Error::BlobSyncFailed(partition, name, error))
+            if partition == "partition" && name == hex(b"readonly")
+                && error.raw_os_error() == Some(libc::EBADF))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_invalid_write_range_leaves_open_clean() {
+        for (case, layouts) in [Layout::V0..=Layout::V0, Layout::ALL]
+            .into_iter()
+            .enumerate()
+        {
+            let (storage, directory) =
+                storage_for_reopen_test(&format!("invalid_write_range_{case}"), layouts);
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            let header = blob.data_offset;
+            let last = i64::MAX as u64;
+            let completed = storage.pending.completions();
+
+            for options in [WriteOptions::default(), WriteOptions::SYNC] {
+                blob.write_at(u64::MAX - header, IoBufs::default(), options)
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    blob.write_at(u64::MAX, IoBufs::default(), options).await,
+                    Err(Error::OffsetOverflow)
+                ));
+
+                // Each nonempty write exceeds the signed file extent by one byte.
+                for chunks in [1, 2, IOVEC_BATCH_SIZE + 1] {
+                    let physical = last - (Widen::widen(chunks) - 1);
+                    let bufs = (0..chunks)
+                        .map(|_| crate::IoBuf::from(b"x"))
+                        .collect::<IoBufs>();
+                    assert!(
+                        matches!(
+                            blob.write_at(physical - header, bufs, options).await,
+                            Err(Error::OffsetOverflow)
+                        ),
+                        "chunks={chunks} options={options:?}"
+                    );
+                    assert!(!blob.open.tracker.is_dirty());
+                    assert!(blob.open.tracker.failure().is_none());
+                }
+            }
+
+            drop(blob);
+            let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+            assert_eq!(size, 0);
+            assert_eq!(storage.pending.completions(), completed);
+            blob.write_at(0, b"ok", WriteOptions::SYNC).await.unwrap();
+            drop(blob);
+            storage.remove("partition", None).await.unwrap();
+            drop(storage);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     struct PanickingOwner {

@@ -7,7 +7,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use ::tokio::sync::watch;
     use cfg_if::cfg_if;
     use commonware_formatting::hex;
-    use commonware_utils::sync::{Mutex, MutexGuard};
+    use commonware_utils::sync::Mutex;
     #[cfg(not(target_os = "linux"))]
     use std::collections::HashSet;
     use std::{
@@ -430,7 +430,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// cannot certify bytes the kernel already reported lost.
     #[derive(Default)]
     pub(crate) struct Tracker {
-        durability: Mutex<()>,
         written: AtomicU64,
         completed: AtomicU64,
         synced: AtomicU64,
@@ -440,15 +439,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     }
 
     impl Tracker {
-        /// Serialize a blocking barrier with its terminal accounting.
-        pub(crate) fn durability(&self) -> Result<MutexGuard<'_, ()>, Error> {
-            let guard = self.durability.lock();
-            if let Some(error) = self.failure() {
-                return Err(error);
-            }
-            Ok(guard)
-        }
-
         /// Record a mutation that needs a completed sync.
         pub(crate) fn write(&self) {
             self.written.fetch_add(1, Ordering::AcqRel);
@@ -583,7 +573,38 @@ pub(crate) mod tests {
         use crate::{Blob as _, BufferPool, Error, ReadOptions, WriteOptions, buffer::Write};
         use ::tokio::time::timeout;
         use commonware_utils::NZUsize;
-        use std::{sync::mpsc, time::Duration};
+        use futures::FutureExt as _;
+        use std::{
+            env,
+            process::Command,
+            sync::mpsc,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        /// Run the current test in a child process with a bounded lifetime.
+        pub(crate) fn run_child(child_var: &str, operation: &str) {
+            let thread = thread::current();
+            let test = thread.name().expect("test harness thread has a name");
+            let mut child = Command::new(env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(child_var, operation)
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "{test} {operation} failed");
+                    return;
+                }
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("{test} {operation} timed out");
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
 
         /// An untouched creation leaves no debt for a later open.
         pub(crate) async fn check_untouched_creation_leaves_no_debt<S: crate::Storage>(
@@ -841,7 +862,7 @@ pub(crate) mod tests {
                 // Block the reopen's flush. The replacement stays alive through a clone while
                 // the removed open drops, so only the replacement may record debt. Dropping
                 // the sender also releases the worker if an assertion unwinds.
-                let (entered, _entering) = ::tokio::sync::oneshot::channel();
+                let (entered, entering) = ::tokio::sync::oneshot::channel();
                 let (release, gate) = mpsc::channel();
                 *pending.test.before_complete.lock() = Some((entered, gate));
                 let completions = pending.completions();
@@ -850,8 +871,18 @@ pub(crate) mod tests {
                 drop(reader);
 
                 let mut reopen = Box::pin(storage.open(partition, name));
-                let early = timeout(Duration::from_millis(50), &mut reopen).await;
-                let completed_early = early.is_ok();
+                timeout(Duration::from_secs(5), async {
+                    commonware_macros::select! {
+                        entered = entering => entered.expect("reopen dropped its flush gate"),
+                        _ = &mut reopen => panic!("reopen completed before its flush"),
+                    }
+                })
+                .await
+                .expect("reopen did not begin its flush");
+                assert!(
+                    (&mut reopen).now_or_never().is_none(),
+                    "reopen exposed the replacement before its flush"
+                );
 
                 // Waiting for this flush must leave the namespace lock available to unrelated
                 // scans and opens.
@@ -866,11 +897,7 @@ pub(crate) mod tests {
                 // Release the worker before checking outcomes so failures cannot leave it
                 // blocked on the gate.
                 drop(release);
-                let (reopened, len) = match early {
-                    Ok(result) => result,
-                    Err(_) => reopen.await,
-                }
-                .unwrap();
+                let (reopened, len) = reopen.await.unwrap();
                 let bytes = reopened
                     .read_at(0, 3, ReadOptions::default())
                     .await
@@ -880,10 +907,6 @@ pub(crate) mod tests {
                 storage.remove(partition, None).await.unwrap();
                 assert_eq!(len, 3);
                 assert_eq!(bytes.as_ref(), b"new");
-                assert!(
-                    !completed_early,
-                    "reopen exposed the replacement before its flush"
-                );
                 assert_eq!(
                     pending.completions() - completions,
                     1,

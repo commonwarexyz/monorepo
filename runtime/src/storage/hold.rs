@@ -97,8 +97,8 @@ pub(crate) struct Held {
 
 impl Held {
     /// Retain a file and the directory hold that protects its storage.
-    pub(crate) fn new(file: File, hold: Arc<Hold>) -> Arc<Self> {
-        Arc::new(Self { file, _hold: hold })
+    pub(crate) const fn new(file: File, hold: Arc<Hold>) -> Self {
+        Self { file, _hold: hold }
     }
 }
 

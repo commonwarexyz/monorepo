@@ -286,11 +286,21 @@ impl FileGeneration {
 /// Tracks the generation shared by existing handles and unresolved mutations for each file.
 type FileGenerations = Arc<Mutex<BTreeMap<FileKey, Weak<FileGeneration>>>>;
 
-fn clear_pending<B>(pending: &PendingMutations<B>, generation: &Arc<FileGeneration>) -> Retired<B> {
+fn clear_pending<B>(
+    pending: &PendingMutations<B>,
+    generations: &[Arc<FileGeneration>],
+) -> Retired<B> {
+    if generations.is_empty() {
+        return Retired {
+            _mutations: Vec::new(),
+        };
+    }
     let mut pending = pending.lock();
     let retired = pending
         .extract_if(.., |mutation| {
-            Arc::ptr_eq(mutation.generation(), generation)
+            generations
+                .iter()
+                .any(|generation| Arc::ptr_eq(mutation.generation(), generation))
         })
         .collect();
     Retired {
@@ -470,24 +480,13 @@ impl<S: crate::Storage> Storage<S> {
                     .and_then(|generation| generation.upgrade())
                     .into_iter()
                     .collect::<Vec<_>>(),
-                None => {
-                    let keys = generations
-                        .keys()
-                        .filter(|(candidate, _)| candidate == partition)
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    keys.into_iter()
-                        .filter_map(|key| generations.remove(&key)?.upgrade())
-                        .collect()
-                }
+                None => generations
+                    .extract_if(.., |(candidate, _), _| candidate == partition)
+                    .filter_map(|(_, generation)| generation.upgrade())
+                    .collect(),
             }
         };
-        Retired {
-            _mutations: retired
-                .into_iter()
-                .flat_map(|generation| clear_pending(&self.pending, &generation)._mutations)
-                .collect(),
-        }
+        clear_pending(&self.pending, &retired)
     }
 
     /// Retire the removed file's crash evidence without destroying its byte owners.
@@ -518,7 +517,7 @@ impl Storage<crate::storage::memory::Storage> {
             .get(&(partition.to_owned(), name.to_vec()))
             .and_then(Weak::upgrade)
             .expect("an admitted blob retains its file generation");
-        clear_pending(&self.pending, &generation)
+        clear_pending(&self.pending, std::slice::from_ref(&generation))
     }
 
     /// Replay selected crash outcomes in issue order.
@@ -912,7 +911,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         }
         let _mutation = self.generation.mutation.lock().await;
         self.inner.sync().await?;
-        clear_pending(&self.pending, &self.generation);
+        clear_pending(&self.pending, std::slice::from_ref(&self.generation));
         Ok(())
     }
 
@@ -2127,6 +2126,50 @@ mod tests {
             h.storage.open("partition", b"test").await,
             Err(Error::Io(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn test_partition_removal_preserves_unrelated_crash_writes() {
+        let h = Harness::new(Config::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        }));
+        let (a, _) = h.storage.open("removed", b"a").await.unwrap();
+        let (b, _) = h.storage.open("removed", b"b").await.unwrap();
+        let (kept, _) = h.storage.open("kept", b"blob").await.unwrap();
+
+        // Interleave both removed blobs with two distinct retained ranges.
+        for (blob, offset, bytes) in [
+            (&a, 0, b"one"),
+            (&kept, 0, b"old"),
+            (&b, 0, b"two"),
+            (&kept, 3, b"new"),
+        ] {
+            blob.write_at(offset, bytes.as_slice(), WriteOptions::default())
+                .await
+                .unwrap();
+        }
+        drop((a, b, kept));
+
+        h.storage.remove("removed", None).await.unwrap();
+        assert_eq!(h.storage.pending.lock().len(), 2);
+        h.storage.crash().unwrap();
+
+        assert!(matches!(
+            h.inner.scan("removed").await,
+            Err(Error::PartitionMissing(_))
+        ));
+        let (kept, len) = h.inner.open("kept", b"blob").await.unwrap();
+        assert_eq!(len, 6);
+        assert_eq!(
+            kept.read_at(0, 6, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            b"oldnew"
+        );
     }
 
     #[tokio::test]
