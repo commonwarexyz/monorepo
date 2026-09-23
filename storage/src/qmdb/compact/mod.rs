@@ -39,7 +39,7 @@ pub(crate) async fn from_sync_result<E, F, D, C, S, Op, DB>(
     log: Memory<F, E, Op>,
     pinned_nodes: Option<Vec<D>>,
     range: NonEmptyRange<Location<F>>,
-    init: impl FnOnce(S, witness::Journal<E, F, D>, C, Location<F>, Vec<D>, Op) -> Result<DB, Error<F>>,
+    init: impl FnOnce(S, witness::Journal<E, F, D>, Location<F>, Vec<D>, Op) -> Result<DB, Error<F>>,
 ) -> Result<DB, Error<F>>
 where
     E: Context,
@@ -57,7 +57,6 @@ where
     init(
         config.strategy,
         journal,
-        config.commit_codec_config,
         last_commit_loc,
         // None only happens at genesis, where nothing is pinned.
         pinned_nodes.unwrap_or_default(),

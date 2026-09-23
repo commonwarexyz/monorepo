@@ -6,8 +6,8 @@
 //! database through the batch's [`Reader`].
 
 use crate::stateful::db::{
-    LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    InitError, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Reader, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -266,8 +266,19 @@ where
     type SyncTarget = AnySyncTarget<F, H::Digest>;
     type Snapshot = LogSnapshot<F, E, FixedJournal<E, fixed::Operation<F, V>>, H>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -326,18 +337,6 @@ where
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
     }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
-    }
 }
 
 impl<F, E, V, H, S> ManagedDb<E> for variable::Db<F, E, V, H, S>
@@ -369,8 +368,19 @@ where
     type SyncTarget = AnySyncTarget<F, H::Digest>;
     type Snapshot = LogSnapshot<F, E, VariableJournal<E, variable::Operation<F, V>>, H>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -428,18 +438,6 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -580,7 +578,9 @@ mod tests {
     fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let (writer, reader) = split(db);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())
@@ -618,7 +618,9 @@ mod tests {
     fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let (_writer, reader) = split(db);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(reader)
@@ -671,7 +673,9 @@ mod tests {
     fn unset_floor_carries_forward_across_commits() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-floor-carry", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let (writer, reader) = split(db);
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(reader.clone())

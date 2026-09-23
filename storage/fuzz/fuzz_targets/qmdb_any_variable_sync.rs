@@ -176,6 +176,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
             context.child("storage"),
             cfg,
+            None,
         )
         .await
         .expect("Failed to init source db");
@@ -346,6 +347,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     let db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("Failed to init source db");

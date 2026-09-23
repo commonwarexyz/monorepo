@@ -27,6 +27,8 @@ const PAGE_CACHE_SIZE: usize = 9;
 const ITEMS_PER_SECTION: u64 = 5;
 const ITEMS_PER_BLOB: u64 = 11;
 
+type FuzzDb<F> = Immutable<F, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
+
 #[derive(Arbitrary, Debug, Clone)]
 enum ImmutableOperation {
     Set {
@@ -147,10 +149,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         let operations = input.operations.clone();
         async move {
             let cfg = db_config(suffix, &context);
-            let mut db =
-                Immutable::<F, _, Digest, Vec<u8>, Sha256, TwoCap, Sequential>::init(context, cfg)
-                    .await
-                    .unwrap();
+            let mut db = FuzzDb::<F>::init(context, cfg, None).await.unwrap();
 
             let mut keys_set: Vec<(Digest, Location<F>)> = Vec::new();
             let mut set_locations: Vec<(Digest, Location<F>)> = Vec::new();

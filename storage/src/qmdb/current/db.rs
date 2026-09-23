@@ -6,7 +6,7 @@ use crate::{
     Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        Error as JournalError, authenticated,
+        authenticated,
         contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{
@@ -25,7 +25,6 @@ use crate::{
             grafting,
             proof::{OpsRootWitness, RangeProof, RangeProofSpec, constant::OperationProof},
         },
-        operation::Floored as _,
     },
 };
 use commonware_codec::{Codec, CodecShared, Copying, DecodeExt};
@@ -472,20 +471,6 @@ where
         );
     }
 
-    /// Returns the minimum rewind target that keeps delayed-merge grafting queries valid
-    /// for the current bitmap pruning boundary.
-    ///
-    /// This is the same absorption threshold used by [`Self::sync_boundary`]: the
-    /// `peak_birth_size` of the youngest pruned chunk-pair's height-(gh+1) parent.
-    /// Rewinding below this size would put the ops tree in a state where the parent has not
-    /// been born, re-exposing individual height-`gh` ops peaks for pruned chunks whose
-    /// grafted leaves are no longer available.
-    ///
-    /// Returns `None` for families without delayed merges.
-    fn delayed_merge_rewind_floor(&self) -> Option<u64> {
-        pair_absorption_threshold::<F, N>(self.any.bitmap.pruned_chunks() as u64)
-    }
-
     /// Read the grafted tree's pinned-node digests for pruning boundary `loc`, in
     /// `Family::nodes_to_pin` order, as `(position, digest)` pairs.
     ///
@@ -544,7 +529,11 @@ where
     ///
     /// `prune_loc` must be at most [`Self::sync_boundary`]: the ops log's lower bound must not
     /// advance past the point where the grafting overlay has been pruned. The bitmap and grafted
-    /// tree advance to the sync boundary regardless of `prune_loc`.
+    /// tree advance to `prune_loc` rounded down to a chunk boundary and never move backwards.
+    /// The log may retain operations below `prune_loc` for section or blob alignment, so bounded
+    /// initialization can reject a commit the log still holds when the bitmap boundary lies
+    /// above that commit's inactivity floor. Callers that must keep an older commit
+    /// initializable prune no further than the sync boundary observed at that commit.
     ///
     /// # Errors
     ///
@@ -570,8 +559,10 @@ where
         // initialize the bitmap.
         self.any.log = self.any.log.commit().await?;
 
-        // Prune the bitmap to the sync boundary (most aggressive safe location).
-        self.any.prune_bitmap(sync_boundary);
+        // Prune the bitmap only to `prune_loc`, as `any::Db::prune` does. Restarts initialize
+        // bounded at retained commits whose floors may precede the live sync boundary, and
+        // initialization rejects a commit whose floor the bitmap has pruned.
+        self.any.prune_bitmap(prune_loc);
         self.prune_grafted_tree_to_bitmap()?;
 
         // Persist grafted tree pruning state before pruning the ops log. If the subsequent
@@ -586,109 +577,9 @@ where
             std::future::pending::<()>().await;
         }
 
-        (self.any, _) = self.any.prune_log(prune_loc).await?;
+        self.any = self.any.prune_log(prune_loc).await?;
         self.any.update_metrics();
         self.update_metrics();
-        Ok(self)
-    }
-
-    /// Rewind the database to `size` operations, where `size` is the location of the next append.
-    ///
-    /// This rewinds the underlying Any database and rebuilds the Current overlay state (bitmap,
-    /// grafted tree, and canonical root) for the rewound size.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when:
-    /// - `size` is not a valid rewind target
-    /// - the target's required logical range is not fully retained (for Current, this includes the
-    ///   underlying Any inactivity-floor boundary and bitmap pruning boundary)
-    /// - `size - 1` is not a commit operation
-    /// - `size` is below the bitmap pruning boundary
-    ///
-    /// Any error from this method is fatal for this handle. Rewind may mutate state in the
-    /// underlying Any database before this Current overlay finishes rebuilding. Callers must drop
-    /// this database handle after any `Err` from `rewind` and reopen from storage.
-    ///
-    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
-    /// completes.
-    #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
-    #[boxed]
-    pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
-        let rewind_size = *size;
-        let current_size = *self.any.log.size();
-        // No-op short-circuit. Avoids the post-rewind grafted-tree rebuild and the validation
-        // and journal-read overhead below. Validation runs after this on the non-no-op path.
-        if rewind_size == current_size {
-            return Ok(self);
-        }
-        // Reject zero / out-of-range up front: lines below compute `rewind_size - 1`, which
-        // underflows when `rewind_size == 0`. `any::Db::rewind` would catch these, but it isn't
-        // called until after those subtractions.
-        if rewind_size == 0 || rewind_size > current_size {
-            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
-        }
-
-        let pruned_chunks = self.any.bitmap.pruned_chunks();
-        let pruned_bits = (pruned_chunks as u64)
-            .checked_mul(bitmap::Prunable::<N>::CHUNK_SIZE_BITS)
-            .ok_or_else(|| Error::DataCorrupted("pruned ops leaves overflow"))?;
-        if rewind_size < pruned_bits {
-            return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
-        }
-        if let Some(rewind_floor) = self.delayed_merge_rewind_floor()
-            && rewind_size < rewind_floor
-        {
-            return Err(Error::Journal(JournalError::ItemPruned(rewind_size - 1)));
-        }
-
-        // Ensure the target commit's logical range is fully representable with the current
-        // bitmap pruning boundary. Even if the ops log still retains older entries, rewinding
-        // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
-        // discarded.
-        {
-            let rewind_last_loc = Location::<F>::new(rewind_size - 1);
-            let rewind_last_op = self.any.log.read(*rewind_last_loc).await?;
-            let Some(rewind_floor) = rewind_last_op.has_floor() else {
-                return Err(Error::<F>::UnexpectedData(rewind_last_loc));
-            };
-            if *rewind_floor < pruned_bits {
-                return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
-            }
-        }
-
-        // Extract pinned nodes for the existing pruning boundary from the in-memory grafted tree.
-        let pinned_nodes: Vec<H::Digest> = if pruned_chunks > 0 {
-            let grafted_leaves = Location::<F>::new(pruned_chunks as u64);
-            self.grafted_pinned_nodes(grafted_leaves)?
-                .into_iter()
-                .map(|(_, digest)| digest)
-                .collect()
-        } else {
-            Vec::new()
-        };
-
-        // `any.rewind` rewinds the log and patches the shared bitmap (truncate + restore active
-        // bits + set the rewound tail's CommitFloor). Live pre-rewind batches must be dropped by
-        // the caller; reads through them now return inconsistent data.
-        self.any = self.any.rewind(size).await?;
-
-        // Rebuild the grafted tree and canonical root from the rewound `any` state.
-        let (grafted_tree, root) = rebuild_grafted_tree::<F, H, S, N>(
-            self.any.bitmap.as_ref(),
-            &pinned_nodes,
-            &self.any.log.merkle,
-            self.any.inactivity_floor_loc,
-            self.any.root(),
-            &self.strategy,
-        )
-        .await?;
-
-        self.grafted_tree = Arc::new(grafted_tree);
-        self.root = root;
-        self.update_metrics();
-
         Ok(self)
     }
 
@@ -820,8 +711,7 @@ where
     Operation<F, U>: Codec,
 {
     /// Capture an owned immutable snapshot of the database's operations log, with bounds
-    /// frozen at capture. The snapshot includes applied-but-uncommitted operations, and reads
-    /// from a range the live database later rewinds are unspecified. It serves the
+    /// frozen at capture. The snapshot includes applied-but-uncommitted operations. It serves the
     /// ops-tree proofs state sync needs. Grafted proofs require the live bitmap, which
     /// keeps no history, so those remain live-only.
     pub async fn snapshot(
@@ -865,7 +755,9 @@ pub(crate) fn sync_boundary<F: Graftable, const N: usize>(
 /// For the youngest of `chunk_count` chunks, return the `peak_birth_size` of its
 /// chunk-pair parent at height `gh+1`. Returns `None` for families without delayed merges
 /// (where `peak_birth_size` at height `gh` equals the chunk boundary).
-fn pair_absorption_threshold<F: Graftable, const N: usize>(chunk_count: u64) -> Option<u64> {
+pub(super) fn pair_absorption_threshold<F: Graftable, const N: usize>(
+    chunk_count: u64,
+) -> Option<u64> {
     if chunk_count == 0 {
         return None;
     }
@@ -1542,6 +1434,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("resume-after-apply", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1612,6 +1505,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("stale-fork-refuse", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1657,6 +1551,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("across-prune", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1711,6 +1606,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("proof-snapshot-churn", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1775,6 +1671,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("db"),
                 fixed_config::<OneCap>("operations-match-applied-range", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1804,6 +1701,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("first"),
                 fixed_config::<OneCap>("start-sync-recovery", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1824,6 +1722,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("second"),
                 fixed_config::<OneCap>("start-sync-recovery", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1844,6 +1743,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("prune-park", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1885,6 +1785,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("reopen"),
                 fixed_config::<OneCap>("prune-park", &ctx),
+                None,
             )
             .await
             .expect("prune crash must leave the db recoverable");
@@ -1903,6 +1804,7 @@ mod tests {
             let mut db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-full", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1939,6 +1841,7 @@ mod tests {
             let db = MmbDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-partial", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -1977,6 +1880,7 @@ mod tests {
             let mut db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-pruned", &ctx),
+                None,
             )
             .await
             .unwrap();
@@ -2013,6 +1917,7 @@ mod tests {
             let db = MmrDb::init(
                 ctx.child("storage"),
                 fixed_config::<OneCap>("ops-root-witness-fresh", &ctx),
+                None,
             )
             .await
             .unwrap();

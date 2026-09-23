@@ -1,14 +1,12 @@
 //! Mailbox and wire types for the QMDB sync resolver service.
 
-use crate::stateful::db::p2p::cancel;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
-use commonware_codec::Read;
 use commonware_cryptography::Digest;
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::{FeedbackTx, Request, Response, Source},
+    qmdb::sync::{Feedback, Request, Response, Source, source},
 };
-use commonware_utils::channel::oneshot;
+use commonware_utils::channel::{mpsc, oneshot};
 use std::collections::VecDeque;
 
 /// The resolver actor dropped the response before completion.
@@ -16,77 +14,110 @@ use std::collections::VecDeque;
 #[error("response dropped before completion")]
 pub struct ResponseDropped;
 
-/// Where the actor delivers a fetched response, along with the channel the caller reports
-/// verification feedback on.
-pub(super) type ResponseTx<F, Op, D> = oneshot::Sender<(Response<F, Op, D>, FeedbackTx)>;
+/// Candidate responses and the channels through which callers judge them.
+pub(super) type Reply<R> = mpsc::Sender<(R, oneshot::Sender<bool>)>;
 
 /// Messages sent from the [`Mailbox`] to the resolver [`Actor`](super::Actor).
-pub(super) enum Message<F: Family, Op, D: Digest> {
+pub(super) enum Message<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
     /// Fetch operations from a remote peer via the P2P resolver engine.
     GetOperations {
         request: Request<F>,
-        response: ResponseTx<F, Op, D>,
+        response: Reply<Response<F, Op, D>>,
     },
-    /// Cancel a previously requested operation fetch.
-    CancelOperations { request: Request<F> },
 }
 
-impl<F: Family, Op, D: Digest> Message<F, Op, D> {
+impl<F, Op, D> Message<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
     fn response_closed(&self) -> bool {
         match self {
-            Self::CancelOperations { .. } => false,
             Self::GetOperations { response, .. } => response.is_closed(),
         }
     }
 }
 
-pub(super) struct Pending<F: Family, Op, D: Digest>(VecDeque<Message<F, Op, D>>);
+pub(super) struct Pending<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
+    messages: VecDeque<Message<F, Op, D>>,
+}
 
-impl<F: Family, Op, D: Digest> Default for Pending<F, Op, D> {
+impl<F, Op, D> Default for Pending<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
     fn default() -> Self {
-        Self(VecDeque::new())
+        Self {
+            messages: VecDeque::new(),
+        }
     }
 }
 
-impl<F: Family, Op, D: Digest> Overflow<Message<F, Op, D>> for Pending<F, Op, D> {
+impl<F, Op, D> Overflow<Message<F, Op, D>> for Pending<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
     fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.messages.is_empty()
     }
 
     fn drain<P>(&mut self, mut push: P)
     where
         P: FnMut(Message<F, Op, D>) -> Option<Message<F, Op, D>>,
     {
-        while let Some(message) = self.0.pop_front() {
+        while let Some(message) = self.messages.pop_front() {
             if message.response_closed() {
                 continue;
             }
 
             if let Some(message) = push(message) {
-                self.0.push_front(message);
+                self.messages.push_front(message);
                 break;
             }
         }
     }
 }
 
-impl<F: Family, Op, D: Digest> Policy for Message<F, Op, D> {
+impl<F, Op, D> Policy for Message<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
     type Overflow = Pending<F, Op, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
             return;
         }
-        overflow.0.push_back(message);
+
+        overflow.messages.push_back(message);
     }
 }
 
-/// Client-facing resolver mailbox used by the QMDB sync engine.
-pub struct Mailbox<F: Family, Op, D: Digest> {
+/// Resolver mailbox for a single QMDB history.
+pub struct Mailbox<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
     sender: Sender<Message<F, Op, D>>,
 }
 
-impl<F: Family, Op, D: Digest> Clone for Mailbox<F, Op, D> {
+impl<F, Op, D> Clone for Mailbox<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -94,7 +125,11 @@ impl<F: Family, Op, D: Digest> Clone for Mailbox<F, Op, D> {
     }
 }
 
-impl<F: Family, Op, D: Digest> Mailbox<F, Op, D> {
+impl<F, Op, D> Mailbox<F, Op, D>
+where
+    F: Family,
+    D: Digest,
+{
     pub(super) const fn new(sender: Sender<Message<F, Op, D>>) -> Self {
         Self { sender }
     }
@@ -103,7 +138,7 @@ impl<F: Family, Op, D: Digest> Mailbox<F, Op, D> {
 impl<F, Op, D> Source for Mailbox<F, Op, D>
 where
     F: Family,
-    Op: Read<Cfg = ()> + Send + Sync + Clone + 'static,
+    Op: Send,
     D: Digest,
 {
     type Family = F;
@@ -111,21 +146,15 @@ where
     type Op = Op;
     type Error = ResponseDropped;
 
-    async fn serve(
-        &self,
-        request: Request<F>,
-    ) -> Result<(Response<Self::Family, Self::Op, Self::Digest>, FeedbackTx), Self::Error> {
-        let (response_tx, response_rx) = oneshot::channel();
+    async fn serve(&self, request: Request<F>) -> source::Result<Self> {
+        let (response_tx, mut response_rx) = mpsc::channel(1);
         let _ = self.sender.enqueue(Message::GetOperations {
             request,
             response: response_tx,
         });
 
-        let mut guard =
-            cancel::Guard::new(self.sender.clone(), Message::CancelOperations { request });
-        let result = response_rx.await;
-        guard.disarm();
-        result.map_err(|_| ResponseDropped)
+        let (response, verdict) = response_rx.recv().await.ok_or(ResponseDropped)?;
+        Ok((response, Some(Feedback::new(verdict, response_rx))))
     }
 }
 
@@ -133,57 +162,68 @@ where
 mod tests {
     use super::*;
     use commonware_cryptography::sha256;
-    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_storage::mmr;
     use commonware_utils::{NZU64, NZUsize};
 
-    /// A caller that abandons its fetch drops the future, which retracts the request from the
-    /// actor.
+    type TestResponse = Response<mmr::Family, u64, sha256::Digest>;
+
     #[test]
-    fn dropping_get_operations_sends_cancel_message() {
+    fn overflow_orders_live_requests() {
+        let mut overflow = Pending::<mmr::Family, u64, sha256::Digest>::default();
+        let request = Request::Operations {
+            size: mmr::Location::new(10),
+            start: mmr::Location::new(3),
+            max_ops: NZU64!(2),
+        };
+        let (response, canceled) = mpsc::channel(1);
+        Message::handle(&mut overflow, Message::GetOperations { request, response });
+        drop(canceled);
+        let (response, _waiting) = mpsc::channel(1);
+        Message::handle(&mut overflow, Message::GetOperations { request, response });
+        overflow.drain(Some);
+        let mut messages = VecDeque::new();
+        overflow.drain(|message| {
+            messages.push_back(message);
+            None
+        });
+        assert!(overflow.is_empty());
+        assert!(
+            matches!(messages.pop_front(), Some(Message::GetOperations { request: queued, response }) if queued == request && !response.is_closed())
+        );
+        assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn dropping_get_operations_closes_queued_reply() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<mmr::Family, u64, sha256::Digest>::new(sender);
-            let size = mmr::Location::new(10);
-            let start_loc = mmr::Location::new(3);
-            let max_ops = NZU64!(2);
+            let request = Request::Operations {
+                size: mmr::Location::new(10),
+                start: mmr::Location::new(3),
+                max_ops: NZU64!(2),
+            };
 
             // Poll once so the request is enqueued, then abandon the fetch.
             {
-                let get = mailbox.serve(Request::Operations {
-                    size,
-                    start: start_loc,
-                    max_ops,
-                });
+                let get = mailbox.serve(request);
                 futures::pin_mut!(get);
                 assert!(futures::poll!(get.as_mut()).is_pending());
             }
 
-            match receiver.recv().await.expect("request should be queued") {
-                Message::GetOperations { request, .. } => {
-                    assert_eq!(request.size(), size);
-                    assert_eq!(request.start(), start_loc);
-                    assert_eq!(request.max_ops(), max_ops);
-                    assert!(matches!(request, Request::Operations { .. }));
-                }
-                Message::CancelOperations { .. } => panic!("cancel should come after request"),
-            }
-
-            match receiver.recv().await.expect("cancel should be queued") {
-                Message::CancelOperations { request } => {
-                    assert_eq!(request.size(), size);
-                    assert_eq!(request.start(), start_loc);
-                    assert_eq!(request.max_ops(), max_ops);
-                    assert!(matches!(request, Request::Operations { .. }));
-                }
-                Message::GetOperations { .. } => panic!("unexpected duplicate request"),
-            }
+            let Message::GetOperations {
+                request: queued,
+                response,
+            } = receiver.recv().await.expect("request should be queued");
+            assert_eq!(queued, request);
+            assert!(response.is_closed());
+            assert!(receiver.try_recv().is_err());
         });
     }
 
-    /// A fetch that completes normally disarms the guard, so no cancel follows.
     #[test]
-    fn completed_get_operations_sends_no_cancel() {
+    fn closed_response_ends_fetch() {
         deterministic::Runner::default().start(|context| async move {
             let (sender, mut receiver) = commonware_actor::mailbox::new(context, NZUsize!(4));
             let mailbox = Mailbox::<mmr::Family, u64, sha256::Digest>::new(sender);
@@ -194,20 +234,66 @@ mod tests {
             });
             let observe = async move {
                 let Message::GetOperations { response, .. } =
-                    receiver.recv().await.expect("request should be queued")
-                else {
-                    panic!("expected a fetch request");
-                };
+                    receiver.recv().await.expect("request should be queued");
                 drop(response);
                 receiver
             };
 
             let (result, mut receiver) = futures::join!(get, observe);
             assert!(matches!(result, Err(ResponseDropped)));
-            assert!(
-                receiver.try_recv().is_err(),
-                "a completed fetch must not enqueue a cancel"
-            );
+            assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn rejected_candidate_keeps_channel_until_acceptance_or_cancellation() {
+        deterministic::Runner::default().start(|context| async move {
+            for cancel in [false, true] {
+                let (sender, mut receiver) = commonware_actor::mailbox::new(
+                    context.child(if cancel { "cancel" } else { "accept" }),
+                    NZUsize!(4),
+                );
+                let mailbox = Mailbox::<mmr::Family, u64, sha256::Digest>::new(sender);
+                let request = Request::Operations {
+                    size: mmr::Location::new(1),
+                    start: mmr::Location::new(0),
+                    max_ops: NZU64!(1),
+                };
+                let mut fetch = Box::pin(mailbox.serve(request));
+                assert!(futures::poll!(fetch.as_mut()).is_pending());
+                let Message::GetOperations { response, .. } = receiver.recv().await.unwrap();
+                let candidate = |value| TestResponse::Operations {
+                    proof: mmr::Proof {
+                        leaves: request.size(),
+                        inactive_peaks: 0,
+                        digests: vec![],
+                    },
+                    operations: vec![value],
+                };
+
+                let (verdict, rejected) = oneshot::channel();
+                assert!(response.try_send((candidate(1), verdict)).is_ok());
+                let (first, feedback) = fetch.await.unwrap();
+                assert!(matches!(first, Response::Operations { operations, .. } if operations == [1]));
+                let mut retry = Box::pin(feedback.unwrap().reject());
+                assert!(futures::poll!(retry.as_mut()).is_pending());
+                assert!(!rejected.await.unwrap());
+                assert!(!response.is_closed());
+                assert!(receiver.try_recv().is_err());
+
+                if cancel {
+                    drop(retry);
+                } else {
+                    let (verdict, accepted) = oneshot::channel();
+                    assert!(response.try_send((candidate(2), verdict)).is_ok());
+                    let (second, feedback) = retry.await.unwrap();
+                    assert!(matches!(second, Response::Operations { operations, .. } if operations == [2]));
+                    feedback.accept();
+                    assert!(accepted.await.unwrap());
+                }
+                response.closed().await;
+                assert!(receiver.try_recv().is_err());
+            }
         });
     }
 }

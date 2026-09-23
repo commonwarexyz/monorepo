@@ -199,16 +199,19 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Sync target type for state sync of this database.
     ///
     /// Typically a database-specific state commitment plus the operation range needed to reach it.
-    type SyncTarget: Clone + PartialEq + Send + Sync;
+    type SyncTarget: Clone + Debug + PartialEq + Send + Sync;
 
     /// Owned immutable snapshot of applied state.
     type Snapshot: Clone + Send + Sync + 'static;
 
-    /// Construct a new database from its configuration.
+    /// Open a database at `expected`, or its latest checkpoint when no target is supplied.
+    ///
+    /// Implementations durably discard state beyond the selected checkpoint before returning.
     fn init(
         context: E,
         config: Self::Config,
-    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+        expected: Option<Self::SyncTarget>,
+    ) -> impl Future<Output = Result<Self, InitError<Self::Error, Self::SyncTarget>>> + Send;
 
     /// Return the sync target produced by a newly initialized database.
     ///
@@ -229,7 +232,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
     /// a `Changeset`, then `db.apply_batch(changeset)`. The returned database
-    /// must expose the batch as an independently rewindable recovery checkpoint.
+    /// must expose the batch as an independently recoverable checkpoint.
     /// The checkpoint need not be durable until the handle returned by
     /// [`Self::finalize`] resolves.
     fn apply(
@@ -271,15 +274,6 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ///
     /// Returning a target does not by itself prove that target durable.
     fn sync_target(&self) -> Self::SyncTarget;
-
-    /// Rewind applied state to `target`.
-    ///
-    /// Implementations must ensure rewind effects are durable before returning
-    /// the database (for example by committing after rewind).
-    fn rewind_to_target(
-        self,
-        target: Self::SyncTarget,
-    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 
 /// Durability barrier returned by [`DatabaseSet::finalize`].
@@ -376,10 +370,15 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     type Config: Send;
 
     /// Per-database sync targets extracted from a finalized block.
-    type SyncTargets: Clone + PartialEq + Send + Sync;
+    type SyncTargets: Clone + Debug + PartialEq + Send + Sync;
 
     /// Construct the database set from its configuration.
-    fn init(context: E, config: Self::Config) -> impl Future<Output = Self> + Send;
+    /// Every returned database must match its expected target when one is supplied.
+    fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTargets>,
+    ) -> impl Future<Output = Self> + Send;
 
     /// Return the sync targets produced by a newly initialized database set.
     fn initial_sync_targets() -> Self::SyncTargets;
@@ -402,7 +401,7 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// Apply each merkleized batch's changeset.
     ///
     /// Returns once every database exposes its batch as an independently
-    /// rewindable recovery checkpoint. Durability is started separately with
+    /// recoverable checkpoint. Durability is started separately with
     /// [`DatabaseSet::finalize`].
     fn apply(self, batches: Self::Merkleized) -> impl Future<Output = Self> + Send;
 
@@ -424,9 +423,6 @@ pub trait DatabaseSet<E>: Send + Sync + Sized + 'static {
     /// Prune each database to the provided per-database targets (see
     /// [`ManagedDb::prune`] for the durability contract).
     fn prune(self, targets: &Self::SyncTargets) -> impl Future<Output = Self> + Send;
-
-    /// Rewind the set to the provided per-database targets.
-    fn rewind_to_targets(self, targets: Self::SyncTargets) -> impl Future<Output = Self> + Send;
 }
 
 /// The snapshot a log-backed QMDB database produces, shared for serving.
@@ -491,8 +487,8 @@ where
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
 
-    async fn init(context: E, config: Self::Config) -> Self {
-        match T::init(context.child("db"), config).await {
+    async fn init(context: E, config: Self::Config, expected: Option<Self::SyncTargets>) -> Self {
+        match T::init(context.child("db"), config, expected).await {
             Ok(database) => Self::from(database),
             Err(err) => panic!(
                 "database init failed (type {}): {err:?}",
@@ -543,10 +539,6 @@ where
 
     async fn prune(self, targets: &Self::SyncTargets) -> Self {
         prune(self, targets, None).await
-    }
-
-    async fn rewind_to_targets(self, targets: Self::SyncTargets) -> Self {
-        rewind(self, targets, None).await
     }
 }
 
@@ -682,6 +674,44 @@ where
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
     ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
+}
+
+/// Why a managed database failed to open.
+#[derive(Debug, thiserror::Error)]
+pub enum InitError<E: Debug, T: Debug> {
+    /// The database failed to open or recover.
+    #[error("database initialization failed: {0:?}")]
+    Database(E),
+    /// The recovered database does not match the expected sync target.
+    #[error("database target mismatch: expected {expected:?}, recovered {recovered:?}")]
+    TargetMismatch {
+        /// The target requested by the caller.
+        expected: T,
+        /// The target recovered from storage.
+        recovered: T,
+    },
+}
+
+/// Validate the complete target before returning a managed database.
+/// Bounds alone do not identify a checkpoint: its commitment and retained range must also match.
+fn validate_initialization<E, T>(
+    db: T,
+    expected: Option<T::SyncTarget>,
+) -> Result<T, InitError<T::Error, T::SyncTarget>>
+where
+    T: ManagedDb<E>,
+{
+    let Some(expected) = expected else {
+        return Ok(db);
+    };
+    let recovered = db.sync_target();
+    if recovered != expected {
+        return Err(InitError::TargetMismatch {
+            expected,
+            recovered,
+        });
+    }
+    Ok(db)
 }
 
 impl<E, T, R, D> StateSyncSet<E, R, D> for Single<T>
@@ -858,7 +888,7 @@ macro_rules! impl_database_set {
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
 
-            async fn init(context: E, config: Self::Config) -> Self {
+            async fn init(context: E, config: Self::Config, expected: Option<Self::SyncTargets>) -> Self {
                 join!($(
                     async {
                         Single::new(
@@ -866,6 +896,7 @@ macro_rules! impl_database_set {
                             $T::init(
                                 context.child(concat!("db_", stringify!($idx))),
                                 config.$idx,
+                                expected.as_ref().map(|targets| targets.$idx.clone()),
                             )
                             .await
                             .expect(concat!(
@@ -945,11 +976,6 @@ macro_rules! impl_database_set {
                 )+)
             }
 
-            async fn rewind_to_targets(self, targets: Self::SyncTargets) -> Self {
-                join!($(
-                    rewind(self.$idx, targets.$idx, Some($idx)),
-                )+)
-            }
         }
     };
 }
@@ -1750,32 +1776,6 @@ async fn finalize<E, T: ManagedDb<E>>(
     (Single { writer }, snapshot, handle)
 }
 
-#[tracing::instrument(name = "stateful.db.rewind", level = "info", skip_all, fields(index = index))]
-async fn rewind<E, T: ManagedDb<E>>(
-    member: Single<T>,
-    target: T::SyncTarget,
-    index: Option<usize>,
-) -> Single<T> {
-    // Mutable rewind failures are fatal by design because the database handle
-    // may be internally diverged after a failed rewind.
-    let Single { writer } = member;
-    let (writer, ()) = writer
-        .mutate(|database| async move {
-            match database.rewind_to_target(target).await {
-                Ok(database) => (database, ()),
-                Err(err) => {
-                    let index = index.map_or(String::new(), |i| format!("index {i}, "));
-                    panic!(
-                        "database rewind failed ({index}type {}): {err:?}",
-                        core::any::type_name::<T>(),
-                    );
-                }
-            }
-        })
-        .await;
-    Single { writer }
-}
-
 #[tracing::instrument(name = "stateful.db.prune", level = "info", skip_all, fields(index = index))]
 async fn prune<E, T: ManagedDb<E>>(
     member: Single<T>,
@@ -1805,7 +1805,7 @@ async fn prune<E, T: ManagedDb<E>>(
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, Barrier, CoordinatorAction, CoordinatorState, DatabaseSet,
+        Anchor, Barrier, CoordinatorAction, CoordinatorState, DatabaseSet, InitError,
         MAX_CHANNEL_DRAIN_PER_TICK, ManagedDb, Reader, Single, StateSyncDb, StateSyncSet,
         SyncEngineConfig, TipUpdate, drain_single_tip_updates, split,
     };
@@ -1826,7 +1826,7 @@ mod tests {
         num::{NonZeroU64, NonZeroUsize},
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -2156,7 +2156,7 @@ mod tests {
             T::SyncTarget: Debug,
         {
             let initial = T::initial_sync_target();
-            let db = T::init(context, config).await.unwrap();
+            let db = T::init(context, config, None).await.unwrap();
             assert_eq!(initial, db.sync_target());
             let (writer, reader) = split(db);
             let batch = T::new_batch(reader)
@@ -2225,13 +2225,18 @@ mod tests {
             });
         }
 
-        async fn assert_rewind_restores_finalized_target<T>(context: Context, config: T::Config)
-        where
+        async fn assert_bounded_init_restores_finalized_target<T>(
+            context: Context,
+            config: T::Config,
+        ) where
             T: ManagedDb<Context> + 'static,
             <T::Unmerkleized as Unmerkleized>::Error: Debug,
             T::SyncTarget: Debug,
+            T::Config: Clone,
         {
-            let db = T::init(context, config).await.unwrap();
+            let db = T::init(context.child("initial"), config.clone(), None)
+                .await
+                .unwrap();
             let (writer, reader) = split(db);
             let batch = T::new_batch(reader.clone())
                 .await
@@ -2252,19 +2257,21 @@ mod tests {
             drop(snapshot);
             handle.await.expect("second database sync failed");
 
-            let (_writer, ()) = writer
-                .mutate(|db| {
-                    let target = target.clone();
-                    async move {
-                        let db = db
-                            .rewind_to_target(target)
-                            .await
-                            .unwrap_or_else(|_| panic!("rewind to finalized target failed"));
-                        (db, ())
-                    }
-                })
-                .await;
-            assert_eq!(reader.read().await.sync_target(), target);
+            drop(writer);
+            drop(reader);
+            let db = T::init(
+                context.child("bounded"),
+                config.clone(),
+                Some(target.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(db.sync_target(), target);
+            drop(db);
+            let db = T::init(context.child("reopened"), config, None)
+                .await
+                .unwrap();
+            assert_eq!(db.sync_target(), target);
         }
 
         #[rstest]
@@ -2309,17 +2316,19 @@ mod tests {
             PhantomData::<KeylessCompactVariable>,
             keyless_compact_variable_config
         )]
-        fn rewind_restores_earlier_finalized_sync_target<T>(
+        fn bounded_initialization_restores_earlier_finalized_sync_target<T>(
             #[case] _db: PhantomData<T>,
             #[case] config: fn(&Context, &str) -> T::Config,
         ) where
             T: ManagedDb<Context> + 'static,
             <T::Unmerkleized as Unmerkleized>::Error: Debug,
             T::SyncTarget: Debug,
+            T::Config: Clone,
         {
             deterministic::Runner::default().start(|context| async move {
                 let config = config(&context, "db");
-                assert_rewind_restores_finalized_target::<T>(context.child("db"), config).await;
+                assert_bounded_init_restores_finalized_target::<T>(context.child("db"), config)
+                    .await;
             });
         }
     }
@@ -2339,9 +2348,9 @@ mod tests {
     #[derive(Default)]
     struct TestDb;
 
-    struct CountingRewindDb {
+    struct InitializationDb {
+        /// Restart target selected during initialization.
         current_target: u64,
-        rewind_count: usize,
     }
 
     struct PruneCountingDb {
@@ -2362,7 +2371,11 @@ mod tests {
 
         fn initial_sync_target() -> Self::SyncTarget {}
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             Ok(Self)
         }
 
@@ -2377,17 +2390,13 @@ mod tests {
         ready_apply!();
 
         fn sync_target(&self) -> Self::SyncTarget {}
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
     }
 
-    impl<E: Send> ManagedDb<E> for CountingRewindDb {
+    impl<E: Send> ManagedDb<E> for InitializationDb {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
         type Error = Infallible;
-        type Config = ();
+        type Config = u64;
         type SyncTarget = u64;
         type Snapshot = ();
 
@@ -2396,11 +2405,22 @@ mod tests {
         }
 
         fn initial_sync_target() -> Self::SyncTarget {
-            unreachable!("CountingRewindDb is constructed directly in tests")
+            0
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-            unreachable!("CountingRewindDb is constructed directly in tests")
+        async fn init(
+            _context: E,
+            config: Self::Config,
+            expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
+            let target = expected.unwrap_or(config);
+            assert!(
+                target <= config,
+                "database is behind its initialization target"
+            );
+            Ok(Self {
+                current_target: target,
+            })
         }
 
         async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
@@ -2415,12 +2435,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.current_target
-        }
-
-        async fn rewind_to_target(mut self, target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            self.current_target = target;
-            self.rewind_count += 1;
-            Ok(self)
         }
     }
 
@@ -2438,7 +2452,11 @@ mod tests {
 
         fn initial_sync_target() -> Self::SyncTarget {}
 
-        async fn init(_context: E, prune_count: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            prune_count: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             Ok(Self { prune_count })
         }
 
@@ -2458,10 +2476,6 @@ mod tests {
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
     }
 
     struct BlockingApplyDb {
@@ -2548,7 +2562,11 @@ mod tests {
 
         fn initial_sync_target() -> Self::SyncTarget {}
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             Ok(Self)
         }
 
@@ -2569,9 +2587,58 @@ mod tests {
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
+    }
 
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
+    /// Database mock that can fail after recording its selected restart target.
+    struct RecoverableStartupDb(u64);
+
+    impl<E: Send> ManagedDb<E> for RecoverableStartupDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = &'static str;
+        type Config = (Arc<AtomicU64>, bool);
+        type SyncTarget = u64;
+        type Snapshot = ();
+
+        async fn snapshot(self) -> Result<(Self, Self::Snapshot), Self::Error> {
+            Ok((self, ()))
+        }
+
+        fn initial_sync_target() -> u64 {
+            0
+        }
+
+        async fn init(
+            _context: E,
+            (state, fail): Self::Config,
+            expected: Option<u64>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
+            let retained = state.load(Ordering::Relaxed);
+            let selected = expected.unwrap_or(retained);
+            if selected > retained {
+                return Err(InitError::Database("database is behind"));
+            }
+            state.store(selected, Ordering::Relaxed);
+            if fail {
+                return Err(InitError::Database(
+                    "initialization interrupted after durable repair",
+                ));
+            }
+            Ok(Self(selected))
+        }
+
+        async fn new_batch(_reader: Reader<Self>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &u64) -> bool {
+            true
+        }
+
+        ready_apply!();
+
+        fn sync_target(&self) -> u64 {
+            self.0
         }
     }
 
@@ -2591,7 +2658,11 @@ mod tests {
 
         fn initial_sync_target() -> Self::SyncTarget {}
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             Ok(Self)
         }
 
@@ -2612,39 +2683,55 @@ mod tests {
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
     }
 
     #[test]
-    fn tuple_rewind_to_targets_validates_already_aligned_databases() {
-        deterministic::Runner::default().start(|_context| async move {
-            type RewindPair = (Single<CountingRewindDb>, Single<CountingRewindDb>);
-
-            let left = CountingRewindDb {
-                current_target: 2,
-                rewind_count: 0,
-            };
-            let right = CountingRewindDb {
-                current_target: 1,
-                rewind_count: 0,
-            };
-
-            let databases: RewindPair = (Single::from(left), Single::from(right));
-            let databases = <RewindPair as DatabaseSet<deterministic::Context>>::rewind_to_targets(
-                databases,
-                (1, 1),
+    fn tuple_initialization_retries_partial_failure_and_rejects_behind() {
+        deterministic::Runner::default().start(|context| async move {
+            type DbSet = (Single<RecoverableStartupDb>, Single<RecoverableStartupDb>);
+            let left = Arc::new(AtomicU64::new(3));
+            let right = Arc::new(AtomicU64::new(2));
+            let result = std::panic::AssertUnwindSafe(<DbSet as DatabaseSet<_>>::init(
+                context.child("interrupted"),
+                ((left.clone(), false), (right.clone(), true)),
+                Some((1, 1)),
+            ))
+            .catch_unwind()
+            .await;
+            assert!(result.is_err());
+            assert_eq!(left.load(Ordering::Relaxed), 1);
+            assert_eq!(right.load(Ordering::Relaxed), 1);
+            let recovered = <DbSet as DatabaseSet<_>>::init(
+                context.child("retry"),
+                ((left.clone(), false), (right.clone(), false)),
+                Some((1, 1)),
             )
             .await;
+            assert_eq!((*recovered.0.reader().read().await).0, 1);
+            assert_eq!((*recovered.1.reader().read().await).0, 1);
+            drop(recovered);
+            let result = std::panic::AssertUnwindSafe(<DbSet as DatabaseSet<_>>::init(
+                context.child("behind"),
+                ((left, false), (right, false)),
+                Some((1, 2)),
+            ))
+            .catch_unwind()
+            .await;
+            assert!(result.is_err());
+        });
+    }
 
-            let (left, right) = (databases.0.reader(), databases.1.reader());
-            assert_eq!(left.read().await.current_target, 1);
-            assert_eq!(left.read().await.rewind_count, 1);
-
-            assert_eq!(right.read().await.current_target, 1);
-            assert_eq!(right.read().await.rewind_count, 1);
+    #[test]
+    fn tuple_initialization_validates_ahead_and_aligned_databases() {
+        deterministic::Runner::default().start(|context| async move {
+            type DbSet = (Single<InitializationDb>, Single<InitializationDb>);
+            let (left, right) =
+                <DbSet as DatabaseSet<_>>::init(context, (2, 1), Some((1, 1))).await;
+            for database in [left, right] {
+                let reader = database.reader();
+                let db = reader.read().await;
+                assert_eq!(db.current_target, 1);
+            }
         });
     }
 
@@ -2676,7 +2763,11 @@ mod tests {
 
         fn initial_sync_target() -> Self::SyncTarget {}
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("BlockingApplyDb is constructed directly in tests")
         }
 
@@ -2703,10 +2794,6 @@ mod tests {
         }
 
         fn sync_target(&self) -> Self::SyncTarget {}
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
-        }
     }
 
     impl<E: Send> ManagedDb<E> for SlowSyncDb {
@@ -2725,7 +2812,11 @@ mod tests {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
 
@@ -2741,10 +2832,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -2766,7 +2853,11 @@ mod tests {
             )
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!(
                 "RejectDuplicateTargetSyncDb is only constructed through state sync in tests"
             )
@@ -2784,10 +2875,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -2807,7 +2894,11 @@ mod tests {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
 
@@ -2823,10 +2914,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -2846,7 +2933,11 @@ mod tests {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
         }
 
@@ -2862,10 +2953,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             0
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -2885,7 +2972,11 @@ mod tests {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
 
@@ -2901,10 +2992,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -2924,7 +3011,11 @@ mod tests {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
@@ -2940,10 +3031,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             0
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -2963,7 +3050,11 @@ mod tests {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
 
@@ -2979,10 +3070,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -3002,7 +3089,11 @@ mod tests {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
         }
 
@@ -3018,10 +3109,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -3041,7 +3128,11 @@ mod tests {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
 
@@ -3057,10 +3148,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -3082,7 +3169,11 @@ mod tests {
             )
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!(
                 "DistinctObservedFastSyncDb is only constructed through state sync in tests"
             )
@@ -3100,10 +3191,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
@@ -3232,7 +3319,11 @@ mod tests {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
         }
 
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: E,
+            _config: Self::Config,
+            _expected: Option<Self::SyncTarget>,
+        ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
         }
 
@@ -3248,10 +3339,6 @@ mod tests {
 
         fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
-        }
-
-        async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-            Ok(self)
         }
     }
 
