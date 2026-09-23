@@ -110,11 +110,12 @@ fn check<P: Point<C>, C>(
                 None,
             )?
         } else {
-            let buckets =
-                Graph::sample(OUTER_Q, chunk.len(), rng)?.scatter(chunk, context, identity)?;
+            let (buckets, occupied) =
+                Graph::sample(OUTER_Q, chunk.len(), rng)?.scatter(chunk, None, context, identity)?;
             let (left, right) = buckets.split_at(buckets.len() / 2);
-            certified(left, rng, context, identity, exact)?
-                && certified(right, rng, context, identity, exact)?
+            let (left_occupied, right_occupied) = occupied.split_at(occupied.len() / 2);
+            certified(left, left_occupied, rng, context, identity, exact)?
+                && certified(right, right_occupied, rng, context, identity, exact)?
         };
         if !valid {
             return Some(false);
@@ -347,13 +348,26 @@ impl Graph {
         (left as usize, right as usize)
     }
 
+    /// Also returns which buckets received a point; the others hold `identity`.
+    /// Points marked absent in `present` are exactly `identity` and are skipped.
     #[inline(always)]
-    fn scatter<P: Point<C>, C>(&self, points: &[P], context: &C, identity: P) -> Option<Vec<P>> {
+    fn scatter<P: Point<C>, C>(
+        &self,
+        points: &[P],
+        present: Option<&[bool]>,
+        context: &C,
+        identity: P,
+    ) -> Option<(Vec<P>, Vec<bool>)> {
         debug_assert_eq!(points.len(), self.edges.len());
+        debug_assert!(present.is_none_or(|present| present.len() == points.len()));
         let side = self.vertices();
         let mut buckets = filled(2 * side, identity)?;
         let mut occupied = filled(2 * side, false)?;
-        for (point, &edge) in points.iter().zip(&self.edges) {
+        for (i, (point, &edge)) in points.iter().zip(&self.edges).enumerate() {
+            // Adding the identity cannot change any bucket's group element.
+            if present.is_some_and(|present| !present[i]) {
+                continue;
+            }
             let (left, right) = self.endpoints(edge);
             for (index, negative) in [(left, edge & 1 != 0), (side + right, edge & 2 != 0)] {
                 let point = if negative { point.neg(context) } else { *point };
@@ -365,7 +379,7 @@ impl Graph {
                 };
             }
         }
-        Some(buckets)
+        Some((buckets, occupied))
     }
 
     #[inline(always)]
@@ -409,13 +423,14 @@ impl Graph {
 #[inline(always)]
 fn certified<P: Point<C>, C>(
     points: &[P],
+    present: &[bool],
     rng: &mut impl CryptoRng,
     context: &C,
     identity: P,
     exact: &impl Fn(&P) -> bool,
 ) -> Option<bool> {
     let graph = Graph::sample(INNER_Q, points.len(), rng)?;
-    let buckets = graph.scatter(points, context, identity)?;
+    let (buckets, _) = graph.scatter(points, Some(present), context, identity)?;
     let mut columns = filled(buckets.len(), Column::default())?;
     if !joint(
         &buckets,
@@ -574,6 +589,26 @@ mod tests {
     }
 
     #[test]
+    fn scatter_skips_only_known_identities() {
+        let mut rng = TestRng::new(19);
+        let len = 500;
+        let graph = Graph::sample(7, len, &mut rng).unwrap();
+        let present: Vec<_> = (0..len).map(|i| i % 3 != 0).collect();
+        let points: Vec<_> = present
+            .iter()
+            .enumerate()
+            .map(|(i, &present)| Integer(if present { (i as i64 * 37 + 1) % 299 } else { 0 }))
+            .collect();
+        let (all, all_occupied) = graph.scatter(&points, None, &299, Integer(0)).unwrap();
+        let (skipped, occupied) = graph
+            .scatter(&points, Some(&present), &299, Integer(0))
+            .unwrap();
+        assert_eq!(all, skipped);
+        assert!(occupied.iter().zip(&all_occupied).all(|(&a, &b)| !a || b));
+        assert_ne!(occupied, all_occupied);
+    }
+
+    #[test]
     fn graph_injection_and_coefficient_certificate() {
         let mut rng = TestRng::new(97);
         let graph = Graph::sample(3, 81, &mut rng).unwrap();
@@ -606,7 +641,7 @@ mod tests {
         }
 
         let points: Vec<_> = (0..81).map(|i| Integer(i % 299)).collect();
-        let buckets = graph.scatter(&points, &299, Integer(0)).unwrap();
+        let (buckets, _) = graph.scatter(&points, None, &299, Integer(0)).unwrap();
         let mut columns = vec![Column::default(); 2 * side];
         let mut trits = Trits {
             rng: &mut rng,
@@ -930,7 +965,8 @@ mod tests {
                                 edges: vec![0, 4, 8],
                             };
                             let points = &raw[..3];
-                            let buckets = graph.scatter(points, &ring, identity).unwrap();
+                            let (buckets, _) =
+                                graph.scatter(points, None, &ring, identity).unwrap();
                             let ids = vec![0; buckets.len()];
                             let mut columns = vec![Column::default(); buckets.len()];
                             for start in (0..INNER_ROWS).step_by(INNER_WIDTH) {
@@ -963,7 +999,8 @@ mod tests {
                                 edges: vec![0],
                             };
                             let points = &raw[1..2];
-                            let buckets = graph.scatter(points, &ring, identity).unwrap();
+                            let (buckets, _) =
+                                graph.scatter(points, None, &ring, identity).unwrap();
                             let side = graph.vertices();
                             let mut columns = vec![Column::default(); 2 * side];
                             let mut ids = vec![3u16.pow(INNER_WIDTH as u32) - 1; 2 * side];
