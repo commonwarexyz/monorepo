@@ -202,10 +202,22 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         (self.journal, _) = self.journal.prune(min).await?;
 
         // Remove pending writes (no need to call `sync` as we are pruning)
-        self.pending = self.pending.split_off(&min);
+        loop {
+            let next = match self.pending.iter().next() {
+                Some(section) if *section < min => *section,
+                _ => break,
+            };
+            self.pending.remove(&next);
+        }
 
         // Remove all indices that are less than min
-        self.indices = self.indices.split_off(&min);
+        loop {
+            let next = match self.indices.first_key_value() {
+                Some((index, _)) if *index < min => *index,
+                _ => break,
+            };
+            self.indices.remove(&next).unwrap();
+        }
 
         // Remove all intervals that are less than min
         if min > 0 {

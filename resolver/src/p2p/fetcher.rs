@@ -218,11 +218,11 @@ where
     /// Update a participant's throughput estimate (higher is better) using an
     /// exponential moving average.
     fn update_performance(&mut self, participant: &P, throughput: u128) {
-        let Some(Reverse(next)) = self.participants.update(participant, |Reverse(past)| {
-            Reverse(past.saturating_add(throughput) / 2)
-        }) else {
+        let Some(Reverse(past)) = self.participants.get(participant) else {
             return;
         };
+        let next = past.saturating_add(throughput) / 2;
+        self.participants.put(participant.clone(), Reverse(next));
         let _ = self.performance.get_or_create_by(participant).try_set(next);
     }
 
@@ -371,23 +371,25 @@ where
     ///
     /// Panics if the key is already pending.
     pub fn add_ready(&mut self, key: Key) {
-        assert!(self.pending.insert(key, (false, self.context.current())));
+        assert!(!self.pending.contains(&key));
         // A previous pending key may have pushed the waiter far into the future
         // because no eligible peer could serve it. A new ready key can still be
         // fetchable, so wake pending processing immediately.
         self.waiter = None;
+        self.pending.put(key, (false, self.context.current()));
     }
 
     /// Adds a key to the pending queue.
     ///
     /// Panics if the key is already pending.
     pub fn add_retry(&mut self, key: Key) {
-        let deadline = self.context.current() + self.retry_timeout;
-        assert!(self.pending.insert(key, (true, deadline)));
+        assert!(!self.pending.contains(&key));
         // A previous pending key may have pushed the waiter far into the future
         // because no eligible peer could serve it. Clear the stale global waiter
         // so this retry can drive pending processing again.
         self.waiter = None;
+        let deadline = self.context.current() + self.retry_timeout;
+        self.pending.put(key, (true, deadline));
     }
 
     /// Returns the deadline for the next pending retry.

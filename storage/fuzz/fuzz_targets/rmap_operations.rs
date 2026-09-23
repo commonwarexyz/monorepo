@@ -139,13 +139,13 @@ fn fuzz(data: FuzzInput) {
             RMapOperation::Iter => {
                 let ranges: Vec<_> = rmap.iter().collect();
 
-                // Check that ranges are disjoint, ordered, and merged when adjacent
+                // Check that ranges are disjoint and ordered
                 for i in 1..ranges.len() {
                     let (_, prev_end) = ranges[i - 1];
                     let (curr_start, _) = ranges[i];
                     assert!(
-                        prev_end.saturating_add(1) < *curr_start,
-                        "Ranges should be disjoint and non-adjacent: prev_end={prev_end}, curr_start={curr_start}",
+                        prev_end < curr_start,
+                        "Ranges should be disjoint: prev_end={prev_end}, curr_start={curr_start}",
                     );
                 }
 

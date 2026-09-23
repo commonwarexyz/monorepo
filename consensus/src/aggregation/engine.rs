@@ -368,7 +368,7 @@ impl<
                 };
 
                 // Update the tip manager
-                if self.safe_tip.update(&sender, tip).is_some() {
+                if self.safe_tip.update(sender.clone(), tip).is_some() {
                     // Fast-forward our tip if needed
                     let safe_tip = self.safe_tip.get();
                     if safe_tip > self.tip {

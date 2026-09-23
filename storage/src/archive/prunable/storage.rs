@@ -420,11 +420,15 @@ impl<T: Translator, E: Context, K: Array, V: CodecShared> Inner<T, E, K, V> {
         self.requested = self.requested.split_off(&min);
 
         // Remove all indices that are less than min
-        let before = self.indices.len();
-        self.indices = self.indices.split_off(&min);
-        self.extra_indices = self.extra_indices.split_off(&min);
-        self.indices_pruned
-            .inc_by((before - self.indices.len()) as u64);
+        loop {
+            let next = match self.indices.first_key_value() {
+                Some((index, _)) if *index < min => *index,
+                _ => break,
+            };
+            self.indices.remove(&next).unwrap();
+            self.extra_indices.remove(&next);
+            self.indices_pruned.inc();
+        }
 
         // Remove pruned indices from the retained range view.
         if min > 0 {

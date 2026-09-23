@@ -13,7 +13,6 @@ use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
-    mem,
 };
 use tracing::{debug, warn};
 
@@ -387,31 +386,37 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
 
     /// See [Ordinal::prune].
     async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Detach sections below `min_section`
+        // Collect sections to remove
         let items_per_blob = self.config.items_per_blob.get();
         let min_section = min / items_per_blob;
-        let retained = self.blobs.split_off(&min_section);
-        let pruned = mem::replace(&mut self.blobs, retained);
+        let sections_to_remove: Vec<u64> = self
+            .blobs
+            .keys()
+            .filter(|&&section| section < min_section)
+            .copied()
+            .collect();
 
-        // Remove each detached section's blob
-        for (section, blob) in pruned {
-            drop(blob);
-            self.context
-                .remove(&self.config.partition, Some(&section.to_be_bytes()))
-                .await?;
+        // Remove the collected sections
+        for section in sections_to_remove {
+            if let Some(blob) = self.blobs.remove(&section) {
+                drop(blob);
+                self.context
+                    .remove(&self.config.partition, Some(&section.to_be_bytes()))
+                    .await?;
 
-            // Remove the corresponding index range from intervals
-            let start_index = section * items_per_blob;
-            let end_index = (section + 1) * items_per_blob - 1;
-            self.intervals.remove(start_index, end_index);
-            debug!(section, start_index, end_index, "pruned blob");
+                // Remove the corresponding index range from intervals
+                let start_index = section * items_per_blob;
+                let end_index = (section + 1) * items_per_blob - 1;
+                self.intervals.remove(start_index, end_index);
+                debug!(section, start_index, end_index, "pruned blob");
+            }
 
             // Update metrics
             self.pruned.inc();
         }
 
         // Clean pending entries that fall into pruned sections.
-        self.pending = self.pending.split_off(&min_section);
+        self.pending.retain(|&section| section >= min_section);
 
         Ok(())
     }
