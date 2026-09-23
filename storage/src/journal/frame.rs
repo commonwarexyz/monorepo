@@ -4,13 +4,23 @@
 //! zstd-compressed) encoded item.
 
 use super::Error;
+use bytes::BufMut;
 use commonware_codec::{
-    Buf, Codec, EncodeSize, ReadExt as _, Write as _,
+    Buf, Codec, EncodeSize, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
+use commonware_runtime::{
+    Blob, Buf as _, BufferPool, IoBufMut, IoBufs, buffer::paged::Writer, iobuf::EncodeExt as _,
+};
+use commonware_utils::Cached;
 use std::future::Future;
-use zstd::{bulk::compress, decode_all};
+use zstd::{
+    bulk::{Compressor, Decompressor},
+    zstd_safe::{WriteBuf, compress_bound, get_frame_content_size},
+};
+
+commonware_utils::thread_local_cache!(static COMPRESSOR: Compressor<'static>);
+commonware_utils::thread_local_cache!(static DECOMPRESSOR: Decompressor<'static>);
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
@@ -108,15 +118,42 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
     Ok((next_offset, item))
 }
 
+/// Decompress one zstd frame into an owned buffer of its declared content size.
+///
+/// Each thread reuses one zstd context across calls. The output is heap-owned because decoded
+/// items may keep zero-copy views of it.
+pub(super) fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
+    let size = get_frame_content_size(compressed)
+        .ok()
+        .flatten()
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or(Error::DecompressionFailed)?;
+    let mut decompressed = Vec::with_capacity(size);
+    let mut decompressor = Cached::take(&DECOMPRESSOR, Decompressor::new, |_| Ok(()))
+        .map_err(|_| Error::DecompressionFailed)?;
+    decompressor
+        .decompress_to_buffer(compressed, &mut decompressed)
+        .map_err(|_| Error::DecompressionFailed)?;
+    Ok(decompressed)
+}
+
 /// Decode a frame's payload into an item, decompressing if needed.
 pub(super) fn decode_item<V: Codec>(
-    item_data: impl Buf,
+    mut item_data: impl Buf,
     cfg: &V::Cfg,
     compressed: bool,
 ) -> Result<V, Error> {
     if compressed {
-        let decompressed =
-            decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
+        // Bulk decompression reads the frame as one slice. Only a frame split across buffers
+        // is copied first.
+        let remaining = item_data.remaining();
+        let decompressed = if item_data.chunk().len() == remaining {
+            let decompressed = decompress(item_data.chunk());
+            item_data.advance(remaining);
+            decompressed?
+        } else {
+            decompress(&item_data.copy_to_bytes(remaining))?
+        };
         V::decode_cfg(decompressed, cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
@@ -155,6 +192,19 @@ pub(super) async fn read_frame_at<V: Codec>(
         }
         FrameInfo::Incomplete {
             varint_len,
+            total_len,
+            ..
+        } if compressed => {
+            // Read the whole payload at once so it decompresses from one buffer.
+            let data_offset = offset
+                .checked_add(varint_len as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            let data = reader.read_at(data_offset, total_len).await?;
+            let decoded = decode_item::<V>(data, cfg, compressed)?;
+            (total_len as u32, decoded)
+        }
+        FrameInfo::Incomplete {
+            varint_len,
             prefix_len,
             total_len,
         } => {
@@ -172,6 +222,145 @@ pub(super) async fn read_frame_at<V: Codec>(
     Ok((next_offset, item_size, decoded))
 }
 
+/// An uncompressed item with its length prefix.
+pub(super) struct UncompressedFrame<'a, V> {
+    item: &'a V,
+    item_len: u32,
+}
+
+impl<'a, V: EncodeSize> UncompressedFrame<'a, V> {
+    /// Validate and size an item before any frame bytes are written.
+    pub(super) fn new(item: &'a V) -> Result<Self, Error> {
+        let item_len = item.encode_size();
+        let item_len_u32 = item_len
+            .try_into()
+            .map_err(|_| Error::ItemTooLarge(item_len))?;
+        UInt(item_len_u32)
+            .encode_size()
+            .checked_add(item_len)
+            .ok_or(Error::OffsetOverflow)?;
+        Ok(Self {
+            item,
+            item_len: item_len_u32,
+        })
+    }
+
+    /// Return the payload length, excluding the size prefix.
+    pub(super) const fn item_len(&self) -> u32 {
+        self.item_len
+    }
+}
+
+impl<V> EncodeSize for UncompressedFrame<'_, V> {
+    fn encode_size(&self) -> usize {
+        UInt(self.item_len).encode_size() + self.item_len as usize
+    }
+}
+
+impl<V: Write> Write for UncompressedFrame<'_, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.item_len).write(buf);
+        self.item.write(buf);
+    }
+}
+
+/// Compress an item's encoding into pooled backing with `reserve` writable bytes after it.
+///
+/// Both the encoding and the compressed payload use `pool`, and each thread reuses one zstd
+/// context across calls.
+pub(super) fn compress(
+    pool: &BufferPool,
+    level: u8,
+    item: &(impl EncodeSize + Write),
+    reserve: usize,
+) -> Result<IoBufMut, Error> {
+    // Bulk compression consumes one contiguous encoding and writes the payload into backing
+    // sized for the worst case. Reusing the context avoids rebuilding its tables.
+    let encoded = item.encode_with_pool_mut(pool);
+    let capacity = compress_bound(encoded.len())
+        .checked_add(reserve)
+        .ok_or(Error::OffsetOverflow)?;
+    let mut payload = Payload(pool.alloc(capacity));
+    let mut compressor = Cached::take(
+        &COMPRESSOR,
+        || Compressor::new(level.into()),
+        |compressor| compressor.set_compression_level(level.into()),
+    )
+    .map_err(|_| Error::CompressionFailed)?;
+    compressor
+        .compress_to_buffer(encoded.as_ref(), &mut payload)
+        .map_err(|_| Error::CompressionFailed)?;
+    Ok(payload.0)
+}
+
+/// Pooled compressor output that exposes only the prefix zstd reports as written.
+struct Payload(IoBufMut);
+
+// SAFETY: `as_mut_ptr` and `capacity` describe the unique allocation owned by the buffer, whose
+// length starts at zero. `as_slice` exposes only initialized bytes, and `filled_until` publishes
+// only the prefix the compressor reports as written.
+unsafe impl WriteBuf for Payload {
+    fn as_slice(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+
+    fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
+
+    unsafe fn filled_until(&mut self, n: usize) {
+        // SAFETY: the caller guarantees the first `n` bytes were initialized.
+        unsafe { self.0.set_len(n) };
+    }
+}
+
+/// A zstd-compressed item with its length prefix.
+pub(super) struct CompressedFrame {
+    payload: IoBufMut,
+    item_len: u32,
+}
+
+impl CompressedFrame {
+    /// Compress an item and validate its frame size before any frame bytes are written.
+    pub(super) fn new<V: Codec>(pool: &BufferPool, level: u8, item: &V) -> Result<Self, Error> {
+        let payload = compress(pool, level, item, 0)?;
+        let item_len = payload.len();
+        let item_len_u32 = item_len
+            .try_into()
+            .map_err(|_| Error::ItemTooLarge(item_len))?;
+        UInt(item_len_u32)
+            .encode_size()
+            .checked_add(item_len)
+            .ok_or(Error::OffsetOverflow)?;
+        Ok(Self {
+            payload,
+            item_len: item_len_u32,
+        })
+    }
+
+    /// Return the compressed payload length, excluding the size prefix.
+    pub(super) const fn item_len(&self) -> u32 {
+        self.item_len
+    }
+}
+
+impl EncodeSize for CompressedFrame {
+    fn encode_size(&self) -> usize {
+        UInt(self.item_len).encode_size() + self.item_len as usize
+    }
+}
+
+impl Write for CompressedFrame {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.item_len).write(buf);
+        buf.put_slice(self.payload.as_ref());
+    }
+}
+
 /// Encode an item as a frame (length prefix plus payload), appending the bytes to `buf`.
 ///
 /// Existing contents of `buf` are preserved; this allows callers to accumulate
@@ -179,48 +368,35 @@ pub(super) async fn read_frame_at<V: Codec>(
 ///
 /// Returns the payload length, excluding the size prefix.
 pub(super) fn encode_frame_into<V: Codec>(
+    pool: &BufferPool,
     compression: Option<u8>,
     item: &V,
     buf: &mut Vec<u8>,
 ) -> Result<u32, Error> {
-    if let Some(compression) = compression {
-        // Compressed: encode first, then compress
-        let encoded = item.encode();
-        let compressed =
-            compress(&encoded, compression as i32).map_err(|_| Error::CompressionFailed)?;
-        let item_len = compressed.len();
-        let item_len_u32: u32 = match item_len.try_into() {
-            Ok(len) => len,
-            Err(_) => return Err(Error::ItemTooLarge(item_len)),
-        };
-        let size_len = UInt(item_len_u32).encode_size();
-        let entry_len = size_len
-            .checked_add(item_len)
-            .ok_or(Error::OffsetOverflow)?;
-
-        buf.reserve(entry_len);
-        UInt(item_len_u32).write(buf);
-        buf.extend_from_slice(&compressed);
-
-        Ok(item_len_u32)
-    } else {
-        // Uncompressed: pre-allocate exact size to avoid copying
-        let item_len = item.encode_size();
-        let item_len_u32: u32 = match item_len.try_into() {
-            Ok(len) => len,
-            Err(_) => return Err(Error::ItemTooLarge(item_len)),
-        };
-        let size_len = UInt(item_len_u32).encode_size();
-        let entry_len = size_len
-            .checked_add(item_len)
-            .ok_or(Error::OffsetOverflow)?;
-
-        buf.reserve(entry_len);
-        UInt(item_len_u32).write(buf);
-        item.write(buf);
-
-        Ok(item_len_u32)
+    match compression {
+        Some(level) => {
+            let frame = CompressedFrame::new(pool, level, item)?;
+            append_frame(&frame, buf);
+            Ok(frame.item_len())
+        }
+        None => {
+            let frame = UncompressedFrame::new(item)?;
+            append_frame(&frame, buf);
+            Ok(frame.item_len())
+        }
     }
+}
+
+/// Append a validated frame after any existing contents of `buf`.
+fn append_frame(frame: &(impl EncodeSize + Write), buf: &mut Vec<u8>) {
+    let initial_len = buf.len();
+    buf.reserve(frame.encode_size());
+    frame.write(buf);
+    assert_eq!(
+        buf.len() - initial_len,
+        frame.encode_size(),
+        "write() did not write expected bytes"
+    );
 }
 
 #[cfg(test)]
@@ -229,70 +405,189 @@ mod tests {
     use crate::utils::codec::View;
     use bytes::{BufMut, Bytes};
     use commonware_codec::{Copying, Encode, Read, Write};
+    use commonware_runtime::{
+        BufferPoolConfig, BufferPooler as _, Metrics as _, Runner as _, deterministic,
+        telemetry::metrics::{has_metric_value, metric_samples},
+    };
+    use commonware_utils::{NZU32, NZUsize};
+    use std::cell::Cell;
 
     /// Frame a single item and return the raw frame bytes.
-    fn frame<V: Codec>(compression: Option<u8>, item: &V) -> Vec<u8> {
+    fn frame<V: Codec>(pool: &BufferPool, compression: Option<u8>, item: &V) -> Vec<u8> {
         let mut buf = Vec::new();
-        encode_frame_into(compression, item, &mut buf).unwrap();
+        encode_frame_into(pool, compression, item, &mut buf).unwrap();
         buf
     }
 
     #[test]
     fn test_roundtrip_uncompressed() {
-        let buf = frame(None, &42u64);
-        let mut cursor = Copying(&buf);
-        let (next_offset, info) = find_frame(&mut cursor, 0).unwrap();
-        let FrameInfo::Complete {
-            varint_len,
-            data_len,
-        } = info
-        else {
-            panic!("expected complete frame");
-        };
-        assert_eq!(varint_len, 1);
-        assert_eq!(data_len, 8);
-        assert_eq!(next_offset, 9);
-        let item: u64 =
-            decode_item(Copying(&buf[varint_len..varint_len + data_len]), &(), false).unwrap();
-        assert_eq!(item, 42);
+        deterministic::Runner::default().start(|context| async move {
+            let buf = frame(context.storage_buffer_pool(), None, &42u64);
+            let mut cursor = Copying(&buf);
+            let (next_offset, info) = find_frame(&mut cursor, 0).unwrap();
+            let FrameInfo::Complete {
+                varint_len,
+                data_len,
+            } = info
+            else {
+                panic!("expected complete frame");
+            };
+            assert_eq!(varint_len, 1);
+            assert_eq!(data_len, 8);
+            assert_eq!(next_offset, 9);
+            let item: u64 =
+                decode_item(Copying(&buf[varint_len..varint_len + data_len]), &(), false).unwrap();
+            assert_eq!(item, 42);
+        });
     }
 
     #[test]
     fn test_roundtrip_compressed() {
-        let buf = frame(Some(3), &42u64);
-        let mut cursor = Copying(&buf);
-        let (_, info) = find_frame(&mut cursor, 0).unwrap();
-        let FrameInfo::Complete {
-            varint_len,
-            data_len,
-        } = info
-        else {
-            panic!("expected complete frame");
-        };
-        let item: u64 =
-            decode_item(Copying(&buf[varint_len..varint_len + data_len]), &(), true).unwrap();
-        assert_eq!(item, 42);
+        deterministic::Runner::default().start(|context| async move {
+            let buf = frame(context.storage_buffer_pool(), Some(3), &42u64);
+            let mut cursor = Copying(&buf);
+            let (_, info) = find_frame(&mut cursor, 0).unwrap();
+            let FrameInfo::Complete {
+                varint_len,
+                data_len,
+            } = info
+            else {
+                panic!("expected complete frame");
+            };
+            let item: u64 =
+                decode_item(Copying(&buf[varint_len..varint_len + data_len]), &(), true).unwrap();
+            assert_eq!(item, 42);
+        });
     }
 
     #[test]
     fn test_accumulation_preserves_existing_contents() {
-        let mut buf = Vec::new();
-        encode_frame_into(None, &1u64, &mut buf).unwrap();
-        let first_frame_len = buf.len();
-        encode_frame_into(None, &2u64, &mut buf).unwrap();
+        deterministic::Runner::default().start(|context| async move {
+            let pool = context.storage_buffer_pool();
+            let mut buf = Vec::new();
+            encode_frame_into(pool, None, &1u64, &mut buf).unwrap();
+            let first_frame_len = buf.len();
+            encode_frame_into(pool, None, &2u64, &mut buf).unwrap();
 
-        // Walk both frames out of the accumulated buffer.
-        let mut cursor = Copying(&buf);
-        let (first_end, _) = find_frame(&mut cursor, 0).unwrap();
-        assert_eq!(first_end as usize, first_frame_len);
-        let first: u64 = decode_item(Copying(&buf[1..9]), &(), false).unwrap();
-        assert_eq!(first, 1);
+            // Walk both frames out of the accumulated buffer.
+            let mut cursor = Copying(&buf);
+            let (first_end, _) = find_frame(&mut cursor, 0).unwrap();
+            assert_eq!(first_end as usize, first_frame_len);
+            let first: u64 = decode_item(Copying(&buf[1..9]), &(), false).unwrap();
+            assert_eq!(first, 1);
 
-        let mut cursor = Copying(&buf[first_frame_len..]);
-        let (second_end, _) = find_frame(&mut cursor, first_end).unwrap();
-        assert_eq!(second_end as usize, buf.len());
-        let second: u64 = decode_item(Copying(&buf[first_frame_len + 1..]), &(), false).unwrap();
-        assert_eq!(second, 2);
+            let mut cursor = Copying(&buf[first_frame_len..]);
+            let (second_end, _) = find_frame(&mut cursor, first_end).unwrap();
+            assert_eq!(second_end as usize, buf.len());
+            let second: u64 =
+                decode_item(Copying(&buf[first_frame_len + 1..]), &(), false).unwrap();
+            assert_eq!(second, 2);
+        });
+    }
+
+    #[test]
+    fn test_compressed_frames_reuse_pool_backing() {
+        let cfg = deterministic::Config::default().with_storage_buffer_pool_config(
+            BufferPoolConfig::for_storage()
+                .with_size_classes([(NZUsize!(8192), NZU32!(2))])
+                .with_thread_cache_disabled(),
+        );
+        deterministic::Runner::new(cfg).start(|context| async move {
+            let pool = context.storage_buffer_pool();
+            let mut actual = vec![42];
+            let mut expected = actual.clone();
+            let mut append = |len, byte, level| {
+                let item = Bytes::from(vec![byte; len]);
+                let compressed = zstd::bulk::compress(&item.encode(), i32::from(level)).unwrap();
+                let item_len = encode_frame_into(pool, Some(level), &item, &mut actual).unwrap();
+                assert_eq!(item_len as usize, compressed.len());
+                UInt(item_len).write(&mut expected);
+                expected.extend_from_slice(&compressed);
+                assert_eq!(actual, expected);
+            };
+
+            // Successive items reuse one input and one output slot. A short item after a long
+            // one must compress only its initialized encoding, and earlier frames must stay
+            // intact. The reused compressor must adopt each item's level.
+            for (len, level) in [
+                (0, 3),
+                (1, 3),
+                (127, 1),
+                (128, 19),
+                (4093, 3),
+                (1, 0),
+                (4093, 255),
+            ] {
+                append(len, 7, level);
+            }
+
+            let metrics = context.encode();
+            assert!(
+                has_metric_value(&metrics, "storage_buffer_pool_buffer_pool_created", 2),
+                "successive frames must reuse one input and one output buffer: {metrics}"
+            );
+            assert!(
+                has_metric_value(
+                    &metrics,
+                    "storage_buffer_pool_buffer_pool_oversized_total",
+                    0
+                ),
+                "oversized requests bypass the pool and would hide allocations"
+            );
+            assert_eq!(
+                metric_samples(&metrics, "storage_buffer_pool_buffer_pool_exhausted_total").count(),
+                0,
+                "exhausted classes fall back to untracked backing"
+            );
+
+            // Pool fallbacks must preserve the compressed format too. Holding both slots forces
+            // exhaustion for the small item, and the large item exceeds the class.
+            let held = (pool.alloc(8192), pool.alloc(8192));
+            for len in [128, 16384] {
+                append(len, 9, 3);
+            }
+            drop(held);
+        });
+    }
+
+    #[test]
+    fn test_uncompressed_frame_dynamic_sizes_and_prefix_thresholds() {
+        struct Dynamic<'a> {
+            bytes: &'a [u8],
+            size_calls: Cell<usize>,
+        }
+
+        impl EncodeSize for Dynamic<'_> {
+            fn encode_size(&self) -> usize {
+                self.size_calls.set(self.size_calls.get() + 1);
+                self.bytes.len()
+            }
+        }
+
+        impl Write for Dynamic<'_> {
+            fn write(&self, buf: &mut impl BufMut) {
+                buf.put_slice(self.bytes);
+            }
+        }
+
+        for len in [0, 127, 128, 16_383, 16_384] {
+            let bytes = vec![7; len];
+            let item = Dynamic {
+                bytes: &bytes,
+                size_calls: Cell::new(0),
+            };
+            let frame = UncompressedFrame::new(&item).unwrap();
+            assert_eq!(item.size_calls.get(), 1);
+            assert_eq!(frame.encode_size(), UInt(len as u32).encode_size() + len);
+
+            let mut encoded = Vec::new();
+            frame.write(&mut encoded);
+            let mut expected = Vec::new();
+            UInt(len as u32).write(&mut expected);
+            expected.extend_from_slice(&bytes);
+            assert_eq!(encoded, expected);
+            assert_eq!(item.size_calls.get(), 1);
+        }
     }
 
     #[test]
@@ -377,12 +672,14 @@ mod tests {
 
     #[test]
     fn test_find_frame_offset_overflow() {
-        let buf = frame(None, &42u64);
-        let mut cursor = Copying(&buf);
-        assert!(matches!(
-            find_frame(&mut cursor, u64::MAX),
-            Err(Error::OffsetOverflow)
-        ));
+        deterministic::Runner::default().start(|context| async move {
+            let buf = frame(context.storage_buffer_pool(), None, &42u64);
+            let mut cursor = Copying(&buf);
+            assert!(matches!(
+                find_frame(&mut cursor, u64::MAX),
+                Err(Error::OffsetOverflow)
+            ));
+        });
     }
 
     #[test]
@@ -414,7 +711,7 @@ mod tests {
 
         // Decompressed fields share the decoder's input allocation
         let value = vec![View::new(1), View::new(2)];
-        let buf = Bytes::from(compress(&value.encode(), 3).unwrap());
+        let buf = Bytes::from(zstd::bulk::compress(&value.encode(), 3).unwrap());
         let decoded = decode_item::<Vec<View>>(buf, &((..).into(), ()), true).unwrap();
         assert_eq!(decoded.len(), value.len());
         for (decoded, expected) in decoded.iter().zip(&value) {
@@ -425,13 +722,52 @@ mod tests {
 
     #[test]
     fn test_decode_item_corrupt_compressed_payload() {
-        let mut buf = frame(Some(3), &42u64);
-        // Corrupt the zstd magic number (first payload byte, after the 1-byte varint).
-        buf[1] ^= 0xFF;
+        deterministic::Runner::default().start(|context| async move {
+            let mut buf = frame(context.storage_buffer_pool(), Some(3), &42u64);
+
+            // Corrupt the zstd magic number (first payload byte, after the 1-byte varint).
+            buf[1] ^= 0xFF;
+            assert!(matches!(
+                decode_item::<u64>(Copying(&buf[1..]), &(), true),
+                Err(Error::DecompressionFailed)
+            ));
+        });
+    }
+
+    #[test]
+    fn test_decode_item_decompresses_split_payloads_and_consumes_exactly() {
+        let cfg = ((..).into(), ());
+        for (len, level) in [(0usize, 3), (1, 1), (4096, 19), (70_000, 3)] {
+            let item: Vec<u8> = (0..len).map(|i| (i % 7) as u8).collect();
+            let payload = zstd::bulk::compress(&item.encode(), level).unwrap();
+
+            // One contiguous buffer decompresses in place, and the read consumes exactly the
+            // payload, leaving what follows it for the next frame.
+            let mut source = Bytes::from([payload.as_slice(), &[9, 9]].concat());
+            let decoded =
+                decode_item::<Vec<u8>>((&mut source).take(payload.len()), &cfg, true).unwrap();
+            assert_eq!(decoded, item);
+            assert_eq!(source.as_ref(), &[9, 9]);
+
+            // A payload split across buffers decodes to the same item.
+            let (head, tail) = payload.split_at(payload.len().min(3));
+            let split = Bytes::copy_from_slice(head).chain(Bytes::copy_from_slice(tail));
+            assert_eq!(decode_item::<Vec<u8>>(split, &cfg, true).unwrap(), item);
+        }
+    }
+
+    #[test]
+    fn test_decompress_rejects_frames_without_content_size() {
+        // Every frame this crate writes declares its content size. A streamed frame that
+        // omits it is rejected rather than decoded with an unbounded buffer.
+        let encoded = 42u64.encode();
+        let streamed = zstd::stream::encode_all(encoded.as_ref(), 3).unwrap();
         assert!(matches!(
-            decode_item::<u64>(Copying(&buf[1..]), &(), true),
+            decompress(&streamed),
             Err(Error::DecompressionFailed)
         ));
+        let sized = zstd::bulk::compress(&encoded, 3).unwrap();
+        assert_eq!(decompress(&sized).unwrap(), encoded.as_ref());
     }
 
     /// An item whose claimed encoded size exceeds the u32 frame limit. The size check
@@ -459,12 +795,42 @@ mod tests {
     }
 
     #[test]
+    fn test_payload_publishes_only_written_prefix() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut payload = Payload(context.storage_buffer_pool().alloc(64));
+            let capacity = WriteBuf::capacity(&payload);
+            assert!(capacity >= 64);
+            assert!(payload.as_slice().is_empty());
+
+            // A failed write publishes nothing.
+            // SAFETY: the closure writes nothing and reports no initialized bytes.
+            let failed = unsafe { payload.write_from(|_, _| Err(1)) };
+            assert_eq!(failed, Err(1));
+            assert!(payload.as_slice().is_empty());
+
+            // A successful write publishes only the prefix it reports, even with room for more.
+            // SAFETY: the closure initializes five bytes within the provided capacity.
+            let written = unsafe {
+                payload.write_from(|ptr, available| {
+                    assert_eq!(available, capacity);
+                    std::ptr::write_bytes(ptr.cast::<u8>(), 7, 5);
+                    Ok(5)
+                })
+            };
+            assert_eq!(written, Ok(5));
+            assert_eq!(payload.as_slice(), &[7; 5]);
+        });
+    }
+
+    #[test]
     fn test_encode_frame_rejects_oversized_item() {
-        let mut buf = Vec::new();
-        assert!(matches!(
-            encode_frame_into(None, &Oversized, &mut buf),
-            Err(Error::ItemTooLarge(_))
-        ));
-        assert!(buf.is_empty());
+        deterministic::Runner::default().start(|context| async move {
+            let mut buf = Vec::new();
+            assert!(matches!(
+                encode_frame_into(context.storage_buffer_pool(), None, &Oversized, &mut buf),
+                Err(Error::ItemTooLarge(_))
+            ));
+            assert!(buf.is_empty());
+        });
     }
 }

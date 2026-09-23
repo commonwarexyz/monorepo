@@ -871,7 +871,9 @@ impl<E: Context> Writable<E> {
 mod tests {
     use super::*;
     use crate::{journal::frame::encode_frame_into, utils::codec::View};
-    use commonware_runtime::{IoBufMut, Runner as _, Storage as _, deterministic};
+    use commonware_runtime::{
+        BufferPooler as _, IoBufMut, Runner as _, Storage as _, deterministic,
+    };
     use commonware_utils::{NZU16, NZUsize};
 
     impl<E: crate::Context> Writable<E> {
@@ -942,7 +944,13 @@ mod tests {
             for compression in [None, Some(1)] {
                 let mut encoded = Vec::new();
                 for item in &items {
-                    encode_frame_into(compression, item, &mut encoded).unwrap();
+                    encode_frame_into(
+                        context.storage_buffer_pool(),
+                        compression,
+                        item,
+                        &mut encoded,
+                    )
+                    .unwrap();
                 }
                 let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
                 let (blob, size) = context

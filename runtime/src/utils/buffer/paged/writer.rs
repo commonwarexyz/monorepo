@@ -57,7 +57,7 @@ use crate::{
     },
 };
 use bytes::BufMut;
-use commonware_codec::{FixedSize, Write};
+use commonware_codec::{EncodeSize, Write};
 use commonware_cryptography::Crc32;
 use commonware_utils::Widen;
 use std::{
@@ -702,7 +702,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         Ok(offset)
     }
 
-    /// Encode a fixed-size value directly into the write buffer if it fits.
+    /// Encode a value directly into the write buffer if it fits.
     ///
     /// Returns its logical offset on success. Returns `None` without encoding or changing the
     /// writer when there is insufficient buffer space. Performs no I/O and does not make the
@@ -710,15 +710,10 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     ///
     /// # Panics
     ///
-    /// Panics if the encoder writes a different number of bytes than [`FixedSize::SIZE`].
-    pub fn try_append_value<T: FixedSize + Write>(&mut self, value: &T) -> Option<u64> {
-        let available = self.buffer.capacity.checked_sub(self.buffer.len())?;
-        if T::SIZE > available {
-            return None;
-        }
-        let offset = self.buffer.size();
-        self.buffer.append_value(value);
-        Some(offset)
+    /// Panics if the encoder writes a different number of bytes than
+    /// [`EncodeSize::encode_size`].
+    pub fn try_append_value<T: EncodeSize + Write>(&mut self, value: &T) -> Option<u64> {
+        self.buffer.try_append_value(value)
     }
 
     /// Append owned bytes to the tip of the blob.
@@ -1366,11 +1361,12 @@ mod tests {
         },
         telemetry::metrics::Registry,
     };
-    use commonware_codec::{Copying, ReadExt};
+    use commonware_codec::{Copying, FixedSize, ReadExt};
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZU32, NZUsize, channel::oneshot, sync::Mutex};
     use futures::FutureExt as _;
     use std::{
+        cell::Cell,
         num::NonZeroU16,
         sync::{
             Arc,
@@ -1429,6 +1425,84 @@ mod tests {
             assert_eq!(
                 writer.read_at(0, 40).await.unwrap().coalesce().as_ref(),
                 expected
+            );
+        });
+    }
+
+    #[test]
+    fn test_append_variable_value_encodes_in_place() {
+        struct Value {
+            size: usize,
+            size_calls: Cell<usize>,
+            writes: Cell<usize>,
+            destination: Cell<usize>,
+        }
+
+        impl EncodeSize for Value {
+            fn encode_size(&self) -> usize {
+                self.size_calls.set(self.size_calls.get() + 1);
+                self.size
+            }
+        }
+
+        impl Write for Value {
+            fn write(&self, buf: &mut impl BufMut) {
+                self.writes.set(self.writes.get() + 1);
+                if self.size > 0 {
+                    self.destination.set(buf.chunk_mut().as_mut_ptr() as usize);
+                }
+                buf.put_bytes(7, self.size);
+            }
+        }
+
+        deterministic::Runner::default().start(|context| async move {
+            let (blob, size) = context.open("variable_value", b"blob").await.unwrap();
+            let cache = CacheRef::from_pooler(&context, NZU16!(16), NZUsize!(4));
+            let mut writer = Writer::new(blob, size, 64, cache.clone()).await.unwrap();
+            let mut value = Value {
+                size: 3,
+                size_calls: Cell::new(0),
+                writes: Cell::new(0),
+                destination: Cell::new(0),
+            };
+
+            // The encoder writes into the tip itself, including when that allocation becomes
+            // a full-page prefix during extension.
+            assert_eq!(writer.try_append_value(&value), Some(0));
+            let tail = writer.buffer.parts().1.as_ptr() as usize;
+            assert_eq!(value.destination.get(), tail);
+            value.size = 22;
+            assert_eq!(writer.try_append_value(&value), Some(3));
+            assert_eq!(value.destination.get(), tail + 3);
+            assert_eq!(
+                writer.buffer.parts().0.chunk_at(0).unwrap().as_ptr() as usize,
+                tail
+            );
+
+            // Empty values are valid. Sizing happens once per attempt, and a capacity miss
+            // never invokes the encoder or changes the writer.
+            value.size = 0;
+            assert_eq!(writer.try_append_value(&value), Some(25));
+            value.size = 39;
+            assert_eq!(writer.try_append_value(&value), Some(25));
+            for size in [1, usize::MAX] {
+                value.size = size;
+                assert_eq!(writer.try_append_value(&value), None);
+            }
+            value.size = 0;
+            assert_eq!(writer.try_append_value(&value), Some(64));
+            assert_eq!(value.size_calls.get(), 7);
+            assert_eq!(value.writes.get(), 5);
+            assert_eq!(writer.size(), 64);
+
+            writer.sync().await.unwrap();
+            drop(writer);
+            let (blob, size) = context.open("variable_value", b"blob").await.unwrap();
+            let writer = Writer::new(blob, size, 64, cache).await.unwrap();
+            assert_eq!(writer.size(), 64);
+            assert_eq!(
+                writer.read_at(0, 64).await.unwrap().coalesce().as_ref(),
+                &[7; 64]
             );
         });
     }

@@ -27,15 +27,17 @@
 //! 5. Decode value
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
-use crate::{Context, journal::Error};
+use crate::{
+    Context,
+    journal::{Error, frame},
+};
 use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
-use commonware_runtime::{BufMut, Error as RError, Handle};
-use std::{collections::BTreeMap, io::Cursor, num::NonZeroUsize};
-use zstd::{bulk::compress, decode_all};
+use commonware_runtime::{BufMut, BufferPool, Error as RError, Handle, IoBufs};
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
 /// Physical overhead appended to every frame: the CRC32 of the frame's data.
 pub(crate) const CHECKSUM_SIZE: usize = crc32::Digest::SIZE;
@@ -65,16 +67,20 @@ struct Inner<E: Context, V: Codec> {
 
     /// Codec configuration.
     codec_config: V::Cfg,
+
+    /// Backing for compression input and output.
+    pool: BufferPool,
 }
 
 impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::init].
     async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
+        let pool = context.storage_buffer_pool().clone();
         let manager_cfg = ManagerConfig {
             partition: cfg.partition,
             factory: WriteFactory {
                 capacity: cfg.write_buffer,
-                pool: context.storage_buffer_pool().clone(),
+                pool: pool.clone(),
             },
         };
         let manager = Manager::init(context, manager_cfg).await?;
@@ -83,28 +89,30 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             manager,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
+            pool,
         })
     }
 
     /// See [Glob::append].
     async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
-        // Encode and optionally compress, then append checksum
-        let buf = if let Some(level) = self.compression {
-            // Compressed: encode first, then compress, then append checksum
-            let encoded = value.encode();
-            let mut compressed =
-                compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?;
-            let checksum = Crc32::checksum(&compressed);
-            compressed.put_u32(checksum);
-            compressed
-        } else {
-            // Uncompressed: pre-allocate exact size to avoid copying
-            let entry_size = value.encode_size() + CHECKSUM_SIZE;
-            let mut buf = Vec::with_capacity(entry_size);
-            value.write(&mut buf);
-            let checksum = Crc32::checksum(&buf);
-            buf.put_u32(checksum);
-            buf
+        // Encode and optionally compress, then append the checksum.
+        let buf: IoBufs = match self.compression {
+            Some(level) => {
+                // The payload is compressed into pooled backing with room for its checksum.
+                let mut buf = frame::compress(&self.pool, level, value, CHECKSUM_SIZE)?;
+                let checksum = Crc32::checksum(buf.as_ref());
+                buf.put_u32(checksum);
+                buf.into()
+            }
+            None => {
+                // Uncompressed: pre-allocate exact size to avoid copying
+                let entry_size = value.encode_size() + CHECKSUM_SIZE;
+                let mut buf = Vec::with_capacity(entry_size);
+                value.write(&mut buf);
+                let checksum = Crc32::checksum(&buf);
+                buf.put_u32(checksum);
+                buf.into()
+            }
         };
 
         // Write to blob
@@ -147,8 +155,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Decompress if needed and decode
         let value = if self.compression.is_some() {
-            let decompressed =
-                decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
+            let decompressed = frame::decompress(compressed_data)?;
             V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
         } else {
             // Share one Bytes owner instead of boxing the pooled IoBuf owner for every field
@@ -482,6 +489,7 @@ pub async fn corrupt_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::Encode as _;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, probability};
@@ -634,6 +642,46 @@ mod tests {
             assert_eq!(retrieved, value);
 
             glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_glob_pooled_entries_match_reference_format() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            for compression in [None, Some(1), Some(3), Some(19)] {
+                let cfg = Config {
+                    partition: format!("glob-format-{}", compression.map_or(0, u16::from)),
+                    compression,
+                    codec_config: ((..).into(), ()),
+                    write_buffer: NZUsize!(1024),
+                };
+                let mut glob: Glob<_, Vec<u8>> = Glob::init(context.child("storage"), cfg)
+                    .await
+                    .expect("Failed to init glob");
+
+                // Entries staged in pooled backing must keep the documented layout byte for
+                // byte, including values larger than the write buffer.
+                for (i, len) in [0usize, 1, 127, 4096, 70_000].into_iter().enumerate() {
+                    let value: Vec<u8> = (0..len).map(|j| (j % 7 + i) as u8).collect();
+                    let offset;
+                    let size;
+                    (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
+
+                    let encoded = value.encode();
+                    let mut expected = compression.map_or_else(
+                        || encoded.to_vec(),
+                        |level| zstd::bulk::compress(&encoded, level.into()).unwrap(),
+                    );
+                    let checksum = Crc32::checksum(&expected);
+                    expected.put_u32(checksum);
+                    let writer = glob.0.manager.get(1).unwrap().unwrap();
+                    let stored = writer.read_at(offset, size as usize).await.unwrap();
+                    assert_eq!(stored.coalesce().as_ref(), expected.as_slice());
+                    assert_eq!(glob.get(1, offset, size).await.unwrap(), value);
+                }
+                glob.destroy().await.expect("Failed to destroy");
+            }
         });
     }
 

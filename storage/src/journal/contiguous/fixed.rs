@@ -655,9 +655,9 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(self.partition.open_recovery(blob).await?),
         };
-        let mut bytes = Vec::with_capacity(A::SIZE);
-        item.write(&mut bytes);
-        writer.append(&bytes).await?;
+        if writer.try_append_value(item).is_none() {
+            writer.append_owned(item.encode_mut().into()).await?;
+        }
 
         // Release completed write buffers without advancing the recovery watermark.
         if end.is_multiple_of(self.cfg.items_per_blob.get()) {
@@ -2444,7 +2444,11 @@ mod tests {
     #[test]
     fn test_recovery_rebuilds_pending_gap() {
         deterministic::Runner::default().start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let mut cfg = test_cfg(&context, NZU64!(5));
+
+            // Two pages fit two digests. A third digest exceeds the buffer and takes the
+            // owned fallback during recovery.
+            cfg.write_buffer = NZUsize!(88);
             let mut journal = Journal::<_, Digest>::init(context.child("seed"), cfg.clone())
                 .await
                 .unwrap();
