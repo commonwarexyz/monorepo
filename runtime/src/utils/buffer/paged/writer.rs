@@ -1117,7 +1117,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         let page_size_u16 =
             u16::try_from(page_size).expect("page size must fit in u16 for CRC record");
 
-        // One CRC allocation serves the entire batch. Payload slices retain their original owners.
+        // Store the batch's CRC records in one allocation, in the same order as the payload pages.
         let mut crcs = self.cache_ref.pool().alloc(CHECKSUM_SIZE as usize * pages);
         for (page, logical_page) in data
             .clone()
@@ -1131,6 +1131,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
         }
         let crc_blob = crcs.freeze();
 
+        // Interleave payload pages and CRC records in physical write order. Slicing retains the
+        // original payload chunks and the shared CRC allocation without copying their bytes.
         let mut crc_start = 0;
         for chunk in data {
             for start in (0..chunk.len()).step_by(page_size) {
@@ -4153,12 +4155,14 @@ mod tests {
     /// Format: [len_hi=0, len_lo=0, 0xDE, 0xAD, 0xBE, 0xEF]
     const DUMMY_MARKER: [u8; 6] = [0x00, 0x00, 0xDE, 0xAD, 0xBE, 0xEF];
 
+    /// Physical encoding retains full-page owners and preserves the first page's durable checksum.
     #[rstest::rstest]
     #[case(103)]
     #[case(4084)]
     #[case(4096)]
     fn test_to_physical_pages_preserves_chunk_owners(#[case] page_size: u16) {
         deterministic::Runner::default().start(|context| async move {
+            // Use only sub-page pool classes so the page owners have native backing.
             let pool = BufferPool::new(
                 BufferPoolConfig::for_storage()
                     .with_size_classes([(NZUsize!(8), NZU32!(1))])
@@ -4175,12 +4179,16 @@ mod tests {
             let page_size = usize::from(page_size.get());
             let capacity = page_size * 32;
             let writer = Writer::new(blob, size, capacity, cache).await.unwrap();
+
+            // Span several allocations with 17 full pages and a partial tail without flushing.
             let data: Vec<_> = (0..page_size * 17 + 17).map(|i| (i % 251) as u8).collect();
             let mut buffer = Buffer::from(0, &[], capacity, page_size, pool);
             for chunk in data.chunks(page_size) {
                 assert!(!buffer.append(chunk));
             }
             assert!(buffer.parts().0.chunk_count() >= 4);
+
+            // Record full-page addresses before draining so a payload copy cannot pass unnoticed.
             let (prefix, tail) = buffer.parts();
             let pointers: Vec<_> = prefix
                 .iter()
@@ -4189,6 +4197,9 @@ mod tests {
                 .flat_map(|chunk| chunk.chunks_exact(page_size))
                 .map(|page| page.as_ptr())
                 .collect();
+
+            // Encode two slices per full page and one padded partial page. Keep a durable checksum
+            // in the first page's second slot, and verify that full-page payload addresses survive.
             let full_pages = buffer.drain_full_pages();
             let durable = ActiveChecksum::new(Slot::Second, 7, Crc32::checksum(&data[..7]));
             let (physical, partial) =
@@ -4199,6 +4210,8 @@ mod tests {
                 assert_eq!(physical.chunk_at(page * 2).unwrap().as_ptr(), ptr);
             }
 
+            // After the ownership checks, coalesce to validate payload bytes, padding, and CRCs.
+            // The protected checksum belongs only to the first page.
             let physical = physical.coalesce();
             let physical_size = page_size + CHECKSUM_SIZE as usize;
             for (idx, page) in physical.as_ref().chunks_exact(physical_size).enumerate() {
