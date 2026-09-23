@@ -713,15 +713,17 @@ stability_scope!(BETA {
         /// Open an existing blob in a given partition or create a new one, returning
         /// the blob and its length.
         ///
+        /// # Uniqueness
+        ///
         /// A blob has one open at a time. Clone the returned blob to share it, and
         /// drop every clone before opening the blob again.
         ///
-        /// An Ok result indicates the blob is durably created (or already exists).
-        ///
-        /// # Errors
-        ///
         /// Returns [`Error::BlobAlreadyOpen`] if a handle from an earlier open of the blob is
         /// still alive and the blob has not been removed since.
+        ///
+        /// # Durability
+        ///
+        /// An Ok result indicates the blob is durably created (or already exists).
         ///
         /// A runtime may retain a durability failure across logical opens. Later opens
         /// can return that failure even after every handle has been dropped.
