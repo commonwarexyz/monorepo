@@ -405,6 +405,27 @@ where
     base_active_keys: usize,
 }
 
+/// A batch whose live chain was validated against the database it will read.
+///
+/// Keeping the database borrow and retained ancestors together prevents later phases from
+/// substituting a different database after validation.
+#[allow(clippy::type_complexity)]
+pub(crate) struct Prepared<'a, F, E, C, I, H, U, const N: usize, S>
+where
+    F: Family,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: update::Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    db: &'a Db<F, E, C, I, H, U, N, S>,
+    mutations: BTreeMap<U::Key, Option<U::Value>>,
+    merkleizer: Merkleizer<F, H, U, S>,
+}
+
 /// Look up a key in the ancestor chain (immediate parent first).
 fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
     ancestors: &'a [Arc<MerkleizedBatch<F, D, U, S>>],
@@ -969,7 +990,7 @@ where
     /// superseded by `diff` (every `Some` `base_old_loc`), in any order. The floor raise
     /// skips re-reading them. `prefetched` optionally holds committed-prefix candidates the
     /// caller gathered and read ahead of time, consumed by the raise before scanning live.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     async fn finish<E, C, I, const N: usize>(
         self,
         mut ops: Vec<Operation<F, U>>,
@@ -981,7 +1002,13 @@ where
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
+    ) -> Result<
+        (
+            Arc<MerkleizedBatch<F, H::Digest, U, S>>,
+            Vec<AncestorBatch<F, H::Digest, U, S>>,
+        ),
+        crate::qmdb::Error<F>,
+    >
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -1284,7 +1311,7 @@ where
             .collect();
 
         assert!(total_active_keys >= 0, "active_keys underflow");
-        Ok(Arc::new(MerkleizedBatch {
+        let batch = Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
             parent: self.ancestors.first().map(Arc::downgrade),
@@ -1298,7 +1325,8 @@ where
                 ancestors,
                 inactivity_floor: floor,
             },
-        }))
+        });
+        Ok((batch, self.ancestors))
     }
 }
 
@@ -1308,15 +1336,6 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
-    /// Validate `current` against the underlying batch's live chain.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn validate_commitment(
-        &self,
-        current: Commitment<F, H::Digest>,
-    ) -> Result<Vec<AncestorBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>> {
-        self.batch.validate_commitment(current)
-    }
-
     /// Expand this staged batch with more reads.
     ///
     /// Existing read indices remain stable. Newly read keys are appended to the staged read set and
@@ -1363,13 +1382,13 @@ where
     }
 
     fn apply_upserts(
-        mut batch: UnmerkleizedBatch<F, H, U, S>,
+        mut mutations: BTreeMap<U::Key, Option<U::Value>>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
-    ) -> UnmerkleizedBatch<F, H, U, S> {
+    ) -> BTreeMap<U::Key, Option<U::Value>> {
         for (key, value) in upserts {
-            batch = batch.write(key, value);
+            mutations.insert(key, value);
         }
-        batch
+        mutations
     }
 
     /// Resolve the caller's updates and upserts against the staged read set, returning the
@@ -1403,11 +1422,29 @@ where
         let Self {
             mut batch,
             keys,
-            mut resolutions,
+            resolutions,
         } = self;
+        let mutations = mem::take(&mut batch.mutations);
+        let (mutations, staged_updates) =
+            Self::resolve_update_parts(mutations, keys, resolutions, updates, upserts, strategy);
+        batch.mutations = mutations;
+        (batch, staged_updates)
+    }
+
+    /// Resolve staged updates using only owned data, allowing the work to run on a detached
+    /// strategy job while the prepared batch retains its database borrow and ancestor chain.
+    #[allow(clippy::type_complexity)]
+    fn resolve_update_parts(
+        mut mutations: BTreeMap<U::Key, Option<U::Value>>,
+        keys: Vec<U::Key>,
+        mut resolutions: Vec<StagedResolution<F, U>>,
+        updates: Vec<(usize, Option<U::Value>)>,
+        upserts: Vec<(U::Key, Option<U::Value>)>,
+        strategy: &S,
+    ) -> (BTreeMap<U::Key, Option<U::Value>>, StagedUpdates<F, U>) {
         let mut staged_updates = StagedUpdates::<F, U>::new();
         if updates.is_empty() {
-            return (Self::apply_upserts(batch, upserts), staged_updates);
+            return (Self::apply_upserts(mutations, upserts), staged_updates);
         }
 
         // Resolve last-write-wins per distinct key: a forward walk keyed on the staged key leaves
@@ -1446,7 +1483,7 @@ where
         // probe is skipped when the batch had no mutations before this call: each distinct
         // key is visited at most once (winners are per key), so a staged winner can never
         // chase a fallback inserted by this same loop.
-        let had_mutations = !batch.mutations.is_empty();
+        let had_mutations = !mutations.is_empty();
         let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(winners.len());
         for (entry, winner) in winners.iter_mut().enumerate() {
             let Some((slot, value)) = winner else {
@@ -1456,13 +1493,13 @@ where
             match &resolutions[*slot] {
                 Some((sloc, _)) if value.is_some() || U::STAGES_DELETES => {
                     if had_mutations {
-                        batch.mutations.remove(key);
+                        mutations.remove(key);
                     }
                     order.push((sloc.loc(), entry));
                 }
                 _ => {
                     let (_, value) = winner.take().expect("winner checked above");
-                    batch.mutations.insert(key.clone(), value);
+                    mutations.insert(key.clone(), value);
                 }
             }
         }
@@ -1483,7 +1520,7 @@ where
                 (keys[slot].clone(), sloc, payload, value)
             })
             .collect();
-        (Self::apply_upserts(batch, upserts), staged_updates)
+        (Self::apply_upserts(mutations, upserts), staged_updates)
     }
 }
 
@@ -1529,29 +1566,26 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let validated_ancestors = self.batch.validate_commitment(db.commitment())?;
-        let (batch, staged_updates, prefetched) = self
+        let (prepared, staged_updates, prefetched) = self
             .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
             })
             .await?;
-        let result = batch
+        let (batch, _retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                db,
                 metadata,
                 staged_updates,
                 Some(prefetched),
                 |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
             )
-            .await;
-        drop(validated_ancestors);
-        result
+            .await?;
+        Ok(batch)
     }
 
     /// Resolve the caller's updates on the strategy pool while gathering and reading the
     /// committed prefix of the floor-raise candidates, overlapping the two. Returns the
-    /// resolved batch, the staged updates, and the prefetched candidates to seed
-    /// [`merkleize_with_floor_scan`](UnmerkleizedBatch::merkleize_with_floor_scan) with.
+    /// prepared batch, the staged updates, and the prefetched candidates to seed its floor scan
+    /// with. Preparation validates and retains the live chain before any supplied-database read.
     ///
     /// `fill_candidates` must be the same candidate source the subsequent floor raise
     /// scans, so the prefetched prefix continues seamlessly into the live scan (see
@@ -1564,20 +1598,16 @@ where
     /// the last emitted candidate or the committed boundary as the continuation point. Both
     /// are correct: the skipped span holds no set bits, and the source cannot change during
     /// the call (commits and prunes take `&mut` on the database).
-    ///
-    /// The caller must validate `db.commitment()` with [`Staged::validate_commitment`] before
-    /// calling this method and retain the returned ancestors until delegated merkleization takes
-    /// ownership of the same live chain.
     #[allow(clippy::type_complexity)]
-    pub(crate) async fn resolve_updates_prefetched<E, C, I, const N: usize>(
+    pub(crate) async fn resolve_updates_prefetched<'a, E, C, I, const N: usize>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &'a Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<
         (
-            UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>,
+            Prepared<'a, F, E, C, I, H, update::Unordered<K, V>, N, S>,
             StagedUpdates<F, update::Unordered<K, V>>,
             PrefetchedCandidates<F, update::Unordered<K, V>>,
         ),
@@ -1588,6 +1618,13 @@ where
         C: Contiguous<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let Self {
+            batch,
+            keys,
+            resolutions,
+        } = self;
+        let mut prepared = batch.prepare(db)?;
+
         // Bound the steps the floor raise can take: only emitted ops consume steps, and an
         // op is emitted per location-resolved update plus per upsert or prior mutation on a
         // key alive in the committed snapshot. Fresh-key creates never consume a step, so
@@ -1599,25 +1636,26 @@ where
         // the prefetched prefix runs out.
         let resolved_updates = updates
             .iter()
-            .filter(|(slot, _)| self.resolutions.get(*slot).is_some_and(Option::is_some))
+            .filter(|(slot, _)| resolutions.get(*slot).is_some_and(Option::is_some))
             .count()
-            .min(self.keys.len());
+            .min(keys.len());
         let existing_writes = upserts
             .iter()
             .map(|(key, _)| key)
-            .chain(self.batch.mutations.keys())
+            .chain(prepared.mutations.keys())
             .filter(|&key| db.snapshot.get(key).next().is_some())
             .count();
         let steps_bound = resolved_updates + existing_writes + 1;
 
         // Overlap the serial update resolution with the candidate prefetch: the
         // committed-prefix candidate set depends only on the base floor, the candidate
-        // source, and the step bound, none of which depend on the resolution. The batch
-        // moves into the job, so its floor is captured first.
-        let scan_from = self.batch.base.inactivity_floor_loc();
+        // source, and the step bound, none of which depend on the resolution. Only owned
+        // update data moves into the job; the prepared batch retains the live ancestor chain.
+        let scan_from = prepared.merkleizer.base_inactivity_floor_loc;
         let resolve_len = updates.len() + upserts.len();
+        let mutations = mem::take(&mut prepared.mutations);
         let resolve = db.strategy().spawn(resolve_len, move |strategy| {
-            self.resolve_updates(updates, upserts, &strategy)
+            Self::resolve_update_parts(mutations, keys, resolutions, updates, upserts, &strategy)
         });
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
@@ -1629,13 +1667,14 @@ where
         let read = db.log.read_many_sharded(&raw).await;
 
         // Join the resolution and surface any read failure.
-        let (batch, staged_updates) = resolve.await;
+        let (mutations, staged_updates) = resolve.await;
+        prepared.mutations = mutations;
         let prefetched = PrefetchedCandidates {
             locs,
             shards: read?,
             next_scan,
         };
-        Ok((batch, staged_updates, prefetched))
+        Ok((prepared, staged_updates, prefetched))
     }
 }
 
@@ -1682,11 +1721,13 @@ where
         I: OrderedIndex<Value = Location<F>>,
     {
         let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
-        batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
+        let prepared = batch.prepare(db)?;
+        let (batch, _retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
             })
-            .await
+            .await?;
+        Ok(batch)
     }
 }
 
@@ -1748,6 +1789,27 @@ where
         (self.mutations, m)
     }
 
+    /// Validate this batch and bind its retained chain to the exact database used by all
+    /// subsequent merkleization reads.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn prepare<'a, E, C, I, const N: usize>(
+        self,
+        db: &'a Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Prepared<'a, F, E, C, I, H, U, N, S>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let (mutations, merkleizer) = self.into_parts();
+        merkleizer.validate_commitment(db.commitment())?;
+        Ok(Prepared {
+            db,
+            mutations,
+            merkleizer,
+        })
+    }
+
     /// Return true when reads can bypass uncommitted overlay resolution and go directly to the DB.
     fn reads_committed_only(&self) -> bool {
         self.mutations.is_empty() && self.base.parent().is_none()
@@ -1768,14 +1830,23 @@ where
     where
         U::Value: Send + Sync,
     {
-        let ancestors = self.base.parent().map(|parent| {
-            let mut ancestors = vec![Arc::clone(parent)];
-            ancestors.extend(parent.ancestors());
-            ancestors
-        });
+        let ancestors = self.retain_ancestors();
+        self.resolve_uncommitted_reads_with_ancestors(keys, &ancestors, strategy, on_diff_hit)
+    }
+
+    /// Resolve uncommitted reads through an already-retained ancestor chain.
+    fn resolve_uncommitted_reads_with_ancestors<'a>(
+        &self,
+        keys: &[&'a U::Key],
+        ancestors: &[AncestorBatch<F, H::Digest, U, S>],
+        strategy: &S,
+        on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
+    ) -> UncommittedReadResolution<'a, U::Key, U::Value>
+    where
+        U::Value: Send + Sync,
+    {
         let diffs: Vec<_> = ancestors
             .iter()
-            .flatten()
             .map(|batch| batch.diff.as_slice())
             .collect();
         resolve_reads(
@@ -1934,8 +2005,11 @@ where
         // write then reuses the resolved location at merkleize instead of falling back to a
         // normal mutation (whose cost -- location gathering, a journal re-read, and
         // per-key ancestor re-resolution -- otherwise grows with ancestor overlap).
-        let (mut results, unresolved) =
-            self.resolve_uncommitted_reads(keys, db.strategy(), |slot, entry| {
+        let (mut results, unresolved) = self.resolve_uncommitted_reads_with_ancestors(
+            keys,
+            &validated_ancestors,
+            db.strategy(),
+            |slot, entry| {
                 let Some(cached) = U::STAGES_ANCESTORS else {
                     return;
                 };
@@ -1951,7 +2025,8 @@ where
                         cached,
                     ));
                 }
-            });
+            },
+        );
         Self::fill_committed_reads(
             unresolved,
             db,
@@ -2005,19 +2080,35 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(
-            db,
-            metadata,
-            StagedUpdates::<F, update::Unordered<K, V>>::new(),
-            None,
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-        )
-        .await
+        let prepared = self.prepare(db)?;
+        let (batch, _retained_ancestors) = prepared
+            .merkleize_with_floor_scan(
+                metadata,
+                StagedUpdates::<F, update::Unordered<K, V>>::new(),
+                None,
+                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            )
+            .await?;
+        Ok(batch)
     }
+}
 
-    /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
+impl<'a, F, K, V, E, C, I, H, const N: usize, S>
+    Prepared<'a, F, E, C, I, H, update::Unordered<K, V>, N, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    E: Context,
+    C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, update::Unordered<K, V>>: Codec,
+{
+    /// Complete a prepared merkleization, consuming staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would
-    /// otherwise require) and accepts the floor-raise candidate source, optionally seeded
+    /// otherwise require) and accepting the floor-raise candidate source, optionally seeded
     /// with prefetched committed-prefix candidates that must come from the same floor and
     /// the same candidate source the callback scans (see [`PrefetchedCandidates`]).
     ///
@@ -2027,21 +2118,25 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
-    pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn merkleize_with_floor_scan(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        let (mut mutations, m) = self.into_parts();
-        m.validate_commitment(db.commitment())?;
+    ) -> Result<
+        (
+            Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>,
+            Vec<AncestorBatch<F, H::Digest, update::Unordered<K, V>, S>>,
+        ),
+        crate::qmdb::Error<F>,
+    > {
+        let Self {
+            db,
+            mut mutations,
+            merkleizer: m,
+        } = self;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
@@ -2213,19 +2308,35 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(
-            db,
-            metadata,
-            StagedUpdates::<F, update::Ordered<K, V>>::new(),
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-        )
-        .await
+        let prepared = self.prepare(db)?;
+        let (batch, _retained_ancestors) = prepared
+            .merkleize_with_floor_scan(
+                metadata,
+                StagedUpdates::<F, update::Ordered<K, V>>::new(),
+                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            )
+            .await?;
+        Ok(batch)
     }
+}
 
-    /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
+impl<'a, F, K, V, E, C, I, H, const N: usize, S>
+    Prepared<'a, F, E, C, I, H, update::Ordered<K, V>, N, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    E: Context,
+    C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+    I: OrderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Complete a prepared merkleization, consuming staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the index probe and journal re-read their
     /// resolution would otherwise require: the caller's new value and the cached next key feed
-    /// op generation directly) and accepts the floor-raise candidate source.
+    /// op generation directly) and accepting the floor-raise candidate source.
     ///
     /// The callback must yield candidates in ascending location order, both within one call
     /// and across successive calls (the floor raise asserts this). It may skip locations only
@@ -2233,20 +2344,24 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
-    pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn merkleize_with_floor_scan(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: OrderedIndex<Value = Location<F>>,
-    {
-        let (mut mutations, m) = self.into_parts();
-        m.validate_commitment(db.commitment())?;
+    ) -> Result<
+        (
+            Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>,
+            Vec<AncestorBatch<F, H::Digest, update::Ordered<K, V>, S>>,
+        ),
+        crate::qmdb::Error<F>,
+    > {
+        let Self {
+            db,
+            mut mutations,
+            merkleizer: m,
+        } = self;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);

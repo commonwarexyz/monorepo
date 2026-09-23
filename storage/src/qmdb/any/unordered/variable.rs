@@ -784,6 +784,94 @@ pub(crate) mod test {
         });
     }
 
+    #[test_traced("WARN")]
+    fn test_prepared_staged_merkleize_retains_ancestors() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = create_test_db(context.child("prepared")).await;
+            let key = |i: u64| Sha256::hash(&[&i.to_be_bytes()]);
+            let mut seed = db.new_batch();
+            for i in 0..64 {
+                seed = seed.write(key(i), Some(to_bytes(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+
+            let grandparent = db
+                .new_batch()
+                .write(key(0), Some(to_bytes(1_000)))
+                .write(key(100), Some(to_bytes(1_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let parent = grandparent
+                .new_batch::<Sha256>()
+                .write(key(1), Some(to_bytes(2_000)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            assert!(!parent.diff.iter().any(|(k, _)| *k == key(100)));
+            let expected_root = parent
+                .new_batch::<Sha256>()
+                .write(key(0), Some(to_bytes(3_000)))
+                .write(key(101), Some(to_bytes(3_001)))
+                .merkleize(&db, None)
+                .await
+                .unwrap()
+                .root();
+
+            let target = key(0);
+            let (values, staged) = parent
+                .new_batch::<Sha256>()
+                .stage(&[&target], &db)
+                .await
+                .unwrap();
+            assert_eq!(values, vec![Some(to_bytes(1_000))]);
+            let weak_grandparent = Arc::downgrade(&grandparent);
+            let mut caller_ancestors = Some((grandparent, parent));
+            let (prepared, updates, prefetched) = staged
+                .resolve_updates_prefetched(
+                    vec![(0, Some(to_bytes(3_000)))],
+                    vec![(key(101), Some(to_bytes(3_001)))],
+                    &db,
+                    |floor, tip, limit, out| {
+                        // Preparation must retain the chain before prefetch starts.
+                        drop(caller_ancestors.take());
+                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
+                    },
+                )
+                .await
+                .unwrap();
+            assert!(caller_ancestors.is_none());
+            assert!(weak_grandparent.upgrade().is_some());
+
+            let (batch, retained_ancestors) = prepared
+                .merkleize_with_floor_scan(
+                    None,
+                    updates,
+                    Some(prefetched),
+                    |floor, tip, limit, out| {
+                        Location::new(db.bitmap.fill_candidates(*floor, tip, limit, out))
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(batch.root(), expected_root);
+            // Current's additional root computation needs this post-merkleization lifetime.
+            assert!(weak_grandparent.upgrade().is_some());
+            assert_eq!(
+                batch.get(&key(100), &db).await.unwrap(),
+                Some(to_bytes(1_001))
+            );
+            drop(retained_ancestors);
+
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            for (k, value) in [(0, 3_000), (1, 2_000), (100, 1_001), (101, 3_001)] {
+                assert_eq!(db.get(&key(k)).await.unwrap(), Some(to_bytes(value)));
+            }
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced]
     fn test_stage_and_expand_reject_foreign_db() {
         deterministic::Runner::default().start(|context| async move {
