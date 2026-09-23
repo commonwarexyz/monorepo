@@ -808,6 +808,12 @@ fn fuzz_family<F: Family, S: Strategy>(
                             assert_eq!(reopened.bounds().end, end);
                             assert_eq!(reopened.root(), root);
                             commits.retain(|candidate, _| *candidate <= end);
+                            // The recovered commit is the newest one in both models.
+                            commit_history.retain(|(size, _, _, _)| *size <= end);
+                            let recovered = commit_history.last().expect("recovered commit is modeled");
+                            assert_eq!(recovered.0, end, "commit models disagree on the recovered commit");
+                            assert_eq!(reopened.get_metadata().await.unwrap(), recovered.3);
+                            expected_metadata = recovered.3.clone();
                             reopened
                         }
                         Err(error @ (Error::InvalidInitializationBound
