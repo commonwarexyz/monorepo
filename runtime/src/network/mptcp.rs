@@ -176,7 +176,7 @@ pub(crate) mod tests {
     }
 
     /// Returns the MPTCP connection token, or `None` if the socket uses TCP
-    /// (including after fallback during negotiation).
+    /// (including after fallback during negotiation) or MPTCP_INFO is unavailable.
     pub(crate) fn token(fd: BorrowedFd<'_>) -> Option<u32> {
         // `mptcpi_token` follows six one-byte fields and the 32-bit `mptcpi_flags`.
         let mut info = [0; 16];
@@ -475,10 +475,11 @@ pub(crate) mod tests {
 
     #[test]
     fn test_socket_protocol_and_flags() {
-        let mptcp = match supported() {
-            Ok(()) => libc::IPPROTO_MPTCP,
-            Err(reason) => {
-                skip("test_socket_protocol_and_flags", &reason);
+        let mptcp = match create(libc::AF_INET, libc::IPPROTO_MPTCP) {
+            Ok(_) => libc::IPPROTO_MPTCP,
+            Err(err) => {
+                assert!(unavailable(&err), "MPTCP socket creation failed: {err}");
+                skip("test_socket_protocol_and_flags", &err.to_string());
                 libc::IPPROTO_TCP
             }
         };

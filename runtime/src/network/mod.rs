@@ -735,13 +735,10 @@ mod tests {
         const TEST: &str = "test_network_mptcp_interop";
         const LARGE: usize = 1024 * 1024;
 
-        let supported = match mptcp::supported() {
-            Ok(()) => true,
-            Err(reason) => {
-                mptcp::skip(TEST, &format!("verifying TCP fallback only: {reason}"));
-                false
-            }
-        };
+        if let Err(reason) = mptcp::supported() {
+            mptcp::skip(TEST, &reason);
+            return;
+        }
         let mut addresses = vec![SocketAddr::from(([127, 0, 0, 1], 0))];
         if std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok() {
             addresses.push(SocketAddr::from((Ipv6Addr::LOCALHOST, 0)));
@@ -753,7 +750,7 @@ mod tests {
             for (dialer_mptcp, listener_mptcp) in
                 [(false, false), (true, true), (true, false), (false, true)]
             {
-                let negotiated = supported && dialer_mptcp && listener_mptcp;
+                let negotiated = dialer_mptcp && listener_mptcp;
                 let mut listener = new_network(listener_mptcp)
                     .bind(address)
                     .await
@@ -776,7 +773,7 @@ mod tests {
                     .dial(listener_addr)
                     .await
                     .expect("Failed to dial server");
-                let protocol = if supported && dialer_mptcp {
+                let protocol = if dialer_mptcp {
                     libc::IPPROTO_MPTCP
                 } else {
                     libc::IPPROTO_TCP
@@ -948,8 +945,12 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
         }
 
+        let (resume_sender, mut resume_receiver) = oneshot::channel();
         let sender = context.child("sender").spawn(move |_| async move {
             for index in 1..TOTAL {
+                if index == INTERRUPT {
+                    (&mut resume_receiver).await.expect("Failed to resume");
+                }
                 sink.send(chunk(index, CHUNK))
                     .await
                     .expect("Failed to send");
@@ -957,6 +958,7 @@ mod tests {
             sink
         });
 
+        let mut resume_sender = Some(resume_sender);
         let mut interrupted = None;
         for expected in 2..=TOTAL {
             acknowledged(&mut stream, expected).await;
@@ -972,14 +974,21 @@ mod tests {
                 }
             }
             if expected == INTERRUPT {
-                // Let acknowledgements already in flight settle before sampling.
+                // The sender pauses at INTERRUPT until the baseline is sampled,
+                // keeping the remaining chunks available to measure failover.
                 paths.interrupt_initial();
                 context.sleep(Duration::from_millis(100)).await;
                 interrupted = Some(mptcp::subflows(fd.as_fd()));
+                resume_sender
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .expect("Sender dropped");
             }
         }
         let sink = sender.await.expect("Sender task failed");
-        server.await.expect("Server task failed");
+        // Keep both endpoints alive while inspecting the connection's subflows.
+        let _server = server.await.expect("Server task failed");
 
         // Path 1 made no progress after the interruption, and path 2 carried the
         // rest of the transfer on the same connection.
