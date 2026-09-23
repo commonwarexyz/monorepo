@@ -68,6 +68,10 @@ const DATA_SUFFIX: &str = "_data";
 /// Suffix appended to the base partition name for the offsets journal.
 const OFFSETS_SUFFIX: &str = "_offsets";
 
+/// A compressed [PreparedAppend] is compacted when its unused capacity exceeds both this and
+/// three times its encoded length.
+const PREPARED_SPARE_LIMIT: usize = 64 * 1024;
+
 /// Provides an owned buffer for reading and reclaims the scratch unless retained fields share it.
 fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
     // Splitting preserves reusable allocation metadata across freezing and reclamation.
@@ -1592,6 +1596,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 }
             }
         }
+        // Compression reserves worst-case room per record, which callers holding the batch keep
+        let spare = encoded.capacity() - encoded.len();
+        if self.compression.is_some() && spare > PREPARED_SPARE_LIMIT && spare > 3 * encoded.len() {
+            encoded.shrink_to_fit();
+        }
         Ok(PreparedAppend {
             encoded,
             item_starts,
@@ -2669,8 +2678,11 @@ mod tests {
         },
         telemetry::metrics::{has_metric_value, metric_samples},
     };
-    use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes};
+    use commonware_utils::{
+        NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes, test_rng,
+    };
     use futures::StreamExt as _;
+    use rand::Rng as _;
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
@@ -3962,6 +3974,63 @@ mod tests {
             assert_eq!(last, 4);
             for (pos, item) in items.iter().enumerate() {
                 assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_prepared_compressed_capacity() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "prepared-compressed-capacity".into(),
+                items_per_section: NZU64!(1024),
+                compression: Some(3),
+                codec_config: (..).into(),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, Bytes>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+
+            let mut rng = test_rng();
+            let large = Bytes::from(vec![0xAB; 1 << 20]);
+            let small: Vec<_> = (0..4096)
+                .map(|_| {
+                    let mut record = vec![0; 64];
+                    rng.fill_bytes(&mut record);
+                    Bytes::from(record)
+                })
+                .collect();
+            let mixed: Vec<_> = small[..64].iter().cloned().chain([large.clone()]).collect();
+
+            // A highly compressible large record, small records whose buffer grows
+            // geometrically, and small records followed by a large one.
+            for batch in [vec![large], small, mixed] {
+                let prepared = journal.prepare_append(Many::Flat(&batch)).unwrap();
+
+                // Compaction must not change the frames.
+                let mut expected = Vec::new();
+                let mut starts = Vec::new();
+                for record in &batch {
+                    starts.push(expected.len());
+                    let mut frame = Vec::new();
+                    encode_frame_into(Some(3), record, &mut frame).unwrap();
+                    expected.extend_from_slice(&frame);
+                }
+                assert_eq!(prepared.encoded, expected);
+                assert_eq!(prepared.item_starts, starts);
+
+                let len = prepared.encoded.len();
+                let spare = prepared.encoded.capacity() - len;
+                assert!(
+                    spare <= PREPARED_SPARE_LIMIT.max(3 * len),
+                    "{spare} unused bytes for {len} encoded bytes"
+                );
             }
 
             journal.destroy().await.unwrap();

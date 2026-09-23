@@ -488,7 +488,8 @@ mod tests {
     use commonware_codec::Encode as _;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, probability};
+    use commonware_utils::{NZUsize, probability, test_rng};
+    use rand::Rng as _;
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
         pub(in super::super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
@@ -651,13 +652,22 @@ mod tests {
                 codec_config: ((..).into(), ()),
                 write_buffer: NZUsize!(1024),
             };
-            let mut glob: Glob<_, Vec<u8>> = Glob::init(context.child("storage"), cfg)
+            let mut glob: Glob<_, Vec<u8>> = Glob::init(context.child("first"), cfg.clone())
                 .await
                 .expect("Failed to init glob");
 
-            // Include values larger than the write buffer.
-            for len in [0usize, 1, 127, 4096, 70_000] {
-                let value: Vec<u8> = (0..len).map(|i| (i % 7) as u8).collect();
+            // Random bytes stay larger than the write buffer after compression, so that entry
+            // is written through to the blob.
+            let mut values: Vec<Vec<u8>> = [0usize, 1, 127, 4096, 70_000]
+                .into_iter()
+                .map(|len| (0..len).map(|i| (i % 7) as u8).collect())
+                .collect();
+            let mut random = vec![0; 4096];
+            test_rng().fill_bytes(&mut random);
+            values.push(random);
+
+            let mut entries = Vec::new();
+            for value in values {
                 let offset;
                 let size;
                 (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
@@ -667,8 +677,23 @@ mod tests {
                 expected.put_u32(checksum);
                 let writer = glob.0.manager.get(1).unwrap().unwrap();
                 let stored = writer.read_at(offset, size as usize).await.unwrap();
-                assert_eq!(stored.coalesce().as_ref(), expected.as_slice(), "len {len}");
+                assert_eq!(stored.coalesce().as_ref(), expected.as_slice());
                 assert_eq!(glob.get(1, offset, size).await.unwrap(), value);
+                entries.push((offset, size, expected, value));
+            }
+            assert!(entries.last().unwrap().1 > 1024);
+            let glob = glob.sync(1).await.expect("Failed to sync");
+            drop(glob);
+
+            // Persisted entries keep the same bytes and values.
+            let glob: Glob<_, Vec<u8>> = Glob::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to reinit glob");
+            let writer = glob.0.manager.get(1).unwrap().unwrap();
+            for (offset, size, expected, value) in &entries {
+                let stored = writer.read_at(*offset, *size as usize).await.unwrap();
+                assert_eq!(stored.coalesce().as_ref(), expected.as_slice());
+                assert_eq!(glob.get(1, *offset, *size).await.unwrap(), *value);
             }
 
             glob.destroy().await.expect("Failed to destroy");

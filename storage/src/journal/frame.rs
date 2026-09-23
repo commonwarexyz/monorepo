@@ -319,6 +319,7 @@ mod tests {
             ("small record", 64, 19),
             ("grow to 1 KiB", 1024, 3),
             ("grow to 16 KiB", 16 * 1024, 1),
+            ("cross a 128 KiB block", 130 * 1024, 3),
             ("small after large", 64, 0),
             ("empty after nonempty", 0, 9),
         ];
