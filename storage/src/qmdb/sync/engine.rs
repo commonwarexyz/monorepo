@@ -294,19 +294,29 @@ where
             config.db_config.journal_config(),
         )
         .await?;
-        let (mut sync_state, journal) =
-            DB::restart_rejected_import(sync_state, journal, config.target.range.start()).await?;
-        let pinned_nodes = if config.target.range.start() == Location::new(0) {
-            Some(Vec::new())
-        } else if journal.size() >= *config.target.range.end() {
-            DB::local_pinned_nodes(&sync_state, &config.db_config, &config.target, &journal).await?
-        } else {
-            None
-        };
-        if let Some(pins) = &pinned_nodes {
-            sync_state =
-                DB::stage_sync_frontier(sync_state, config.target.range.start(), pins.clone())
-                    .await?;
+        let start = config.target.range.start();
+        let (mut sync_state, mut journal) =
+            DB::restart_rejected_import(sync_state, journal, start).await?;
+        let mut pinned_nodes = None;
+        if start == Location::new(0) {
+            sync_state = DB::stage_sync_frontier(sync_state, start, Vec::new()).await?;
+            pinned_nodes = Some(Vec::new());
+        }
+        // Nothing is fetched for a journal that already reaches the target, so its operations are
+        // kept only if they authenticate against the target.
+        if journal.size() >= *config.target.range.end() {
+            match DB::local_pinned_nodes(&sync_state, &config.db_config, &config.target, &journal)
+                .await?
+            {
+                Some(pins) => {
+                    if pinned_nodes.is_none() {
+                        sync_state =
+                            DB::stage_sync_frontier(sync_state, start, pins.clone()).await?;
+                        pinned_nodes = Some(pins);
+                    }
+                }
+                None => journal = journal.clear(start).await?,
+            }
         }
         let journal = journal.prepare_range(config.target.range.clone()).await?;
 

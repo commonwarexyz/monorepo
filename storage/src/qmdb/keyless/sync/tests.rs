@@ -1927,10 +1927,36 @@ mod compact_variable_mmr {
         });
     }
 
-    /// A completed import that fails root verification makes the next attempt discard the
-    /// divergent operations it would otherwise reuse. Interrupting later attempts at their first
-    /// durability operation or at any started sync leaves the database either blocked or
-    /// authenticated at the target.
+    fn engine_config<DB>(
+        context: DB::Context,
+        source: Arc<SourceDb>,
+        target: sync::Target<mmr::Family, sha256::Digest>,
+        db_config: DB::Config,
+    ) -> sync::engine::Config<DB, Arc<SourceDb>>
+    where
+        DB: sync::Database<Family = mmr::Family, Digest = sha256::Digest>,
+        Arc<SourceDb>: sync::SourceFor<DB>,
+        DB::Op: Encode,
+    {
+        sync::engine::Config {
+            context,
+            db_config,
+            fetch_batch_size: NZU64!(2),
+            target,
+            source,
+            apply_batch_size: NZU64!(1024),
+            max_outstanding_requests: 1,
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 0,
+        }
+    }
+
+    /// Divergent operations that stop short of the target are reused, so the completed import fails
+    /// root verification and makes the next attempt discard them. Interrupting later attempts at
+    /// their first durability operation or at any started sync leaves the database either blocked
+    /// or authenticated at the target.
     #[test_traced("WARN")]
     fn test_full_sync_rejected_import_discards_divergent_operations() {
         type DelayedDb = variable::Db<
@@ -1940,32 +1966,6 @@ mod compact_variable_mmr {
             Sha256,
             Sequential,
         >;
-
-        fn engine_config<DB>(
-            context: DB::Context,
-            source: Arc<SourceDb>,
-            target: sync::Target<mmr::Family, sha256::Digest>,
-            db_config: DB::Config,
-        ) -> sync::engine::Config<DB, Arc<SourceDb>>
-        where
-            DB: sync::Database<Family = mmr::Family, Digest = sha256::Digest>,
-            Arc<SourceDb>: sync::SourceFor<DB>,
-            DB::Op: Encode,
-        {
-            sync::engine::Config {
-                context,
-                db_config,
-                fetch_batch_size: NZU64!(2),
-                target,
-                source,
-                apply_batch_size: NZU64!(1024),
-                max_outstanding_requests: 1,
-                update_rx: None,
-                finish_rx: None,
-                reached_target_tx: None,
-                max_retained_roots: 0,
-            }
-        }
 
         deterministic::Runner::default().start(|context| async move {
             let source = SourceDb::init(
@@ -1979,6 +1979,8 @@ mod compact_variable_mmr {
                 .append(vec![2])
                 .append(vec![3])
                 .append(vec![4])
+                .append(vec![5])
+                .append(vec![6])
                 .merkleize(&source, None, Location::new(0))
                 .await;
             let (source, _) = source.apply_batch(batch).await.unwrap();
@@ -1988,7 +1990,7 @@ mod compact_variable_mmr {
                 range: non_empty_range!(Location::new(0), source.bounds().end),
             };
 
-            // Retain operations that diverge from the source at the same locations.
+            // Retain a divergent prefix that stops short of the target.
             let config = source_config("rejected-client", &context);
             let client = SourceDb::init(context.child("divergent"), config.clone())
                 .await
@@ -1997,12 +1999,11 @@ mod compact_variable_mmr {
                 .new_batch()
                 .append(vec![7])
                 .append(vec![8])
-                .append(vec![9])
                 .merkleize(&client, None, Location::new(0))
                 .await;
             let (client, _) = client.apply_batch(batch).await.unwrap();
             let client = client.commit().await.unwrap();
-            assert_eq!(client.bounds(), source.bounds());
+            assert!(client.bounds().end < source.bounds().end);
             assert_ne!(client.root(), target.root);
             drop(client);
 
@@ -2117,6 +2118,64 @@ mod compact_variable_mmr {
                 .unwrap();
             assert_eq!(client.root(), target.root);
             client.destroy().await.unwrap();
+        });
+    }
+
+    /// Retained operations that reach the target but do not authenticate against it are discarded
+    /// before fetching, whether or not the operation before the target's end is a commit.
+    #[test_traced("WARN")]
+    fn test_full_sync_discards_unauthenticated_operations_at_target() {
+        deterministic::Runner::default().start(|context| async move {
+            for (floor, appends) in [(0u64, 6u8), (0, 8), (4, 6), (4, 8)] {
+                let case = format!("{floor}-{appends}");
+                let source = SourceDb::init(
+                    context.child("source").with_attribute("case", &case),
+                    source_config(&format!("unauthenticated-source-{case}"), &context),
+                )
+                .await
+                .unwrap();
+                let mut batch = source.new_batch();
+                for value in 0..6u8 {
+                    batch = batch.append(vec![value]);
+                }
+                let batch = batch.merkleize(&source, None, Location::new(floor)).await;
+                let (source, _) = source.apply_batch(batch).await.unwrap();
+                let source = Arc::new(source.commit().await.unwrap());
+                let target = sync::Target {
+                    root: source.root(),
+                    range: non_empty_range!(Location::new(floor), source.bounds().end),
+                };
+
+                // Retain a divergent log that reaches the target. With 6 appends its operation at
+                // `end - 1` is a commit, and with 8 it is an append.
+                let config = source_config(&format!("unauthenticated-client-{case}"), &context);
+                let client = SourceDb::init(
+                    context.child("divergent").with_attribute("case", &case),
+                    config.clone(),
+                )
+                .await
+                .unwrap();
+                let mut batch = client.new_batch();
+                for value in 100..100 + appends {
+                    batch = batch.append(vec![value]);
+                }
+                let batch = batch.merkleize(&client, None, Location::new(0)).await;
+                let (client, _) = client.apply_batch(batch).await.unwrap();
+                let client = client.commit().await.unwrap();
+                assert!(client.bounds().end >= target.range.end());
+                drop(client);
+
+                let synced: SourceDb = sync::sync(engine_config(
+                    context.child("sync").with_attribute("case", &case),
+                    source.clone(),
+                    target.clone(),
+                    config,
+                ))
+                .await
+                .unwrap();
+                assert_eq!(synced.root(), target.root);
+                synced.destroy().await.unwrap();
+            }
         });
     }
 

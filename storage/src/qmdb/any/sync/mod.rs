@@ -186,9 +186,7 @@ where
         target: &qmdb::sync::Target<Self::Family, Self::Digest>,
         journal: &Self::Journal,
     ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        if target.range.start() == Location::new(0)
-            || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
-        {
+        if !qmdb::sync::journal_covers_range(journal.bounds(), &target.range) {
             return Ok(None);
         }
 

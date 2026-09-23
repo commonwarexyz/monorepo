@@ -296,16 +296,17 @@ where
         target: &qmdb::sync::Target<Self::Family, Self::Digest>,
         journal: &Self::Journal,
     ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
-        if target.range.start() == Location::new(0)
-            || !qmdb::sync::journal_covers_range(journal.bounds(), &target.range)
-        {
+        if !qmdb::sync::journal_covers_range(journal.bounds(), &target.range) {
             return Ok(None);
         }
 
         // The inactivity floor is carried by the last commit operation rather than
         // being the target range's start.
-        let inactivity_floor =
-            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
+        let Some(inactivity_floor) =
+            qmdb::sync::retained_floor(journal, target.range.end()).await?
+        else {
+            return Ok(None);
+        };
 
         qmdb::sync::local_pinned_nodes::<F, _, H, S, _>(
             state,

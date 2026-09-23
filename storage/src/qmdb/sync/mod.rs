@@ -30,6 +30,7 @@ mod database;
 pub use database::Database;
 pub(crate) use database::{
     Config as DatabaseConfig, journal_covers_range, local_pinned_nodes, restart_rejected_import,
+    retained_floor,
 };
 
 pub mod source;

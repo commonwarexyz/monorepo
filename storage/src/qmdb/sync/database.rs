@@ -109,12 +109,10 @@ pub trait Database: Sized + Send {
         self,
     ) -> impl Future<Output = Result<(), crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Return locally available pinned nodes for the target, if persisted local state can
-    /// authenticate them.
+    /// Return the target's pinned nodes if the retained operations authenticate against its root.
     ///
-    /// Returning `Some` lets a completed sync journal reuse pinned nodes from an on-disk
-    /// database instead of fetching them from peers. Returning `None` always falls back to
-    /// fetching from peers.
+    /// The engine calls this only when the journal already reaches the target's end, and discards
+    /// the retained operations when it returns `None`.
     fn local_pinned_nodes(
         state: &Self::SyncState,
         config: &Self::Config,
@@ -153,6 +151,25 @@ where
     }
     let journal = journal.clear(start).await.map_err(Into::into)?;
     Ok((frontier.restart().await?, journal))
+}
+
+/// Read the inactivity floor committed at `end - 1`, or `None` if that operation cannot be the
+/// target's last commit.
+pub(crate) async fn retained_floor<F, R>(
+    journal: &R,
+    end: Location<F>,
+) -> Result<Option<Location<F>>, crate::qmdb::Error<F>>
+where
+    F: Family,
+    R: Contiguous<Item: crate::qmdb::operation::Floored<F>>,
+{
+    match crate::qmdb::find_inactivity_floor_at(journal, end).await {
+        Ok(floor) => Ok(Some(floor)),
+        Err(
+            crate::qmdb::Error::HistoricalFloorPruned(_) | crate::qmdb::Error::DataCorrupted(_),
+        ) => Ok(None),
+        Err(err) => Err(err),
+    }
 }
 
 /// Authenticate a retained operation prefix and recover the requested pruning frontier.
