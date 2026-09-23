@@ -304,6 +304,9 @@ pub mod tests {
 
         runner().start(|context| async move {
             let (blob, _) = context.open("observer_sync", b"file").await.unwrap();
+            blob.write_at(0, b"dirty", WriteOptions::default())
+                .await
+                .unwrap();
             let (fd, _peer) = socket();
             let mut blocker = recv(fd, None);
             assert!(poll!(&mut blocker).is_pending());
@@ -367,6 +370,11 @@ pub mod tests {
         let callbacks = Arc::new(Reentrant::default());
         runner().start(|context| async move {
             let (blob, _) = context.open("observer_closed", b"file").await.unwrap();
+
+            // Dirty the open so start_sync submits a request to the closed worker.
+            blob.write_at(0, b"x", WriteOptions::default())
+                .await
+                .unwrap();
             let (fd, _peer) = socket();
             let mut operation = recv(fd.clone(), None);
             let waker = callbacks.waker();
