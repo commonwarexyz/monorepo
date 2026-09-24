@@ -37,6 +37,14 @@ commonware_macros::stability_scope!(BETA {
         core::num::NonZeroU64 => u128;
     );
 
+    impl Widen<usize> for u32 {
+        #[inline]
+        fn widen(self) -> usize {
+            const { assert!(Self::BITS <= usize::BITS) };
+            self as usize
+        }
+    }
+
     impl Widen<u64> for usize {
         #[inline]
         fn widen(self) -> u64 {

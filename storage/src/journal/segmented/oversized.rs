@@ -111,7 +111,10 @@ pub struct Config<C> {
     /// Buffer size for sequential index recovery.
     pub replay_buffer: NonZeroUsize,
 
-    /// Optional compression level for values (using zstd).
+    /// Optional zstd compression level for stored values.
+    ///
+    /// Keep the choice between `None` and `Some(_)` fixed while stored values are retained.
+    /// Only the compression level may change between initializations when compression is enabled.
     pub compression: Option<u8>,
 
     /// Codec configuration for values.
