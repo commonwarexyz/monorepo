@@ -22,7 +22,7 @@ stability_scope!(BETA {
         ordered::{Map, Set},
     };
     use std::{
-        error::Error as StdError, fmt::Debug, future::Future, num::NonZeroUsize, ops::BitOrAssign,
+        error::Error as StdError, fmt::Debug, future::Future, num::NonZeroUsize,
         time::SystemTime,
     };
 
@@ -43,6 +43,8 @@ stability_scope!(BETA {
     pub type Channel = u64;
 
     /// Enum indicating the set of recipients to send a message to.
+    ///
+    /// Sets merge with [`Recipients::union_with`].
     #[derive(Clone, Debug)]
     pub enum Recipients<P: PublicKey> {
         All,
@@ -50,9 +52,15 @@ stability_scope!(BETA {
         One(P),
     }
 
-    impl<P: PublicKey> BitOrAssign for Recipients<P> {
-        fn bitor_assign(&mut self, incoming: Self) {
-            match (&mut *self, incoming) {
+    impl<P: PublicKey> Recipients<P> {
+        /// Adds the recipients in `other` to `self`.
+        ///
+        /// [`Recipients::All`] absorbs any other set. Two equal [`Recipients::One`] stay one
+        /// peer; any other explicit union becomes [`Recipients::Some`] with its peers sorted and
+        /// deduplicated. An empty [`Recipients::Some`] stays explicit and never widens to
+        /// [`Recipients::All`].
+        pub fn union_with(&mut self, other: Self) {
+            match (&mut *self, other) {
                 (Self::All, _) => return,
                 (_, Self::All) => {
                     *self = Self::All;
@@ -499,7 +507,7 @@ mod tests {
     ) {
         let (left, right) = (&recipients[left], &recipients[right]);
         let mut merged = left.clone();
-        merged |= right.clone();
+        merged.union_with(right.clone());
         if matches!(left, Recipients::All) || matches!(right, Recipients::All) {
             assert!(matches!(merged, Recipients::All));
             return;
