@@ -171,10 +171,7 @@ fn fuzz(input: FuzzInput) {
                     let res = BloomFilter::<Sha256>::decode_cfg(encoded, &(cfg.0, wider));
                     assert!(matches!(
                         res,
-                        Err(CodecError::Invalid(
-                            "BloomFilter",
-                            "bitmap length doesn't match config"
-                        ))
+                        Err(CodecError::InvalidLength(len)) if len as u64 == cfg.1.get()
                     ));
                 }
             }
