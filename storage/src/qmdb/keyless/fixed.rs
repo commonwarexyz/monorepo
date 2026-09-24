@@ -15,7 +15,7 @@ pub type Db<F, E, V, H, S> =
     super::Keyless<F, E, FixedEncoding<V>, fixed::Journal<E, Operation<F, V>>, H, S>;
 
 /// A compact keyless authenticated db for fixed-size data.
-pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, (), S>;
+pub type CompactDb<F, E, V, H, S> = super::CompactDb<F, E, FixedEncoding<V>, H, S>;
 
 /// Configuration for a fixed-size [keyless](super) authenticated db.
 pub type Config<S> = super::Config<JournalConfig, S>;
@@ -119,7 +119,6 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
             },
-            commit_codec_config: (),
         };
         TestCompactDb::init(context, cfg, None).await.unwrap()
     }
@@ -205,7 +204,6 @@ mod tests {
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                 },
-                commit_codec_config: (),
             };
             let mut db = TestCompactDb::<F>::init(context.child("create"), cfg.clone(), None)
                 .await
