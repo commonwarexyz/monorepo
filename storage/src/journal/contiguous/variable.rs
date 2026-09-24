@@ -53,6 +53,20 @@ use std::{
 };
 use tracing::warn;
 
+/// Suffix appended to the base partition name for the data blobs.
+const DATA_SUFFIX: &str = "_data";
+
+/// Suffix appended to the base partition name for the offsets journal.
+const OFFSETS_SUFFIX: &str = "_offsets";
+
+/// Unused capacity a compressed [PreparedAppend] may retain before compaction is considered.
+///
+/// In-place compression reserves `ZSTD_compressBound` of each encoded item for one-pass
+/// compression. A compressible record leaves much of that reservation unused, and a caller may
+/// retain the batch across unrelated work. Compaction requires unused capacity above this floor
+/// and at least three times the stored length, borrowing zstd's `ZSTD_WORKSPACETOOLARGE_FACTOR`.
+const PREPARED_SPARE_LIMIT: usize = 64 * 1024;
+
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
 pub struct PreparedAppend<V> {
@@ -61,33 +75,6 @@ pub struct PreparedAppend<V> {
     compressed: bool,
     _marker: PhantomData<V>,
 }
-
-impl<V> PreparedAppend<V> {
-    /// Releases capacity reserved by compressed frames but left unused.
-    ///
-    /// See [PREPARED_SPARE_LIMIT] for the compaction thresholds.
-    fn compact(&mut self) {
-        let (len, capacity) = (self.encoded.len(), self.encoded.capacity());
-        if capacity - len > PREPARED_SPARE_LIMIT && len <= capacity / 4 {
-            self.encoded.shrink_to_fit();
-        }
-    }
-}
-
-/// Suffix appended to the base partition name for the data blobs.
-const DATA_SUFFIX: &str = "_data";
-
-/// Suffix appended to the base partition name for the offsets journal.
-const OFFSETS_SUFFIX: &str = "_offsets";
-
-/// Unused capacity a deferred [PreparedAppend] may retain before compaction is considered.
-///
-/// In-place compression reserves `ZSTD_compressBound` of each encoded item for one-pass
-/// compression. A compressible record leaves much of that reservation unused, and a caller may
-/// retain the batch across unrelated work. Compaction requires unused capacity above this floor
-/// and at least three times the stored length, borrowing zstd's `ZSTD_WORKSPACETOOLARGE_FACTOR`.
-/// Uncompressed frames reserve only what they write, so their batches do not meet both conditions.
-const PREPARED_SPARE_LIMIT: usize = 64 * 1024;
 
 /// Provides an owned buffer for reading and reclaims the scratch unless retained fields share it.
 fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
@@ -2314,7 +2301,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// perform the append without holding unrelated locks across journal I/O.
     pub fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
         let mut prepared = self.0.prepare_append(items)?;
-        prepared.compact();
+        if prepared.compressed {
+            let (len, capacity) = (prepared.encoded.len(), prepared.encoded.capacity());
+            if capacity - len > PREPARED_SPARE_LIMIT && len <= capacity / 4 {
+                prepared.encoded.shrink_to_fit();
+            }
+        }
         Ok(prepared)
     }
 
@@ -2692,9 +2684,7 @@ mod tests {
         },
         telemetry::metrics::{has_metric_value, metric_samples},
     };
-    use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes, test_rng,
-    };
+    use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::Rng as _;
     use std::num::NonZeroU16;
@@ -3997,7 +3987,7 @@ mod tests {
     #[test_traced]
     fn test_variable_prepared_compressed_capacity() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let cfg = Config {
                 partition: "prepared-compressed-capacity".into(),
                 items_per_section: NZU64!(1024),
@@ -4011,12 +4001,11 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut rng = test_rng();
             let large = Bytes::from(vec![0xAB; 1 << 20]);
             let small: Vec<_> = (0..4096)
                 .map(|_| {
                     let mut record = vec![0; 64];
-                    rng.fill_bytes(&mut record);
+                    context.fill_bytes(&mut record);
                     Bytes::from(record)
                 })
                 .collect();

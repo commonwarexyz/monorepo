@@ -1,4 +1,4 @@
-//! Variable-journal frame preparation, excluding storage I/O.
+//! Variable-journal batch preparation across record sizes and compressibility.
 
 use crate::{PAGE_SIZE, REPLAY_BUFFER, WRITE_BUFFER};
 use commonware_runtime::{
@@ -17,9 +17,14 @@ use std::{hint::black_box, time::Instant};
 
 fn bench_size<const SIZE: usize>(c: &mut Criterion) {
     let runner = tokio::Runner::default();
-    // Keep the input payload within 32 MiB, including for large records.
+
+    // Cap input payloads at 32 MiB: the full 32,768-item sweep with 1 MiB records would
+    // otherwise allocate 32 GiB. Oversized batches are skipped below.
     let max_items = 32_768.min(32 * 1024 * 1024 / SIZE);
+
     for random in [false, true] {
+        // Repeated bytes with distinct item prefixes provide highly compressible records.
+        // Random bytes exercise inputs with little opportunity for compression.
         let mut rng = test_rng();
         let values: Vec<_> = (0..max_items as u64)
             .map(|i| {
@@ -32,15 +37,19 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                 FixedBytes::new(bytes)
             })
             .collect();
+
         for items in [1, 32, 256, 1_024, 32_768] {
             if items > max_items {
                 continue;
             }
             let values = &values[..items];
             for compression in [None, Some(3)] {
+                // Fixed-size encoding copies the same number of bytes for either input pattern,
+                // so one uncompressed baseline covers both.
                 if compression.is_none() && random {
                     continue;
                 }
+
                 let level = compression.map_or("none".into(), |level| level.to_string());
                 c.bench_function(
                     &format!(
@@ -69,6 +78,9 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                             .await
                             .unwrap();
 
+                            // Include frame encoding, optional compression, compaction, and dropping
+                            // each batch. Input generation, journal initialization, and cleanup stay
+                            // outside the timed interval.
                             let start = Instant::now();
                             for _ in 0..iters {
                                 black_box(journal.prepare_append(Many::Flat(black_box(values))))

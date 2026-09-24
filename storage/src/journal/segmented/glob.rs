@@ -488,7 +488,7 @@ mod tests {
     use commonware_codec::Encode as _;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, probability, test_rng};
+    use commonware_utils::{NZUsize, probability};
     use rand::Rng as _;
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
@@ -645,7 +645,7 @@ mod tests {
     #[test_traced]
     fn test_glob_compressed_entries_match_reference_format() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let cfg = Config {
                 partition: "test-partition".into(),
                 compression: Some(19),
@@ -663,7 +663,7 @@ mod tests {
                 .map(|len| (0..len).map(|i| (i % 7) as u8).collect())
                 .collect();
             let mut random = vec![0; 4096];
-            test_rng().fill_bytes(&mut random);
+            context.fill_bytes(&mut random);
             values.push(random);
 
             let mut entries = Vec::new();
