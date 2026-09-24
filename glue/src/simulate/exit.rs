@@ -7,7 +7,9 @@ use std::{future::Future, pin::Pin};
 /// Simulation termination condition.
 ///
 /// The simulator evaluates this condition against the current tracker and
-/// active validator states. Returning `Ok(true)` ends the simulation.
+/// active validator states. The first `Ok(true)` ends report collection and
+/// commits to completion. Already accepted finalizations are still validated,
+/// then post-run properties are checked. The condition is not reevaluated.
 pub trait ExitCondition<P: PublicKey, S>: Send + Sync {
     /// Human-readable name for logging and errors.
     fn name(&self) -> &str;

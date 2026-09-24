@@ -18,9 +18,10 @@ pub trait FinalizationProperty<S>: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 }
 
-/// A property checked once at simulation end with access to both the
-/// progress tracker and all validator states (inside the runtime,
-/// before it shuts down).
+/// A property checked once at simulation end with access to the final
+/// progress tracker and all active validator states. Report collection has
+/// ended, but validator actors remain available for state queries until
+/// the runtime shuts down.
 pub trait Property<P: PublicKey, S>: Send + Sync {
     /// Human-readable name for error reporting.
     fn name(&self) -> &str;

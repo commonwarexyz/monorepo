@@ -298,7 +298,6 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
 }
 
 /// Engine definition implementing `EngineDefinition` for the simulation harness.
-#[derive(Clone)]
 pub(crate) struct SingleDbEngine {
     participants: Vec<ed25519::PublicKey>,
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
@@ -307,6 +306,21 @@ pub(crate) struct SingleDbEngine {
     retained_marshal_blocks: usize,
     sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+}
+
+// Plans clone definitions for each run; a team keeps its definition across restarts.
+impl Clone for SingleDbEngine {
+    fn clone(&self) -> Self {
+        Self {
+            participants: self.participants.clone(),
+            schemes: self.schemes.clone(),
+            enable_state_sync: self.enable_state_sync,
+            sync_config: self.sync_config,
+            retained_marshal_blocks: self.retained_marshal_blocks,
+            sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
+            sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
 }
 
 impl SingleDbEngine {
@@ -632,6 +646,7 @@ impl EngineDefinition for SingleDbEngine {
         (
             handle,
             MockValidatorState {
+                public_key: public_key.clone(),
                 marshal: marshal_mailbox,
                 state_sync_entries: self
                     .sync_entries

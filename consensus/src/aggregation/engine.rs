@@ -326,6 +326,21 @@ impl<
                         }
                     });
 
+                if let Some(signer) = scheme.me() {
+                    for (height, pending) in &self.pending {
+                        if self.confirmed.contains_key(height) {
+                            continue;
+                        }
+                        if let Pending::Verified(_, acks) = pending
+                            && !acks
+                                .get(&epoch)
+                                .is_some_and(|acks| acks.contains_key(&signer))
+                        {
+                            self.rebroadcast_deadlines.put(*height, self.context.current());
+                        }
+                    }
+                }
+
                 continue;
             },
 
@@ -615,7 +630,10 @@ impl<
                 let signed;
                 (self, signed) = self.sign_ack(height, digest).await;
                 match signed {
-                    Some(ack) => ack,
+                    Some(ack) => {
+                        (self, _) = self.handle_ack(&ack).await;
+                        ack
+                    }
                     None => return self,
                 }
             }

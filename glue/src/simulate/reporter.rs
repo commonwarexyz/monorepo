@@ -15,11 +15,13 @@ use commonware_utils::channel::mpsc;
 /// finalization events to the simulation harness via a monitor channel.
 ///
 /// Place this in the marshal reporter chain so it intercepts
-/// [`Update::Tip`] events before delegation.
+/// [`Update::Tip`] events before delegation. Monitoring ends when the
+/// simulation exit condition first succeeds; later events still reach the
+/// wrapped reporter.
 #[derive(Clone)]
 pub struct MonitorReporter<P: PublicKey, R> {
     inner: R,
-    monitor: mpsc::Sender<FinalizationUpdate<P>>,
+    monitor: mpsc::UnboundedSender<FinalizationUpdate<P>>,
     pk: P,
 }
 
@@ -29,7 +31,11 @@ impl<P: PublicKey, R> MonitorReporter<P, R> {
     /// - `pk`: the public key of the validator this reporter belongs to.
     /// - `monitor`: channel for sending finalization updates to the harness.
     /// - `inner`: the wrapped reporter to delegate to after interception.
-    pub const fn new(pk: P, monitor: mpsc::Sender<FinalizationUpdate<P>>, inner: R) -> Self {
+    pub const fn new(
+        pk: P,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<P>>,
+        inner: R,
+    ) -> Self {
         Self { inner, monitor, pk }
     }
 }
@@ -44,10 +50,11 @@ where
     type Activity = Update<B>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let Update::Tip(round, _, ref digest) = activity {
-            let _ = self.monitor.try_send(FinalizationUpdate {
+        if let Update::Tip(round, height, ref digest) = activity {
+            let _ = self.monitor.send(FinalizationUpdate {
                 pk: self.pk.clone(),
                 round,
+                height,
                 block_digest: digest.as_ref().to_vec(),
             });
         }

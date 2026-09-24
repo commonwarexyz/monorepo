@@ -218,6 +218,59 @@ fn state_sync_crash_during_sync() {
 
 #[test_group("slow")]
 #[test_traced("DEBUG")]
+fn state_sync_recovery_rejects_uncrashed_seed_single_db() {
+    run_state_sync_recovery_rejects_uncrashed_seed(
+        SingleDbEngine::new(NUM_VALIDATORS)
+            .with_state_sync()
+            .with_slow_state_sync(),
+    );
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+fn state_sync_recovery_rejects_uncrashed_seed_multi_db() {
+    run_state_sync_recovery_rejects_uncrashed_seed(
+        MultiDbEngine::new(NUM_VALIDATORS)
+            .with_state_sync()
+            .with_slow_state_sync(),
+    );
+}
+
+fn run_state_sync_recovery_rejects_uncrashed_seed<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    CrashDuringStateSyncRecovery: Property<ed25519::PublicKey, D::State>,
+    LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    let late_joiner = engine.participants()[0].clone();
+    state_sync_crash_plan(engine.clone())
+        .seeds([0])
+        .run()
+        .expect("first seed must demonstrate recovery")
+        .into_iter()
+        .for_each(|result| {
+            assert_eq!(result.crashes, 1);
+            assert_eq!(result.scheduled_actions, 2);
+        });
+
+    let result = state_sync_plan(engine)
+        .seeds([1])
+        .property(CrashDuringStateSyncRecovery::new(late_joiner))
+        .run();
+    let Err(error) = result else {
+        panic!("recovery property accepted an uncrashed seed");
+    };
+    assert!(
+        error.contains("post-run property violation (crash_during_state_sync_recovery)"),
+        "unexpected simulation failure: {error}"
+    );
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
 #[should_panic(expected = "runtime timeout")]
 fn state_sync_partitioned_restart_stays_stuck_until_network_heals_single_db() {
     run_state_sync_partitioned_restart_stays_stuck_until_network_heals(
@@ -710,9 +763,28 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    state_sync_crash_plan(engine)
+        .seeds(0..5)
+        .property(LateJoinerStateSyncHandoff)
+        .property(BlockAgreementAtHeight::new(130))
+        .run()
+        .unwrap()
+        .into_iter()
+        .for_each(|result| {
+            assert_eq!(result.crashes, 1);
+            assert_eq!(result.scheduled_actions, 2);
+        });
+}
+
+fn state_sync_crash_plan<D>(engine: D) -> PlanBuilder<D>
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    CrashDuringStateSyncRecovery: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
     let late_joiner = engine.participants()[0].clone();
     PlanBuilder::new(engine)
-        .seeds(0..5)
         .crash(Crash::DelayRound {
             participants: vec![late_joiner.clone()],
             round: Round::new(Epoch::zero(), View::new(80)),
@@ -721,15 +793,14 @@ where
         // state sync, then restart it without clearing any partitions.
         .crash(Crash::Schedule(
             Schedule::new()
-                .at(Duration::from_secs(5), Action::Crash(late_joiner.clone()))
-                .at(Duration::from_secs(7), Action::Restart(late_joiner)),
+                .at(
+                    Duration::from_millis(6_250),
+                    Action::Crash(late_joiner.clone()),
+                )
+                .at(Duration::from_secs(7), Action::Restart(late_joiner.clone())),
         ))
         .exit_condition(ProcessedHeightAtLeast::new(130))
-        .property(CrashDuringStateSyncRecovery)
-        .property(LateJoinerStateSyncHandoff)
-        .property(BlockAgreementAtHeight::new(130))
-        .run()
-        .unwrap();
+        .property(CrashDuringStateSyncRecovery::new(late_joiner))
 }
 
 /// Partition the late joiner, crash it mid-sync, then restart it into the same

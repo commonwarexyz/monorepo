@@ -52,7 +52,7 @@ impl<D: EngineDefinition> Team<D> {
         ctx: &deterministic::Context,
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         pk: D::PublicKey,
-        monitor: mpsc::Sender<FinalizationUpdate<D::PublicKey>>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<D::PublicKey>>,
         delayed: bool,
     ) {
         // Abort existing handle if present
@@ -111,7 +111,7 @@ impl<D: EngineDefinition> Team<D> {
         ctx: &deterministic::Context,
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         link: Link,
-        monitor: mpsc::Sender<FinalizationUpdate<D::PublicKey>>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<D::PublicKey>>,
         delayed: &HashSet<D::PublicKey>,
     ) {
         // Link all participants
@@ -156,7 +156,7 @@ impl<D: EngineDefinition> Team<D> {
         ctx: &deterministic::Context,
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         pk: D::PublicKey,
-        monitor: mpsc::Sender<FinalizationUpdate<D::PublicKey>>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<D::PublicKey>>,
         delayed: bool,
     ) {
         info!(target: "simulator", ?pk, "restarting validator");

@@ -493,7 +493,8 @@ impl<D: EngineDefinition> Plan<D> {
 
         let total = self.participants.len();
         let mut team = Team::new(self.engine.clone(), self.participants.clone());
-        let (monitor_tx, mut monitor_rx) = mpsc::channel::<FinalizationUpdate<D::PublicKey>>(1024);
+        let (monitor_tx, mut monitor_rx) =
+            mpsc::unbounded_channel::<FinalizationUpdate<D::PublicKey>>();
         let (restart_tx, mut restart_rx) = mpsc::channel::<D::PublicKey>(10);
         let (crash_tx, mut crash_rx) = mpsc::channel::<()>(1);
         let (schedule_tx, mut schedule_rx) = mpsc::channel::<ScheduleCmd<D::PublicKey>>(10);
@@ -570,6 +571,7 @@ impl<D: EngineDefinition> Plan<D> {
                 let was_delayed = delayed.contains(&pk);
                 team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
                     .await;
+                continue;
             },
             Some(update) = monitor_rx.recv() else {
                 result = Err("monitor channel closed".into());
@@ -611,37 +613,12 @@ impl<D: EngineDefinition> Plan<D> {
                     }
                 }
 
-                // Check termination.
-                let target_count = if delayed_started { total } else { active_count };
-                let states = team.active_states();
-                let done = self
-                    .exit_condition
-                    .reached(&tracker, &states, target_count)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "exit condition evaluation failed ({}): {e}",
-                            self.exit_condition.name()
-                        )
-                    })?;
-                if done {
-                    result = self
-                        .finish(
-                            &ctx,
-                            tracker,
-                            &team,
-                            crashes,
-                            &scheduled_actions,
-                            delayed_started,
-                        )
-                        .await;
-                    break;
-                }
-
                 // Start delayed validators after enough progress
                 if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
                     info!(target: "simulator", "starting delayed participants");
-                    for pk in &delayed {
+                    let mut delayed_order: Vec<_> = delayed.iter().collect();
+                    delayed_order.sort_unstable();
+                    for pk in delayed_order {
                         team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
                             .await;
                     }
@@ -652,45 +629,21 @@ impl<D: EngineDefinition> Plan<D> {
                 if !self.exit_condition.requires_polling() {
                     continue;
                 }
-                let target_count = if delayed_started { total } else { active_count };
-                let states = team.active_states();
-                let done = self
-                    .exit_condition
-                    .reached(&tracker, &states, target_count)
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "exit condition evaluation failed ({}): {e}",
-                            self.exit_condition.name()
-                        )
-                    })?;
-                if !done {
-                    continue;
-                }
-
-                result = self
-                    .finish(
-                        &ctx,
-                        tracker,
-                        &team,
-                        crashes,
-                        &scheduled_actions,
-                        delayed_started,
-                    )
-                    .await;
-                break;
             },
-            Some(cmd) = schedule_rx.recv() else break => match cmd {
-                ScheduleCmd::Crash(pk) => {
-                    if team.crash(&pk) {
-                        crashes += 1;
+            Some(cmd) = schedule_rx.recv() else break => {
+                match cmd {
+                    ScheduleCmd::Crash(pk) => {
+                        if team.crash(&pk) {
+                            crashes += 1;
+                        }
+                    }
+                    ScheduleCmd::Restart(pk) => {
+                        let was_delayed = delayed.contains(&pk);
+                        team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                            .await;
                     }
                 }
-                ScheduleCmd::Restart(pk) => {
-                    let was_delayed = delayed.contains(&pk);
-                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
-                        .await;
-                }
+                continue;
             },
             _ = crash_rx.recv() => {
                 let Some((_, downtime, count)) = self.random_crash() else {
@@ -713,6 +666,41 @@ impl<D: EngineDefinition> Plan<D> {
                         let _ = restart_tx.send(pk).await;
                     });
                 }
+                continue;
+            },
+            on_end => {
+                if !monitor_rx.is_closed() {
+                    let target_count = if delayed_started { total } else { active_count };
+                    let states = team.active_states();
+                    let done = self.exit_condition.reached(&tracker, &states, target_count)
+                        .await
+                        .map_err(|e| format!(
+                            "exit condition evaluation failed ({}): {e}",
+                            self.exit_condition.name(),
+                        ))?;
+                    if !done {
+                        continue;
+                    }
+
+                    // Completion fixes the report boundary. Already accepted tips
+                    // still receive the normal checks, while live actors remain
+                    // available to post-run properties.
+                    monitor_rx.close();
+                }
+                if !monitor_rx.is_empty() {
+                    continue;
+                }
+                result = self
+                    .finish(
+                        &ctx,
+                        tracker,
+                        &team,
+                        crashes,
+                        &scheduled_actions,
+                        delayed_started,
+                    )
+                    .await;
+                break;
             },
         }
 
@@ -847,9 +835,10 @@ impl<D: EngineDefinition> Plan<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::types::{Epoch, Round, View};
+    use commonware_consensus::types::{Epoch, Height, Round, View};
     use commonware_cryptography::{Signer as _, ed25519};
     use commonware_runtime::{Clock, Handle, Quota, Spawner};
+    use commonware_utils::sync::Mutex;
     use std::{
         future::Future,
         pin::Pin,
@@ -861,14 +850,19 @@ mod tests {
         participants: Vec<ed25519::PublicKey>,
         finalize_after: Duration,
         finalizations: u64,
+        period: Duration,
+        script: Vec<(ed25519::PublicKey, u64, u8)>,
+        starts: Option<Arc<Mutex<Vec<usize>>>>,
     }
 
     struct FinalizingNode {
         context: deterministic::Context,
-        monitor: mpsc::Sender<FinalizationUpdate<ed25519::PublicKey>>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<ed25519::PublicKey>>,
         pk: ed25519::PublicKey,
         finalize_after: Duration,
         finalizations: u64,
+        period: Duration,
+        script: Vec<(ed25519::PublicKey, u64, u8)>,
     }
 
     #[derive(Clone)]
@@ -878,7 +872,7 @@ mod tests {
 
     struct FaultObservingNode {
         context: deterministic::Context,
-        monitor: mpsc::Sender<FinalizationUpdate<ed25519::PublicKey>>,
+        monitor: mpsc::UnboundedSender<FinalizationUpdate<ed25519::PublicKey>>,
         pk: ed25519::PublicKey,
     }
 
@@ -894,6 +888,9 @@ mod tests {
                 participants,
                 finalize_after,
                 finalizations,
+                period: Duration::ZERO,
+                script: vec![],
+                starts: None,
             }
         }
     }
@@ -926,6 +923,17 @@ mod tests {
         ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
             let finalize_after = self.finalize_after;
             let finalizations = self.finalizations;
+            let period = self.period;
+            let script = if ctx.index == 0 {
+                self.script.clone()
+            } else {
+                vec![]
+            };
+            if ctx.delayed
+                && let Some(starts) = &self.starts
+            {
+                starts.lock().push(ctx.index);
+            }
             async move {
                 (
                     FinalizingNode {
@@ -934,6 +942,8 @@ mod tests {
                         pk: ctx.public_key.clone(),
                         finalize_after,
                         finalizations,
+                        period,
+                        script,
                     },
                     (),
                 )
@@ -945,18 +955,32 @@ mod tests {
             let monitor = engine.monitor;
             let finalize_after = engine.finalize_after;
             let finalizations = engine.finalizations;
+            let period = engine.period;
+            let script = engine.script;
             engine.context.spawn(move |ctx| async move {
                 if finalize_after > Duration::ZERO {
                     ctx.sleep(finalize_after).await;
                 }
-                for view in 1..=finalizations {
-                    let _ = monitor
+                for (pk, view, digest) in script {
+                    monitor
                         .send(FinalizationUpdate {
-                            pk: pk.clone(),
+                            pk,
                             round: Round::new(Epoch::zero(), View::new(view)),
-                            block_digest: vec![view as u8],
+                            height: Height::new(view),
+                            block_digest: vec![digest],
                         })
-                        .await;
+                        .expect("report must enter monitor queue");
+                }
+                for view in 1..=finalizations {
+                    let _ = monitor.send(FinalizationUpdate {
+                        pk: pk.clone(),
+                        round: Round::new(Epoch::zero(), View::new(view)),
+                        height: Height::new(view),
+                        block_digest: vec![view as u8],
+                    });
+                    if period > Duration::ZERO {
+                        ctx.sleep(period).await;
+                    }
                 }
             })
         }
@@ -998,13 +1022,12 @@ mod tests {
             let monitor = engine.monitor;
             engine.context.spawn(move |ctx| async move {
                 ctx.sleep(Duration::from_millis(10)).await;
-                let _ = monitor
-                    .send(FinalizationUpdate {
-                        pk,
-                        round: Round::new(Epoch::zero(), View::new(1)),
-                        block_digest: vec![1],
-                    })
-                    .await;
+                let _ = monitor.send(FinalizationUpdate {
+                    pk,
+                    round: Round::new(Epoch::zero(), View::new(1)),
+                    height: Height::new(1),
+                    block_digest: vec![1],
+                });
             })
         }
     }
@@ -1080,6 +1103,154 @@ mod tests {
                 ))
             })
         }
+    }
+
+    impl ExitCondition<ed25519::PublicKey, ()> for SingleUseProperty {
+        fn name(&self) -> &str {
+            "single_use_condition"
+        }
+
+        fn requires_polling(&self) -> bool {
+            true
+        }
+
+        fn reached<'a>(
+            &'a self,
+            _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+            _states: &'a [&'a ()],
+            _target_count: usize,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + 'a>> {
+            Box::pin(async move { Ok(self.calls.fetch_add(1, Ordering::Relaxed) == 0) })
+        }
+    }
+
+    #[test]
+    fn completion_commits_before_draining() {
+        for finalizations in [0, 3] {
+            let result = PlanBuilder::new(FinalizingEngine::new(1, Duration::ZERO, finalizations))
+                .exit_condition(SingleUseProperty::default())
+                .property(SingleUseProperty::default())
+                .timeout(Duration::from_secs(1))
+                .run()
+                .expect("the first successful exit check commits to completion");
+            assert_eq!(result[0].tracker.min_view(), finalizations);
+        }
+    }
+
+    #[derive(Clone)]
+    struct SlowCheck {
+        context: Arc<deterministic::Context>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl FinalizationProperty<()> for SlowCheck {
+        fn name(&self) -> &str {
+            "slow_check"
+        }
+        fn check<'a>(
+            &'a self,
+            _states: &'a [&'a ()],
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                self.context.sleep(Duration::from_millis(5)).await;
+                Ok(())
+            })
+        }
+    }
+
+    impl Property<ed25519::PublicKey, ()> for SlowCheck {
+        fn name(&self) -> &str {
+            "slow_check"
+        }
+        fn check<'a>(
+            &'a self,
+            _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+            states: &'a [&'a ()],
+        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+            FinalizationProperty::check(self, states)
+        }
+    }
+
+    #[rstest::rstest]
+    #[case::finalization_property(true)]
+    #[case::post_run_property(false)]
+    fn completion_does_not_require_a_quiet_reporter(#[case] per_finalization: bool) {
+        deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+            let mut engine = FinalizingEngine::new(1, Duration::ZERO, u64::MAX);
+            engine.period = Duration::from_millis(1);
+            let calls = Arc::new(AtomicUsize::new(0));
+            let property = SlowCheck {
+                context: Arc::new(context.child("slow_check")),
+                calls: calls.clone(),
+            };
+            let builder = PlanBuilder::new(engine).required_finalizations(1);
+            let plan = if per_finalization {
+                builder.finalization_property(property)
+            } else {
+                builder.property(property)
+            }
+            .build();
+            let result = plan
+                .run_inner(context)
+                .await
+                .expect("finite checks must complete despite continuous finalizations");
+            let checked = calls.load(Ordering::Relaxed);
+            if per_finalization {
+                assert!(
+                    checked > 1,
+                    "must check the backlog accepted during the first check"
+                );
+                assert_eq!(checked as u64, result.tracker.min_view());
+            } else {
+                assert_eq!(checked, 1, "post-run properties run once");
+            }
+        });
+    }
+
+    #[test]
+    fn queued_fork_must_fail_simulation() {
+        let mut engine = FinalizingEngine::new(2, Duration::ZERO, 0);
+        let a = engine.participants[0].clone();
+        let b = engine.participants[1].clone();
+        engine.script = vec![(b.clone(), 2, 2), (a, 3, 3), (b, 3, 4)];
+        let error = PlanBuilder::new(engine)
+            .required_finalizations(2)
+            .timeout(Duration::from_secs(2))
+            .run()
+            .err()
+            .expect("queued conflict must fail");
+        assert!(error.contains("fork detected"), "{error}");
+    }
+
+    #[test]
+    fn multi_delayed_start_is_deterministic() {
+        let mut observed = HashSet::new();
+        for _ in 0..24 {
+            let starts = Arc::new(Mutex::new(vec![]));
+            let mut engine = FinalizingEngine::new(4, Duration::from_millis(100), 2);
+            let delayed = engine.participants[..2].to_vec();
+            engine.starts = Some(starts.clone());
+            let result = PlanBuilder::new(engine)
+                .seed(7)
+                .required_finalizations(2)
+                .timeout(Duration::from_secs(2))
+                .crash(Crash::DelayRound {
+                    participants: delayed,
+                    round: Round::new(Epoch::zero(), View::new(1)),
+                })
+                .run()
+                .unwrap();
+            assert!(result[0].delayed_started);
+            let order = starts.lock().clone();
+            assert_eq!(order.len(), 2);
+            observed.insert((order, result[0].state.clone()));
+        }
+        assert_eq!(
+            observed.len(),
+            1,
+            "different starts or audit states: {observed:?}"
+        );
     }
 
     #[test]

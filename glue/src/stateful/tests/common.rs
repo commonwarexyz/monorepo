@@ -74,6 +74,7 @@ pub(super) fn archive_config<C>(
 /// can share the same state type and property implementations.
 #[derive(Clone)]
 pub(crate) struct MockValidatorState<V: Variant> {
+    pub(super) public_key: ed25519::PublicKey,
     pub(super) marshal: marshal::core::Mailbox<MockScheme<ed25519::PublicKey>, V>,
     pub(super) state_sync_entries: u64,
     pub(super) state_sync_height: Option<u64>,
@@ -82,7 +83,8 @@ pub(crate) struct MockValidatorState<V: Variant> {
 
 impl<V: Variant> PartialEq for MockValidatorState<V> {
     fn eq(&self, other: &Self) -> bool {
-        self.state_sync_entries == other.state_sync_entries
+        self.public_key == other.public_key
+            && self.state_sync_entries == other.state_sync_entries
             && self.state_sync_height == other.state_sync_height
     }
 }
