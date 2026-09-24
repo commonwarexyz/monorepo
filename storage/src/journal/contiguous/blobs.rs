@@ -900,12 +900,15 @@ mod tests {
 
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
+            // The first frame fills the first page, and the second frame's payload ends one
+            // byte into the third page.
             let exact_page = [0x11; 63];
             let cross_page = [0x22; 64];
             let mut encoded = Vec::new();
             encode_frame_into(None, &exact_page, &mut encoded).unwrap();
             encode_frame_into(None, &cross_page, &mut encoded).unwrap();
 
+            // Replay a sealed snapshot so payloads are copied out of the paged replay buffer.
             let cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(3));
             let (blob, size) = context
                 .open("paged-replay-bulk-fields", b"blob")
@@ -918,6 +921,7 @@ mod tests {
                 .replay_from(0, NZUsize!(128), ReadOptions::default())
                 .unwrap();
 
+            // A payload ending exactly at a page boundary is copied from one page.
             assert!(replay.ensure(1).await.unwrap());
             let (len, _) = replay.read_length().unwrap();
             assert_eq!(len, exact_page.len());
@@ -927,6 +931,7 @@ mod tests {
                 exact_page
             );
 
+            // The next frame starts on the second page, and its payload crosses into the third.
             assert!(replay.ensure(1).await.unwrap());
             let (len, _) = replay.read_length().unwrap();
             assert_eq!(len, cross_page.len());

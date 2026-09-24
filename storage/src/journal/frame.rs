@@ -164,6 +164,7 @@ pub(super) struct Limited<B> {
 }
 
 impl<B: Buf> Limited<B> {
+    /// Limit reads from `inner` to `limit` bytes.
     pub(super) fn new(inner: B, limit: usize) -> Self {
         Self {
             inner: inner.take(limit),
@@ -405,13 +406,18 @@ mod tests {
     };
     use zstd::bulk::compress;
 
+    /// A buffer that counts the bulk copies forwarded to it.
     struct TrackingBuf {
+        /// Bytes served to readers.
         inner: Bytes,
+        /// Calls to `copy_to_slice`.
         copies: usize,
+        /// Calls to `try_copy_to_slice`.
         try_copies: usize,
     }
 
     impl TrackingBuf {
+        /// Wrap `inner` with no copies recorded.
         fn new(inner: Bytes) -> Self {
             Self {
                 inner,
@@ -464,9 +470,11 @@ mod tests {
         {
             let mut limited = Limited::new(&mut backing, 10);
 
+            // An empty copy still reaches the backing buffer.
             let mut empty = [];
             limited.try_copy_to_slice(&mut empty).unwrap();
 
+            // Both copy methods forward to the backing buffer and consume the limit.
             let mut prefix = [0; 4];
             limited.try_copy_to_slice(&mut prefix).unwrap();
             assert_eq!(&prefix, b"abcd");
@@ -477,6 +485,7 @@ mod tests {
             assert_eq!(limited.remaining(), 0);
         }
 
+        // Each copy was forwarded once, and bytes past the limit stay unread.
         assert_eq!(backing.try_copies, 2);
         assert_eq!(backing.copies, 1);
         assert_eq!(backing.inner.as_ref(), b"NEXT");
@@ -487,6 +496,7 @@ mod tests {
         let mut backing = TrackingBuf::new(Bytes::from_static(b"dataNEXT"));
         let mut limited = Limited::new(&mut backing, 4);
 
+        // A fallible overread fails before reaching the backing buffer.
         let mut dst = [0xAA; 5];
         let err = limited.try_copy_to_slice(&mut dst).unwrap_err();
         assert_eq!(err.requested, 5);
@@ -496,17 +506,20 @@ mod tests {
         assert_eq!(limited.inner.get_ref().inner.as_ref(), b"dataNEXT");
         assert_eq!(limited.inner.get_ref().try_copies, 0);
 
+        // An infallible overread panics without copying or advancing.
         let mut dst = [0xBB; 5];
         assert!(catch_unwind(AssertUnwindSafe(|| limited.copy_to_slice(&mut dst))).is_err());
         assert_eq!(dst, [0xBB; 5]);
         assert_eq!(limited.remaining(), 4);
         assert_eq!(limited.inner.get_ref().inner.as_ref(), b"dataNEXT");
 
+        // Integer reads check the limit too.
         let err = limited.try_get_u64().unwrap_err();
         assert_eq!(err.requested, 8);
         assert_eq!(err.available, 4);
         assert_eq!(limited.remaining(), 4);
 
+        // A backing buffer shorter than the limit bounds what is available.
         let mut short = TrackingBuf::new(Bytes::from_static(b"abc"));
         let mut limited = Limited::new(&mut short, usize::MAX);
         let err = limited.try_copy_to_slice(&mut [0; 4]).unwrap_err();
@@ -518,6 +531,7 @@ mod tests {
 
     #[test]
     fn test_limited_buf_preserves_owned_bytes_and_frame_bounds() {
+        // `copy_to_bytes` returns a view of the source instead of a copy.
         let source = Bytes::from_static(b"abcdefghNEXT");
         let source_ptr = source.as_ptr();
         let retained = {
@@ -528,6 +542,7 @@ mod tests {
         drop(source);
         assert_eq!(retained.as_ref(), b"abcdefgh");
 
+        // Decoding must consume the whole frame, and no more.
         let mut source = Bytes::from_static(b"abcdefghNEXT");
         assert!(matches!(
             decode_item::<u8>(Limited::new(&mut source, 8), &(), false),
@@ -535,6 +550,7 @@ mod tests {
         ));
         assert!(source.as_ref().ends_with(b"NEXT"));
 
+        // A field longer than the frame fails without consuming the source.
         let mut source = Bytes::from_static(b"abcdefghNEXT");
         assert!(matches!(
             decode_item::<u64>(Limited::new(&mut source, 7), &(), false),

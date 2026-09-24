@@ -886,7 +886,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 }
             }
 
-            // Decode item - use take() to limit bytes read
+            // Decode the item without reading past its frame
             let item_offset = current.offset;
             let next_offset = match current
                 .offset
