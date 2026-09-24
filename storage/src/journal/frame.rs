@@ -179,8 +179,6 @@ pub(super) async fn read_frame_at<V: Codec>(
 }
 
 /// Compress `data` into one independent zstd frame appended to `buf`, returning its length.
-///
-/// Each thread reuses one zstd context across calls.
 pub(super) fn compress_into(level: u8, data: &[u8], buf: &mut Vec<u8>) -> Result<usize, Error> {
     let start = buf.len();
     buf.reserve(compress_bound(data.len()));
