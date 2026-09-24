@@ -206,6 +206,8 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
 
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
+    ///
+    /// `proof.leaves` is the bitmap's total bit length, which `root` authenticates.
     pub fn verify_bit_inclusion(
         hasher: &impl Hasher<mmr::Family, Digest = D>,
         proof: &Proof<D>,
@@ -440,8 +442,8 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     ///
     /// The bitmap proof stores the number of bits in the bitmap within the proof's `leaves` field
     /// instead of the underlying MMR leaf count, since the MMR does not reflect the number of bits
-    /// in any partial chunk. The underlying MMR size can be derived from the number of bits as
-    /// `leaf_num_to_pos(proof.leaves / BitMap<_, N>::CHUNK_SIZE_BITS)`.
+    /// in any partial chunk. The underlying MMR leaf count is `proof.leaves` divided by
+    /// [Self::CHUNK_SIZE_BITS].
     ///
     /// # Errors
     ///
@@ -725,7 +727,7 @@ mod tests {
     #[test_traced]
     fn test_bitmap_verify_rejects_relocated_partial_chunk() {
         for bagging in [ForwardFold, BackwardFold] {
-            // Empty MMR, single peaks, and multiple peaks.
+            // Empty MMR, one peak, and multiple peaks.
             for full_chunks in [0, 1, 2, 3, 7] {
                 test_bitmap_verify_rejects_relocated_partial_chunk_n::<1>(full_chunks, bagging);
                 test_bitmap_verify_rejects_relocated_partial_chunk_n::<32>(full_chunks, bagging);
@@ -787,6 +789,13 @@ mod tests {
                         relocated.leaves = Location::new(target_chunk * chunk_bits + tail_bits);
                         for offset in 0..=tail_bits {
                             let bit = target_chunk * chunk_bits + offset;
+                            // A tail bit relocated into a full chunk contradicts the real bit.
+                            if target_chunk < full_chunks && offset < tail_bits {
+                                assert_ne!(
+                                    TestMerkleizedBitMap::<N>::get_bit_from_chunk(&chunk, bit),
+                                    !bit.is_multiple_of(2),
+                                );
+                            }
                             let valid = TestMerkleizedBitMap::<N>::verify_bit_inclusion(
                                 &hasher, &relocated, &chunk, bit, &root,
                             );
