@@ -10,11 +10,28 @@ use crate::{
 use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
 use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{futures::Aborter, ordered::Quorum};
-use std::{
-    mem::replace,
-    time::{Duration, SystemTime},
-};
+use std::time::{Duration, SystemTime};
 use tracing::{Span, debug, info_span};
+
+/// Our nullify or finalize vote for a round, and the timeouts live before it.
+///
+/// The two votes are mutually exclusive and never retracted (see the module
+/// documentation), so a round never returns to [Decision::Open].
+enum Decision {
+    /// Neither vote broadcast. The leader and certification deadlines are
+    /// armed on view entry. The latch holds the first explicit timeout, which
+    /// can precede view entry and never moves.
+    Open {
+        leader: Option<SystemTime>,
+        certification: Option<SystemTime>,
+        latch: Option<(SystemTime, TimeoutReason)>,
+    },
+    /// Nullify vote broadcast. Only the retry deadline can fire, and
+    /// next_timeout schedules it on the first poll.
+    Nullified { retry: Option<SystemTime> },
+    /// Finalize vote broadcast. No round-local timeout can fire.
+    Finalized,
+}
 
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
@@ -57,27 +74,19 @@ pub struct Round<S: Scheme, D: Digest> {
 
     proposal: ProposalSlot<D>,
 
-    // Deadlines armed by set_deadlines when entering a view.
-    leader_deadline: Option<SystemTime>,
-    certification_deadline: Option<SystemTime>,
+    decision: Decision,
+
+    // Same-term stall anchor armed by set_deadlines. Unlike the round-local
+    // timeouts, it survives our nullify vote.
     stall_deadline: Option<SystemTime>,
-
-    // Nullify retry, scheduled by next_timeout and reset by construct_nullify.
-    retry_deadline: Option<SystemTime>,
-
-    // First explicit timeout latched for this round (see latch_timeout).
-    // Unlike retry_deadline, this is first-wins and never moves.
-    latched_timeout: Option<(SystemTime, TimeoutReason)>,
 
     // Certificates received from batcher (constructed or from network).
     notarization: Option<Notarization<S, D>>,
     broadcast_notarize: bool,
     broadcast_notarization: bool,
     nullification: Option<Nullification<S>>,
-    broadcast_nullify: bool,
     broadcast_nullification: bool,
     finalization: Option<Finalization<S, D>>,
-    broadcast_finalize: bool,
     broadcast_finalization: bool,
     certify: CertifyState,
     last_ancestry_request: Option<View>,
@@ -97,19 +106,18 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             span: ViewSpan::new(),
             leader: None,
             proposal: ProposalSlot::new(),
-            leader_deadline: None,
-            certification_deadline: None,
+            decision: Decision::Open {
+                leader: None,
+                certification: None,
+                latch: None,
+            },
             stall_deadline: None,
-            retry_deadline: None,
-            latched_timeout: None,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
             nullification: None,
-            broadcast_nullify: false,
             broadcast_nullification: false,
             finalization: None,
-            broadcast_finalize: false,
             broadcast_finalization: false,
             certify: CertifyState::Ready,
             last_ancestry_request: None,
@@ -120,7 +128,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader info if we should propose.
     fn propose_ready(&self) -> Option<Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
-        if !self.is_signer(leader.idx) || self.broadcast_nullify || !self.proposal.should_build() {
+        if !self.is_signer(leader.idx) || self.nullified() || !self.proposal.should_build() {
             return None;
         }
         Some(leader.clone())
@@ -141,7 +149,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader info if we should verify a proposal.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
-        if self.is_signer(leader.idx) || self.broadcast_nullify || !self.proposal.should_verify() {
+        if self.is_signer(leader.idx) || self.nullified() || !self.proposal.should_verify() {
             return None;
         }
         Some(leader)
@@ -400,7 +408,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes the local proposal flow after the automaton returns a payload.
     pub fn proposed(&mut self, now: SystemTime, proposal: Proposal<D>) -> bool {
-        if self.broadcast_nullify {
+        if self.nullified() {
             return false;
         }
         self.proposal.record_verified(proposal);
@@ -414,7 +422,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// or the slot was in an invalid state (e.g., we received a certificate for a
     /// conflicting proposal).
     pub fn verified(&mut self) -> bool {
-        if self.broadcast_nullify {
+        if self.nullified() {
             return false;
         }
         if !self.proposal.mark_verified() {
@@ -428,7 +436,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns true if the proposal should trigger verification, false otherwise.
     pub fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
-        if self.broadcast_nullify {
+        if self.nullified() {
             return false;
         }
         match self.proposal.update_vote(&proposal) {
@@ -469,8 +477,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         certification_deadline: SystemTime,
         stall_deadline: Option<SystemTime>,
     ) {
-        self.leader_deadline = Some(leader_deadline);
-        self.certification_deadline = Some(certification_deadline);
+        if let Decision::Open {
+            leader,
+            certification,
+            ..
+        } = &mut self.decision
+        {
+            *leader = Some(leader_deadline);
+            *certification = Some(certification_deadline);
+        }
         self.stall_deadline = stall_deadline;
     }
 
@@ -484,8 +499,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// without touching any deadline: in particular, the stall deadline anchors
     /// term-level stall protection and must not be reset by a per-view timeout.
     pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
-        if self.latched_timeout.is_none() && !self.broadcast_nullify {
-            self.latched_timeout = Some((now, reason));
+        if let Decision::Open { latch, .. } = &mut self.decision
+            && latch.is_none()
+        {
+            *latch = Some((now, reason));
         }
     }
 
@@ -496,11 +513,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// should not timeout (e.g. because we have already finalized).
     pub const fn construct_nullify(&mut self) -> Option<bool> {
         // Ensure we haven't already broadcast a finalize vote.
-        if self.broadcast_finalize {
+        if matches!(self.decision, Decision::Finalized) {
             return None;
         }
-        let retry = replace(&mut self.broadcast_nullify, true);
-        self.retry_deadline = None;
+        let retry = self.nullified();
+        self.decision = Decision::Nullified { retry: None };
         Some(retry)
     }
 
@@ -511,34 +528,32 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         retry_interval: Duration,
         allow_latched_timeout: bool,
     ) -> Option<(SystemTime, TimeoutReason)> {
-        if self.broadcast_finalize || self.finalization().is_some() {
+        if self.finalization().is_some() {
             return None;
         }
-        if self.broadcast_nullify {
-            if let Some(deadline) = self.retry_deadline {
-                return Some((deadline, TimeoutReason::Retry));
+        let proposed = self.proposal().is_some();
+        let certified = self.is_certified();
+        match &mut self.decision {
+            Decision::Finalized => None,
+            // Schedule the retry on the first poll after a nullify broadcast
+            // (this also covers rounds restored from replay).
+            Decision::Nullified { retry } => {
+                let deadline = *retry.get_or_insert_with(|| now + retry_interval);
+                Some((deadline, TimeoutReason::Retry))
             }
-            // Lazily schedule the next retry on first poll after a nullify
-            // broadcast (this also covers rounds restored from replay, which
-            // arrive with no schedule).
-            let next = now + retry_interval;
-            self.retry_deadline = Some(next);
-            return Some((next, TimeoutReason::Retry));
+            Decision::Open {
+                latch: Some(latch), ..
+            } if allow_latched_timeout => Some(*latch),
+            Decision::Open {
+                leader: Some(deadline),
+                ..
+            } if !proposed => Some((*deadline, TimeoutReason::LeaderTimeout)),
+            Decision::Open {
+                certification: Some(deadline),
+                ..
+            } if !certified => Some((*deadline, TimeoutReason::CertificationTimeout)),
+            Decision::Open { .. } => None,
         }
-        if allow_latched_timeout && let Some(latched) = self.latched_timeout {
-            return Some(latched);
-        }
-        if self.proposal().is_none()
-            && let Some(deadline) = self.leader_deadline
-        {
-            return Some((deadline, TimeoutReason::LeaderTimeout));
-        }
-        if !self.is_certified()
-            && let Some(deadline) = self.certification_deadline
-        {
-            return Some((deadline, TimeoutReason::CertificationTimeout));
-        }
-        None
     }
 
     /// Returns the same-term stall deadline while the round remains unfinalized.
@@ -664,6 +679,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         None
     }
 
+    /// Returns true if we broadcast a nullify vote for this round.
+    const fn nullified(&self) -> bool {
+        matches!(self.decision, Decision::Nullified { .. })
+    }
+
     /// Returns true if [Self::construct_notarize] would yield a proposal,
     /// without marking it broadcast.
     pub const fn can_construct_notarize(&self) -> bool {
@@ -675,7 +695,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // we have observed equivocation (where the proposal would be set to
         // ProposalStatus::Equivocated) or if verification hasn't completed yet.
         !self.broadcast_notarize
-            && !self.broadcast_nullify
+            && !self.nullified()
             && matches!(self.proposal.status(), ProposalStatus::Verified)
     }
 
@@ -697,7 +717,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // Ensure we haven't already broadcast a finalize vote or nullify vote.
         // The nullify check is the never-healing base case of same-term vote
         // safety (see the module documentation).
-        if self.broadcast_finalize || self.broadcast_nullify {
+        if !matches!(self.decision, Decision::Open { .. }) {
             return None;
         }
         // We do not check for an observed finalization here: the caller only
@@ -721,7 +741,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
 
-        self.broadcast_finalize = true;
+        self.decision = Decision::Finalized;
         self.proposal.proposal()
     }
 
@@ -742,14 +762,14 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                     self.is_signer(nullify.signer()),
                     "replaying nullify from another signer"
                 );
-                self.broadcast_nullify = true;
+                self.decision = Decision::Nullified { retry: None };
             }
             Artifact::Finalize(finalize) => {
                 assert!(
                     self.is_signer(finalize.signer()),
                     "replaying finalize from another signer"
                 );
-                self.broadcast_finalize = true;
+                self.decision = Decision::Finalized;
             }
             Artifact::Notarization(_) => {
                 self.broadcast_notarization = true;
@@ -1182,12 +1202,12 @@ mod tests {
         assert!(equivocator.is_none());
 
         // Recovered certificates must not imply that we cast a local finalize vote.
-        assert!(!round.broadcast_finalize);
+        assert!(!matches!(round.decision, Decision::Finalized));
         assert_eq!(round.construct_finalize(), None);
 
         // But we should still broadcast the recovered certificate.
         assert_eq!(round.broadcast_finalization(), Some(certificate));
-        assert!(!round.broadcast_finalize);
+        assert!(!matches!(round.decision, Decision::Finalized));
         assert_eq!(round.broadcast_finalization(), None);
     }
 
@@ -1247,9 +1267,9 @@ mod tests {
         round.replay(&Artifact::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
         round.replay(&Artifact::Nullify(nullify_local));
-        assert!(round.broadcast_nullify);
+        assert!(round.nullified());
         round.replay(&Artifact::Finalize(finalize_local));
-        assert!(round.broadcast_finalize);
+        assert!(matches!(round.decision, Decision::Finalized));
         round.replay(&Artifact::Notarization(notarization.clone()));
         assert!(round.broadcast_notarization);
         round.replay(&Artifact::Nullification(nullification.clone()));
