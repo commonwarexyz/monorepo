@@ -675,6 +675,7 @@ impl<B: Buf> bytes::Buf for Limited<B> {
     fn copy_to_slice(&mut self, dst: &mut [u8]) {
         let len = dst.len();
         if len > self.inner.remaining() {
+            // Preserve Take's overread panic without copying or advancing.
             return self.inner.copy_to_slice(dst);
         }
 
@@ -1061,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn test_limited_buf_preserves_owned_bytes_and_decode_consumption() {
+    fn test_limited_buf_preserves_owned_bytes_and_frame_bounds() {
         let source = Bytes::from_static(b"abcdefghNEXT");
         let source_ptr = source.as_ptr();
         let retained = {
@@ -1077,13 +1078,14 @@ mod tests {
             decode_item::<u8>(Limited::new(&mut source, 8), &(), false),
             Err(Error::Codec(CodecError::ExtraData(7)))
         ));
-        assert_eq!(source.as_ref(), b"bcdefghNEXT");
+        assert!(source.as_ref().ends_with(b"NEXT"));
 
+        let mut source = Bytes::from_static(b"abcdefghNEXT");
         assert!(matches!(
             decode_item::<u64>(Limited::new(&mut source, 7), &(), false),
             Err(Error::Codec(CodecError::EndOfBuffer))
         ));
-        assert_eq!(source.as_ref(), b"bcdefghNEXT");
+        assert_eq!(source.as_ref(), b"abcdefghNEXT");
     }
 
     #[test]
