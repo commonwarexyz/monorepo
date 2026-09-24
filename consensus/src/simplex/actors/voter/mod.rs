@@ -3,6 +3,7 @@ mod ingress;
 mod round;
 mod slot;
 mod state;
+mod timer;
 
 use crate::{
     CertifiableAutomaton, Relay, Reporter,

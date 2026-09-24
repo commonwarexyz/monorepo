@@ -843,7 +843,8 @@ impl<E: Clock + CryptoRng + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> Sta
 
     /// Immediately expires `view` on its first timeout when skip budget is
     /// available, forcing a timeout to fire on the next tick. Otherwise, the
-    /// timeout remains latched until budget becomes available.
+    /// timeout remains latched until budget becomes available or the view
+    /// nullifies.
     ///
     /// If the round has already been marked timed out, this preserves the existing
     /// retry schedule.
