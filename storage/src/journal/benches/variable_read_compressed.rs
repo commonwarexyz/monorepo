@@ -16,7 +16,7 @@ use futures::{StreamExt, pin_mut};
 use rand::{Rng as _, RngExt as _};
 use std::{hint::black_box, time::Instant};
 
-/// Most items land in sealed sections, which replay pages directly.
+/// Value of items_per_section to use in the journal config.
 const ITEMS_PER_SECTION: u64 = 1_000;
 
 fn bench_size<const SIZE: usize>(c: &mut Criterion) {
@@ -54,7 +54,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                         .await
                         .unwrap();
 
-                        // Random items barely compress. Others differ only in a counter prefix.
+                        // Random items do not compress. Others differ only in a counter prefix.
                         let mut rng = test_rng();
                         for i in 0..items {
                             let mut bytes = [0xAB; SIZE];

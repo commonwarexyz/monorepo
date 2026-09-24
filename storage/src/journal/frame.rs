@@ -118,15 +118,23 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
 
 /// Decompress a zstd payload.
 ///
-/// Journal writers produce a single frame with a declared content size. These payloads decompress
-/// in one call into an exactly sized buffer, reusing one context per thread. Payloads without a
-/// declared size or that the bulk path cannot decode fall back to streaming decompression.
+/// Journal writers compress each item into one frame that declares its content size. Such a
+/// payload decompresses in one call into a buffer of exactly that size, reusing one context per
+/// thread. Payloads without a declared size, or that the bulk decoder rejects, stream instead.
+///
+/// The output is a heap buffer that the codec takes ownership of, so decoded items can keep
+/// zero-copy views into it.
 pub(super) fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
+    // The declared size comes from our own checksummed writes, so it sizes the allocation
+    // directly. The bulk decoder fails if the output does not match it.
     if let Some(size) = get_frame_content_size(compressed)
         .ok()
         .flatten()
         .and_then(|size| usize::try_from(size).ok())
     {
+        // Bulk decompression restarts its state at every frame and allocates nothing inside the
+        // context. The cached context needs no reset, even after a failed call, and never grows.
+        //
         // The declared size covers only the first frame. Additional frames may require more
         // output space, in which case the payload streams below.
         let decompressed = Cached::take(&DECOMPRESSOR, Decompressor::new, |_| Ok(()))
@@ -135,6 +143,9 @@ pub(super) fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
             return Ok(decompressed);
         }
     }
+
+    // Streaming uses its own context. Streaming through the cached context would grow it by a
+    // window and I/O buffers that it would then hold for the life of the thread.
     decode_all(compressed).map_err(|_| Error::DecompressionFailed)
 }
 
@@ -645,7 +656,8 @@ mod tests {
 
     #[test]
     fn test_decompress_streams_frames_without_content_size() {
-        // Streaming encoders omit the content size. Such frames still decode.
+        // `encode_all` streams without a pledged size, so it omits the content size. Such frames
+        // still decode.
         let data = 42u64.encode();
         let streamed = zstd::stream::encode_all(data.as_ref(), 3).unwrap();
         assert_eq!(get_frame_content_size(&streamed).unwrap(), None);
