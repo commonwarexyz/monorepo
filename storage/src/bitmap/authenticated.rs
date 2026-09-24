@@ -34,20 +34,19 @@ use commonware_utils::{
 };
 use tracing::{debug, error, warn};
 
-/// Returns a root digest that incorporates bits not yet part of the MMR because they
-/// belong to the last (unfilled) chunk.
+/// Returns a root digest incorporating the total bitmap length and the last (unfilled) chunk.
+/// The total length binds the partial chunk to its absolute position.
 pub(crate) fn partial_chunk_root<H: Hasher<mmr::Family>, const N: usize>(
     hasher: &H,
     mmr_root: &H::Digest,
-    next_bit: u64,
+    bit_len: u64,
     last_chunk_digest: &H::Digest,
 ) -> H::Digest {
-    assert!(next_bit > 0);
-    assert!(next_bit < UtilsBitMap::<N>::CHUNK_SIZE_BITS);
-    let next_bit = next_bit.to_be_bytes();
+    assert!(!bit_len.is_multiple_of(UtilsBitMap::<N>::CHUNK_SIZE_BITS));
+    let bit_len = bit_len.to_be_bytes();
     hasher.hash(&[
         mmr_root.as_ref(),
-        next_bit.as_slice(),
+        bit_len.as_slice(),
         last_chunk_digest.as_ref(),
     ])
 }
@@ -260,9 +259,8 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
                 return false;
             }
             let last_chunk_digest = hasher.digest(chunk);
-            let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
             let reconstructed_root =
-                partial_chunk_root::<_, N>(hasher, &last_digest, next_bit, &last_chunk_digest);
+                partial_chunk_root::<_, N>(hasher, &last_digest, bit_len, &last_chunk_digest);
             return reconstructed_root == *root;
         };
 
@@ -276,9 +274,8 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
             }
         };
 
-        let next_bit = bit_len % Self::CHUNK_SIZE_BITS;
         let reconstructed_root =
-            partial_chunk_root::<_, N>(hasher, &mmr_root, next_bit, &last_digest);
+            partial_chunk_root::<_, N>(hasher, &mmr_root, bit_len, &last_digest);
 
         reconstructed_root == *root
     }
@@ -430,7 +427,9 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
     /// boundary. Otherwise, the root is computed as follows in order to capture the bits that are
     /// not yet part of the MMR:
     ///
-    /// hash(mmr_root || next_bit as u64 be_bytes || last_chunk_digest)
+    /// hash(mmr_root || bit_len.to_be_bytes() || last_chunk_digest)
+    ///
+    /// `bit_len` is the total number of bits, including pruned bits.
     ///
     /// The root is computed during merkleization and cached, so this method is cheap to call.
     pub const fn root(&self) -> D {
@@ -573,9 +572,9 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> UnmerkleizedBitMap<E, D
         let cached_root = if self.bitmap.is_chunk_aligned() {
             mmr_root
         } else {
-            let (last_chunk, next_bit) = self.bitmap.last_chunk();
+            let (last_chunk, _) = self.bitmap.last_chunk();
             let last_chunk_digest = hasher.digest(last_chunk);
-            partial_chunk_root::<_, N>(hasher, &mmr_root, next_bit, &last_chunk_digest)
+            partial_chunk_root::<_, N>(hasher, &mmr_root, self.len(), &last_chunk_digest)
         };
 
         Ok(MerkleizedBitMap {
@@ -722,6 +721,73 @@ mod tests {
                 "bitmap proof with nonzero inactive_peaks must not verify"
             );
         });
+    }
+
+    #[test_traced]
+    fn test_bitmap_verify_rejects_relocated_partial_chunk() {
+        // Empty MMR, single peaks, and multiple peaks.
+        for full_chunks in [0, 1, 2, 3, 7] {
+            test_bitmap_verify_rejects_relocated_partial_chunk_n::<1>(full_chunks);
+            test_bitmap_verify_rejects_relocated_partial_chunk_n::<32>(full_chunks);
+            test_bitmap_verify_rejects_relocated_partial_chunk_n::<64>(full_chunks);
+        }
+    }
+
+    fn test_bitmap_verify_rejects_relocated_partial_chunk_n<const N: usize>(full_chunks: u64) {
+        let chunk_bits = TestMerkleizedBitMap::<N>::CHUNK_SIZE_BITS;
+        for tail_bits in [1, 2, chunk_bits - 1] {
+            let executor = deterministic::Runner::default();
+            executor.start(|context| async move {
+                let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+                let bitmap: TestMerkleizedBitMap<N> = TestMerkleizedBitMap::init(
+                    context.child("bitmap"),
+                    "test",
+                    Sequential,
+                    &hasher,
+                )
+                .await
+                .unwrap();
+                let mut dirty = bitmap.into_dirty();
+                let tail_start = full_chunks * chunk_bits;
+
+                // Opposite alternating patterns make relocation into any full chunk a false claim.
+                for i in 0..tail_start {
+                    dirty.push(i % 2 != 0);
+                }
+                for i in 0..tail_bits {
+                    dirty.push(i % 2 == 0);
+                }
+                let mut bitmap = dirty.merkleize(&hasher).unwrap();
+                let root = bitmap.root();
+
+                // The tail's absolute position must stay authenticated after pruning all full chunks.
+                for prune_to in [0, tail_start] {
+                    bitmap.prune_to_bit(prune_to).unwrap();
+                    assert_eq!(bitmap.root(), root);
+                    let (proof, chunk) = bitmap.proof(&hasher, tail_start).await.unwrap();
+                    assert_eq!(*proof.leaves, tail_start + tail_bits);
+
+                    // Try every earlier chunk, the real tail, and nearby and distant future chunks.
+                    for target_chunk in (0..=full_chunks + 1).chain([full_chunks + 8]) {
+                        let mut relocated = proof.clone();
+                        relocated.leaves = Location::new(target_chunk * chunk_bits + tail_bits);
+                        for offset in 0..=tail_bits {
+                            let bit = target_chunk * chunk_bits + offset;
+                            let valid = TestMerkleizedBitMap::<N>::verify_bit_inclusion(
+                                &hasher, &relocated, &chunk, bit, &root,
+                            );
+                            // Only populated bits at the original tail position may verify.
+                            assert_eq!(
+                                valid,
+                                target_chunk == full_chunks && offset < tail_bits,
+                                "N={N}, full_chunks={full_chunks}, tail_bits={tail_bits}, \
+                                 prune_to={prune_to}, target_chunk={target_chunk}, offset={offset}",
+                            );
+                        }
+                    }
+                }
+            });
+        }
     }
 
     #[test_traced]
