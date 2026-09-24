@@ -1,85 +1,67 @@
-use super::types::Activity;
+use super::{Recoverer, scheme, types::Certificate};
 use crate::{
-    Automaton, Monitor, Reporter,
-    types::{Epoch, EpochDelta, Height, HeightDelta},
+    Automaton, Reporter,
+    types::{Epoch, Height},
 };
-use commonware_cryptography::{
-    Digest,
-    certificate::{Provider, Verifier},
-};
+use commonware_cryptography::{Digest, certificate::Verifier};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::NonZeroDuration;
 use std::num::{NonZeroU64, NonZeroUsize};
 
-/// Configuration for the [super::Engine].
+/// Configuration for a fixed per-epoch [super::Engine].
 pub struct Config<
-    P: Provider<Scope = Epoch>,
+    S: scheme::Scheme<D>,
     D: Digest,
     A: Automaton<Context = Height, Digest = D>,
-    Z: Reporter<Activity = Activity<P::Scheme, D>>,
-    M: Monitor<Index = Epoch>,
-    B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
+    Z: Reporter<Activity = Certificate<S, D>>,
+    B: Blocker<PublicKey = <S as Verifier>::PublicKey>,
     T: Strategy,
+    R: Recoverer,
 > {
-    /// Tracks the current state of consensus (to determine which participants should
-    /// be involved in the current broadcast attempt).
-    pub monitor: M,
-
-    /// Provider for epoch-specific signing schemes.
-    pub provider: P,
-
-    /// Proposes and verifies [Digest]s.
+    /// Epoch represented by this engine.
+    pub epoch: Epoch,
+    /// First mandatory global position, inclusive.
+    pub first: Height,
+    /// Last mandatory global position, inclusive.
+    pub last: Height,
+    /// Fixed signing scheme for `epoch`.
+    pub scheme: S,
+    /// Provides the canonical digest for each position.
+    ///
+    /// Every successful response for a position must return the same digest across clones and
+    /// restarts. Closing a response declines the position for this engine instance. The position
+    /// can still complete from a learned certificate or after restart.
     pub automaton: A,
-
-    /// Notified when a chunk receives a quorum of [super::types::Ack]s.
+    /// Receives certificates after the engine syncs them to its journal.
     pub reporter: Z,
-
-    /// Blocker for the network.
-    ///
-    /// Blocking is handled by [commonware_p2p].
+    /// Blocker for invalid network messages.
     pub blocker: B,
-
-    /// Whether acks are sent as priority.
+    /// Whether acknowledgments are sent as priority messages.
     pub priority_acks: bool,
-
-    /// How often an ack is rebroadcast to all validators if no quorum is reached.
+    /// How often an acknowledgment is rebroadcast until certification.
     pub rebroadcast_timeout: NonZeroDuration,
-
-    /// A tuple representing the epochs to keep in memory.
-    /// The first element is the number of old epochs to keep.
-    /// The second element is the number of future epochs to accept.
+    /// Number of acknowledgment rebroadcast ticks before resolver recovery starts.
+    pub recovery_after_rebroadcasts: NonZeroU64,
+    /// Shared resolver recovery coordinator.
+    pub recoverer: R,
+    /// Maximum number of live positions.
     ///
-    /// For example, if the current epoch is 10, and the bounds are (1, 2), then
-    /// epochs 9, 10, 11, and 12 are kept (and accepted);
-    /// all others are pruned or rejected.
-    pub epoch_bounds: (EpochDelta, EpochDelta),
-
-    /// The number of chunks to process concurrently.
+    /// This value must remain unchanged while retaining the engine's journal.
     pub window: NonZeroU64,
-
-    /// Number of heights to track below the tip when collecting acks and/or pruning.
-    pub activity_timeout: HeightDelta,
-
-    /// Partition for the [commonware_storage::journal::segmented::variable::Journal].
+    /// Journal partition.
     pub journal_partition: String,
-
-    /// The size of the write buffer to use for each blob in the journal.
+    /// Journal write-buffer size.
     pub journal_write_buffer: NonZeroUsize,
-
-    /// Number of bytes to buffer when replaying a journal.
+    /// Journal replay-buffer size.
     pub journal_replay_buffer: NonZeroUsize,
-
-    /// The number of entries to keep per journal section.
+    /// Number of positions assigned to each journal section.
     pub journal_heights_per_section: NonZeroU64,
-
-    /// Compression level for the journal.
+    /// Journal compression level.
     pub journal_compression: Option<u8>,
-
-    /// Page cache for the journal.
+    /// Journal page cache.
     pub journal_page_cache: CacheRef,
-
-    /// Strategy for parallel operations.
+    /// Parallel verification strategy.
     pub strategy: T,
 }
