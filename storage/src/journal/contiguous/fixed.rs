@@ -606,6 +606,30 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         Self::open(context, cfg, checkpoint, max_size).await
     }
 
+    /// Positions the stored blobs may hold, from blob names and the checkpoint without opening
+    /// their contents. The end is an upper bound based on the newest blob's capacity. A staged
+    /// clear has not yet been applied.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn span(
+        context: &E,
+        cfg: &Config,
+        checkpoint: &Checkpoint<E>,
+    ) -> Result<Range<u64>, Error> {
+        let per_blob = cfg.items_per_blob.get();
+        let (_, names) = Partition::select(context, &cfg.partition).await?;
+        let indices = Partition::<E>::indices(names)?;
+        let start = Inner::<E, A>::recover_pruning_boundary(
+            checkpoint.boundary_hint(),
+            indices.first().copied(),
+            per_blob,
+        )?;
+        let end = match indices.last() {
+            Some(&newest) => super::blob_first_position(newest, per_blob)?.saturating_add(per_blob),
+            None => start,
+        };
+        Ok(start..end)
+    }
+
     /// Exclusive recovered item end.
     pub(super) const fn size(&self) -> u64 {
         self.bounds.end

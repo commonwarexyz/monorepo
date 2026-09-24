@@ -11,6 +11,9 @@
 //! interior fsync holes (skipping any wholly covered by the acknowledged floor), and the
 //! offsets journal only advances after the data it indexes is durable.
 
+#[commonware_macros::stability(ALPHA)]
+use super::checkpoint::Checkpoint;
+
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
@@ -393,6 +396,17 @@ impl<C> Config<C> {
     /// Returns the partition name for the offsets journal.
     fn offsets_partition(&self) -> String {
         format!("{}{}", self.partition, OFFSETS_SUFFIX)
+    }
+
+    /// Configuration of the offsets journal.
+    fn offsets_config(&self) -> fixed::Config {
+        fixed::Config {
+            partition: self.offsets_partition(),
+            items_per_blob: self.items_per_section,
+            page_cache: self.page_cache.clone(),
+            write_buffer: self.write_buffer,
+            replay_buffer: self.replay_buffer,
+        }
     }
 }
 
@@ -1117,13 +1131,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // that reset so stale data is never replayed past the reset size.
         let offsets = fixed::Recovery::<E, u64>::init_cleared(
             context.child("offsets"),
-            fixed::Config {
-                partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
-                page_cache: cfg.page_cache.clone(),
-                write_buffer: cfg.write_buffer,
-                replay_buffer: cfg.replay_buffer,
-            },
+            cfg.offsets_config(),
             max_size,
             || Partition::<E>::remove_all(&data_context, &data_partition),
         )
@@ -1210,6 +1218,55 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         }
         .inspect(max_size.unwrap_or(u64::MAX), &valid_lengths)
         .await
+    }
+
+    /// Possible stored positions based on the checkpoint and blob names, without opening data
+    /// blobs. Its end is the newest data blob's capacity; inspection determines the actual end.
+    /// A staged clear makes the journal empty at its target. Bounded recovery rejects an
+    /// acknowledged offsets prefix with no corresponding data blobs.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn span(context: &E, cfg: &Config<V::Cfg>) -> Result<Range<u64>, Error> {
+        let per_blob = cfg.items_per_section.get();
+        let offsets_context = context.child("offsets");
+        let offsets_cfg = cfg.offsets_config();
+        let checkpoint =
+            Checkpoint::open(offsets_context.child("meta"), &offsets_cfg.partition).await?;
+        if let Some(target) = checkpoint.clear_target() {
+            return Ok(target..target);
+        }
+        let offsets =
+            fixed::Recovery::<E, u64>::span(&offsets_context, &offsets_cfg, &checkpoint).await?;
+        let names = Partition::<E>::scan_names(context, &cfg.data_partition()).await?;
+        let data = Partition::<E>::indices(names)?;
+        let (Some(&oldest), Some(&newest)) = (data.first(), data.last()) else {
+            if checkpoint
+                .watermark()
+                .is_some_and(|watermark| watermark > offsets.start)
+            {
+                return Err(Error::Corruption(
+                    "retained offsets have no data blobs".into(),
+                ));
+            }
+            return Ok(offsets.start..offsets.start);
+        };
+        let start = offsets.start.max(blob_first_position(oldest, per_blob)?);
+        let end = blob_first_position(newest, per_blob)?.saturating_add(per_blob);
+        Ok(start..end)
+    }
+
+    /// Reopen the journal without an initialization bound.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn unbounded(self) -> Result<Self, Error> {
+        let Self {
+            context,
+            cfg,
+            pending,
+            offsets,
+            ..
+        } = self;
+        drop(pending);
+        drop(offsets);
+        Self::open(context, cfg, None).await
     }
 
     /// Scan only the recovery suffix, stopping before decoding discarded frames.
@@ -1519,13 +1576,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let offsets = Box::new(
             fixed::Inner::<E, u64>::init_at_size_cleared(
                 offsets_context,
-                fixed::Config {
-                    partition: offsets_partition,
-                    items_per_blob: cfg.items_per_section,
-                    page_cache: cfg.page_cache.clone(),
-                    write_buffer: cfg.write_buffer,
-                    replay_buffer: cfg.replay_buffer,
-                },
+                cfg.offsets_config(),
                 size,
                 || Partition::<E>::remove_all(&data_context, &data_partition),
             )
