@@ -25,6 +25,24 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(4096);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
+fn fill_variable_item<const COMPRESSED: bool>(
+    context: &mut commonware_runtime::deterministic::Context,
+    index: usize,
+    item: &mut Vec<u8>,
+) {
+    // Alternate repeated patterns with random bytes to cover compressed and raw zstd blocks.
+    if COMPRESSED && index.is_multiple_of(2) {
+        item.resize(192, 0);
+        for (offset, byte) in item.iter_mut().enumerate() {
+            *byte = (offset % 16) as u8;
+        }
+    } else {
+        let size = context.random_range(0..256);
+        item.resize(size, 0);
+        context.fill(item.as_mut_slice());
+    }
+}
+
 fn authenticated_merkle_config(
     prefix: &str,
     pooler: &impl BufferPooler,
@@ -116,9 +134,9 @@ impl StorageWorkload for ContiguousFixedWorkload {
     }
 }
 
-struct ContiguousVariableWorkload;
+struct ContiguousVariableWorkload<const COMPRESSED: bool>;
 
-impl StorageWorkload for ContiguousVariableWorkload {
+impl<const COMPRESSED: bool> StorageWorkload for ContiguousVariableWorkload<COMPRESSED> {
     type Error = crate::journal::Error;
 
     async fn run(
@@ -131,7 +149,7 @@ impl StorageWorkload for ContiguousVariableWorkload {
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
-            compression: None,
+            compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
         };
         let mut journal =
@@ -139,10 +157,8 @@ impl StorageWorkload for ContiguousVariableWorkload {
 
         let mut data_to_write =
             vec![Vec::new(); context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
-        for item in data_to_write.iter_mut() {
-            let size = context.random_range(0..256);
-            item.resize(size, 0);
-            context.fill(item.as_mut_slice());
+        for (i, item) in data_to_write.iter_mut().enumerate() {
+            fill_variable_item::<COMPRESSED>(&mut context, i, item);
         }
 
         for item in data_to_write {
@@ -184,9 +200,9 @@ impl StorageWorkload for SegmentedFixedWorkload {
     }
 }
 
-struct SegmentedGlobWorkload;
+struct SegmentedGlobWorkload<const COMPRESSED: bool>;
 
-impl StorageWorkload for SegmentedGlobWorkload {
+impl<const COMPRESSED: bool> StorageWorkload for SegmentedGlobWorkload<COMPRESSED> {
     type Error = crate::journal::Error;
 
     async fn run(
@@ -195,7 +211,7 @@ impl StorageWorkload for SegmentedGlobWorkload {
     ) -> Result<(), Self::Error> {
         let config = glob::Config {
             partition: format!("segmented-glob-conformance-{seed}"),
-            compression: None,
+            compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
             write_buffer: WRITE_BUFFER,
         };
@@ -203,10 +219,8 @@ impl StorageWorkload for SegmentedGlobWorkload {
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];
-        for item in data_to_write.iter_mut() {
-            let size = context.random_range(0..256);
-            item.resize(size, 0);
-            context.fill(item.as_mut_slice());
+        for (i, item) in data_to_write.iter_mut().enumerate() {
+            fill_variable_item::<COMPRESSED>(&mut context, i, item);
         }
 
         for (i, item) in data_to_write.iter().enumerate() {
@@ -219,9 +233,9 @@ impl StorageWorkload for SegmentedGlobWorkload {
     }
 }
 
-struct SegmentedVariableWorkload;
+struct SegmentedVariableWorkload<const COMPRESSED: bool>;
 
-impl StorageWorkload for SegmentedVariableWorkload {
+impl<const COMPRESSED: bool> StorageWorkload for SegmentedVariableWorkload<COMPRESSED> {
     type Error = crate::journal::Error;
 
     async fn run(
@@ -232,7 +246,7 @@ impl StorageWorkload for SegmentedVariableWorkload {
             partition: format!("segmented-variable-conformance-{seed}"),
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: WRITE_BUFFER,
-            compression: None,
+            compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
         };
         let mut journal =
@@ -241,10 +255,8 @@ impl StorageWorkload for SegmentedVariableWorkload {
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];
-        for item in data_to_write.iter_mut() {
-            let size = context.random_range(0..256);
-            item.resize(size, 0);
-            context.fill(item.as_mut_slice());
+        for (i, item) in data_to_write.iter_mut().enumerate() {
+            fill_variable_item::<COMPRESSED>(&mut context, i, item);
         }
 
         for (i, item) in data_to_write.iter().enumerate() {
@@ -304,9 +316,9 @@ impl Record for TestEntry {
     }
 }
 
-struct SegmentedOversizedWorkload;
+struct SegmentedOversizedWorkload<const COMPRESSED: bool>;
 
-impl StorageWorkload for SegmentedOversizedWorkload {
+impl<const COMPRESSED: bool> StorageWorkload for SegmentedOversizedWorkload<COMPRESSED> {
     type Error = crate::journal::Error;
 
     async fn run(
@@ -320,7 +332,7 @@ impl StorageWorkload for SegmentedOversizedWorkload {
             index_write_buffer: WRITE_BUFFER,
             value_write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
-            compression: None,
+            compression: COMPRESSED.then_some(3),
             codec_config: (RangeCfg::new(0..256), ()),
         };
         let mut journal =
@@ -329,10 +341,8 @@ impl StorageWorkload for SegmentedOversizedWorkload {
 
         let items_count = context.random_range(0..(ITEMS_PER_BLOB.get() as usize) * 4);
         let mut data_to_write = vec![Vec::new(); items_count];
-        for item in data_to_write.iter_mut() {
-            let size = context.random_range(0..256);
-            item.resize(size, 0);
-            context.fill(item.as_mut_slice());
+        for (i, item) in data_to_write.iter_mut().enumerate() {
+            fill_variable_item::<COMPRESSED>(&mut context, i, item);
         }
 
         for (i, item) in data_to_write.iter().enumerate() {
@@ -388,11 +398,15 @@ impl StorageWorkload for AuthenticatedMmbWorkload {
 
 conformance_tests! {
     StorageConformance<ContiguousFixedWorkload> => 512,
-    StorageConformance<ContiguousVariableWorkload> => 512,
+    StorageConformance<ContiguousVariableWorkload<false>> => 512,
+    StorageConformance<ContiguousVariableWorkload<true>> => 512,
     StorageConformance<SegmentedFixedWorkload> => 512,
-    StorageConformance<SegmentedGlobWorkload> => 512,
-    StorageConformance<SegmentedVariableWorkload> => 512,
-    StorageConformance<SegmentedOversizedWorkload> => 512,
+    StorageConformance<SegmentedGlobWorkload<false>> => 512,
+    StorageConformance<SegmentedGlobWorkload<true>> => 512,
+    StorageConformance<SegmentedVariableWorkload<false>> => 512,
+    StorageConformance<SegmentedVariableWorkload<true>> => 512,
+    StorageConformance<SegmentedOversizedWorkload<false>> => 512,
+    StorageConformance<SegmentedOversizedWorkload<true>> => 512,
     StorageConformance<AuthenticatedMmrWorkload> => 256,
     StorageConformance<AuthenticatedMmbWorkload> => 256,
 }

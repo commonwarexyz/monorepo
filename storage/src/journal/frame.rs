@@ -13,7 +13,6 @@ use commonware_utils::{Cached, Widen};
 use std::{future::Future, io::Cursor};
 use zstd::{
     bulk::Decompressor,
-    decode_all,
     zstd_safe::{CCtx, compress_bound, get_frame_content_size},
 };
 
@@ -116,37 +115,21 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
     Ok((next_offset, item))
 }
 
-/// Decompress a zstd payload.
-///
-/// Journal writers compress each item into one frame that declares its content size. Such a
-/// payload decompresses in one call into a buffer of exactly that size, reusing one context per
-/// thread. Payloads without a declared size, or that the bulk decoder rejects, stream instead.
-///
-/// The output is a heap buffer that the codec takes ownership of, so decoded items can keep
-/// zero-copy views into it.
+/// Decompress a journal payload into an owned buffer for zero-copy decoding.
 pub(super) fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
-    // The declared size comes from our own checksummed writes, so it sizes the allocation
-    // directly. The bulk decoder fails if the output does not match it.
-    if let Some(size) = get_frame_content_size(compressed)
+    // Journal writers emit single frames that declare their content size, so we can
+    // allocate the output buffer from it.
+    let size = get_frame_content_size(compressed)
         .ok()
         .flatten()
         .and_then(|size| usize::try_from(size).ok())
-    {
-        // Bulk decompression restarts its state at every frame and allocates nothing inside the
-        // context. The cached context needs no reset, even after a failed call, and never grows.
-        //
-        // The declared size covers only the first frame. Additional frames may require more
-        // output space, in which case the payload streams below.
-        let decompressed = Cached::take(&DECOMPRESSOR, Decompressor::new, |_| Ok(()))
-            .and_then(|mut decompressor| decompressor.decompress(compressed, size));
-        if let Ok(decompressed) = decompressed {
-            return Ok(decompressed);
-        }
-    }
+        .ok_or(Error::DecompressionFailed)?;
 
-    // Streaming uses its own context. Streaming through the cached context would grow it by a
-    // window and I/O buffers that it would then hold for the life of the thread.
-    decode_all(compressed).map_err(|_| Error::DecompressionFailed)
+    // Bulk decompression resets its fixed-size context before each frame, so it can
+    // be cached without cleanup, even after a failed decode.
+    Cached::take(&DECOMPRESSOR, Decompressor::new, |_| Ok(()))
+        .and_then(|mut decompressor| decompressor.decompress(compressed, size))
+        .map_err(|_| Error::DecompressionFailed)
 }
 
 /// Decode a frame's payload into an item, decompressing if needed.
@@ -206,8 +189,7 @@ pub(super) async fn read_frame_at<V: Codec>(
             total_len,
             ..
         } if compressed => {
-            // Reread the few payload bytes already buffered so a payload held in one chunk
-            // decompresses without copying its compressed bytes.
+            // Reread the buffered prefix so contiguous payloads decompress without a staging copy.
             let data_offset = offset
                 .checked_add(varint_len as u64)
                 .ok_or(Error::OffsetOverflow)?;
@@ -627,7 +609,7 @@ mod tests {
 
     #[test]
     fn test_compressed_frames_declare_content_size() {
-        // Reads take the bulk path only for frames that declare their content size.
+        // The reader requires the writer to declare each frame's decompressed size.
         for len in [0usize, 1, 4096] {
             let item = vec![7u8; len];
             let buf = frame(Some(3), &item);
@@ -655,13 +637,13 @@ mod tests {
     }
 
     #[test]
-    fn test_decompress_streams_frames_without_content_size() {
-        // `encode_all` streams without a pledged size, so it omits the content size. Such frames
-        // still decode.
-        let data = 42u64.encode();
-        let streamed = zstd::stream::encode_all(data.as_ref(), 3).unwrap();
-        assert_eq!(get_frame_content_size(&streamed).unwrap(), None);
-        assert_eq!(decompress(&streamed).unwrap(), data.as_ref());
+    fn test_decompress_rejects_frame_without_content_size() {
+        let payload = zstd::stream::encode_all(42u64.encode().as_ref(), 3).unwrap();
+        assert_eq!(get_frame_content_size(&payload).unwrap(), None);
+        assert!(matches!(
+            decompress(&payload),
+            Err(Error::DecompressionFailed)
+        ));
     }
 
     #[test]
@@ -683,38 +665,7 @@ mod tests {
                 decompress(&corrupted),
                 Err(Error::DecompressionFailed)
             ));
-            assert!(decode_all(corrupted.as_slice()).is_err());
         }
-    }
-
-    #[test]
-    fn test_decompress_concatenated_frames() {
-        // The first frame's declared size cannot hold the whole payload, so it streams.
-        let encoded = 42u64.encode();
-        let payload = [
-            compress(&encoded[..4], 3).unwrap(),
-            compress(&encoded[4..], 3).unwrap(),
-        ]
-        .concat();
-        assert_eq!(decode_all(payload.as_slice()).unwrap(), encoded.as_ref());
-        assert_eq!(
-            decode_item::<u64>(Copying(&payload), &(), true).unwrap(),
-            42
-        );
-    }
-
-    #[test]
-    fn test_decompress_skippable_frame_prefix() {
-        // An empty skippable frame reports a content size of zero, so the payload streams.
-        let encoded = 42u64.encode();
-        let mut payload = vec![0x50, 0x2a, 0x4d, 0x18, 0, 0, 0, 0];
-        payload.extend_from_slice(&compress(&encoded, 3).unwrap());
-        assert_eq!(get_frame_content_size(&payload).unwrap(), Some(0));
-        assert_eq!(decode_all(payload.as_slice()).unwrap(), encoded.as_ref());
-        assert_eq!(
-            decode_item::<u64>(Copying(&payload), &(), true).unwrap(),
-            42
-        );
     }
 
     #[test]
@@ -728,15 +679,6 @@ mod tests {
                 42
             );
         }
-        let streamed = zstd::stream::encode_all(99u64.encode().as_ref(), 3).unwrap();
-        assert_eq!(
-            decode_item::<u64>(Copying(&streamed), &(), true).unwrap(),
-            99
-        );
-        assert_eq!(
-            decode_item::<u64>(Copying(&payload), &(), true).unwrap(),
-            42
-        );
     }
 
     /// An item whose claimed encoded size exceeds the u32 frame limit. The size check
