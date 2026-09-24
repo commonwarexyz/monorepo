@@ -80,7 +80,11 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
+        Error,
+        any::ValueEncoding,
+        chain, find_inactivity_floor_at,
+        metrics::Metrics,
+        operation::{Committable, Key},
         sync::source,
     },
     translator::Translator,
@@ -143,20 +147,6 @@ where
         }
     }
     Ok(())
-}
-
-/// Compute the authenticated root of a newly initialized database without opening storage.
-///
-/// The initial commit never carries metadata, so this root always represents `Commit(None, 0)`.
-pub fn initial_root<F, K, V, H>() -> H::Digest
-where
-    F: Family,
-    K: Key,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, K, V>: EncodeShared,
-{
-    single_operation_root::<F, H>(&Operation::<F, K, V>::Commit(None, Location::new(0)))
 }
 
 /// Configuration for an [Immutable] authenticated db.
@@ -274,39 +264,28 @@ where
         .await?;
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
 
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.journal.bounds();
-            let last_commit_loc =
-                Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
+        let size = journal.size();
+        let inactivity_floor_loc = find_inactivity_floor_at(&journal, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
 
-            // Read the floor from the last commit operation.
-            let last_op = journal.journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = last_op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
-
-            // Replay the log from the inactivity floor to build the snapshot. Every retained
-            // location is inserted, mirroring the live apply path, so a repeated key keeps
-            // serving one of its written values across restarts and bounded initializations.
-            build_snapshot(
-                inactivity_floor_loc,
-                &journal.journal,
-                &mut snapshot,
-                cfg.init_buffer,
-            )
-            .await?;
-
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        // Replay the log from the inactivity floor to build the snapshot. Every retained
+        // location is inserted, mirroring the live apply path, so a repeated key keeps
+        // serving one of its written values across restarts and bounded initializations.
+        build_snapshot(
+            inactivity_floor_loc,
+            &journal.journal,
+            &mut snapshot,
+            cfg.init_buffer,
+        )
+        .await?;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
@@ -777,13 +756,16 @@ pub(super) mod tests {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::{verify_proof, verify_proof_and_pinned_nodes},
+        qmdb::{
+            sync::{MerkleizedBatch as _, Target},
+            verify_proof, verify_proof_and_pinned_nodes,
+        },
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
     use commonware_cryptography::{Sha256, sha256, sha256::Digest};
     use commonware_runtime::{Supervisor as _, deterministic};
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZU64, non_empty_range};
     use core::{future::Future, pin::Pin};
     use std::ops::Range;
 
@@ -1783,6 +1765,45 @@ pub(super) mod tests {
         assert_eq!(db.get(&key2).await.unwrap(), None);
 
         db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleized_batch_target<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+        let floor = Location::new(1);
+        let batch = db
+            .new_batch()
+            .set(Sha256::hash(&[&[1]]), Sha256::fill(1))
+            .merkleize(&db, None, floor)
+            .await;
+        let size = batch.bounds().tip.size;
+        assert_eq!(
+            batch.target().unwrap(),
+            Target {
+                root: batch.root(),
+                range: non_empty_range!(floor, size)
+            }
+        );
+
+        // A floor at the batch size is what `apply_batch` rejects, so there is no target.
+        let batch = db
+            .new_batch()
+            .set(Sha256::hash(&[&[2]]), Sha256::fill(2))
+            .merkleize(&db, None, size)
+            .await;
+        assert!(matches!(
+            batch.target(),
+            Err(Error::FloorBeyondSize(floor, commit)) if floor == size && commit == size - 1
+        ));
     }
 
     #[boxed]

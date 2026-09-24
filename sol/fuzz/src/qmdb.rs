@@ -885,7 +885,12 @@ mod tests {
     use crate::Cli;
     use clap::Parser;
     use commonware_codec::{Copying, DecodeExt};
-    use commonware_storage::{merkle::Proof, qmdb::current::proof::RangeProof};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::deterministic;
+    use commonware_storage::{
+        merkle::Proof,
+        qmdb::{current::proof::RangeProof, sync::Database as _},
+    };
 
     #[test]
     fn cli_requires_variable_value_length() {
@@ -1602,8 +1607,22 @@ mod tests {
         }
         if *proof.leaves == 1 {
             let initial = match encoding {
-                "fixed" => keyless::initial_root::<F, FixedEncoding<FixedBytes<32>>, H>(),
-                _ => keyless::initial_root::<F, qmdb::any::value::VariableEncoding<Vec<u8>>, H>(),
+                "fixed" => keyless::fixed::Db::<
+                    F,
+                    deterministic::Context,
+                    FixedBytes<32>,
+                    H,
+                    Sequential,
+                >::initial_target()
+                .root,
+                _ => keyless::variable::Db::<
+                    F,
+                    deterministic::Context,
+                    Vec<u8>,
+                    H,
+                    Sequential,
+                >::initial_target()
+                .root,
             };
             assert_eq!(root, initial);
         }

@@ -315,8 +315,8 @@
 //! partial.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root). The ops root is
-//! returned by the `sync::Database` trait's `root()` method, since the sync engine verifies batches
-//! against the ops root, not the canonical root.
+//! returned by [ops_root()](db::Db::ops_root) and is the root of the `sync::Database` target,
+//! since the sync engine verifies batches against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
 //! verifying ops proofs directly should use [`crate::qmdb::verify_proof`]. After sync, the bitmap
@@ -521,6 +521,7 @@ pub mod tests {
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
             store::tests::{TestKey, TestValue},
+            sync::MerkleizedBatch as _,
             verify_proof,
         },
         translator::Translator,
@@ -2571,6 +2572,24 @@ pub mod tests {
                 )
                 .await;
             }
+
+            // The batch and the database agree on the chunk-aligned sync target.
+            let merkleized = db
+                .new_batch()
+                .write(key(0), Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let expected = merkleized.target().unwrap();
+            (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(
+                <UnorderedVariableDb as crate::qmdb::sync::Database>::target(&db),
+                expected
+            );
+            assert!(
+                *expected.range.start() > 0,
+                "expected a non-zero sync boundary"
+            );
 
             let prune_boundary = db.sync_boundary();
             let db = db.prune(prune_boundary).await.unwrap();

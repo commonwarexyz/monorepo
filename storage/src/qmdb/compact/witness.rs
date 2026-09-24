@@ -23,16 +23,16 @@ use crate::{
     merkle::{self, Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{
         self, Error,
-        operation::Floored,
-        sync::{CompactTarget, Request, Response},
+        operation::Committable,
+        sync::{Request, Response, Target},
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Buf, Decode as _, EncodeSize, Read, Write};
+use commonware_codec::{Buf, Decode as _, Encode, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
-use commonware_utils::sync::RwLock;
+use commonware_utils::{non_empty_range, sync::RwLock};
 use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -108,11 +108,12 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
         self.witness.size
     }
 
-    /// The compact-sync target (root and size) this witness can serve.
-    pub(crate) const fn target(&self) -> CompactTarget<F, D> {
-        CompactTarget {
+    /// The sync target this witness can serve.
+    pub(crate) fn target(&self) -> Target<F, D> {
+        let size = self.size();
+        Target {
             root: self.root,
-            size: self.size(),
+            range: non_empty_range!(size - 1, size),
         }
     }
 }
@@ -557,21 +558,6 @@ where
     })
 }
 
-/// Validate that a decoded commit floor does not point past the commit it authenticates.
-///
-/// The inactivity floor of a commit must sit at or below the commit's own location. A higher
-/// floor would reference operations that do not exist yet, which indicates disk corruption in
-/// the persisted witness.
-pub(crate) fn validate_inactivity_floor<F: Family>(
-    inactivity_floor_loc: Location<F>,
-    last_commit_loc: Location<F>,
-) -> Result<(), Error<F>> {
-    if inactivity_floor_loc > last_commit_loc {
-        return Err(Error::DataCorrupted("invalid compact witness"));
-    }
-    Ok(())
-}
-
 /// Load the tip witness from the journal and rebuild the Merkle from it.
 async fn load_tip<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
@@ -583,7 +569,7 @@ where
     F: Family,
     H: Hasher,
     S: Strategy,
-    Op: Read + Floored<F>,
+    Op: Read + Committable<F>,
 {
     let size = journal.size();
     if size == 0 {
@@ -608,7 +594,7 @@ where
     D: Digest,
     H: Hasher<Digest = D>,
     S: Strategy,
-    Op: Read + Floored<F>,
+    Op: Read + Committable<F>,
 {
     let size = witness.size;
     if size == 0 {
@@ -621,9 +607,13 @@ where
     let last_commit_op = Op::decode_cfg(witness.op_bytes.clone(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let inactivity_floor_loc = last_commit_op
-        .has_floor()
+        .floor()
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
-    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+    if inactivity_floor_loc > last_commit_loc {
+        return Err(Error::DataCorrupted(
+            "inactivity floor exceeds commit location",
+        ));
+    }
 
     let hasher = qmdb::hasher::<H>();
     merkle
@@ -650,14 +640,13 @@ pub(crate) async fn init<E, F, H, S, Op>(
     max_size: Option<Location<F>>,
     merkle: &mut compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
-    initial_commit_op_bytes: Vec<u8>,
 ) -> Result<(Store<E, F, H::Digest>, Op), Error<F>>
 where
     E: Context,
     F: Family,
     H: Hasher,
     S: Strategy,
-    Op: Read + Floored<F>,
+    Op: Read + Encode + Committable<F>,
 {
     crate::qmdb::validate_initialization_bound(max_size)?;
 
@@ -672,9 +661,12 @@ where
             return Err(Error::DataCorrupted("witness journal has no tip"));
         }
         let journal = pending.finish(0).await?;
-        let journal =
-            bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
-                .await?;
+        let journal = bootstrap_initial_commit::<E, F, H, S>(
+            journal,
+            merkle,
+            Op::initial_commit().encode().to_vec(),
+        )
+        .await?;
         let (witness, op) =
             load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
         return Ok((Store::new(journal, witness), op));

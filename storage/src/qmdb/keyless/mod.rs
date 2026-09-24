@@ -51,8 +51,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::value::ValueEncoding, chain, metrics::Metrics, single_operation_root,
-        sync::source,
+        Error, any::value::ValueEncoding, chain, find_inactivity_floor_at, metrics::Metrics,
+        operation::Committable, sync::source,
     },
 };
 use commonware_codec::EncodeShared;
@@ -74,19 +74,6 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::{APPEND_CONTEXT, COMMIT_CONTEXT, Operation};
-
-/// Compute the authenticated root of a newly initialized database without opening storage.
-///
-/// The initial commit never carries metadata, so this root always represents `Commit(None, 0)`.
-pub fn initial_root<F, V, H>() -> H::Digest
-where
-    F: Family,
-    V: ValueEncoding,
-    H: Hasher,
-    Operation<F, V>: EncodeShared,
-{
-    single_operation_root::<F, H>(&Operation::<F, V>::Commit(None, Location::new(0)))
-}
 
 /// Configuration for a [Keyless] authenticated db.
 #[derive(Clone)]
@@ -176,27 +163,15 @@ where
         let metrics = Metrics::new(context);
         if journal.size() == 0 {
             warn!("no operations found in log, creating initial commit");
-            (journal, _) = journal
-                .append(&Operation::Commit(None, Location::new(0)))
-                .await?;
+            (journal, _) = journal.append(&Operation::initial_commit()).await?;
             journal = journal.sync().await?;
         }
 
-        let (last_commit_loc, inactivity_floor_loc) = {
-            let bounds = journal.bounds();
-            let last_commit_loc = Location::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .expect("at least one commit should exist"),
-            );
-            let op = journal.read(*last_commit_loc).await?;
-            let inactivity_floor_loc = op
-                .has_floor()
-                .expect("last operation should be a commit with floor");
-            (last_commit_loc, inactivity_floor_loc)
-        };
-        let inactive_peaks = F::inactive_peaks(last_commit_loc + 1, inactivity_floor_loc);
+        let size = journal.size();
+        let inactivity_floor_loc = find_inactivity_floor_at(&journal, size)
+            .await?
+            .ok_or(Error::UnexpectedData(size - 1))?;
+        let inactive_peaks = F::inactive_peaks(size, inactivity_floor_loc);
         let root = journal.root(inactive_peaks)?;
 
         let db = Self {
@@ -561,11 +536,14 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::qmdb::{verify_proof, verify_proof_and_pinned_nodes};
+    use crate::qmdb::{
+        sync::{MerkleizedBatch as _, Target},
+        verify_proof, verify_proof_and_pinned_nodes,
+    };
     use commonware_cryptography::Sha256;
     use commonware_parallel::Strategy;
     use commonware_runtime::{Supervisor as _, deterministic};
-    use commonware_utils::NZU64;
+    use commonware_utils::{NZU64, non_empty_range};
     use std::{future::Future, pin::Pin};
 
     pub(crate) type Reopen<D> =
@@ -2404,6 +2382,42 @@ pub(crate) mod tests {
         ));
 
         db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleized_batch_target<F: Family, V, C, H, S: Strategy>(
+        db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        let floor = Location::new(1);
+        let batch = db
+            .new_batch()
+            .append(V::Value::make(1))
+            .merkleize(&db, None, floor)
+            .await;
+        let size = batch.bounds().tip.size;
+        assert_eq!(
+            batch.target().unwrap(),
+            Target {
+                root: batch.root(),
+                range: non_empty_range!(floor, size)
+            }
+        );
+
+        // A floor at the batch size is what `apply_batch` rejects, so there is no target.
+        let batch = db
+            .new_batch()
+            .append(V::Value::make(2))
+            .merkleize(&db, None, size)
+            .await;
+        assert!(matches!(
+            batch.target(),
+            Err(Error::FloorBeyondSize(floor, commit)) if floor == size && commit == size - 1
+        ));
     }
 
     #[boxed]

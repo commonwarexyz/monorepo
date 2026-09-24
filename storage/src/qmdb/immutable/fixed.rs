@@ -513,6 +513,7 @@ mod tests {
         test_fixed_bounded_initialization_recovery => run_bounded_initialization_recovery, open_with_max;
         test_fixed_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, open_small_sections_with_max;
+        test_fixed_merkleized_batch_target => run_merkleized_batch_target, open;
         test_fixed_inactivity_floor_tracking => run_inactivity_floor_tracking, open;
         test_fixed_floor_monotonicity => run_floor_monotonicity, open;
         test_fixed_floor_monotonicity_violation => run_floor_monotonicity_violation, open;

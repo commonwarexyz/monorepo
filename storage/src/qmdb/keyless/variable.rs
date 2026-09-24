@@ -161,6 +161,7 @@ mod tests {
         test_keyless_variable_bounded_initialization_recovery => run_bounded_initialization_recovery, bounded;
         test_keyless_variable_bounded_initialization_pruned_target_errors =>
             run_bounded_initialization_pruned_target_errors, bounded;
+        test_keyless_variable_merkleized_batch_target => run_merkleized_batch_target, db;
         test_keyless_variable_floor_tracking => run_floor_tracking, reopen_indexed;
         test_keyless_variable_floor_regression_rejected => run_floor_regression_rejected, reopen;
         test_keyless_variable_floor_beyond_commit_loc_rejected => run_floor_beyond_commit_loc_rejected, reopen;
