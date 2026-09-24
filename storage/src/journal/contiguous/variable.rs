@@ -1575,11 +1575,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     async fn append_many_inner<'a>(&'a mut self, items: Many<'a, V>) -> Result<u64, Error> {
-        self.write_encoded(self.prepare_append(items)?).await
+        let prepared = self.prepare_append::<false>(items)?;
+        self.write_encoded(prepared).await
     }
 
-    /// See [Journal::prepare_append].
-    pub(crate) fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
+    /// Encode a batch, optionally compacting unused capacity for a deferred append according to
+    /// [PREPARED_SPARE_LIMIT].
+    pub(crate) fn prepare_append<const COMPACT: bool>(
+        &self,
+        items: Many<'_, V>,
+    ) -> Result<PreparedAppend<V>, Error> {
         let mut encoded = Vec::new();
         let mut item_starts = Vec::with_capacity(items.len());
         let mut encode = |item: &V| {
@@ -1600,6 +1605,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 }
             }
         }
+
+        // Release excess capacity for batches that callers may retain. Compact before building
+        // PreparedAppend so it can be constructed directly in the caller's return slot.
+        if COMPACT && self.compression.is_some() {
+            let (len, capacity) = (encoded.len(), encoded.capacity());
+            if capacity - len > PREPARED_SPARE_LIMIT && len <= capacity / 4 {
+                encoded.shrink_to_fit();
+            }
+        }
+
         Ok(PreparedAppend {
             encoded,
             item_starts,
@@ -2300,14 +2315,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// This lets callers serialize borrowed items synchronously, release those borrows, and
     /// perform the append without holding unrelated locks across journal I/O.
     pub fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
-        let mut prepared = self.0.prepare_append(items)?;
-        if prepared.compressed {
-            let (len, capacity) = (prepared.encoded.len(), prepared.encoded.capacity());
-            if capacity - len > PREPARED_SPARE_LIMIT && len <= capacity / 4 {
-                prepared.encoded.shrink_to_fit();
-            }
-        }
-        Ok(prepared)
+        self.0.prepare_append::<true>(items)
     }
 
     /// Append items encoded by [`Self::prepare_append`], returning the position of the last item
@@ -4012,8 +4020,18 @@ mod tests {
                 })
                 .collect();
             let mixed: Vec<_> = small[..64].iter().cloned().chain([large.clone()]).collect();
+
+            // Immediate appends retain capacity even when a deferred batch would be compacted.
+            let immediate = journal
+                .0
+                .prepare_append::<false>(Many::Flat(std::slice::from_ref(&large)))
+                .unwrap();
+            let len = immediate.encoded.len();
+            let spare = immediate.encoded.capacity() - len;
+            assert!(spare > PREPARED_SPARE_LIMIT.max(len.saturating_mul(3)));
+
+            // Compaction must not change the frames.
             for batch in [vec![large], small, mixed] {
-                // Compaction must not change the frames.
                 let prepared = journal.prepare_append(Many::Flat(&batch)).unwrap();
                 let mut expected = Vec::new();
                 let mut starts = Vec::new();
