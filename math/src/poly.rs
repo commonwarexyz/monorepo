@@ -125,6 +125,31 @@ impl<K> Poly<K> {
         acc
     }
 
+    /// Evaluate a polynomial at a small integer point.
+    ///
+    /// This returns `a_0 + x a_1 + x^2 a_2 + ...`, where `x a` means `a` added
+    /// to itself `x` times. Each step of Horner's method scales by `x` with
+    /// [`Additive::scale`], costing about `log2(x)` doublings, so this is much
+    /// cheaper than [`Self::eval_msm`] at the same point when `x` is small.
+    ///
+    /// The running time depends on `x`, so `x` must not be secret.
+    pub fn eval_u64(&self, x: u64) -> K
+    where
+        K: Additive,
+    {
+        let x = [x];
+        let mut iter = self.coeffs.iter().rev();
+        let mut acc = iter
+            .next()
+            .expect("Impossible: Polynomial has no coefficients")
+            .clone();
+        for coeff in iter {
+            acc = acc.scale(&x);
+            acc += coeff;
+        }
+        acc
+    }
+
     /// Like [`Self::eval`], but using [`Space::msm`].
     ///
     /// This method uses more scratch space, and requires cloning values of
@@ -591,6 +616,7 @@ pub mod fuzz {
         EvalScale(Poly<F>, F, F),
         EvalZero(Poly<F>),
         EvalMsm(Poly<F>, F),
+        EvalU64(Poly<F>, Poly<G>, u64),
         LinCombEval(Poly<F>, Vec<(F, F)>),
         Interpolate(Poly<F>),
         InterpolateWithZeroPoint(Poly<F>),
@@ -623,6 +649,11 @@ pub mod fuzz {
                 }
                 Self::EvalMsm(f, x) => {
                     assert_eq!(f.eval(&x), f.eval_msm(&x, &Sequential));
+                }
+                Self::EvalU64(f, g, x) => {
+                    let point = F::from(x);
+                    assert_eq!(f.eval_u64(x), f.eval(&point));
+                    assert_eq!(g.eval_u64(x), g.eval_msm(&point, &Sequential));
                 }
                 Self::LinCombEval(f, pairs) => {
                     let naive_eval = pairs.iter().fold(F::zero(), |mut acc, (a, b)| {
@@ -724,7 +755,7 @@ pub mod fuzz {
 #[cfg(test)]
 mod test {
     use super::{fuzz::Plan, *};
-    use crate::test::F;
+    use crate::test::{F, G};
     use arbitrary::Unstructured;
 
     #[test]
@@ -771,6 +802,19 @@ mod test {
         let mut u = Unstructured::new(&[]);
         for case in cases {
             case.run(&mut u).unwrap();
+        }
+    }
+
+    #[test]
+    fn eval_u64_edge_cases() {
+        let mut rng = commonware_utils::test_rng();
+        let mut u = Unstructured::new(&[]);
+        for degree in [0, 1, 2, 7, 33] {
+            let f = Poly::<F>::new(&mut rng, degree);
+            let g = Poly::<G>::commit(f.clone());
+            for x in (0..=40).chain([u64::from(u32::MAX), F::MAX, u64::MAX]) {
+                Plan::EvalU64(f.clone(), g.clone(), x).run(&mut u).unwrap();
+            }
         }
     }
 
