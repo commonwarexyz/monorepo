@@ -2,6 +2,7 @@ mod actor;
 mod ingress;
 mod round;
 mod verifier;
+mod votes;
 
 use crate::{
     Relay, Reporter,
