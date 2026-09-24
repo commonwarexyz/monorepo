@@ -388,7 +388,7 @@ where
 ///
 /// Every stage runs against the same database borrow, so the resolved state cannot go stale
 /// between compaction and finalization.
-pub(crate) struct PreparedBatch<F: Family, H, U, S: Strategy>
+struct PreparedBatch<F: Family, H, U, S: Strategy>
 where
     U: update::Update,
     H: Hasher,
