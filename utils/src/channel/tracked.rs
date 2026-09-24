@@ -53,7 +53,7 @@ use super::mpsc::{
 use crate::sync::Mutex;
 use futures::Stream;
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, VecDeque, hash_map::Entry},
     hash::Hash,
     pin::Pin,
     sync::Arc,
@@ -75,19 +75,13 @@ impl<B: Eq + Hash + Clone> Drop for Guard<B> {
         let mut state = self.tracker.lock();
 
         // Mark the message as delivered
-        *state.pending.get_mut(&self.sequence).unwrap() = true;
+        let index = (self.sequence - state.watermark - 1) as usize;
+        state.pending[index] = true;
 
-        // Advance past consecutive delivered messages. Every sequence in (watermark, next) has an
-        // entry, so stopping at `next` means `entry` never probes a missing key.
-        let mut current_watermark = state.watermark;
-        while current_watermark + 1 < state.next
-            && let Entry::Occupied(entry) = state.pending.entry(current_watermark + 1)
-            && *entry.get()
-        {
-            entry.remove();
-            current_watermark += 1;
+        // Advance past consecutive delivered messages
+        while state.pending.pop_front_if(|delivered| *delivered).is_some() {
+            state.watermark += 1;
         }
-        state.watermark = current_watermark;
 
         // Update batch count (if necessary)
         if let Some(batch) = self.batch.take() {
@@ -118,7 +112,8 @@ struct State<B> {
     next: u64,
     watermark: u64,
     batches: HashMap<B, usize>,
-    pending: HashMap<u64, bool>,
+    /// Whether each sequence after `watermark` has been delivered, oldest first.
+    pending: VecDeque<bool>,
 }
 
 impl<B> Default for State<B> {
@@ -127,7 +122,7 @@ impl<B> Default for State<B> {
             next: 1,
             watermark: 0,
             batches: HashMap::new(),
-            pending: HashMap::new(),
+            pending: VecDeque::new(),
         }
     }
 }
@@ -159,7 +154,7 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
         state.next += 1;
 
         // Track this sequence as not yet delivered
-        state.pending.insert(sequence, false);
+        state.pending.push_back(false);
 
         // Update batch count if provided
         if let Some(batch) = &batch {
