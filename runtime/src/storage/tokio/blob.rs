@@ -819,7 +819,8 @@ mod tests {
 
     /// A reopen of the same incarnation waits for the canceled write or resize, with retirement
     /// on either side of its attachment. Replacement leaves an earlier reopen bound to the
-    /// removed file. Both paths report the captured file's settled contents.
+    /// removed file. Both paths report the captured file's settled contents. The wait itself is
+    /// pinned deterministically by `test_cancelled_completion_failure_is_retained`.
     async fn check_reopen_after_gated_mutation(
         replace: bool,
         shrink: bool,

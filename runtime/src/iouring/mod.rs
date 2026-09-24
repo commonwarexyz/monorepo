@@ -14,7 +14,7 @@
 //! # Ownership
 //!
 //! Workers own task, request, timer, and result progress. Each open serializes
-//! durability operations across workers through their terminal accounting.
+//! its syncs and SYNC writes across workers until their results are recorded.
 //! Forwarded results, mailboxes, task handles, supervision, and metrics are
 //! synchronized across threads.
 //!

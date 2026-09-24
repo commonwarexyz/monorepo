@@ -32,8 +32,9 @@ impl Config {
 
 /// Filesystem storage with one logical open per blob.
 ///
-/// Failed durability barriers during creation or content sync remain errors on later opens
-/// through this instance until the blob is removed or recreated.
+/// Failed durability barriers during content sync remain errors on later opens through this
+/// instance until the blob is removed or recreated. Creation failures are retained only when
+/// the header is complete.
 #[derive(Clone)]
 pub struct Storage {
     lock: Arc<Mutex<Partitions>>,
@@ -262,8 +263,7 @@ impl crate::Storage for Storage {
                         Ok((0, blob_version, data_offset))
                     })()
                     .inspect_err(|error: &Error| {
-                        // Retain creation failures until the namespace entry
-                        // is removed or replaced.
+                        // Retain creation failures until the blob is removed or recreated.
                         pending.fail(&generation, error.clone());
                     })?,
                 };
@@ -1645,6 +1645,7 @@ mod tests {
             test_pool(),
         );
         shared::check_recreate_reopen(&storage, &storage.pending).await;
+        shared::check_recreate_clean(&storage, &storage.pending).await;
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
     }

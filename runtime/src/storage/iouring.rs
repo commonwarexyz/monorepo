@@ -75,8 +75,9 @@ pub struct Config {
 /// Filesystem storage with one logical open per blob. Each request executes on the worker
 /// that registers it.
 ///
-/// Failed durability barriers during creation or content sync remain errors on later opens
-/// through this instance until the blob is removed or recreated.
+/// Failed durability barriers during content sync remain errors on later opens through this
+/// instance until the blob is removed or recreated. Creation failures are retained only when
+/// the header is complete.
 #[derive(Clone)]
 pub struct Storage {
     /// Serialize metadata operations across cloned contexts and workers.
@@ -205,7 +206,7 @@ impl crate::Storage for Storage {
                     Ok((0, blob_version, data_offset))
                 })()
                 .inspect_err(|error: &Error| {
-                    // Retain creation failures until the namespace entry is removed or replaced.
+                    // Retain creation failures until the blob is removed or recreated.
                     self.pending.fail(&generation, error.clone());
                 })?,
             };
@@ -864,8 +865,8 @@ mod tests {
         let _ = fs::remove_dir_all(directory);
     }
 
-    /// Dropping the last handle with unsynced writes performs no I/O, releases the directory
-    /// hold at once, and leaves debt the next open establishes with a single flush.
+    /// Dropping the last handle with unsynced writes performs no I/O and leaves debt the next
+    /// open establishes with a single flush. Settled opens release the directory hold.
     #[test]
     fn test_dirty_drop_leaves_its_flush_to_the_next_open() {
         let (storage, directory) = create_test_storage();
@@ -2076,6 +2077,7 @@ mod tests {
                 drop(reopened);
                 storage.remove(partition, None).await.unwrap();
             }
+            shared::check_recreate_clean(&storage, &storage.pending).await;
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });

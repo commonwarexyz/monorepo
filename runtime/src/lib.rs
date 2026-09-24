@@ -673,7 +673,7 @@ stability_scope!(BETA {
     ///
     /// A blob reopened within a run has the same durability guarantee. Opening
     /// waits for outstanding operations from the previous open to finish and
-    /// ensures that any data exposed by the new handle is crash-durable.
+    /// ensures that any data readable when it returns is crash-durable.
     ///
     /// # Cancellation
     ///

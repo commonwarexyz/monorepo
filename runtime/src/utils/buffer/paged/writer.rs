@@ -163,10 +163,10 @@ impl<B: Blob> Recovery<B> {
     /// `cache_ref` and appends stage in a write buffer of capacity `capacity`. Trims any invalid
     /// tail so the blob ends at a checksum-validated page. Earlier pages are not scanned.
     ///
-    /// Before appending, the tail-page contents must be durable: either open after a crash or call
-    /// [Self::sync]. Until then, recovery may read or truncate the blob. The discovered checksum
-    /// slot seeds durable-slot tracking, so appending over a still-volatile tail can overwrite the
-    /// only durable slot.
+    /// Before appending, the tail-page contents must be durable: either pass a blob with no writes
+    /// since it was opened or call [Self::sync]. Until then, recovery may read or truncate the
+    /// blob. The discovered checksum slot seeds durable-slot tracking, so appending over a
+    /// still-volatile tail can overwrite the only durable slot.
     pub async fn open(
         blob: B,
         original_blob_size: u64,

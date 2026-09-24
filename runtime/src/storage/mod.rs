@@ -789,9 +789,8 @@ pub(crate) mod tests {
 
         /// Reopening a replacement flushes its debt while another partition remains usable.
         ///
-        /// Covers name and partition removal while the old handle remains readable. Dropping
-        /// that handle must not record debt for the replacement, and the replacement's reopen
-        /// must not return before its own flush completes.
+        /// Covers name and partition removal while the old handle remains readable. The
+        /// replacement's reopen must not return before its own flush completes.
         pub(crate) async fn check_recreate_reopen<S: crate::Storage>(
             storage: &S,
             pending: &Pending,
@@ -881,6 +880,46 @@ pub(crate) mod tests {
                 let (names, len) = clean_progress.unwrap();
                 assert_eq!(names, vec![b"ready".to_vec()]);
                 assert_eq!(len, 0);
+            }
+        }
+
+        /// A dirty handle to a removed blob records no debt for a clean replacement.
+        ///
+        /// Covers name and partition removal.
+        pub(crate) async fn check_recreate_clean<S: crate::Storage>(
+            storage: &S,
+            pending: &Pending,
+        ) {
+            for remove_name in [true, false] {
+                let partition = "recreate_clean";
+                let name = b"blob";
+                let (old, _) = storage.open(partition, name).await.unwrap();
+                old.write_at(0, b"old", WriteOptions::default())
+                    .await
+                    .unwrap();
+                storage
+                    .remove(partition, remove_name.then_some(name.as_slice()))
+                    .await
+                    .unwrap();
+                let (current, _) = storage.open(partition, name).await.unwrap();
+                current
+                    .write_at(0, b"new", WriteOptions::SYNC)
+                    .await
+                    .unwrap();
+
+                // Drop the removed open while the replacement still owns the name.
+                let completions = pending.completions();
+                drop(old);
+                drop(current);
+                let (reopened, len) = storage.open(partition, name).await.unwrap();
+                drop(reopened);
+                storage.remove(partition, None).await.unwrap();
+                assert_eq!(len, 3);
+                assert_eq!(
+                    pending.completions(),
+                    completions,
+                    "the removed open recorded debt for its replacement"
+                );
             }
         }
     }
