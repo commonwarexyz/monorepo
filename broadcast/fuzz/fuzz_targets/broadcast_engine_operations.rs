@@ -253,6 +253,7 @@ fn fuzz(input: FuzzInput) {
             let config = Config {
                 public_key: public_key.clone(),
                 mailbox_size: NZUsize!(1024),
+                ingress_size: NZUsize!(1024),
                 deque_size: input.cache_size,
                 priority: false,
                 codec_config: RangeCfg::from(..),
