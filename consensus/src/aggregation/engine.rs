@@ -326,6 +326,9 @@ impl<
                         }
                     });
 
+                // We can join the committee after verifying a height, leaving it without a
+                // local ack or rebroadcast deadline. Schedule missing acks for unconfirmed
+                // heights so they can progress in the current epoch.
                 if let Some(signer) = scheme.me() {
                     for (height, pending) in &self.pending {
                         if self.confirmed.contains_key(height) {
