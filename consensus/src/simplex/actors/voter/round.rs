@@ -28,9 +28,9 @@ enum Decision {
     },
     /// Nullify vote broadcast. Only the retry deadline can fire, and
     /// next_timeout schedules it on the first poll.
-    Nullified { retry: Option<SystemTime> },
+    VotedNullify { retry: Option<SystemTime> },
     /// Finalize vote broadcast. No round-local timeout can fire.
-    Finalized,
+    VotedFinalize,
 }
 
 /// Tracks the leader of a round.
@@ -128,7 +128,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader info if we should propose.
     fn propose_ready(&self) -> Option<Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
-        if !self.is_signer(leader.idx) || self.nullified() || !self.proposal.should_build() {
+        if !self.is_signer(leader.idx) || self.voted_nullify() || !self.proposal.should_build() {
             return None;
         }
         Some(leader.clone())
@@ -149,7 +149,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the leader info if we should verify a proposal.
     fn verify_ready(&self) -> Option<&Leader<S::PublicKey>> {
         let leader = self.leader.as_ref()?;
-        if self.is_signer(leader.idx) || self.nullified() || !self.proposal.should_verify() {
+        if self.is_signer(leader.idx) || self.voted_nullify() || !self.proposal.should_verify() {
             return None;
         }
         Some(leader)
@@ -408,7 +408,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Completes the local proposal flow after the automaton returns a payload.
     pub fn proposed(&mut self, now: SystemTime, proposal: Proposal<D>) -> bool {
-        if self.nullified() {
+        if self.voted_nullify() {
             return false;
         }
         self.proposal.record_verified(proposal);
@@ -422,7 +422,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// or the slot was in an invalid state (e.g., we received a certificate for a
     /// conflicting proposal).
     pub fn verified(&mut self) -> bool {
-        if self.nullified() {
+        if self.voted_nullify() {
             return false;
         }
         if !self.proposal.mark_verified() {
@@ -436,7 +436,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     ///
     /// Returns true if the proposal should trigger verification, false otherwise.
     pub fn set_proposal(&mut self, proposal: Proposal<D>) -> bool {
-        if self.nullified() {
+        if self.voted_nullify() {
             return false;
         }
         match self.proposal.update_vote(&proposal) {
@@ -513,11 +513,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// should not timeout (e.g. because we have already finalized).
     pub const fn construct_nullify(&mut self) -> Option<bool> {
         // Ensure we haven't already broadcast a finalize vote.
-        if matches!(self.decision, Decision::Finalized) {
+        if matches!(self.decision, Decision::VotedFinalize) {
             return None;
         }
-        let retry = self.nullified();
-        self.decision = Decision::Nullified { retry: None };
+        let retry = self.voted_nullify();
+        self.decision = Decision::VotedNullify { retry: None };
         Some(retry)
     }
 
@@ -534,10 +534,10 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let proposed = self.proposal().is_some();
         let certified = self.is_certified();
         match &mut self.decision {
-            Decision::Finalized => None,
+            Decision::VotedFinalize => None,
             // Schedule the retry on the first poll after a nullify broadcast
             // (this also covers rounds restored from replay).
-            Decision::Nullified { retry } => {
+            Decision::VotedNullify { retry } => {
                 let deadline = *retry.get_or_insert_with(|| now + retry_interval);
                 Some((deadline, TimeoutReason::Retry))
             }
@@ -680,8 +680,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns true if we broadcast a nullify vote for this round.
-    const fn nullified(&self) -> bool {
-        matches!(self.decision, Decision::Nullified { .. })
+    const fn voted_nullify(&self) -> bool {
+        matches!(self.decision, Decision::VotedNullify { .. })
     }
 
     /// Returns true if [Self::construct_notarize] would yield a proposal,
@@ -695,7 +695,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // we have observed equivocation (where the proposal would be set to
         // ProposalStatus::Equivocated) or if verification hasn't completed yet.
         !self.broadcast_notarize
-            && !self.nullified()
+            && !self.voted_nullify()
             && matches!(self.proposal.status(), ProposalStatus::Verified)
     }
 
@@ -741,7 +741,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
 
-        self.decision = Decision::Finalized;
+        self.decision = Decision::VotedFinalize;
         self.proposal.proposal()
     }
 
@@ -762,14 +762,22 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                     self.is_signer(nullify.signer()),
                     "replaying nullify from another signer"
                 );
-                self.decision = Decision::Nullified { retry: None };
+                assert!(
+                    !matches!(self.decision, Decision::VotedFinalize),
+                    "replayed nullify conflicts with local finalize"
+                );
+                self.decision = Decision::VotedNullify { retry: None };
             }
             Artifact::Finalize(finalize) => {
                 assert!(
                     self.is_signer(finalize.signer()),
                     "replaying finalize from another signer"
                 );
-                self.decision = Decision::Finalized;
+                assert!(
+                    !matches!(self.decision, Decision::VotedNullify { .. }),
+                    "replayed finalize conflicts with local nullify"
+                );
+                self.decision = Decision::VotedFinalize;
             }
             Artifact::Notarization(_) => {
                 self.broadcast_notarization = true;
@@ -1202,12 +1210,12 @@ mod tests {
         assert!(equivocator.is_none());
 
         // Recovered certificates must not imply that we cast a local finalize vote.
-        assert!(!matches!(round.decision, Decision::Finalized));
+        assert!(!matches!(round.decision, Decision::VotedFinalize));
         assert_eq!(round.construct_finalize(), None);
 
         // But we should still broadcast the recovered certificate.
         assert_eq!(round.broadcast_finalization(), Some(certificate));
-        assert!(!matches!(round.decision, Decision::Finalized));
+        assert!(!matches!(round.decision, Decision::VotedFinalize));
         assert_eq!(round.broadcast_finalization(), None);
     }
 
@@ -1239,7 +1247,6 @@ mod tests {
         .expect("notarization");
 
         // Create nullification
-        let nullify_local = Nullify::sign::<Sha256Digest>(&local_scheme, round).expect("nullify");
         let nullify_votes: Vec<_> = schemes
             .iter()
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("nullify"))
@@ -1249,7 +1256,6 @@ mod tests {
                 .expect("nullification");
 
         // Create finalize
-        let finalize_local = Finalize::sign(&local_scheme, proposal.clone()).expect("finalize");
         let finalize_votes: Vec<_> = schemes
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
@@ -1266,10 +1272,6 @@ mod tests {
         round.set_leader(Participant::new(0));
         round.replay(&Artifact::Notarize(notarize_local));
         assert!(round.broadcast_notarize);
-        round.replay(&Artifact::Nullify(nullify_local));
-        assert!(round.nullified());
-        round.replay(&Artifact::Finalize(finalize_local));
-        assert!(matches!(round.decision, Decision::Finalized));
         round.replay(&Artifact::Notarization(notarization.clone()));
         assert!(round.broadcast_notarization);
         round.replay(&Artifact::Nullification(nullification.clone()));
@@ -1284,6 +1286,56 @@ mod tests {
         assert!(round.broadcast_nullification);
         round.replay(&Artifact::Finalization(finalization));
         assert!(round.broadcast_finalization);
+    }
+
+    #[test]
+    fn replay_local_votes_is_idempotent() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
+
+        let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round_info).expect("nullify");
+        let mut nullified = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        nullified.replay(&Artifact::Nullify(nullify.clone()));
+        nullified.replay(&Artifact::Nullify(nullify));
+        assert!(nullified.voted_nullify());
+
+        let finalize = Finalize::sign(&schemes[0], proposal).expect("finalize");
+        let mut finalized = Round::new(schemes[0].clone(), round_info);
+        finalized.replay(&Artifact::Finalize(finalize.clone()));
+        finalized.replay(&Artifact::Finalize(finalize));
+        assert!(matches!(finalized.decision, Decision::VotedFinalize));
+    }
+
+    #[test]
+    #[should_panic(expected = "replayed finalize conflicts with local nullify")]
+    fn replay_finalize_conflicts_with_local_nullify() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
+        let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round_info).expect("nullify");
+        let finalize = Finalize::sign(&schemes[0], proposal).expect("finalize");
+        let mut round = Round::new(schemes[0].clone(), round_info);
+
+        round.replay(&Artifact::Nullify(nullify));
+        round.replay(&Artifact::Finalize(finalize));
+    }
+
+    #[test]
+    #[should_panic(expected = "replayed nullify conflicts with local finalize")]
+    fn replay_nullify_conflicts_with_local_finalize() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
+        let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round_info).expect("nullify");
+        let finalize = Finalize::sign(&schemes[0], proposal).expect("finalize");
+        let mut round = Round::new(schemes[0].clone(), round_info);
+
+        round.replay(&Artifact::Finalize(finalize));
+        round.replay(&Artifact::Nullify(nullify));
     }
 
     /// Replaying a local notarize vote for a leader-owned proposal should
@@ -1358,6 +1410,89 @@ mod tests {
 
         // Check that construct_nullify returns None
         assert!(round.construct_nullify().is_none());
+    }
+
+    #[test]
+    fn replayed_finalize_does_not_block_proposal_or_notarize() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
+        let finalize = Finalize::sign(&schemes[0], proposal.clone()).expect("finalize");
+        let mut round = Round::new(schemes[0].clone(), round_info);
+        round.set_leader(Participant::new(0));
+
+        round.replay(&Artifact::Finalize(finalize));
+        assert!(round.should_propose());
+        assert!(round.set_proposal(proposal.clone()));
+        assert!(round.verified());
+        assert_eq!(round.construct_notarize(), Some(&proposal));
+        assert!(round.construct_nullify().is_none());
+    }
+
+    #[test]
+    fn latch_before_deadlines_remains_first_timeout() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        let start = SystemTime::UNIX_EPOCH;
+        let latched = start + Duration::from_secs(1);
+        let leader = start + Duration::from_secs(10);
+        let certification = start + Duration::from_secs(20);
+
+        round.latch_timeout(latched, TimeoutReason::Inactivity);
+        round.set_deadlines(leader, certification, None);
+
+        assert_eq!(
+            round.next_timeout(start, Duration::from_secs(5), true),
+            Some((latched, TimeoutReason::Inactivity))
+        );
+        assert_eq!(
+            round.next_timeout(start, Duration::from_secs(5), false),
+            Some((leader, TimeoutReason::LeaderTimeout))
+        );
+    }
+
+    #[test]
+    fn nullify_retry_is_stable_and_resets_on_retry() {
+        let mut rng = test_rng();
+        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
+        let round_info = Rnd::new(Epoch::new(5), View::new(2));
+        let mut round = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
+        let start = SystemTime::UNIX_EPOCH;
+        let retry = Duration::from_secs(5);
+
+        round.set_deadlines(
+            start + Duration::from_secs(1),
+            start + Duration::from_secs(2),
+            None,
+        );
+        round.latch_timeout(start, TimeoutReason::Inactivity);
+        assert_eq!(round.construct_nullify(), Some(false));
+        assert!(round.construct_finalize().is_none());
+
+        round.set_deadlines(
+            start + Duration::from_secs(10),
+            start + Duration::from_secs(20),
+            None,
+        );
+        round.latch_timeout(start + Duration::from_secs(3), TimeoutReason::LeaderNullify);
+        let first = round.next_timeout(start + Duration::from_secs(4), retry, true);
+        assert_eq!(
+            first,
+            Some((start + Duration::from_secs(9), TimeoutReason::Retry))
+        );
+        assert_eq!(
+            round.next_timeout(start + Duration::from_secs(30), retry, true),
+            first
+        );
+
+        assert_eq!(round.construct_nullify(), Some(true));
+        assert_eq!(
+            round.next_timeout(start + Duration::from_secs(30), retry, true),
+            Some((start + Duration::from_secs(35), TimeoutReason::Retry))
+        );
     }
 
     #[test]
@@ -1670,6 +1805,7 @@ mod tests {
 
         // Now construct finalize succeeds
         assert!(round.construct_finalize().is_some());
+        assert!(round.construct_nullify().is_none());
     }
 
     #[test]
