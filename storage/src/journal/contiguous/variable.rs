@@ -365,7 +365,10 @@ pub struct Config<C> {
     /// All non-final blobs are logically full.
     pub items_per_section: NonZeroU64,
 
-    /// Optional compression level for stored items.
+    /// Optional zstd compression level for stored items.
+    ///
+    /// Keep the choice between `None` and `Some(_)` fixed while stored items are retained.
+    /// Only the compression level may change between initializations when compression is enabled.
     pub compression: Option<u8>,
 
     /// [Codec] configuration for encoding/decoding items.
@@ -4054,6 +4057,73 @@ mod tests {
                 );
             }
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_compressed_frames_cross_pages() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let cfg = Config {
+                partition: "compressed-cross-pages".into(),
+                items_per_section: NZU64!(3),
+                compression: Some(3),
+                codec_config: ((..=4096).into(), ()),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(64),
+            };
+
+            // Random items stay larger than a page after compression, so their frames span
+            // checksummed page boundaries. Repeated items compress to a few bytes.
+            let items: Vec<Vec<u8>> = (0..10)
+                .map(|i| {
+                    let mut item = vec![i as u8; 1500 + i * 97];
+                    if i % 3 != 2 {
+                        context.fill_bytes(&mut item);
+                    }
+                    item
+                })
+                .collect();
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for item in &items {
+                (journal, _) = journal.append(item).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen with an empty cache so reads decode frames from the blobs. Sealed sections
+            // replay pages directly, and the tail replays through the writer.
+            let cfg = Config {
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                ..cfg
+            };
+            let journal = Journal::<_, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            {
+                let stream = journal
+                    .replay(0, NZUsize!(64), ReadOptions::default())
+                    .await
+                    .unwrap();
+                futures::pin_mut!(stream);
+                let mut expected = 0u64;
+                while let Some(result) = stream.next().await {
+                    let (pos, item) = result.unwrap();
+                    assert_eq!(pos, expected);
+                    assert_eq!(item, items[pos as usize]);
+                    expected += 1;
+                }
+                assert_eq!(expected, items.len() as u64);
+            }
+            for (pos, item) in items.iter().enumerate() {
+                assert_eq!(&journal.read(pos as u64).await.unwrap(), item);
+            }
+            let positions: Vec<u64> = (0..items.len() as u64).collect();
+            assert_eq!(journal.read_many(&positions).await.unwrap(), items);
             journal.destroy().await.unwrap();
         });
     }

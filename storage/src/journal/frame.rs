@@ -12,11 +12,12 @@ use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer
 use commonware_utils::{Cached, Widen};
 use std::{future::Future, io::Cursor};
 use zstd::{
-    decode_all,
-    zstd_safe::{CCtx, compress_bound},
+    bulk::Decompressor,
+    zstd_safe::{CCtx, compress_bound, get_frame_content_size},
 };
 
 commonware_utils::thread_local_cache!(static COMPRESSOR: CCtx<'static>);
+commonware_utils::thread_local_cache!(static DECOMPRESSOR: Decompressor<'static>);
 
 /// Read access needed to decode a frame at a known offset.
 pub(super) trait FrameReader {
@@ -114,15 +115,39 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
     Ok((next_offset, item))
 }
 
+/// Decompress a journal payload into an owned buffer for zero-copy decoding.
+pub(super) fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
+    // Journal writers emit single frames that declare their content size, so we can allocate the
+    // output buffer from it.
+    let size = get_frame_content_size(compressed)
+        .ok()
+        .flatten()
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or(Error::DecompressionFailed)?;
+
+    // Bulk decompression resets its fixed-size context before each frame, so it can be cached
+    // without cleanup, even after a failed decode.
+    Cached::take(&DECOMPRESSOR, Decompressor::new, |_| Ok(()))
+        .and_then(|mut decompressor| decompressor.decompress(compressed, size))
+        .map_err(|_| Error::DecompressionFailed)
+}
+
 /// Decode a frame's payload into an item, decompressing if needed.
 pub(super) fn decode_item<V: Codec>(
-    item_data: impl Buf,
+    mut item_data: impl Buf,
     cfg: &V::Cfg,
     compressed: bool,
 ) -> Result<V, Error> {
     if compressed {
-        let decompressed =
-            decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
+        // Bulk decompression reads one slice, so only a payload split across chunks is copied.
+        let len = item_data.remaining();
+        let decompressed = if item_data.chunk().len() == len {
+            let decompressed = decompress(item_data.chunk());
+            item_data.advance(len);
+            decompressed?
+        } else {
+            decompress(&item_data.copy_to_bytes(len))?
+        };
         V::decode_cfg(decompressed, cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
@@ -158,6 +183,19 @@ pub(super) async fn read_frame_at<V: Codec>(
                 compressed,
             )?;
             (data_len as u32, decoded)
+        }
+        FrameInfo::Incomplete {
+            varint_len,
+            total_len,
+            ..
+        } if compressed => {
+            // Reread the buffered prefix so a payload read as one chunk decompresses without a
+            // staging copy.
+            let data_offset = offset
+                .checked_add(varint_len as u64)
+                .ok_or(Error::OffsetOverflow)?;
+            let data = reader.read_at(data_offset, total_len).await?;
+            (total_len as u32, decode_item::<V>(data, cfg, compressed)?)
         }
         FrameInfo::Incomplete {
             varint_len,
@@ -270,6 +308,7 @@ mod tests {
     use commonware_codec::{Copying, Encode, Read, Write};
     use commonware_utils::test_rng;
     use rand::{Rng as _, RngExt as _};
+    use zstd::bulk::compress;
 
     /// Frame a single item and return the raw frame bytes.
     fn frame<V: Codec>(compression: Option<u8>, item: &V) -> Vec<u8> {
@@ -541,6 +580,106 @@ mod tests {
             decode_item::<u64>(Copying(&buf[1..]), &(), true),
             Err(Error::DecompressionFailed)
         ));
+    }
+
+    #[test]
+    fn test_decode_item_decompresses_split_payloads_and_consumes_exactly() {
+        let cfg = ((..).into(), ());
+        for (len, level) in [(0usize, 3), (1, 1), (4096, 19), (70_000, 3)] {
+            let item: Vec<u8> = (0..len).map(|i| (i % 7) as u8).collect();
+            let payload = compress(&item.encode(), level).unwrap();
+
+            // A payload in one chunk decompresses without copying its compressed bytes. Decoding
+            // consumes exactly the payload and leaves the following bytes for the next frame.
+            let mut source = Bytes::from([payload.as_slice(), &[9, 9]].concat());
+            let decoded =
+                decode_item::<Vec<u8>>((&mut source).take(payload.len()), &cfg, true).unwrap();
+            assert_eq!(decoded, item);
+            assert_eq!(source.as_ref(), &[9, 9]);
+
+            // A payload split across chunks is copied first and consumed the same way.
+            let (head, tail) = payload.split_at(payload.len().min(3));
+            let mut split =
+                Bytes::copy_from_slice(head).chain(Bytes::from([tail, &[9, 9]].concat()));
+            let decoded =
+                decode_item::<Vec<u8>>((&mut split).take(payload.len()), &cfg, true).unwrap();
+            assert_eq!(decoded, item);
+            assert_eq!(split.copy_to_bytes(split.remaining()).as_ref(), &[9, 9]);
+        }
+    }
+
+    #[test]
+    fn test_compressed_frames_declare_content_size() {
+        // The reader requires the writer to declare each frame's decompressed size.
+        for len in [0usize, 1, 4096] {
+            let item = vec![7u8; len];
+            let buf = frame(Some(3), &item);
+            let (_, varint_len) = decode_length_prefix(&mut Copying(&buf)).unwrap();
+            assert_eq!(
+                get_frame_content_size(&buf[varint_len..]).unwrap(),
+                Some(item.encode_size() as u64)
+            );
+        }
+    }
+
+    #[test]
+    fn test_decompress_reuses_thread_context() {
+        // Shrinking outputs, ending with an empty one, decompress through one cached context.
+        for len in [70_000usize, 64, 0] {
+            let data: Vec<u8> = (0..len).map(|i| (i % 7) as u8).collect();
+            let payload = compress(&data, 3).unwrap();
+            assert_eq!(get_frame_content_size(&payload).unwrap(), Some(len as u64));
+            assert_eq!(decompress(&payload).unwrap(), data);
+        }
+        assert!(
+            DECOMPRESSOR.with(|slot| slot.borrow().1.is_some()),
+            "the context must return to the thread's cache"
+        );
+    }
+
+    #[test]
+    fn test_decompress_rejects_frame_without_content_size() {
+        let payload = zstd::stream::encode_all(42u64.encode().as_ref(), 3).unwrap();
+        assert_eq!(get_frame_content_size(&payload).unwrap(), None);
+        assert!(matches!(
+            decompress(&payload),
+            Err(Error::DecompressionFailed)
+        ));
+    }
+
+    #[test]
+    fn test_decompress_rejects_wrong_declared_size() {
+        let data = vec![7u8; 100];
+        let payload = compress(&data, 3).unwrap();
+
+        // A small single-segment frame stores its one-byte content size after the four-byte
+        // magic number and the one-byte frame header descriptor.
+        assert_eq!(payload[5], 100);
+        for declared in [99u8, 101] {
+            let mut corrupted = payload.clone();
+            corrupted[5] = declared;
+            assert_eq!(
+                get_frame_content_size(&corrupted).unwrap(),
+                Some(u64::from(declared))
+            );
+            assert!(matches!(
+                decompress(&corrupted),
+                Err(Error::DecompressionFailed)
+            ));
+        }
+    }
+
+    #[test]
+    fn test_decompress_context_recovers_after_errors() {
+        // Each truncation fails, and the cached context then decodes a valid payload.
+        let payload = compress(&42u64.encode(), 3).unwrap();
+        for len in 0..payload.len() {
+            assert!(decompress(&payload[..len]).is_err());
+            assert_eq!(
+                decode_item::<u64>(Copying(&payload), &(), true).unwrap(),
+                42
+            );
+        }
     }
 
     /// An item whose claimed encoded size exceeds the u32 frame limit. The size check
