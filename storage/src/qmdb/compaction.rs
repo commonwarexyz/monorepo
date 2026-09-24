@@ -1,35 +1,41 @@
-//! Scheduling controls for QMDB floor raising.
+//! Budgets for QMDB floor raising.
 //!
-//! A prepared batch accepts zero or more explicit compaction rounds before finalization.
-//! Callers can implement their own scheduling policy by choosing a budget for each round.
-//! All participants reproducing a root must use the same deterministic policy. Disabling
-//! compaction or providing insufficient sustained work can leave retained history unbounded.
+//! Merkleizing a batch raises the inactivity floor by moving active entries from below it to the
+//! log's tip. [`UnmerkleizedBatch::merkleize`](crate::qmdb::any::batch::UnmerkleizedBatch::merkleize)
+//! moves at most `user_steps + 1` entries and scans as far as needed to find them, so the floor
+//! advances at a rate set by each batch's own operation count, but the scan can cross an
+//! arbitrarily long inactive range.
 //!
-//! # Choosing a path
+//! [`UnmerkleizedBatch::merkleize_with_compaction_plan`](crate::qmdb::any::batch::UnmerkleizedBatch::merkleize_with_compaction_plan)
+//! lets the caller choose the [`CompactionBudget`] instead, capping both the entries moved and
+//! the locations scanned. After resolving the batch's mutations, it passes [`CompactionStats`]
+//! to a caller-supplied closure, which returns the budget and the CommitFloor metadata. This
+//! suits deployments where execution time is scarcer than disk space, such as a batch that must
+//! finalize within a block-production deadline. A caller can spend a fixed budget per batch,
+//! choose one from the batch's shape (for example, compacting only below an active-key density),
+//! skip compaction with a zero budget, or commit an empty batch to do compaction-only work.
 //!
-//! [`UnmerkleizedBatch::merkleize`](crate::qmdb::any::batch::UnmerkleizedBatch::merkleize)
-//! compacts with the default budget and finalizes in one call, so the floor advances at a rate set
-//! by each batch's own operation count. Manual compaction, reached through
-//! [`UnmerkleizedBatch::prepare`](crate::qmdb::any::batch::UnmerkleizedBatch::prepare), moves that
-//! schedule to the caller: each round's budget caps the entries moved and the locations scanned,
-//! bounding compaction cost per batch independently of how much the batch writes.
-//!
-//! That bound suits deployments where execution time is scarcer than disk space, such as a batch
-//! that must finalize within a block-production deadline. A caller can spend a fixed budget per
-//! batch, or skip rounds entirely, and reclaim space over later batches instead. Space is
-//! reclaimed more slowly in exchange, so sustained budgets must still outpace the rate at which
-//! batches render operations inactive.
+//! Space is reclaimed more slowly under a bounded budget, so sustained budgets must outpace the
+//! rate at which batches render operations inactive. All participants reproducing a root must
+//! choose budgets and metadata with the same deterministic function of [`CompactionStats`].
+//! Disabling compaction or providing insufficient sustained work can leave retained history
+//! unbounded.
 //!
 //! # Example
 //!
-//! An application can split compaction into bounded rounds and finalize the batch separately:
-//!
 //! ```ignore
-//! let prepared = batch.prepare(&db).await?;
-//! let budget = CompactionBudget { max_moves: 32, max_scan: 4096 };
-//! let (prepared, progress) = prepared.compact(&db, budget).await?;
-//! println!("moved {} entries across {} locations", progress.moved, progress.scanned);
-//! let batch = prepared.merkleize(&db, metadata).await?;
+//! let batch = batch
+//!     .merkleize_with_compaction_plan(&db, |stats| {
+//!         let retained = *stats.tip - *stats.inactivity_floor;
+//!         let max_scan = if retained > 2 * stats.total_active_keys as u64 {
+//!             4096
+//!         } else {
+//!             0
+//!         };
+//!         let budget = CompactionBudget { max_moves: stats.user_steps + 1, max_scan };
+//!         (budget, metadata)
+//!     })
+//!     .await?;
 //! ```
 //!
 //! [`CompactionBudget`] has no `Default` implementation: callers must choose the move and scan
@@ -37,31 +43,43 @@
 
 use crate::merkle::{Family, Location};
 
-/// Maximum work for one compaction round.
+/// Shape of a batch after its mutations are resolved and before compaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompactionStats<F: Family> {
+    /// Operations the batch appends that supersede an existing key's operation (updates and
+    /// deletes, not creates). The default budget moves `user_steps + 1` entries, the extra move
+    /// accounting for the previous CommitFloor becoming inactive.
+    pub user_steps: u64,
+    /// Active keys once the batch is applied. Compaction does not change this count.
+    pub total_active_keys: usize,
+    /// Location where compaction starts scanning. Equals `tip` when the batch leaves no active
+    /// keys, in which case compaction has nothing to scan.
+    pub inactivity_floor: Location<F>,
+    /// Log size after the batch's operations, excluding compaction moves and the CommitFloor.
+    /// Compaction scans no further than this location.
+    pub tip: Location<F>,
+}
+
+impl<F: Family> CompactionStats<F> {
+    /// The budget [`UnmerkleizedBatch::merkleize`](crate::qmdb::any::batch::UnmerkleizedBatch::merkleize)
+    /// uses: `user_steps + 1` moves with no scan limit.
+    pub const fn default_budget(&self) -> CompactionBudget {
+        CompactionBudget {
+            max_moves: self.user_steps + 1,
+            max_scan: u64::MAX,
+        }
+    }
+}
+
+/// Maximum compaction work for one merkleization.
 ///
 /// Limits apply to entry moves and the operation-location interval searched, not elapsed time
 /// or bytes copied. Bitmap access is chunk-granular: a chunk intersecting the interval may be
-/// read in full. Either limit being zero disables the round. Use `u64::MAX` for no limit.
+/// read in full. Either limit being zero skips compaction. Use `u64::MAX` for no limit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompactionBudget {
     /// Maximum number of active entries copied to the log's tip.
     pub max_moves: u64,
     /// Maximum number of operation locations searched, including inactive gaps.
     pub max_scan: u64,
-}
-
-/// Progress made by one compaction round.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CompactionResult<F: Family> {
-    /// Number of active entries copied to the tip.
-    pub moved: u64,
-    /// Length of the operation-location interval searched by this round.
-    pub scanned: u64,
-    /// Resulting inactivity floor. It never passes an unprocessed active entry.
-    pub floor: Location<F>,
-    /// Whether the scan reached the tip fixed when the batch was prepared.
-    ///
-    /// Budget exhaustion alone does not imply scan exhaustion. Later rounds continue the same
-    /// scan and never revisit entries moved by an earlier round of this prepared batch.
-    pub exhausted: bool,
 }

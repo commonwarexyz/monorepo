@@ -1,10 +1,18 @@
 use super::*;
-use crate::qmdb::{any::operation::Operation, compaction::CompactionBudget};
+use crate::qmdb::{
+    any::operation::Operation,
+    compaction::{CompactionBudget, CompactionStats},
+};
 use commonware_codec::Encode;
 
 const ONE: CompactionBudget = CompactionBudget {
     max_moves: 1,
     max_scan: u64::MAX,
+};
+
+const SKIP: CompactionBudget = CompactionBudget {
+    max_moves: 0,
+    max_scan: 0,
 };
 
 macro_rules! parity {
@@ -42,45 +50,86 @@ macro_rules! parity {
                         ancestors.push(parent);
                     }
                 }
+                let (base_floor, base_tip) = ancestors.last().map_or_else(
+                    || (db.inactivity_floor_loc(), db.bounds().end),
+                    |parent| (parent.bounds().inactivity_floor, parent.bounds().tip.size),
+                );
                 let make = || {
                     ancestors
                         .last()
                         .map_or_else(|| db.new_batch(), |parent| parent.new_batch::<Sha256>())
                         .write(key(150), Some(val(999)))
                 };
-                let automatic = make().merkleize(&db, Some(val(10))).await.unwrap();
-                let prepared = make().prepare(&db).await.unwrap();
-                let default_budget = prepared.default_compaction_budget();
-                assert_eq!(default_budget.max_moves, 2);
-                let (prepared, first) = prepared.compact(&db, ONE).await.unwrap();
-                assert_eq!(prepared.default_compaction_budget(), default_budget);
-                let (prepared, second) = prepared.compact(&db, ONE).await.unwrap();
-                assert_eq!(prepared.default_compaction_budget(), default_budget);
-                assert_eq!((first.moved, second.moved), (1, 1));
-                assert!(second.floor > first.floor);
-                let manual = prepared.merkleize(&db, Some(val(10))).await.unwrap();
-                assert_eq!(automatic.root(), manual.root());
                 let encode = |ops: &[_]| ops.iter().map(Encode::encode).collect::<Vec<_>>();
+
+                // The plan sees the resolved batch before compaction: one update of an existing
+                // key, appended at the parent's tip.
+                let mut seen = None;
+                let explicit = make()
+                    .merkleize_with_compaction_plan(&db, |stats| {
+                        seen = Some(stats);
+                        (stats.default_budget(), Some(val(10)))
+                    })
+                    .await
+                    .unwrap();
+                let stats: CompactionStats<_> = seen.unwrap();
+                assert_eq!(stats.user_steps, 1);
+                assert_eq!(stats.inactivity_floor, base_floor);
+                assert_eq!(*stats.tip, *base_tip + 1);
+                assert_eq!(
+                    stats.default_budget(),
+                    CompactionBudget {
+                        max_moves: 2,
+                        max_scan: u64::MAX,
+                    }
+                );
+
+                // Planning with the default budget matches automatic merkleization.
+                let automatic = make().merkleize(&db, Some(val(10))).await.unwrap();
+                assert_eq!(automatic.root(), explicit.root());
                 assert_eq!(
                     encode(&automatic.operations().1),
-                    encode(&manual.operations().1)
+                    encode(&explicit.operations().1)
                 );
+
+                let bounded = make()
+                    .merkleize_with_compaction_plan(&db, |_| (ONE, None))
+                    .await
+                    .unwrap();
+                let ops = bounded.operations().1;
+                assert_eq!(ops.len(), 3); // User update, one move, and CommitFloor.
                 assert_eq!(
-                    manual
-                        .operations()
-                        .1
-                        .iter()
+                    ops.iter()
                         .filter(|op| matches!(op, Operation::CommitFloor(..)))
                         .count(),
                     1
                 );
+                assert!(bounded.bounds().inactivity_floor > base_floor);
 
-                let prepared = make().prepare(&db).await.unwrap();
-                let floor = prepared.inactivity_floor();
-                let disabled = prepared.merkleize(&db, None).await.unwrap();
-                assert_eq!(disabled.bounds().inactivity_floor, floor);
-                assert_eq!(disabled.operations().1.len(), 2); // User update and CommitFloor only.
-                let (updated, _) = db.apply_batch(disabled).await.unwrap();
+                for budget in [
+                    SKIP,
+                    CompactionBudget {
+                        max_moves: 0,
+                        max_scan: u64::MAX,
+                    },
+                    CompactionBudget {
+                        max_moves: u64::MAX,
+                        max_scan: 0,
+                    },
+                ] {
+                    let skipped = make()
+                        .merkleize_with_compaction_plan(&db, |_| (budget, None))
+                        .await
+                        .unwrap();
+                    assert_eq!(skipped.bounds().inactivity_floor, base_floor);
+                    assert_eq!(skipped.operations().1.len(), 2); // User update and CommitFloor.
+                }
+
+                let skipped = make()
+                    .merkleize_with_compaction_plan(&db, |_| (SKIP, None))
+                    .await
+                    .unwrap();
+                let (updated, _) = db.apply_batch(skipped).await.unwrap();
                 db = updated;
                 assert_eq!(db.get(&key(150)).await.unwrap(), Some(val(999)));
             }
@@ -89,14 +138,14 @@ macro_rules! parity {
 }
 
 #[test]
-fn manual_compaction_matches_default_ordered() {
+fn bounded_compaction_matches_default_ordered() {
     parity!(OrderedVariableDb, |ctx| variable_config::<OneCap>(
         "ordered", ctx
     ));
 }
 
 #[test]
-fn manual_compaction_matches_default_unordered() {
+fn bounded_compaction_matches_default_unordered() {
     parity!(UnorderedVariableDb, |ctx| variable_config::<OneCap>(
         "unordered",
         ctx
@@ -104,7 +153,7 @@ fn manual_compaction_matches_default_unordered() {
 }
 
 #[test]
-fn manual_compaction_matches_default_any_ordered() {
+fn bounded_compaction_matches_default_any_ordered() {
     type AnyDb = crate::qmdb::any::ordered::variable::Db<
         mmr::Family,
         Context,
@@ -118,7 +167,7 @@ fn manual_compaction_matches_default_any_ordered() {
 }
 
 #[test]
-fn manual_compaction_matches_default_any_unordered() {
+fn bounded_compaction_matches_default_any_unordered() {
     type AnyDb = crate::qmdb::any::unordered::variable::Db<
         mmr::Family,
         Context,
@@ -133,22 +182,21 @@ fn manual_compaction_matches_default_any_unordered() {
 }
 
 #[test]
-fn manual_compaction_resumes_across_inactive_pages_and_recovers() {
+fn bounded_compaction_progresses_across_inactive_gaps_and_recovers() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         let config = || variable_config::<OneCap>("bounded", &context);
         let db = UnorderedVariableDb::init(context.child("first"), config())
             .await
             .unwrap();
+
+        // Leave the floor at 0 with 301 inactive locations below the 300 active updates.
         let mut batch = db.new_batch();
         for i in 0..300 {
             batch = batch.write(key(i), Some(val(i)));
         }
         let batch = batch
-            .prepare(&db)
-            .await
-            .unwrap()
-            .merkleize(&db, None)
+            .merkleize_with_compaction_plan(&db, |_| (SKIP, None))
             .await
             .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
@@ -157,77 +205,63 @@ fn manual_compaction_resumes_across_inactive_pages_and_recovers() {
             batch = batch.write(key(i), Some(val(i + 1000)));
         }
         let batch = batch
-            .prepare(&db)
-            .await
-            .unwrap()
-            .merkleize(&db, None)
+            .merkleize_with_compaction_plan(&db, |_| (SKIP, None))
             .await
             .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
-        let prepared = db.new_batch().prepare(&db).await.unwrap();
-        let (prepared, zero) = prepared
-            .compact(
-                &db,
-                CompactionBudget {
-                    max_moves: 0,
-                    max_scan: u64::MAX,
-                },
-            )
+        assert_eq!(*db.inactivity_floor_loc(), 0);
+
+        // Compact only while active keys fill less than `percent` of the retained range, and
+        // record the active-key count in the metadata.
+        let plan = |percent: u64, scan: u64| {
+            move |stats: CompactionStats<_>| {
+                let retained = *stats.tip - *stats.inactivity_floor;
+                let sparse = retained * percent > stats.total_active_keys as u64 * 100;
+                let budget = CompactionBudget {
+                    max_moves: stats.user_steps + 1,
+                    max_scan: if sparse { scan } else { 0 },
+                };
+                (budget, Some(val(stats.total_active_keys as u64)))
+            }
+        };
+
+        // A scan limit crossing only inactive locations still advances the floor.
+        let mut seen = None;
+        let batch = db
+            .new_batch()
+            .merkleize_with_compaction_plan(&db, |stats| {
+                seen = Some(stats);
+                plan(100, 256)(stats)
+            })
             .await
             .unwrap();
-        assert_eq!((zero.moved, zero.scanned, *zero.floor), (0, 0, 0));
-        assert!(!zero.exhausted);
-        let (prepared, zero) = prepared
-            .compact(
-                &db,
-                CompactionBudget {
-                    max_moves: u64::MAX,
-                    max_scan: 0,
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!((zero.moved, zero.scanned), (0, 0));
-        assert!(!zero.exhausted);
-        let (prepared, gap) = prepared
-            .compact(
-                &db,
-                CompactionBudget {
-                    max_moves: 1,
-                    max_scan: 256,
-                },
-            )
-            .await
-            .unwrap();
-        assert_eq!((gap.moved, gap.scanned, *gap.floor), (0, 256, 256));
-        assert!(!gap.exhausted);
-        // Committing after a round must preserve progress through inactive gaps.
-        let batch = prepared.merkleize(&db, None).await.unwrap();
+        let stats = seen.unwrap();
+        assert_eq!(
+            (stats.user_steps, stats.total_active_keys),
+            (0, 300)
+        );
+        assert_eq!((*stats.inactivity_floor, *stats.tip), (0, 603));
+        assert_eq!(*batch.bounds().inactivity_floor, 256);
+        assert_eq!(batch.operations().1.len(), 1); // CommitFloor only.
         let (db, _) = db.apply_batch(batch).await.unwrap();
-        let prepared = db.new_batch().prepare(&db).await.unwrap();
-        let (prepared, gap) = prepared
-            .compact(
-                &db,
-                CompactionBudget {
-                    max_moves: 1,
-                    max_scan: 46,
-                },
-            )
+
+        // The next commit resumes from the committed floor.
+        let batch = db
+            .new_batch()
+            .merkleize_with_compaction_plan(&db, plan(100, 46))
             .await
             .unwrap();
-        assert_eq!((gap.moved, gap.scanned, *gap.floor), (0, 46, 302));
-        let (prepared, moved) = prepared
-            .compact(
-                &db,
-                CompactionBudget {
-                    max_moves: 1,
-                    max_scan: 1,
-                },
-            )
+        assert_eq!(*batch.bounds().inactivity_floor, 302);
+        assert_eq!(batch.operations().1.len(), 1);
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+
+        let batch = db
+            .new_batch()
+            .merkleize_with_compaction_plan(&db, plan(100, 1))
             .await
             .unwrap();
-        assert_eq!((moved.moved, moved.scanned, *moved.floor), (1, 1, 303));
-        let batch = prepared.merkleize(&db, Some(val(42))).await.unwrap();
+        assert_eq!(*batch.bounds().inactivity_floor, 303);
+        assert_eq!(batch.operations().1.len(), 2); // One move and CommitFloor.
         let root = batch.root();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         let db = db.sync().await.unwrap();
@@ -239,14 +273,31 @@ fn manual_compaction_resumes_across_inactive_pages_and_recovers() {
             .await
             .unwrap();
         assert_eq!(db.root(), root);
+        assert_eq!(*db.inactivity_floor_loc(), 303);
+        assert_eq!(db.get_metadata().await.unwrap(), Some(val(300)));
         for i in 0..300 {
             assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 1000)));
         }
+
+        // Above 90% density, a 90% policy skips compaction.
+        let mut seen = None;
+        let batch = db
+            .new_batch()
+            .merkleize_with_compaction_plan(&db, |stats| {
+                seen = Some(stats);
+                plan(90, u64::MAX)(stats)
+            })
+            .await
+            .unwrap();
+        let stats = seen.unwrap();
+        assert_eq!((*stats.inactivity_floor, *stats.tip), (303, 607));
+        assert_eq!(batch.bounds().inactivity_floor, stats.inactivity_floor);
+        assert_eq!(batch.operations().1.len(), 1);
     });
 }
 
 #[test]
-fn manual_compaction_exhaustion_does_not_recopy_moved_entries() {
+fn bounded_compaction_does_not_recopy_moved_entries() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         let db = UnorderedVariableDb::init(
@@ -255,126 +306,38 @@ fn manual_compaction_exhaustion_does_not_recopy_moved_entries() {
         )
         .await
         .unwrap();
-        let prepared = db
+        let unbounded = CompactionBudget {
+            max_moves: u64::MAX,
+            max_scan: u64::MAX,
+        };
+        let batch = db
             .new_batch()
             .write(key(1), Some(val(1)))
             .write(key(2), Some(val(2)))
-            .prepare(&db)
+            .merkleize_with_compaction_plan(&db, |_| (unbounded, None))
             .await
             .unwrap();
-        let (prepared, first) = prepared.compact(&db, ONE).await.unwrap();
-        let (prepared, second) = prepared
-            .compact(
-                &db,
-                CompactionBudget {
-                    max_moves: u64::MAX,
-                    max_scan: u64::MAX,
-                },
-            )
-            .await
-            .unwrap();
-        let (prepared, exhausted) = prepared.compact(&db, ONE).await.unwrap();
-        assert_eq!((first.moved, second.moved, exhausted.moved), (1, 1, 0));
-        assert!(second.exhausted && exhausted.exhausted);
-        let batch = prepared.merkleize(&db, None).await.unwrap();
         assert_eq!(batch.operations().1.len(), 5); // Two creates, two moves, one commit.
         let (db, _) = db.apply_batch(batch).await.unwrap();
-        let prepared = db
+
+        // An empty post-state starts compaction at the tip, leaving nothing to scan.
+        let mut seen = None;
+        let batch = db
             .new_batch()
             .write(key(1), None)
             .write(key(2), None)
-            .prepare(&db)
+            .merkleize_with_compaction_plan(&db, |stats| {
+                seen = Some(stats);
+                (ONE, None)
+            })
             .await
             .unwrap();
-        let (prepared, empty) = prepared.compact(&db, ONE).await.unwrap();
-        assert_eq!((empty.moved, empty.scanned), (0, 0));
-        assert!(empty.exhausted);
-        let batch = prepared.merkleize(&db, None).await.unwrap();
+        let stats = seen.unwrap();
+        assert_eq!((stats.user_steps, stats.total_active_keys), (2, 0));
+        assert_eq!(stats.inactivity_floor, stats.tip);
+        assert_eq!(batch.operations().1.len(), 3); // Two deletes and CommitFloor.
         assert_eq!(batch.bounds().inactivity_floor, batch.bounds().tip.size - 1);
         let (db, _) = db.apply_batch(batch).await.unwrap();
         assert!(db.is_empty());
-    });
-}
-
-#[test]
-fn manual_compaction_rejects_changed_database() {
-    let runner = deterministic::Runner::default();
-    runner.start(|context| async move {
-        let db = UnorderedVariableDb::init(
-            context.child("db"),
-            variable_config::<OneCap>("stale", &context),
-        )
-        .await
-        .unwrap();
-        let first = db.new_batch().prepare(&db).await.unwrap();
-        let second = db.new_batch().prepare(&db).await.unwrap();
-        let other = db
-            .new_batch()
-            .write(key(1), Some(val(1)))
-            .merkleize(&db, None)
-            .await
-            .unwrap();
-        let (db, _) = db.apply_batch(other).await.unwrap();
-        let root = db.root();
-        let floor = db.inactivity_floor_loc();
-        assert!(matches!(
-            first.compact(&db, ONE).await,
-            Err(Error::StaleBatch)
-        ));
-        assert_eq!(db.root(), root);
-        assert_eq!(db.inactivity_floor_loc(), floor);
-        assert!(matches!(
-            second.merkleize(&db, None).await,
-            Err(Error::StaleBatch)
-        ));
-        assert_eq!(db.root(), root);
-        assert_eq!(db.inactivity_floor_loc(), floor);
-    });
-}
-
-#[test]
-fn manual_compaction_rejects_applied_parent() {
-    let runner = deterministic::Runner::default();
-    runner.start(|context| async move {
-        let db = UnorderedVariableDb::init(
-            context.child("db"),
-            variable_config::<OneCap>("applied-parent", &context),
-        )
-        .await
-        .unwrap();
-        let parent = db
-            .new_batch()
-            .write(key(1), Some(val(1)))
-            .merkleize(&db, None)
-            .await
-            .unwrap();
-        let first = parent
-            .new_batch::<Sha256>()
-            .write(key(2), Some(val(2)))
-            .prepare(&db)
-            .await
-            .unwrap();
-        let second = parent
-            .new_batch::<Sha256>()
-            .write(key(2), Some(val(2)))
-            .prepare(&db)
-            .await
-            .unwrap();
-        let (second, _) = second.compact(&db, ONE).await.unwrap();
-        let (db, _) = db.apply_batch(parent).await.unwrap();
-        let root = db.root();
-        let floor = db.inactivity_floor_loc();
-        assert!(matches!(
-            first.compact(&db, ONE).await,
-            Err(Error::StaleBatch)
-        ));
-        assert_eq!(db.root(), root);
-        assert_eq!(db.inactivity_floor_loc(), floor);
-        assert!(matches!(
-            second.merkleize(&db, None).await,
-            Err(Error::StaleBatch)
-        ));
-        assert_eq!(db.root(), root);
-        assert_eq!(db.inactivity_floor_loc(), floor);
     });
 }

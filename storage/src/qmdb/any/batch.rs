@@ -17,7 +17,7 @@ use crate::{
         },
         bitmap::Shared,
         chain::{self, Bounds, Commitment},
-        compaction::{CompactionBudget, CompactionResult},
+        compaction::{CompactionBudget, CompactionStats},
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -384,18 +384,11 @@ where
     base_active_keys: usize,
 }
 
-/// Resolved user operations for caller-controlled compaction and finalization.
+/// Resolved user operations awaiting compaction and finalization.
 ///
-/// Created by `UnmerkleizedBatch::prepare`. Call [`Self::compact`] zero
-/// or more times, then [`Self::merkleize`] to append one CommitFloor and compute the root.
-/// All rounds share the original scan tip. See [`crate::qmdb::compaction`] for the scheduling
-/// policies this path supports and how they compare to the single-call
-/// [`UnmerkleizedBatch::merkleize`].
-///
-/// The database must retain the same root between preparation and finalization. Any root change,
-/// including applying an ancestor, is rejected with [`crate::qmdb::Error::StaleBatch`].
-/// An error consumes the prepared batch.
-pub struct PreparedBatch<F: Family, H, U, S: Strategy>
+/// Every stage runs against the same database borrow, so the resolved state cannot go stale
+/// between compaction and finalization.
+pub(crate) struct PreparedBatch<F: Family, H, U, S: Strategy>
 where
     U: update::Update,
     H: Hasher,
@@ -410,7 +403,6 @@ where
     user_steps: u64,
     floor: Location<F>,
     fixed_tip: u64,
-    db_root: H::Digest,
 }
 
 /// Look up a key in the ancestor chain (immediate parent first).
@@ -969,7 +961,6 @@ where
         superseded_locs: Vec<Location<F>>,
         active_keys_delta: isize,
         user_steps: u64,
-        db_root: H::Digest,
     ) -> Self {
         let total_active_keys = merkleizer
             .base_active_keys
@@ -993,82 +984,36 @@ where
             user_steps,
             floor,
             fixed_tip,
-            db_root,
         }
     }
 
-    /// Default per-commit move allowance (`user_steps + 1`), with no scan limit.
-    ///
-    /// The extra move accounts for the previous CommitFloor becoming inactive. This value is
-    /// fixed at preparation and does not decrease after compaction. Each [`Self::compact`] call
-    /// uses its supplied budget independently. To split this allowance across rounds, track the
-    /// remaining moves by subtracting each round's [`CompactionResult::moved`].
-    pub const fn default_compaction_budget(&self) -> CompactionBudget {
-        CompactionBudget {
-            max_moves: self.user_steps + 1,
-            max_scan: u64::MAX,
+    const fn stats(&self) -> CompactionStats<F> {
+        CompactionStats {
+            user_steps: self.user_steps,
+            total_active_keys: self.total_active_keys,
+            inactivity_floor: self.floor,
+            tip: Location::new(self.fixed_tip),
         }
     }
 
-    /// Return the current inactivity floor.
-    pub const fn inactivity_floor(&self) -> Location<F> {
-        self.floor
-    }
-
-    /// Return the number of active keys after this batch is applied.
-    pub const fn total_active_keys(&self) -> usize {
-        self.total_active_keys
-    }
-
-    /// Return the operation-log tip before any floor-raise moves are appended.
-    pub const fn fixed_tip(&self) -> Location<F> {
-        Location::new(self.fixed_tip)
-    }
-
-    /// Compact at most the supplied move and scan allowances, returning the batch and progress.
+    /// Raise the inactivity floor within `budget`.
     ///
-    /// The scan resumes across calls. Entries moved in earlier rounds are outside the fixed
-    /// scan interval. Scanned inactive gaps advance the floor even if no entries were moved,
-    /// preserving progress across commits. Zero in either budget field makes this a no-op.
-    pub async fn compact<E, C, I, const N: usize>(
-        self,
-        db: &Db<F, E, C, I, H, U, N, S>,
-        budget: CompactionBudget,
-    ) -> Result<(Self, CompactionResult<F>), crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        self.compact_with_floor_scan(db, budget, None, |floor, tip, limit, out| {
-            fill_candidates(&db.bitmap, floor, tip, limit, out)
-        })
-        .await
-    }
-
-    pub(crate) async fn compact_with_floor_scan<E, C, I, const N: usize>(
+    /// Scanned inactive gaps advance the floor even if no entries were moved, preserving
+    /// progress across commits. Zero in either budget field skips compaction.
+    async fn compact<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, U, N, S>,
         budget: CompactionBudget,
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<(Self, CompactionResult<F>), crate::qmdb::Error<F>>
+    ) -> Result<Self, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        if db.root() != self.db_root {
-            return Err(crate::qmdb::Error::StaleBatch);
-        }
         if budget.max_moves == 0 || budget.max_scan == 0 || *self.floor >= self.fixed_tip {
-            let result = CompactionResult {
-                moved: 0,
-                scanned: 0,
-                floor: self.floor,
-                exhausted: *self.floor >= self.fixed_tip,
-            };
-            return Ok((self, result));
+            return Ok(self);
         }
         let Self {
             merkleizer: m,
@@ -1080,7 +1025,6 @@ where
             user_steps,
             mut floor,
             fixed_tip,
-            db_root,
         } = self;
         let total_steps = budget.max_moves;
         let mut scan_from = floor;
@@ -1316,33 +1260,23 @@ where
             // gaps so a scan-limited commit does not restart from the same gap next time.
             floor = scan_from;
         }
-        let result = CompactionResult {
-            moved,
-            scanned: *floor - scan_start,
+        Ok(Self {
+            merkleizer: m,
+            ops,
+            diff,
+            superseded_locs,
+            floor_diff,
+            total_active_keys,
+            user_steps,
             floor,
-            exhausted: *floor >= fixed_tip,
-        };
-        Ok((
-            Self {
-                merkleizer: m,
-                ops,
-                diff,
-                superseded_locs,
-                floor_diff,
-                total_active_keys,
-                user_steps,
-                floor,
-                fixed_tip,
-                db_root,
-            },
-            result,
-        ))
+            fixed_tip,
+        })
     }
 
     /// Finalize the prepared operations by appending one CommitFloor and computing the root.
     ///
     /// An empty post-state places its floor at the commit location directly.
-    pub async fn merkleize<E, C, I, const N: usize>(
+    async fn merkleize<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, U, N, S>,
         metadata: Option<U::Value>,
@@ -1352,9 +1286,6 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        if db.root() != self.db_root {
-            return Err(crate::qmdb::Error::StaleBatch);
-        }
         let Self {
             merkleizer: m,
             mut ops,
@@ -1674,7 +1605,7 @@ where
         batch
             .merkleize_with_floor_scan(
                 db,
-                metadata,
+                |stats| (stats.default_budget(), metadata),
                 staged_updates,
                 Some(prefetched),
                 |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
@@ -1809,9 +1740,12 @@ where
     {
         let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
         batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&db.bitmap, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                db,
+                |stats| (stats.default_budget(), metadata),
+                staged_updates,
+                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            )
             .await
     }
 }
@@ -2102,7 +2036,39 @@ where
     {
         self.merkleize_with_floor_scan(
             db,
-            metadata,
+            |stats| (stats.default_budget(), metadata),
+            StagedUpdates::<F, update::Unordered<K, V>>::new(),
+            None,
+            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+        )
+        .await
+    }
+
+    /// Like [`merkleize`](Self::merkleize), but `plan` chooses the compaction budget and the
+    /// CommitFloor metadata from the batch's resolved [`CompactionStats`].
+    ///
+    /// `plan` runs once, after mutations are resolved and before compaction. See
+    /// [`crate::qmdb::compaction`] for how the budget bounds compaction work.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.any.unordered.batch.merkleize_with_compaction_plan",
+        level = "info",
+        skip_all,
+        fields(mutations = self.mutations.len() as u64),
+    )]
+    pub async fn merkleize_with_compaction_plan<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        self.merkleize_with_floor_scan(
+            db,
+            plan,
             StagedUpdates::<F, update::Unordered<K, V>>::new(),
             None,
             |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
@@ -2122,10 +2088,12 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
+    ///
+    /// `plan` chooses the floor-raise budget and CommitFloor metadata from the resolved batch.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
+        plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
@@ -2135,31 +2103,16 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let prepared = self.prepare_with_updates(db, staged_updates).await?;
-        let budget = prepared.default_compaction_budget();
-        let (prepared, _) = prepared
-            .compact_with_floor_scan(db, budget, prefetched, fill_candidates)
-            .await?;
-        prepared.merkleize(db, metadata).await
+        let prepared = self.prepare(db, staged_updates).await?;
+        let (budget, metadata) = plan(prepared.stats());
+        prepared
+            .compact(db, budget, prefetched, fill_candidates)
+            .await?
+            .merkleize(db, metadata)
+            .await
     }
 
-    /// Resolve user mutations for caller-controlled compaction and finalization.
-    ///
-    /// Use the returned batch to choose compaction budgets and the number of rounds. To apply the
-    /// default compaction budget and finalize in one call, use [`Self::merkleize`].
-    pub async fn prepare<E, C, I, const N: usize>(
-        self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<PreparedBatch<F, H, update::Unordered<K, V>, S>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        self.prepare_with_updates(db, Vec::new()).await
-    }
-
-    async fn prepare_with_updates<E, C, I, const N: usize>(
+    async fn prepare<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
@@ -2302,7 +2255,6 @@ where
             superseded_locs,
             active_keys_delta,
             user_steps,
-            db.root(),
         ))
     }
 }
@@ -2335,7 +2287,38 @@ where
     {
         self.merkleize_with_floor_scan(
             db,
-            metadata,
+            |stats| (stats.default_budget(), metadata),
+            StagedUpdates::<F, update::Ordered<K, V>>::new(),
+            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+        )
+        .await
+    }
+
+    /// Like [`merkleize`](Self::merkleize), but `plan` chooses the compaction budget and the
+    /// CommitFloor metadata from the batch's resolved [`CompactionStats`].
+    ///
+    /// `plan` runs once, after mutations are resolved and before compaction. See
+    /// [`crate::qmdb::compaction`] for how the budget bounds compaction work.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.any.ordered.batch.merkleize_with_compaction_plan",
+        level = "info",
+        skip_all,
+        fields(mutations = self.mutations.len() as u64),
+    )]
+    pub async fn merkleize_with_compaction_plan<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+    {
+        self.merkleize_with_floor_scan(
+            db,
+            plan,
             StagedUpdates::<F, update::Ordered<K, V>>::new(),
             |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
         )
@@ -2353,10 +2336,12 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
+    ///
+    /// `plan` chooses the floor-raise budget and CommitFloor metadata from the resolved batch.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        metadata: Option<V::Value>,
+        plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -2365,31 +2350,16 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let prepared = self.prepare_with_updates(db, staged_updates).await?;
-        let budget = prepared.default_compaction_budget();
-        let (prepared, _) = prepared
-            .compact_with_floor_scan(db, budget, None, fill_candidates)
-            .await?;
-        prepared.merkleize(db, metadata).await
+        let prepared = self.prepare(db, staged_updates).await?;
+        let (budget, metadata) = plan(prepared.stats());
+        prepared
+            .compact(db, budget, None, fill_candidates)
+            .await?
+            .merkleize(db, metadata)
+            .await
     }
 
-    /// Resolve user mutations for caller-controlled compaction and finalization.
-    ///
-    /// Use the returned batch to choose compaction budgets and the number of rounds. To apply the
-    /// default compaction budget and finalize in one call, use [`Self::merkleize`].
-    pub async fn prepare<E, C, I, const N: usize>(
-        self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<PreparedBatch<F, H, update::Ordered<K, V>, S>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: OrderedIndex<Value = Location<F>>,
-    {
-        self.prepare_with_updates(db, Vec::new()).await
-    }
-
-    async fn prepare_with_updates<E, C, I, const N: usize>(
+    async fn prepare<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
@@ -2753,7 +2723,6 @@ where
             superseded_locs,
             active_keys_delta,
             user_steps,
-            db.root(),
         ))
     }
 }
@@ -3919,34 +3888,42 @@ mod tests {
                     max_scan: u64::MAX,
                 };
                 let mut reference_fills = 0;
-                let (reference, reference_progress) = make()
-                    .prepare(&db)
-                    .await
-                    .unwrap()
-                    .compact_with_floor_scan(&db, budget, None, |floor, tip, _, out| {
-                        reference_fills += 1;
-                        fill_candidates(&db.bitmap, floor, tip, 1, out)
-                    })
+                let reference = make()
+                    .merkleize_with_floor_scan(
+                        &db,
+                        |_| (budget, None),
+                        Vec::new(),
+                        None,
+                        |floor, tip, _, out| {
+                            reference_fills += 1;
+                            fill_candidates(&db.bitmap, floor, tip, 1, out)
+                        },
+                    )
                     .await
                     .unwrap();
                 let mut fills = 0;
-                let (prepared, progress) = make()
-                    .prepare(&db)
-                    .await
-                    .unwrap()
-                    .compact_with_floor_scan(&db, budget, None, |floor, tip, limit, out| {
-                        fills += 1;
-                        fill_candidates(&db.bitmap, floor, tip, limit, out)
-                    })
+                let batch = make()
+                    .merkleize_with_floor_scan(
+                        &db,
+                        |_| (budget, None),
+                        Vec::new(),
+                        None,
+                        |floor, tip, limit, out| {
+                            fills += 1;
+                            fill_candidates(&db.bitmap, floor, tip, limit, out)
+                        },
+                    )
                     .await
                     .unwrap();
-                assert_eq!(progress, reference_progress);
-                assert_eq!(progress.moved, 1);
-                assert!(progress.exhausted);
-                let reference = reference.merkleize(&db, None).await.unwrap();
-                let batch = prepared.merkleize(&db, None).await.unwrap();
                 assert_eq!(batch.root(), reference.root());
                 assert_eq!(batch.operations(), reference.operations());
+                // 1000 deletes, one move of the surviving key, and the CommitFloor.
+                assert_eq!(batch.operations().1.len(), 1002);
+                // The scan reached the pre-move tip, just below the moved key.
+                assert_eq!(
+                    *batch.bounds().inactivity_floor,
+                    *batch.bounds().tip.size - 2
+                );
                 assert!(
                     fills <= 3,
                     "compaction used {fills} candidate fills (single-candidate reference: {reference_fills})"
