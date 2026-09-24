@@ -1198,7 +1198,7 @@ pub trait BackingRecovery: Send + Sync + Sized {
 /// A [Mutable] journal that can back an authenticated [Journal].
 pub trait Backing<E: Context>: Mutable {
     /// The configuration needed to initialize this journal.
-    type Config: Clone + Send;
+    type Config: Clone + Send + Sync;
 
     /// Initialization-owned storage used to select and validate the retained prefix.
     type Recovery: BackingRecovery<Journal = Self>;
@@ -1211,6 +1211,25 @@ pub trait Backing<E: Context>: Mutable {
         cfg: Self::Config,
         max_size: Option<u64>,
     ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Open recovery storage reset to an empty journal at `size`, discarding stored items
+    /// without reading them. Returns [JournalError::SizeOverflow] for `u64::MAX`.
+    fn clear(
+        context: E,
+        cfg: Self::Config,
+        size: u64,
+    ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Whether stored items may serve a sync range starting at `position`, without reading them.
+    ///
+    /// The retained start must be at or below `position`, with either a possible item at or above
+    /// it or an empty journal exactly at `position`. A pending reset counts as an empty journal
+    /// at its target.
+    fn covers(
+        context: &E,
+        cfg: &Self::Config,
+        position: u64,
+    ) -> impl Future<Output = Result<bool, JournalError>> + Send;
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
@@ -1221,17 +1240,21 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 ) -> Result<J, JournalError> {
     assert!(!range.is_empty(), "range must not be empty");
 
-    // Sync targets describe the same append-only log. Recover local history before choosing the
-    // prefix to reuse for this target.
-    let pending = J::recover(context, cfg, None).await?;
+    if !J::covers(&context, &cfg, range.start).await? {
+        return J::clear(context, cfg, range.start)
+            .await?
+            .finish(range.start)
+            .await;
+    }
+    let pending = J::recover(context, cfg, Some(range.end)).await?;
     let bounds = pending.bounds();
 
-    // A fresh journal already aligned with the sync start needs no reset.
-    if bounds == (0..0) && range.start == 0 {
-        return pending.finish(0).await;
+    // A journal already empty at the sync start needs no reset.
+    if bounds == (range.start..range.start) {
+        return pending.finish(range.start).await;
     }
 
-    // Fetch the range anew when its start is pruned or local progress does not reach it.
+    // Blob capacity can overstate the recovered end when the tail is short or has a gap.
     if bounds.start > range.start || bounds.end <= range.start {
         return pending.reset(range.start).await?.finish(range.start).await;
     }

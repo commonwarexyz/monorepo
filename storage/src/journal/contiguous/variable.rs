@@ -13,7 +13,6 @@
 
 #[commonware_macros::stability(ALPHA)]
 use super::checkpoint::Checkpoint;
-
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
@@ -2597,6 +2596,56 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
         max_size: Option<u64>,
     ) -> Result<Self::Recovery, Error> {
         Recovery::open(context, cfg, max_size).await
+    }
+
+    async fn covers(context: &E, cfg: &Self::Config, position: u64) -> Result<bool, Error> {
+        let span = Recovery::<E, V>::span(context, cfg).await?;
+        Ok(span.contains(&position) || (span.is_empty() && span.start == position))
+    }
+
+    async fn clear(context: E, cfg: Self::Config, size: u64) -> Result<Self::Recovery, Error> {
+        let data_partition = cfg.data_partition();
+        let data_context = context.child("data");
+        let offsets_context = context.child("offsets");
+        let offsets_cfg = cfg.offsets_config();
+        let checkpoint =
+            Checkpoint::open(offsets_context.child("meta"), &offsets_cfg.partition).await?;
+
+        // A staged clear already owns the offsets blob partitions. Otherwise fail before writing
+        // intent if they are inconsistent.
+        if checkpoint.clear_target().is_none() {
+            Partition::select(&offsets_context, &offsets_cfg.partition).await?;
+        }
+
+        // The offsets reset is staged durably, the data partition is removed, then the reset
+        // completes. A crash at any point leaves a staged clear that the next open finishes.
+        let offsets = fixed::Recovery::<E, u64>::open_cleared(
+            offsets_context,
+            offsets_cfg,
+            checkpoint,
+            size,
+            || Partition::<E>::remove_all(&data_context, &data_partition),
+        )
+        .await?;
+        let partition = Partition::new(
+            data_context,
+            data_partition,
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+        Ok(Recovery {
+            context,
+            cfg,
+            partition,
+            pending: BTreeMap::new(),
+            discarded: Vec::new(),
+            recovered_scans: BTreeMap::new(),
+            offsets: Box::new(offsets),
+            bounds: size..size,
+            bounded: false,
+            #[cfg(test)]
+            halt_after_data_removal: false,
+        })
     }
 
     type Config = Config<V::Cfg>;
