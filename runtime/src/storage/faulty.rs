@@ -46,7 +46,8 @@ pub enum PartialWriteMode {
 }
 
 /// Fault configuration for `write_at` operations and byte retention from failed writes or
-/// successful unsynchronized writes when a crash is simulated.
+/// successful unsynchronized writes when a crash is simulated. A successful reopen reads only
+/// the blob's durable contents and retires its pending crash outcomes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WriteConfig {
     /// Probability that `write_at` returns an injected failure.
@@ -99,7 +100,8 @@ impl<'a> arbitrary::Arbitrary<'a> for WriteConfig {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ResizeConfig {
     /// Probability that `resize` returns an injected failure, also used independently as the
-    /// probability that a successful unsynchronized resize survives a simulated crash.
+    /// probability that a successful unsynchronized resize survives a simulated crash. A
+    /// successful reopen of the blob retires that outcome.
     pub failure_rate: Probability,
 
     /// Probability that an injected failure resizes to an intermediate size rather than leaving

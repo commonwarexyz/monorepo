@@ -304,6 +304,13 @@ impl Request {
                     matches!(r.state, WriteAtState::WritingSync | WriteAtState::Syncing),
                     result,
                 );
+
+                // A successful trailing sync also covers the mutations completed before the
+                // request. Credit them before the durability permit is released.
+                let result = match result {
+                    Ok(()) if r.state == WriteAtState::Syncing => r.file.tracker.end_sync(r.seen),
+                    result => result,
+                };
                 (
                     RequestOutput::WriteAt(result),
                     RetiredResources::File {
@@ -717,9 +724,30 @@ pub struct WriteAtRequest {
     pub state: WriteAtState,
     /// Page-cache policy for this request.
     pub cache: Cache,
+    /// Completed mutations that preceded this request, which a trailing sync covers.
+    seen: u64,
 }
 
 impl WriteAtRequest {
+    /// Record the mutation frontier a trailing sync can cover before ring submission.
+    pub fn new(
+        file: Arc<Shared>,
+        offset: u64,
+        write: WriteBuffers,
+        state: WriteAtState,
+        cache: Cache,
+    ) -> Self {
+        let seen = file.tracker.begin_sync();
+        Self {
+            file,
+            offset,
+            write,
+            state,
+            cache,
+            seen,
+        }
+    }
+
     /// Use `RWF_DSYNC` because the write contract does not require timestamp-only metadata.
     fn rw_flags(&mut self) -> i32 {
         let sync = if self.state == WriteAtState::WritingSync {
@@ -807,7 +835,7 @@ impl WriteAtRequest {
 pub struct SyncRequest {
     /// Open whose file the fsync SQE uses.
     pub file: Arc<Shared>,
-    /// Completed mutations that preceded this barrier's submission.
+    /// Completed mutations that preceded this request's construction.
     seen: u64,
 }
 
@@ -970,13 +998,13 @@ mod tests {
 
     /// Create a five-byte positioned write with no durability requirement.
     fn make_write_request(file: Arc<Shared>, cache: Cache) -> WriteAtRequest {
-        WriteAtRequest {
+        WriteAtRequest::new(
             file,
-            offset: 0,
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            state: WriteAtState::Writing,
+            0,
+            IoBufs::from(IoBuf::from(b"hello")).into(),
+            WriteAtState::Writing,
             cache,
-        }
+        )
     }
 
     /// Create a connection request with stable storage for a native address.
@@ -1554,13 +1582,13 @@ mod tests {
             WriteAtState::WritingBeforeSync,
         ] {
             let trailing_sync = state == WriteAtState::WritingBeforeSync;
-            let mut write = WriteAtRequest {
-                file: make_file(),
-                offset: 17,
-                write: IoBufs::from(buf.clone()).into(),
+            let mut write = WriteAtRequest::new(
+                make_file(),
+                17,
+                IoBufs::from(buf.clone()).into(),
                 state,
-                cache: Cache::Enabled,
-            };
+                Cache::Enabled,
+            );
 
             // A signed CQE cannot report the entire u32-sized prefix at once.
             for _ in 0..2 {
@@ -1656,13 +1684,13 @@ mod tests {
 
     #[test]
     fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
-        let mut request = WriteAtRequest {
-            file: make_file(),
-            offset: 0,
-            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-            state: WriteAtState::WritingSync,
-            cache: Cache::Disabled,
-        };
+        let mut request = WriteAtRequest::new(
+            make_file(),
+            0,
+            IoBufs::from(IoBuf::from(b"hello")).into(),
+            WriteAtState::WritingSync,
+            Cache::Disabled,
+        );
 
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
         assert!(request.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
@@ -1702,20 +1730,39 @@ mod tests {
 
     #[test]
     fn test_sync_completion_credits_only_its_successful_barrier() {
-        for success in [false, true] {
-            for later_write in [false, true] {
-                let file = make_file();
-                file.tracker.write();
-                file.tracker.complete();
-                let request = Request::Sync(SyncRequest::new(file.clone()));
-                if later_write {
+        for trailing in [false, true] {
+            for success in [false, true] {
+                for later_write in [false, true] {
+                    let file = make_file();
                     file.tracker.write();
                     file.tracker.complete();
+
+                    // A multi-batch write reaches its trailing sync after its last batch.
+                    let mut request = if trailing {
+                        Request::WriteAt(WriteAtRequest::new(
+                            file.clone(),
+                            0,
+                            IoBufs::from(IoBuf::from(b"hello")).into(),
+                            WriteAtState::WritingBeforeSync,
+                            Cache::Enabled,
+                        ))
+                    } else {
+                        Request::Sync(SyncRequest::new(file.clone()))
+                    };
+                    if trailing {
+                        assert!(request.on_cqe(ACTIVE, 5).is_none());
+                    }
+
+                    // A write completing during the barrier stays dirty.
+                    if later_write {
+                        file.tracker.write();
+                        file.tracker.complete();
+                    }
+                    let result = if success { Ok(()) } else { Err(Error::Timeout) };
+                    let (_, retired) = request.complete(result);
+                    drop(retired);
+                    assert_eq!(file.tracker.is_dirty(), !success || later_write);
                 }
-                let result = if success { Ok(()) } else { Err(Error::Timeout) };
-                let (_, retired) = request.complete(result);
-                drop(retired);
-                assert_eq!(file.tracker.is_dirty(), !success || later_write);
             }
         }
     }
@@ -1735,17 +1782,17 @@ mod tests {
                 let mut successful = state.as_ref().map_or_else(
                     || Request::Sync(SyncRequest::new(file.clone())),
                     |state| {
-                        Request::WriteAt(WriteAtRequest {
-                            file: file.clone(),
-                            offset: 0,
-                            write: IoBufs::from(IoBuf::from(b"hello")).into(),
-                            state: if *state == WriteAtState::Syncing {
+                        Request::WriteAt(WriteAtRequest::new(
+                            file.clone(),
+                            0,
+                            IoBufs::from(IoBuf::from(b"hello")).into(),
+                            if *state == WriteAtState::Syncing {
                                 WriteAtState::WritingBeforeSync
                             } else {
                                 WriteAtState::WritingSync
                             },
-                            cache: Cache::Enabled,
-                        })
+                            Cache::Enabled,
+                        ))
                     },
                 );
                 if state == Some(WriteAtState::Syncing) {
@@ -1790,7 +1837,13 @@ mod tests {
                         assert!(file.tracker.is_dirty());
                     } else {
                         result.unwrap();
-                        assert_eq!(file.tracker.is_dirty(), state.is_some());
+
+                        // A trailing sync credits the write completed before the request. A
+                        // fused write covers only its own range.
+                        assert_eq!(
+                            file.tracker.is_dirty(),
+                            state == Some(WriteAtState::WritingSync)
+                        );
                     }
                     drop(retired);
                 };

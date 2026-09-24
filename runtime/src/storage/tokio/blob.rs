@@ -93,7 +93,8 @@ struct Shared {
 #[cfg(test)]
 #[derive(Default)]
 struct Hooks {
-    /// Pause the next mutation after it enters the blocking pool.
+    /// Pause the next cached single-buffer plain write or resize after it enters the blocking
+    /// pool.
     before_mutation: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next sync after the filesystem operation completes.
     after_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
@@ -191,7 +192,7 @@ impl Shared {
     /// Establish a settled predecessor's debt through this open's file.
     ///
     /// A failure also poisons this open, so its settlement retains the error even when a
-    /// successor attached during the flush. Removing or recreating the name clears the error.
+    /// successor was admitted during the flush. Removing or recreating the name clears the error.
     fn complete(&self) -> Result<(), Error> {
         #[cfg(test)]
         self.pending.before_complete();
@@ -825,34 +826,41 @@ mod tests {
     }
 
     /// A reopen of the same incarnation waits for the canceled write or resize, with retirement
-    /// on either side of its attachment. Replacement leaves an earlier reopen bound to the
+    /// on either side of its admission. Replacement leaves an earlier reopen bound to the
     /// removed file. Both paths report the captured file's settled contents. The wait itself is
     /// pinned deterministically by `test_cancelled_completion_failure_is_retained`.
     async fn check_reopen_after_gated_mutation(
         replace: bool,
         shrink: bool,
-        retire_before_attach: bool,
+        retire_before_admit: bool,
     ) {
         // Use V0 to cover opens whose header prefix includes payload bytes.
         let (storage, directory) = storage_for_reopen_test(
-            &format!("gated_reopen_{replace}_{shrink}_{retire_before_attach}"),
+            &format!("gated_reopen_{replace}_{shrink}_{retire_before_admit}"),
             Layout::V0..=Layout::V0,
         );
         let mut reopening = None;
+        let mut paused = None;
         if replace {
             // The removed incarnation's reopen stays in flight while the name is recreated
-            // underneath it. The scan returns after the reopen's namespace dispatch, so the
-            // reopen captures the old file before the removal. Whether it flushes the unlinked
-            // file or reads no debt, it publishes nothing into the recreated name.
+            // underneath it. It pauses before its debt read, after its namespace dispatch
+            // captured the old file, so it reads no debt and publishes nothing into the
+            // recreated name.
             let (old, _) = storage.open("partition", b"blob").await.unwrap();
             old.write_at(0, b"old", WriteOptions::default())
                 .await
                 .unwrap();
             drop(old);
+            let (entered, entering) = oneshot::channel();
+            let (release, gate) = mpsc::channel();
+            *storage.pending.test.before_metadata.lock() = Some((entered, gate));
             let mut open = Box::pin(storage.open("partition", b"blob"));
-            assert!((&mut open).now_or_never().is_none());
-            storage.scan("partition").await.unwrap();
+            commonware_macros::select! {
+                entered = entering => entered.unwrap(),
+                _ = &mut open => panic!("reopen completed before its debt read"),
+            }
             reopening = Some(open);
+            paused = Some(release);
             storage.remove("partition", Some(b"blob")).await.unwrap();
         }
 
@@ -889,10 +897,10 @@ mod tests {
             .clone();
 
         // Select whether retirement happens before or after the successor claims the name.
-        let attachment = if retire_before_attach {
+        let admission = if retire_before_admit {
             let (entered, entering) = oneshot::channel();
             let (release, gate) = mpsc::channel();
-            *storage.pending.test.before_attach.lock() = Some((entered, gate));
+            *storage.pending.test.before_admit.lock() = Some((entered, gate));
             Some((entering, release))
         } else {
             None
@@ -900,15 +908,15 @@ mod tests {
         let mut reopening =
             reopening.unwrap_or_else(|| Box::pin(storage.open("partition", b"blob")));
         let early = (&mut reopening).now_or_never();
-        if let Some((entering, release_attach)) = attachment {
+        if let Some((entering, release_admit)) = admission {
             // The reopen captures the file and its pre-mutation length, then pauses before
-            // attaching while the mutation finishes and its open settles. It attaches with no
-            // settlement outstanding, so only the recorded debt defers its length read.
+            // admission while the mutation finishes and its open settles. It is admitted with
+            // no settlement outstanding, so only the recorded debt defers its length read.
             entering.await.unwrap();
             release.send(()).unwrap();
             Pending::wait(wait.clone()).await.unwrap();
             assert_eq!(storage.pending.outstanding(), 0);
-            release_attach.send(()).unwrap();
+            release_admit.send(()).unwrap();
         } else {
             // Namespace dispatch completes before this barrier. Without replacement, the
             // mutation still owns the captured file, so its size is not yet authoritative.
@@ -916,8 +924,10 @@ mod tests {
             release.send(()).unwrap();
         }
 
-        // With replacement, the earlier reopen captures the old incarnation. Every returned
-        // length and byte sequence must describe its captured file after mutations finish.
+        // With replacement, release the earlier reopen, which captured the old incarnation.
+        // Every returned length and byte sequence must describe its captured file after
+        // mutations finish.
+        drop(paused);
         let (reopened, size) = match early {
             Some(result) => result,
             None => reopening.as_mut().await,
@@ -977,7 +987,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_reopen_after_retirement_before_attachment() {
+    async fn test_reopen_after_retirement_before_admission() {
         for shrink in [false, true] {
             check_reopen_after_gated_mutation(false, shrink, true).await;
         }
@@ -1008,7 +1018,7 @@ mod tests {
         // Canceling the awaiter must leave completion owned by the blocking operation.
         drop(opening);
 
-        // Attach the retry before releasing the stale completion.
+        // Admit the retry before releasing the stale completion.
         // Only the retry may flush the debt.
         let mut retry = Box::pin(storage.open("partition", b"blob"));
         assert!((&mut retry).now_or_never().is_none());
@@ -1060,8 +1070,8 @@ mod tests {
         assert!(wait.is_some());
         assert_eq!(storage.pending.outstanding(), 1);
 
-        // The reopen attaches behind the settling predecessor and waits for it. The scan
-        // proves its namespace dispatch, and with it the attachment, completed.
+        // The reopen is admitted behind the settling predecessor and waits for it. The scan
+        // proves its namespace dispatch, and with it the admission, completed.
         let mut opening = Box::pin(storage.open("partition", b"blob"));
         assert!((&mut opening).now_or_never().is_none());
         storage.scan("partition").await.unwrap();

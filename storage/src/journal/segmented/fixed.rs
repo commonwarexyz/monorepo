@@ -725,10 +725,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// from `start_position` in `start_section`.
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
-    /// validates replay setup but does not allocate `buffer` bytes per blob. Page buffers
-    /// are allocated lazily as the reader advances. Every backing blob read performed by
-    /// the returned replay uses `read_options`, including reads after advancing to
-    /// another section.
+    /// validates replay setup and copies each replayed section's partial tail page, but
+    /// does not allocate `buffer` bytes per blob. Read buffers are allocated lazily as the
+    /// reader advances. Every backing blob read performed by the returned replay uses
+    /// `read_options`, including reads after advancing to another section.
     ///
     /// A nonzero start must be a boundary already validated by a prior replay or a durable
     /// marker: torn-page repair treats everything below it as proven.

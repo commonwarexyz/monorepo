@@ -630,26 +630,20 @@ impl crate::Blob for Blob {
             WriteAtState::WritingSync
         };
 
-        // A trailing sync covers every mutation completed before the write was issued.
-        let covers_file = state == WriteAtState::WritingBeforeSync;
-        let seen = if covers_file {
-            self.shared.tracker.begin_sync()
-        } else {
-            0
-        };
-
         // A plain write records its mutation before submission. The ring settles the debt at
-        // completion through `Shared::wrote`, so a caller that stops waiting changes nothing.
+        // completion, and credits a trailing sync while the request holds the open's durability
+        // permit, so a caller that stops waiting changes nothing.
         if !sync {
             self.shared.tracker.write();
         }
-        let result = match Operation::register(Request::WriteAt(WriteAtRequest {
-            file: self.shared.clone(),
+        let trailing = state == WriteAtState::WritingBeforeSync;
+        let result = match Operation::register(Request::WriteAt(WriteAtRequest::new(
+            self.shared.clone(),
             offset,
-            write: bufs.into(),
+            bufs.into(),
             state,
             cache,
-        }))
+        )))
         .await
         {
             Ok(RequestOutput::WriteAt(result)) => result,
@@ -657,12 +651,14 @@ impl crate::Blob for Blob {
             Err(_) => Err(Error::WriteFailed),
         };
 
-        // The caller credits prior completed mutations after a successful trailing sync.
-        // Cancellation leaves that credit unapplied. Request completion still retains failures.
-        if covers_file && result.is_ok() {
-            return self.shared.tracker.end_sync(seen);
+        // In a multi-batch write, only the trailing sync reports `Error::Io`. Name it like `sync`.
+        match result {
+            Err(Error::Io(error)) if trailing => {
+                let (partition, name) = &self.shared.key;
+                Err(Error::BlobSyncFailed(partition.clone(), hex(name), error))
+            }
+            result => result,
         }
-        result
     }
 
     // TODO: Make this async. See https://github.com/commonwarexyz/monorepo/issues/831
@@ -1972,15 +1968,15 @@ mod tests {
             // The write failed against the read-only descriptor after its caller left, so the
             // retired request left the name dirty, and poisoned when the sync was fused.
             assert!(pending.owes("partition", b"readonly"), "chunks={chunks}");
-            let attached = pending.admit("partition", b"readonly", true);
+            let admitted = pending.admit("partition", b"readonly", true);
             if chunks == 1 {
                 assert!(
-                    matches!(attached, Err(Error::BlobSyncFailed(_, _, error))
+                    matches!(admitted, Err(Error::BlobSyncFailed(_, _, error))
                         if error.raw_os_error() == Some(libc::EBADF)),
                     "chunks={chunks}"
                 );
             } else {
-                let (_, wait, owed) = attached.unwrap();
+                let (_, wait, owed) = admitted.unwrap();
                 assert!(wait.is_none() && owed, "chunks={chunks}");
             }
             std::fs::remove_dir_all(directory).unwrap();
@@ -2121,6 +2117,56 @@ mod tests {
         });
     }
 
+    /// A multi-batch durable write credits the plain writes before it when its trailing sync
+    /// completes, not when its caller resumes. A dropped caller leaves no debt, and a failure
+    /// retained after completion does not fail the finished write.
+    #[test]
+    fn test_trailing_sync_credits_at_completion() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            for orphan in [true, false] {
+                let name = [u8::from(orphan)];
+                let (blob, _) = storage.open("trailing_credit", &name).await.unwrap();
+                blob.write_at(0, b"prefix", WriteOptions::default())
+                    .await
+                    .unwrap();
+
+                // Submit a write spanning more than one iovec batch, then wait for the request
+                // to retire its file reference without polling the caller again.
+                let bufs = (0..IOVEC_BATCH_SIZE + 1)
+                    .map(|_| IoBuf::from(b"x"))
+                    .collect::<IoBufs>();
+                let mut write = Box::pin(blob.write_at(6, bufs, WriteOptions::SYNC));
+                assert!(futures::poll!(write.as_mut()).is_pending());
+                while Arc::strong_count(&blob.shared) > 1 {
+                    crate::utils::reschedule().await;
+                }
+                assert!(!blob.shared.tracker.is_dirty());
+
+                if orphan {
+                    // The dropped caller leaves nothing for the next open to flush.
+                    drop(write);
+                    drop(blob);
+                    settle(&storage.pending).await;
+                    assert!(!storage.pending.owes("trailing_credit", &name));
+                    let completions = storage.pending.completions();
+                    drop(storage.open("trailing_credit", &name).await.unwrap());
+                    assert_eq!(storage.pending.completions(), completions);
+                } else {
+                    // A later barrier's failure does not fail the finished write. Later
+                    // durability claims still observe it.
+                    blob.shared.tracker.poison(&Error::Closed);
+                    write.await.unwrap();
+                    assert!(matches!(blob.sync().await, Err(Error::Closed)));
+                    drop(blob);
+                }
+            }
+            storage.remove("trailing_credit", None).await.unwrap();
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
     /// Handles whose mutations are all durable leave no debt, and removal forgets whatever a
     /// dirty handle left behind.
     #[test]
@@ -2200,6 +2246,68 @@ mod tests {
                 .coalesce();
             assert_eq!(read.as_ref(), b"orphaned");
             drop(blob);
+            drop(storage);
+            let _ = std::fs::remove_dir_all(storage_directory);
+        });
+    }
+
+    /// An open waiting on a settling predecessor may be cancelled or have its blob removed. A
+    /// cancelled open leaves the debt to a retry. A removed open binds to the old file and
+    /// leaves the replacement alone.
+    #[test]
+    fn test_waiting_open_cancelled_or_removed() {
+        iouring::Runner::default().start(|_| async {
+            let (storage, storage_directory) = create_test_storage();
+            for remove in [false, true] {
+                // Keep the predecessor settling behind a registered orphaned write.
+                let name = [u8::from(remove)];
+                let (blob, _) = storage.open("partition", &name).await.unwrap();
+                let mut write = Box::pin(blob.write_at(0, b"orphaned", WriteOptions::default()));
+                assert!(futures::poll!(write.as_mut()).is_pending());
+                drop(write);
+                drop(blob);
+                let mut open = Box::pin(storage.open("partition", &name));
+                assert!(futures::poll!(open.as_mut()).is_pending());
+                let completions = storage.pending.completions();
+
+                if remove {
+                    // Removal detaches the settling predecessor. The replacement then opens
+                    // while the removed open still waits.
+                    assert_eq!(storage.pending.outstanding(), 1);
+                    storage.remove("partition", Some(&name)).await.unwrap();
+                    assert_eq!(storage.pending.outstanding(), 0);
+                    let (current, len) = storage.open("partition", &name).await.unwrap();
+                    assert_eq!(len, 0);
+                    let (removed, len) = open.await.unwrap();
+                    assert_eq!(len, 8);
+                    let read = removed
+                        .read_at(0, 8, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce();
+                    assert_eq!(read.as_ref(), b"orphaned");
+                    drop(removed);
+                    drop(current);
+                    settle(&storage.pending).await;
+                    assert!(!storage.pending.owes("partition", &name));
+                    let (_, len) = storage.open("partition", &name).await.unwrap();
+                    assert_eq!(len, 0);
+                    assert_eq!(storage.pending.completions(), completions);
+                } else {
+                    // The retry waits for the same predecessor and flushes its debt once.
+                    drop(open);
+                    let (retry, len) = storage.open("partition", &name).await.unwrap();
+                    assert_eq!(len, 8);
+                    assert_eq!(storage.pending.completions(), completions + 1);
+                    let read = retry
+                        .read_at(0, 8, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce();
+                    assert_eq!(read.as_ref(), b"orphaned");
+                }
+            }
+            storage.remove("partition", None).await.unwrap();
             drop(storage);
             let _ = std::fs::remove_dir_all(storage_directory);
         });

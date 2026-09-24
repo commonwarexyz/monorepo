@@ -2102,13 +2102,13 @@ pub mod tests {
                     } else {
                         IoBufs::from(IoBuf::from(b"new"))
                     };
-                    Request::WriteAt(WriteAtRequest {
-                        file: held.clone(),
-                        offset: 0,
-                        write: bufs.into(),
+                    Request::WriteAt(WriteAtRequest::new(
+                        held.clone(),
+                        0,
+                        bufs.into(),
                         state,
-                        cache: Cache::Enabled,
-                    })
+                        Cache::Enabled,
+                    ))
                 },
             );
             let second = harness.admit(successor, 1);
@@ -2193,13 +2193,13 @@ pub mod tests {
                 )
             };
             let first = harness.driver.admit(
-                Request::WriteAt(WriteAtRequest {
-                    file: file.clone(),
-                    offset: 0,
-                    write: bufs.into(),
+                Request::WriteAt(WriteAtRequest::new(
+                    file.clone(),
+                    0,
+                    bufs.into(),
                     state,
-                    cache: Cache::Disabled,
-                }),
+                    Cache::Disabled,
+                )),
                 Observer::Local(None),
                 harness.start,
                 &mut harness.deferred,
@@ -2232,17 +2232,25 @@ pub mod tests {
                 }
             }
 
-            assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(second));
             assert!(harness.driver.state.acquiring.is_empty());
             assert!(!harness.driver.state.waiters.is_pending(first));
-            if !multibatch {
+
+            // A trailing sync credits the write completed before it under the permit, so the
+            // successor resolves without an SQE. A fused write covers only its own range.
+            if multibatch {
+                assert!(harness.driver.state.ready_queue.is_empty());
+                assert!(!harness.driver.state.waiters.is_pending(second));
+                harness.collect();
+            } else {
+                assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(second));
                 assert!(matches!(
                     harness.driver.observe(first, TaskWaker::noop()),
                     Observation::Ready(RequestOutput::WriteAt(Ok(())))
                 ));
+                harness.driver.state.waiters.stage(second);
+                harness.simulated_completion(second, 0);
             }
-            harness.driver.state.waiters.stage(second);
-            harness.simulated_completion(second, 0);
+            assert_eq!(harness.completed.len(), 1 + usize::from(multibatch));
             assert!(harness.completed.iter().all(|completion| matches!(
                 completion.output,
                 RequestOutput::WriteAt(Ok(())) | RequestOutput::Sync(Ok(()))
@@ -2419,13 +2427,13 @@ pub mod tests {
             .map(|_| IoBuf::from(b"x"))
             .collect::<IoBufs>();
         let id = harness.admit(
-            Request::WriteAt(WriteAtRequest {
-                file: held.clone(),
-                offset: 0,
-                write: bufs.into(),
-                state: WriteAtState::WritingBeforeSync,
-                cache: Cache::Enabled,
-            }),
+            Request::WriteAt(WriteAtRequest::new(
+                held.clone(),
+                0,
+                bufs.into(),
+                WriteAtState::WritingBeforeSync,
+                Cache::Enabled,
+            )),
             0,
         );
         harness.orphan(id);

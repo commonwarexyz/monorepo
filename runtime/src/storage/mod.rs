@@ -122,7 +122,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         before_metadata: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
         /// Pause the next admission before it inspects the name's entry, letting predecessor work
         /// retire.
-        before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
+        before_admit: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
     }
 
     /// Tracks one name's latest open, outstanding settlement, and retained durability state.
@@ -177,15 +177,17 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     impl Pending {
         /// Admit an open while the backend holds its namespace lock. `existing` reports whether
-        /// the file already had a valid header. Without one, the open starts a new incarnation and
-        /// discards the name's previous durability state.
+        /// the file already had a valid header. Without one, the open starts a new incarnation,
+        /// discards the name's previous durability state, and detaches any handle left from the
+        /// previous incarnation.
         ///
-        /// Returns [Error::BlobAlreadyOpen] while a handle from an earlier open is alive. Returns
-        /// the name's retained failure until the name is removed or recreated. Otherwise returns
-        /// the open's generation, the receiver that fires once a still-settling predecessor has
-        /// finished its operations, and whether the name carries debt or outstanding work the
-        /// open must observe through [Self::debt] before trusting the file. Descriptor metadata
-        /// must be observed after admission, or after awaiting the returned receiver.
+        /// Returns [Error::BlobAlreadyOpen] while a handle from an earlier open of the same
+        /// incarnation is alive. Returns the name's retained failure until the name is removed or
+        /// recreated. Otherwise returns the open's generation, the receiver that fires once a
+        /// still-settling predecessor has finished its operations, and whether the name carries
+        /// debt or outstanding work the open must observe through [Self::debt] before trusting
+        /// the file. Descriptor metadata must be observed after admission, or after awaiting the
+        /// returned receiver.
         pub(crate) fn admit(
             self: &Arc<Self>,
             partition: &str,
@@ -196,7 +198,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 self.forget(partition, Some(name));
             }
             #[cfg(test)]
-            if let Some((entered, released)) = self.test.before_attach.lock().take() {
+            if let Some((entered, released)) = self.test.before_admit.lock().take() {
                 let _ = entered.send(());
                 let _ = released.recv();
             }
@@ -1037,7 +1039,7 @@ pub(crate) mod tests {
             let dropper = thread::spawn(move || drop(generation));
 
             // Release the external owner while the registry is locked. The strong count detects
-            // the last drop. Operation completion and an independent attachment verify progress.
+            // the last drop. Operation completion and an independent admission verify progress.
             while identity.strong_count() == owners {
                 thread::yield_now();
             }
@@ -1063,7 +1065,7 @@ pub(crate) mod tests {
         }
 
         #[test]
-        fn test_last_generation_drop_during_attach() {
+        fn test_last_generation_drop_during_admit() {
             check_last_generation_drop_during_observation(false);
         }
 
@@ -1188,7 +1190,7 @@ pub(crate) mod tests {
         }
 
         #[test]
-        fn test_live_open_refuses_a_second_attach() {
+        fn test_live_open_refuses_a_second_admit() {
             let pending = Arc::new(Pending::default());
             let (first, _, _) = pending.admit("a", b"1", false).unwrap();
             assert!(matches!(

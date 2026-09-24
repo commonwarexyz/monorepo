@@ -924,6 +924,9 @@ impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
 }
 
 /// Blob wrapper that parks each started sync and supports one-shot blocking sync tracking.
+///
+/// A started sync keeps the wrapped blob, and with it the logical open, alive until its handle
+/// completes or drops.
 pub struct DelayedSyncBlob<B> {
     inner: Arc<B>,
     pending: PendingSyncs,

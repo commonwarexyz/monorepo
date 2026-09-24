@@ -293,4 +293,49 @@ pub(crate) mod tests {
             );
         });
     }
+
+    #[test]
+    fn test_replace_retires_only_matching_registrations() {
+        Runner::default().start(|context| async move {
+            let inner = crate::storage::memory::Storage::new(context.storage_buffer_pool().clone());
+            let opens = Arc::new(Opens::default());
+            let open = |partition: &str, name: &[u8]| {
+                let versions = crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION;
+                opens
+                    .open(
+                        partition,
+                        name,
+                        inner.open_versioned(partition, name, versions),
+                    )
+                    .map(Opened::finish)
+            };
+            let refused = |partition: &str, name: &[u8]| {
+                matches!(open(partition, name), Err(Error::BlobAlreadyOpen(..)))
+            };
+            let ax = open("a", b"x").unwrap();
+            let ay = open("a", b"y").unwrap();
+            let bx = open("b", b"x").unwrap();
+
+            // A failed replacement leaves every registration intact.
+            assert!(matches!(
+                opens.replace("a", None, || Err::<(), _>(Error::Closed)),
+                Err(Error::Closed)
+            ));
+            assert!(refused("a", b"x") && refused("a", b"y") && refused("b", b"x"));
+
+            // Replacing a name retires only that name. The old handle cannot release the new one.
+            opens.replace("a", Some(b"x"), || Ok(())).unwrap();
+            assert!(refused("a", b"y") && refused("b", b"x"));
+            let current = open("a", b"x").unwrap();
+            drop(ax);
+            assert!(refused("a", b"x"));
+
+            // Replacing a partition retires its live names but not another partition's.
+            opens.replace("a", None, || Ok(())).unwrap();
+            drop(open("a", b"x").unwrap());
+            drop(open("a", b"y").unwrap());
+            assert!(refused("b", b"x"));
+            drop((current, ay, bx));
+        });
+    }
 }
