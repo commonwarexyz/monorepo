@@ -1730,14 +1730,12 @@ mod tests {
             partial_rate: probability!(1.0),
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
-        let blob = Arc::new(blob);
         blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
             .await
             .unwrap();
 
-        let resize_blob = blob.clone();
         let (resize, write) = tokio::join!(biased;
-            resize_blob.resize(0),
+            blob.resize(0),
             blob.write_at(10, b"X", WriteOptions::SYNC),
         );
         assert!(resize.is_err());

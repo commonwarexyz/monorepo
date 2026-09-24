@@ -597,7 +597,7 @@ impl ReadAtRequest {
         let ptr = unsafe { self.buf.as_mut_ptr().add(self.read) };
         let remaining = len - self.read;
         let offset = self.offset + self.read as u64;
-        let rw_flags = self.cache.rw_flag();
+        let rw_flags = self.cache.rw_flag(&self.file.dont_cache_supported);
         opcode::Read::new(fd, ptr, scalar_len(remaining))
             .offset(offset)
             .rw_flags(rw_flags)
@@ -609,7 +609,11 @@ impl ReadAtRequest {
     fn on_cqe(&mut self, state: WaiterState, result: i32) -> Option<Result<(), Error>> {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Error(code) if self.cache.fallback(code) => None,
+            CqeResult::Error(code)
+                if self.cache.fallback(&self.file.dont_cache_supported, code) =>
+            {
+                None
+            }
             CqeResult::Cancelled | CqeResult::Error(_) => Some(Err(Error::ReadFailed)),
             CqeResult::Zero => Some(Err(Error::BlobInsufficientLength)),
             CqeResult::Positive(n) => {
@@ -634,17 +638,17 @@ pub enum Cache {
     /// Use the operating system's normal page-cache behavior.
     Enabled,
     /// Best-effort bypass of the page cache while the backend supports it.
-    Disabled(Arc<AtomicBool>),
+    Disabled,
 }
 
 #[allow(clippy::missing_const_for_fn)]
 impl Cache {
     /// Return the flag for this request, falling back to normal caching if another request has
     /// already found the hint unsupported.
-    fn rw_flag(&mut self) -> i32 {
+    fn rw_flag(&mut self, supported: &AtomicBool) -> i32 {
         match self {
-            Self::Disabled(supported) if supported.load(Ordering::Relaxed) => libc::RWF_DONTCACHE,
-            Self::Disabled(_) => {
+            Self::Disabled if supported.load(Ordering::Relaxed) => libc::RWF_DONTCACHE,
+            Self::Disabled => {
                 *self = Self::Enabled;
                 0
             }
@@ -653,7 +657,7 @@ impl Cache {
     }
 
     /// Retry without cache bypass if the kernel rejected the hint.
-    fn fallback(&mut self, code: i32) -> bool {
+    fn fallback(&mut self, supported: &AtomicBool, code: i32) -> bool {
         if code != -libc::EOPNOTSUPP {
             return false;
         }
@@ -661,7 +665,7 @@ impl Cache {
         // Each request that submitted the hint must retry, even if a sibling
         // has already updated the shared capability flag.
         match std::mem::replace(self, Self::Enabled) {
-            Self::Disabled(supported) => {
+            Self::Disabled => {
                 supported.store(false, Ordering::Relaxed);
                 true
             }
@@ -728,7 +732,7 @@ impl WriteAtRequest {
         } else {
             0
         };
-        sync | self.cache.rw_flag()
+        sync | self.cache.rw_flag(&self.file.dont_cache_supported)
     }
 
     /// Build the next positioned write SQE for the remaining bytes.
@@ -774,7 +778,11 @@ impl WriteAtRequest {
 
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => None,
-            CqeResult::Error(code) if self.cache.fallback(code) => None,
+            CqeResult::Error(code)
+                if self.cache.fallback(&self.file.dont_cache_supported, code) =>
+            {
+                None
+            }
             CqeResult::Error(code) if self.state == WriteAtState::WritingSync => Some(Err(
                 Error::Io(std::io::Error::from_raw_os_error(-code).into()),
             )),
@@ -955,9 +963,9 @@ mod tests {
     }
 
     /// Create a five-byte positioned read with the requested cache policy.
-    fn make_read_request(cache: Cache) -> ReadAtRequest {
+    fn make_read_request(file: Arc<Shared>, cache: Cache) -> ReadAtRequest {
         ReadAtRequest {
-            file: make_file(),
+            file,
             offset: 0,
             read: 0,
             buf: IoBufMut::zeroed(5),
@@ -966,9 +974,9 @@ mod tests {
     }
 
     /// Create a five-byte positioned write with no durability requirement.
-    fn make_write_request(cache: Cache) -> WriteAtRequest {
+    fn make_write_request(file: Arc<Shared>, cache: Cache) -> WriteAtRequest {
         WriteAtRequest {
-            file: make_file(),
+            file,
             offset: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::Writing,
@@ -1261,13 +1269,13 @@ mod tests {
                 (Request::Send(send), opcode::Send::CODE, deadline, false),
                 (Request::Recv(recv), opcode::Recv::CODE, deadline, false),
                 (
-                    Request::ReadAt(make_read_request(Cache::Enabled)),
+                    Request::ReadAt(make_read_request(make_file(), Cache::Enabled)),
                     opcode::Read::CODE,
                     None,
                     false,
                 ),
                 (
-                    Request::WriteAt(make_write_request(Cache::Enabled)),
+                    Request::WriteAt(make_write_request(make_file(), Cache::Enabled)),
                     opcode::Write::CODE,
                     None,
                     true,
@@ -1307,7 +1315,7 @@ mod tests {
             assert!(catch_unwind(AssertUnwindSafe(|| recv.build_sqe())).is_err());
         }
 
-        let mut read = make_read_request(Cache::Enabled);
+        let mut read = make_read_request(make_file(), Cache::Enabled);
         read.read = 6;
         assert!(catch_unwind(AssertUnwindSafe(|| read.build_sqe())).is_err());
     }
@@ -1340,7 +1348,7 @@ mod tests {
             exact: true,
             deadline,
         };
-        let mut read = make_read_request(Cache::Enabled);
+        let mut read = make_read_request(make_file(), Cache::Enabled);
         read.offset = 7;
 
         // Real buffers remain valid while each builder advances to its suffix.
@@ -1441,7 +1449,7 @@ mod tests {
 
     #[test]
     fn test_active_read_at_paths() {
-        let mut request = Request::ReadAt(make_read_request(Cache::Enabled));
+        let mut request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(request.on_cqe(ACTIVE, -libc::EAGAIN).is_none());
 
         // Positioned reads accumulate progress until the full range is available.
@@ -1451,20 +1459,20 @@ mod tests {
             RequestOutput::ReadAt(Ok(_))
         ));
 
-        let request = Request::ReadAt(make_read_request(Cache::Enabled));
+        let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(matches!(
             complete(request, ACTIVE, 0),
             RequestOutput::ReadAt(Err((_, Error::BlobInsufficientLength)))
         ));
 
-        let request = Request::ReadAt(make_read_request(Cache::Enabled));
+        let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(matches!(
             complete(request, ACTIVE, -libc::EIO),
             RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
         ));
 
         // An orphaned read may be cancelled while its SQE is still in flight.
-        let request = Request::ReadAt(make_read_request(Cache::Enabled));
+        let request = Request::ReadAt(make_read_request(make_file(), Cache::Enabled));
         assert!(matches!(
             complete(request, WaiterState::CancelRequested, -libc::ECANCELED),
             RequestOutput::ReadAt(Err((_, Error::ReadFailed)))
@@ -1473,54 +1481,69 @@ mod tests {
 
     #[test]
     fn test_uncached_read_fallback_preserves_progress_and_is_shared_with_writes() {
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut read = make_read_request(Cache::Disabled(supported.clone()));
+        let file = make_file();
+        let mut read = make_read_request(file.clone(), Cache::Disabled);
 
         // Preserve completed bytes while retrying without the rejected cache hint.
-        assert_eq!(read.cache.rw_flag(), libc::RWF_DONTCACHE);
+        assert_eq!(
+            read.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
         assert!(read.on_cqe(ACTIVE, 2).is_none());
         assert_eq!(read.read, 2);
-        assert_eq!(read.cache.rw_flag(), libc::RWF_DONTCACHE);
+        assert_eq!(
+            read.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
 
         assert!(read.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert_eq!(read.read, 2);
-        assert!(!supported.load(Ordering::Relaxed));
-        assert_eq!(read.cache.rw_flag(), 0);
+        assert!(!file.dont_cache_supported.load(Ordering::Relaxed));
+        assert_eq!(read.cache.rw_flag(&file.dont_cache_supported), 0);
 
         // Capability loss is shared in both directions across sibling requests.
-        let mut sibling_write = make_write_request(Cache::Disabled(supported));
+        let mut sibling_write = make_write_request(file, Cache::Disabled);
         assert_eq!(sibling_write.rw_flags(), 0);
 
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut write = make_write_request(Cache::Disabled(supported.clone()));
+        let file = make_file();
+        let mut write = make_write_request(file.clone(), Cache::Disabled);
         assert_eq!(write.rw_flags(), libc::RWF_DONTCACHE);
         assert!(write.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
-        let mut sibling_read = make_read_request(Cache::Disabled(supported));
-        assert_eq!(sibling_read.cache.rw_flag(), 0);
+        let mut sibling_read = make_read_request(file.clone(), Cache::Disabled);
+        assert_eq!(sibling_read.cache.rw_flag(&file.dont_cache_supported), 0);
 
         // Unrelated I/O failures must not disable the hint for future requests.
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut failing_read = make_read_request(Cache::Disabled(supported.clone()));
-        assert_eq!(failing_read.cache.rw_flag(), libc::RWF_DONTCACHE);
+        let file = make_file();
+        let mut failing_read = make_read_request(file.clone(), Cache::Disabled);
+        assert_eq!(
+            failing_read.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
         let result = failing_read.on_cqe(ACTIVE, -libc::EIO);
-        assert!(supported.load(Ordering::Relaxed));
+        assert!(file.dont_cache_supported.load(Ordering::Relaxed));
         assert!(matches!(result, Some(Err(Error::ReadFailed))));
     }
 
     #[test]
     fn test_queued_cache_fallbacks_retry() {
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut first = make_read_request(Cache::Disabled(supported.clone()));
-        let mut second = make_read_request(Cache::Disabled(supported.clone()));
+        let file = make_file();
+        let mut first = make_read_request(file.clone(), Cache::Disabled);
+        let mut second = make_read_request(file.clone(), Cache::Disabled);
 
         // Requests queued before the shared downgrade must each requeue without the hint.
-        assert_eq!(first.cache.rw_flag(), libc::RWF_DONTCACHE);
-        assert_eq!(second.cache.rw_flag(), libc::RWF_DONTCACHE);
+        assert_eq!(
+            first.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
+        assert_eq!(
+            second.cache.rw_flag(&file.dont_cache_supported),
+            libc::RWF_DONTCACHE
+        );
         assert!(first.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
         assert!(second.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
-        assert!(!supported.load(Ordering::Relaxed));
-        assert_eq!(first.cache.rw_flag(), 0);
-        assert_eq!(second.cache.rw_flag(), 0);
+        assert!(!file.dont_cache_supported.load(Ordering::Relaxed));
+        assert_eq!(first.cache.rw_flag(&file.dont_cache_supported), 0);
+        assert_eq!(second.cache.rw_flag(&file.dont_cache_supported), 0);
     }
 
     #[test]
@@ -1568,7 +1591,7 @@ mod tests {
 
     #[test]
     fn test_active_write_at_paths() {
-        let mut write = make_write_request(Cache::Enabled);
+        let mut write = make_write_request(make_file(), Cache::Enabled);
         assert_eq!(write.rw_flags(), 0);
         let mut request = Request::WriteAt(write);
         assert!(request.on_cqe(ACTIVE, -libc::EAGAIN).is_none());
@@ -1581,7 +1604,7 @@ mod tests {
         ));
 
         // The same completion path handles progress spanning several chunks.
-        let mut write = make_write_request(Cache::Enabled);
+        let mut write = make_write_request(make_file(), Cache::Enabled);
         let mut bufs = IoBufs::from(IoBuf::from(b"abc"));
         bufs.append(IoBuf::from(b"de"));
         write.write = bufs.into();
@@ -1593,14 +1616,14 @@ mod tests {
         ));
 
         for result in [0, -libc::EIO, -libc::ECANCELED] {
-            let request = Request::WriteAt(make_write_request(Cache::Enabled));
+            let request = Request::WriteAt(make_write_request(make_file(), Cache::Enabled));
             assert!(matches!(
                 complete(request, ACTIVE, result),
                 RequestOutput::WriteAt(Err(Error::WriteFailed))
             ));
         }
 
-        let mut write = make_write_request(Cache::Enabled);
+        let mut write = make_write_request(make_file(), Cache::Enabled);
         write.state = WriteAtState::WritingBeforeSync;
         assert!(matches!(
             complete(Request::WriteAt(write), ACTIVE, -libc::EIO),
@@ -1608,7 +1631,7 @@ mod tests {
         ));
 
         // A fused write retains the kernel errno through its durability failure.
-        let mut write = make_write_request(Cache::Enabled);
+        let mut write = make_write_request(make_file(), Cache::Enabled);
         write.state = WriteAtState::WritingSync;
         assert_eq!(write.rw_flags(), libc::RWF_DSYNC);
         let file = write.file.clone();
@@ -1627,7 +1650,7 @@ mod tests {
             (ACTIVE, 0),
             (WaiterState::CancelRequested, -libc::ECANCELED),
         ] {
-            let mut write = make_write_request(Cache::Enabled);
+            let mut write = make_write_request(make_file(), Cache::Enabled);
             write.state = WriteAtState::WritingSync;
             assert!(matches!(
                 complete(Request::WriteAt(write), state, result),
@@ -1638,22 +1661,24 @@ mod tests {
 
     #[test]
     fn test_uncached_sync_write_retries_without_hint_when_unsupported() {
-        let dont_cache_supported = Arc::new(AtomicBool::new(true));
-
         let mut request = WriteAtRequest {
             file: make_file(),
             offset: 0,
             write: IoBufs::from(IoBuf::from(b"hello")).into(),
             state: WriteAtState::WritingSync,
-            cache: Cache::Disabled(dont_cache_supported.clone()),
+            cache: Cache::Disabled,
         };
 
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC | libc::RWF_DONTCACHE);
         assert!(request.on_cqe(ACTIVE, -libc::EOPNOTSUPP).is_none());
-        assert!(!dont_cache_supported.load(Ordering::Relaxed));
-        request.cache = Cache::Disabled(dont_cache_supported);
+        assert!(!request.file.dont_cache_supported.load(Ordering::Relaxed));
+        request.cache = Cache::Disabled;
         assert_eq!(request.rw_flags(), libc::RWF_DSYNC);
-        assert!(!request.cache.fallback(-libc::EOPNOTSUPP));
+        assert!(
+            !request
+                .cache
+                .fallback(&request.file.dont_cache_supported, -libc::EOPNOTSUPP)
+        );
     }
 
     #[test]
@@ -1804,7 +1829,7 @@ mod tests {
         assert_eq!(buf.as_mut_ptr(), pointer);
         drop(retired);
 
-        let mut read = make_read_request(Cache::Enabled);
+        let mut read = make_read_request(make_file(), Cache::Enabled);
         let pointer = read.buf.as_mut_ptr();
         let (output, retired) = Request::ReadAt(read).complete(Err(Error::Timeout));
         let RequestOutput::ReadAt(Err((mut buf, Error::Timeout))) = output else {
@@ -1813,7 +1838,7 @@ mod tests {
         assert_eq!(buf.as_mut_ptr(), pointer);
         drop(retired);
 
-        let request = Request::WriteAt(make_write_request(Cache::Enabled));
+        let request = Request::WriteAt(make_write_request(make_file(), Cache::Enabled));
         let (output, retired) = request.complete(Err(Error::Timeout));
         assert!(matches!(
             output,

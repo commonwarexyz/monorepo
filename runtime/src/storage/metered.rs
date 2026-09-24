@@ -5,10 +5,7 @@ use crate::{
         traces::TracedExt as _,
     },
 };
-use std::{
-    ops::{Deref, RangeInclusive},
-    sync::Arc,
-};
+use std::{ops::RangeInclusive, sync::Arc};
 use tracing::{Instrument as _, Span, field::Empty};
 
 pub struct Metrics {
@@ -96,11 +93,12 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
+        self.metrics.open_blobs.inc();
         Ok((
             Blob {
                 inner,
                 partition: partition.into(),
-                metrics: MetricsHandle::new(self.metrics.clone()),
+                metrics: self.metrics.clone(),
             },
             len,
             blob_version,
@@ -120,31 +118,12 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 pub struct Blob<B> {
     inner: B,
     partition: String,
-    metrics: MetricsHandle,
+    metrics: Arc<Metrics>,
 }
 
-/// Counts the blob as open until its inner handle drops.
-struct MetricsHandle(Arc<Metrics>);
-
-impl MetricsHandle {
-    /// Counts the blob as open until this handle is dropped.
-    fn new(metrics: Arc<Metrics>) -> Self {
-        metrics.open_blobs.inc();
-        Self(metrics)
-    }
-}
-
-impl Deref for MetricsHandle {
-    type Target = Metrics;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Drop for MetricsHandle {
+impl<B> Drop for Blob<B> {
     fn drop(&mut self) {
-        self.0.open_blobs.dec();
+        self.metrics.open_blobs.dec();
     }
 }
 

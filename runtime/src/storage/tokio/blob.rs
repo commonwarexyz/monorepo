@@ -40,22 +40,28 @@ enum Cache {
     /// Use the operating system's normal page-cache behavior.
     Enabled,
     /// Best-effort bypass of the page cache while the backend supports it.
-    Disabled(Arc<AtomicBool>),
+    Disabled,
 }
 
 impl Cache {
     /// Return whether the next Linux submission should request cache bypass.
-    fn is_disabled(&self) -> bool {
+    fn is_disabled(&self, supported: &AtomicBool) -> bool {
         cfg!(target_os = "linux")
-            && matches!(self, Self::Disabled(supported) if supported.load(Ordering::Relaxed))
+            && matches!(self, Self::Disabled)
+            && supported.load(Ordering::Relaxed)
     }
 
     /// Return whether an unsupported cache-bypass attempt should be retried with normal caching.
-    fn retry_cached(&mut self, err: &std::io::Error, attempted_dont_cache: bool) -> bool {
+    fn retry_cached(
+        &mut self,
+        supported: &AtomicBool,
+        err: &std::io::Error,
+        attempted_dont_cache: bool,
+    ) -> bool {
         if err.raw_os_error() != Some(libc::EOPNOTSUPP) || !attempted_dont_cache {
             return false;
         }
-        let Self::Disabled(supported) = std::mem::replace(self, Self::Enabled) else {
+        let Self::Disabled = std::mem::replace(self, Self::Enabled) else {
             return false;
         };
         supported.store(false, Ordering::Relaxed);
@@ -73,6 +79,9 @@ struct Shared {
     file: Held,
     tracker: Tracker,
     durability: Mutex<()>,
+    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
+    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
+    dont_cache_supported: AtomicBool,
     pending: Arc<Pending>,
     key: (String, Vec<u8>),
     /// Settles the open once its last handle dropped and every operation finished.
@@ -207,9 +216,6 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
-    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
-    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
-    dont_cache_supported: Arc<AtomicBool>,
 }
 
 impl Drop for Blob {
@@ -262,6 +268,7 @@ impl Blob {
             file: Held::new(file, hold),
             tracker: Tracker::default(),
             durability: Mutex::new(()),
+            dont_cache_supported: AtomicBool::new(true),
             pending: generation.pending.clone(),
             key: generation.key.clone(),
             promise: OnceLock::new(),
@@ -273,7 +280,6 @@ impl Blob {
             generation,
             pool,
             data_offset,
-            dont_cache_supported: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -286,11 +292,11 @@ impl Blob {
     #[cfg(target_os = "linux")]
     fn read_exact_at(
         mut cache: Cache,
-        file: &File,
+        file: &Shared,
         mut buf: &mut [u8],
         mut offset: u64,
     ) -> Result<(), Error> {
-        if !cache.is_disabled() {
+        if !cache.is_disabled(&file.dont_cache_supported) {
             file.read_exact_at(buf, offset)?;
             return Ok(());
         }
@@ -316,7 +322,7 @@ impl Blob {
                 if err.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                if cache.retry_cached(&err, true) {
+                if cache.retry_cached(&file.dont_cache_supported, &err, true) {
                     file.read_exact_at(buf, offset)?;
                     return Ok(());
                 }
@@ -337,7 +343,7 @@ impl Blob {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn read_exact_at(_: Cache, file: &File, buf: &mut [u8], offset: u64) -> Result<(), Error> {
+    fn read_exact_at(_: Cache, file: &Shared, buf: &mut [u8], offset: u64) -> Result<(), Error> {
         file.read_exact_at(buf, offset)?;
         Ok(())
     }
@@ -354,7 +360,7 @@ impl Blob {
     /// backend may support it. An EOPNOTSUPP disables the hint and retries normally.
     fn write_vectored_at(
         mut cache: Cache,
-        file: &File,
+        file: &Shared,
         mut offset: u64,
         bufs: &mut IoBufs,
         flags: Option<libc::c_int>,
@@ -376,7 +382,7 @@ impl Blob {
 
             cfg_if! {
                 if #[cfg(target_os = "linux")] {
-                    let attempted_dont_cache = cache.is_disabled();
+                    let attempted_dont_cache = cache.is_disabled(&file.dont_cache_supported);
                     // SAFETY: `IoSlice` is ABI-compatible with `libc::iovec` on Unix.
                     // `io_slices` points to valid readable buffers held alive for this syscall.
                     let ret = unsafe {
@@ -414,7 +420,7 @@ impl Blob {
                 }
 
                 // Retry normally and stop requesting an unsupported cache-bypass hint.
-                if cache.retry_cached(&err, attempted_dont_cache) {
+                if cache.retry_cached(&file.dont_cache_supported, &err, attempted_dont_cache) {
                     continue;
                 }
                 return Err(err.into());
@@ -464,7 +470,7 @@ impl crate::Blob for Blob {
         let file = self.shared.clone();
         let pool = self.pool.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
-            Cache::Disabled(self.dont_cache_supported.clone())
+            Cache::Disabled
         } else {
             Cache::Enabled
         };
@@ -514,7 +520,7 @@ impl crate::Blob for Blob {
             return Err(error);
         }
         let cache = if options.contains(WriteOptions::DONT_CACHE) {
-            Cache::Disabled(self.dont_cache_supported.clone())
+            Cache::Disabled
         } else {
             Cache::Enabled
         };
@@ -535,7 +541,7 @@ impl crate::Blob for Blob {
         }
         task::spawn_blocking(move || {
             // Preserve the single-buffer fast path when no option requires per-write flags.
-            let mut bufs = if !sync && !cache.is_disabled() {
+            let mut bufs = if !sync && !cache.is_disabled(&file.dont_cache_supported) {
                 match bufs.try_into_single() {
                     Ok(buf) => {
                         #[cfg(test)]
@@ -1384,25 +1390,27 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     #[test]
     fn test_cache_bypass_is_ignored_off_linux() {
-        let cache = Cache::Disabled(Arc::new(AtomicBool::new(true)));
-        assert!(!cache.is_disabled());
+        let supported = AtomicBool::new(true);
+        let cache = Cache::Disabled;
+        assert!(!cache.is_disabled(&supported));
     }
 
     #[test]
     fn test_cache_bypass_retry_decision() {
-        let supported = Arc::new(AtomicBool::new(true));
-        let mut cache = Cache::Disabled(supported.clone());
-        let sibling = Cache::Disabled(supported.clone());
+        let supported = AtomicBool::new(true);
+        let mut cache = Cache::Disabled;
+        let mut sibling = Cache::Disabled;
         let unsupported = std::io::Error::from_raw_os_error(libc::EOPNOTSUPP);
         let invalid = std::io::Error::from_raw_os_error(libc::EINVAL);
 
-        assert!(!cache.retry_cached(&invalid, true));
+        assert!(!cache.retry_cached(&supported, &invalid, true));
         assert!(supported.load(Ordering::Relaxed));
-        assert!(!cache.retry_cached(&unsupported, false));
+        assert!(!cache.retry_cached(&supported, &unsupported, false));
         assert!(supported.load(Ordering::Relaxed));
-        assert!(cache.retry_cached(&unsupported, true));
+        assert!(cache.retry_cached(&supported, &unsupported, true));
         assert!(!supported.load(Ordering::Relaxed));
-        assert!(!sibling.is_disabled());
-        assert!(!cache.retry_cached(&unsupported, true));
+        assert!(!sibling.is_disabled(&supported));
+        assert!(sibling.retry_cached(&supported, &unsupported, true));
+        assert!(!cache.retry_cached(&supported, &unsupported, true));
     }
 }

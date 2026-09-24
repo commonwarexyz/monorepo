@@ -667,7 +667,7 @@ pub mod tests {
         },
         panic::{AssertUnwindSafe, catch_unwind},
         path::PathBuf,
-        sync::{Arc, atomic::AtomicBool},
+        sync::Arc,
         task::Wake,
         thread,
     };
@@ -2195,7 +2195,7 @@ pub mod tests {
                     offset: 0,
                     write: bufs.into(),
                     state,
-                    cache: Cache::Disabled(Arc::new(AtomicBool::new(true))),
+                    cache: Cache::Disabled,
                 }),
                 Observer::Local(None),
                 harness.start,

@@ -305,9 +305,6 @@ pub struct Blob {
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
-    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
-    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
-    dont_cache_supported: Arc<AtomicBool>,
 }
 
 /// A blob's file with the writes no completed sync covers.
@@ -323,6 +320,9 @@ pub(crate) struct Shared {
     /// Only driver-owned futures may wait on this mutex. Permits are released while
     /// the worker is borrowed, so their wakers must not borrow the worker again.
     pub(crate) durability: Arc<AsyncMutex<()>>,
+    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
+    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
+    pub(crate) dont_cache_supported: AtomicBool,
     pending: Arc<Pending>,
     key: (String, Vec<u8>),
     /// Settles the open once its last handle dropped and every request finished.
@@ -450,6 +450,7 @@ impl Shared {
             file: Held::new(file, hold),
             tracker: Tracker::default(),
             durability: Arc::new(AsyncMutex::new(())),
+            dont_cache_supported: AtomicBool::new(true),
             pending: Arc::new(Pending::default()),
             key: (String::new(), Vec::new()),
             promise: OnceLock::new(),
@@ -479,6 +480,7 @@ impl Blob {
             file: Held::new(file, hold),
             tracker: Tracker::default(),
             durability: Arc::new(AsyncMutex::new(())),
+            dont_cache_supported: AtomicBool::new(true),
             pending: generation.pending.clone(),
             key: generation.key.clone(),
             promise: OnceLock::new(),
@@ -488,7 +490,6 @@ impl Blob {
             generation,
             pool,
             data_offset,
-            dont_cache_supported: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -574,7 +575,7 @@ impl crate::Blob for Blob {
             .ok_or(Error::OffsetOverflow)?;
 
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
-            Cache::Disabled(self.dont_cache_supported.clone())
+            Cache::Disabled
         } else {
             Cache::Enabled
         };
@@ -624,7 +625,7 @@ impl crate::Blob for Blob {
             .ok_or(Error::OffsetOverflow)?;
 
         let cache = if options.contains(WriteOptions::DONT_CACHE) {
-            Cache::Disabled(self.dont_cache_supported.clone())
+            Cache::Disabled
         } else {
             Cache::Enabled
         };
