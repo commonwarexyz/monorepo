@@ -1,12 +1,12 @@
 //! Serving the latest published database snapshots.
 //!
 //! [`Publisher::new`] creates a [`Publisher`] and a [`Subscriber`] over a shared
-//! cell containing the latest published snapshots. Each finalization publishes
-//! its snapshots as soon as the block applies, so served state may run ahead of
-//! disk. That is safe because peers verify everything they fetch against a
-//! finalized root, and finalized state survives any local crash by replay.
-//! Publication is monotone by construction, since finalizations arrive in
-//! order.
+//! cell containing the latest published snapshots. Snapshots are captured and
+//! published when a durability sync starts over applied state, so served state
+//! may run ahead of disk. That is safe because peers verify everything they
+//! fetch against a finalized root, and finalized state survives any local
+//! crash by replay. Every publish site labels at the latest applied height, so
+//! publication stays monotone (asserted in [`Publisher::publish`]).
 //!
 //! A prune leaves the served snapshots pinning the pruned storage, so the prune
 //! path captures and publishes fresh snapshots right after pruning.

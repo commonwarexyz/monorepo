@@ -343,7 +343,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stateful::db::{Publisher, Shared};
+    use crate::stateful::db::Publisher;
     use bytes::Bytes;
     use commonware_actor::Feedback;
     use commonware_consensus::types::Height;
@@ -371,7 +371,7 @@ mod tests {
         NZU16, NZU32, NZU64, NZUsize,
         channel::{mpsc, oneshot},
         probability,
-        sync::Mutex,
+        sync::{AsyncRwLockReadGuard, AsyncRwLockWriteGuard, Mutex, TracedAsyncRwLock},
     };
     use futures::FutureExt as _;
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -418,7 +418,46 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Shared<TestDb> as Source>::Op;
+    /// Controllable source whose storage calls can be held pending independently of the actor.
+    #[derive(Clone)]
+    struct GatedSource(Arc<TracedAsyncRwLock<Option<TestDb>>>);
+
+    impl GatedSource {
+        fn new(label: &'static str, db: TestDb) -> Self {
+            Self(Arc::new(TracedAsyncRwLock::new(label, Some(db))))
+        }
+
+        async fn read(&self) -> AsyncRwLockReadGuard<'_, TestDb> {
+            AsyncRwLockReadGuard::map(self.0.read().await, |db| db.as_ref().unwrap())
+        }
+
+        async fn write(&self) -> (SourceSlot<'_>, TestDb) {
+            let mut guard = self.0.write().await;
+            let db = guard.take().unwrap();
+            (SourceSlot(guard), db)
+        }
+    }
+
+    struct SourceSlot<'a>(AsyncRwLockWriteGuard<'a, Option<TestDb>>);
+
+    impl SourceSlot<'_> {
+        fn put(mut self, db: TestDb) {
+            *self.0 = Some(db);
+        }
+    }
+
+    impl Source for GatedSource {
+        type Family = mmr::Family;
+        type Digest = sha256::Digest;
+        type Op = <TestDb as Source>::Op;
+        type Error = <Arc<TracedAsyncRwLock<Option<TestDb>>> as Source>::Error;
+
+        async fn serve(&self, request: Request<mmr::Family>) -> sync::source::Result<Self> {
+            self.0.serve(request).await
+        }
+    }
+
+    type TestOp = <GatedSource as Source>::Op;
 
     type TestActor = Actor<
         deterministic::Context,
@@ -426,8 +465,8 @@ mod tests {
         DummyProvider,
         DummyBlocker,
         mmr::Family,
-        Shared<TestDb>,
-        Shared<TestDb>,
+        GatedSource,
+        GatedSource,
     >;
 
     type TestResponse = Response<mmr::Family, TestOp, sha256::Digest>;
@@ -549,9 +588,9 @@ mod tests {
 
     fn test_actor(
         context: deterministic::Context,
-        database: Option<Shared<TestDb>>,
+        database: Option<GatedSource>,
         config: Config<ed25519::PublicKey, DummyProvider, DummyBlocker>,
-    ) -> (Publisher<Shared<TestDb>>, TestActor, LiveMailbox) {
+    ) -> (Publisher<GatedSource>, TestActor, LiveMailbox) {
         let publication_context = context.child("publication");
         let (mut publisher, subscriber) = Publisher::new(&publication_context);
         if let Some(database) = database {
@@ -595,15 +634,15 @@ mod tests {
         }
     }
 
-    async fn init_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
+    async fn init_db(context: deterministic::Context, suffix: &str) -> GatedSource {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
             .await
             .expect("db init should succeed");
-        Shared::new("test", db)
+        GatedSource::new("test", db)
     }
 
     /// Create a database with one applied update.
-    async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
+    async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> GatedSource {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
             .await
             .expect("db init should succeed");
@@ -616,16 +655,16 @@ mod tests {
             .await
             .expect("batch should merkleize");
         let (db, _) = db.apply_batch(batch).await.expect("batch should apply");
-        Shared::new("test", db)
+        GatedSource::new("test", db)
     }
 
-    type LiveMailbox = SyncMailbox<mmr::Family, Shared<TestDb>>;
+    type LiveMailbox = SyncMailbox<mmr::Family, GatedSource>;
 
     /// Two connected resolver services with distinct databases, indexed by peer.
     struct LivePair {
         /// Databases served by each peer.
-        databases: [Shared<TestDb>; 2],
-        publishers: [Publisher<Shared<TestDb>>; 2],
+        databases: [GatedSource; 2],
+        publishers: [Publisher<GatedSource>; 2],
         /// Mailboxes for requesting data from peers.
         mailboxes: [LiveMailbox; 2],
         /// Actor counters used to observe admission and cancellation.
@@ -789,7 +828,7 @@ mod tests {
     }
 
     /// Obtain the response directly from its database for comparison with the P2P result.
-    async fn expected_payload(db: &Shared<TestDb>, request: Request<mmr::Family>) -> Bytes {
+    async fn expected_payload(db: &GatedSource, request: Request<mmr::Family>) -> Bytes {
         db.serve(request).await.unwrap().0.encode()
     }
 
@@ -1919,7 +1958,7 @@ mod tests {
                 .await
                 .unwrap();
             let publication_context = test_context.child("client_publication");
-            let (_publisher, subscriber) = Publisher::<Shared<TestDb>>::new(&publication_context);
+            let (_publisher, subscriber) = Publisher::<GatedSource>::new(&publication_context);
             let (actor, mailbox) = Actor::<_, _, _, _, mmr::Family, _, _>::new(
                 test_context.child("actor_2"),
                 Config {
