@@ -48,7 +48,6 @@ use commonware_runtime::{BufMut, Error as RError, Handle};
 use std::{collections::BTreeMap, num::NonZeroUsize};
 #[commonware_macros::stability(ALPHA)]
 use std::{iter, ops::Range, sync::Arc};
-use zstd::zstd_safe::compress_bound;
 
 /// Physical overhead appended to every frame: the CRC32 of the frame's data.
 pub(crate) const CHECKSUM_SIZE: usize = crc32::Digest::SIZE;
@@ -296,78 +295,72 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         })
     }
 
-    /// See [Glob::append].
-    async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
-        // Encode and optionally compress, then append checksum
-        let buf = if let Some(level) = self.compression {
-            // Compressed: encode first, then compress, then append checksum
-            let encoded = value.encode();
-            let mut compressed = Vec::with_capacity(compress_bound(encoded.len()) + CHECKSUM_SIZE);
-            frame::compress_into(level, &encoded, &mut compressed)?;
-            let checksum = Crc32::checksum(&compressed);
-            compressed.put_u32(checksum);
-            compressed
+    /// Append the frame of `value` to `out`, returning the frame size.
+    ///
+    /// A frame is the value's codec output (zstd-compressed at `compression`, if any) followed
+    /// by the CRC32 of those bytes.
+    fn frame(compression: Option<u8>, value: &V, out: &mut Vec<u8>) -> Result<u32, Error> {
+        let start = out.len();
+        if let Some(level) = compression {
+            frame::compress_into(level, &value.encode(), out)?;
         } else {
-            // Uncompressed: pre-allocate exact size to avoid copying
-            let entry_size = value.encode_size() + CHECKSUM_SIZE;
-            let mut buf = Vec::with_capacity(entry_size);
-            value.write(&mut buf);
-            let checksum = Crc32::checksum(&buf);
-            buf.put_u32(checksum);
-            buf
-        };
-
-        // Write to blob
-        let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
-        let writer = self.manager.get_or_create(section).await?;
-        let offset = writer.size();
-        writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
-
-        Ok((offset, entry_size))
+            out.reserve(value.encode_size() + CHECKSUM_SIZE);
+            value.write(out);
+        }
+        let checksum = Crc32::checksum(&out[start..]);
+        out.put_u32(checksum);
+        u32::try_from(out.len() - start).map_err(|_| Error::ValueTooLarge)
     }
 
-    /// Append multiple independently framed values with one buffered-writer operation.
+    /// Write `frames` at the end of `section` with one buffered-writer operation, returning the
+    /// offset of their first byte.
+    async fn write_frames(&mut self, section: u64, frames: Vec<u8>) -> Result<u64, Error> {
+        let writer = self.manager.get_or_create(section).await?;
+        let offset = writer.size();
+        if offset.checked_add(frames.len() as u64).is_none() {
+            return Err(Error::OffsetOverflow);
+        }
+        writer
+            .write_at(offset, frames)
+            .await
+            .map_err(Error::Runtime)?;
+        Ok(offset)
+    }
+
+    /// See [Glob::append].
+    async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
+        let mut frame = Vec::new();
+        let size = Self::frame(self.compression, value, &mut frame)?;
+        let offset = self.write_frames(section, frame).await?;
+        Ok((offset, size))
+    }
+
+    /// See [Glob::append_many].
+    #[commonware_macros::stability(ALPHA)]
     async fn append_many<'a>(
         &mut self,
         section: u64,
-        values: impl ExactSizeIterator<Item = &'a V>,
+        values: impl IntoIterator<Item = &'a V>,
     ) -> Result<Vec<(u64, u32)>, Error>
     where
         V: 'a,
     {
-        if values.len() == 0 {
+        let values = values.into_iter();
+        let mut frames = Vec::new();
+        let mut locations = Vec::with_capacity(values.size_hint().0);
+        for value in values {
+            let start = frames.len() as u64;
+            locations.push((start, Self::frame(self.compression, value, &mut frames)?));
+        }
+        if locations.is_empty() {
             return Err(Error::EmptyAppend);
         }
 
-        let mut encoded = Vec::new();
-        let mut locations = Vec::with_capacity(values.len());
-        for value in values {
-            let start = encoded.len();
-            if let Some(level) = self.compression {
-                frame::compress_into(level, &value.encode(), &mut encoded)?;
-            } else {
-                value.write(&mut encoded);
-            }
-            let checksum = Crc32::checksum(&encoded[start..]);
-            encoded.put_u32(checksum);
-            let size = u32::try_from(encoded.len() - start).map_err(|_| Error::ValueTooLarge)?;
-            let start = u64::try_from(start).map_err(|_| Error::OffsetOverflow)?;
-            locations.push((start, size));
+        // The write rejects a batch whose end overflows, so no frame offset can.
+        let offset = self.write_frames(section, frames).await?;
+        for (start, _) in &mut locations {
+            *start += offset;
         }
-
-        let writer = self.manager.get_or_create(section).await?;
-        let offset = writer.size();
-        let encoded_len = u64::try_from(encoded.len()).map_err(|_| Error::OffsetOverflow)?;
-        let _end = offset
-            .checked_add(encoded_len)
-            .ok_or(Error::OffsetOverflow)?;
-        for (relative, _) in &mut locations {
-            *relative = offset.checked_add(*relative).ok_or(Error::OffsetOverflow)?;
-        }
-        writer
-            .write_at(offset, encoded)
-            .await
-            .map_err(Error::Runtime)?;
         Ok(locations)
     }
 
@@ -529,10 +522,14 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     }
 
     /// Append multiple values to one section with one buffered-writer operation.
+    ///
+    /// Returns each value's `(offset, size)` in input order, or [Error::EmptyAppend] for no
+    /// values.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn append_many<'a>(
         mut self,
         section: u64,
-        values: impl ExactSizeIterator<Item = &'a V>,
+        values: impl IntoIterator<Item = &'a V>,
     ) -> Result<(Self, Vec<(u64, u32)>), Error>
     where
         V: 'a,
@@ -778,6 +775,7 @@ mod tests {
     };
     use commonware_utils::{NZUsize, probability};
     use rand::Rng as _;
+    use zstd::bulk::compress;
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
         pub(in super::super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
@@ -821,8 +819,7 @@ mod tests {
     fn test_append_many_frames_and_writes_once() {
         for compression in [None, Some(3)] {
             deterministic::Runner::default().start(|context| async move {
-                let (context, recordings) =
-                    commonware_runtime::mocks::RecordingContext::new(context);
+                let (context, recordings) = RecordingContext::new(context);
                 let cfg = Config {
                     compression,
                     write_buffer: NZUsize!(8),
@@ -917,6 +914,48 @@ mod tests {
                 Err(Error::EmptyAppend)
             ));
         });
+    }
+
+    #[test_traced]
+    fn test_frame_format() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let cfg = Config {
+                    compression,
+                    ..test_cfg()
+                };
+                let values = [[5u8; 64], [6; 64]];
+                let glob = Glob::<_, [u8; 64]>::init(context.child("glob"), cfg.clone())
+                    .await
+                    .unwrap();
+                let (glob, _) = glob.append_many(0, values.iter()).await.unwrap();
+                let (glob, _, _) = glob.append(0, &values[0]).await.unwrap();
+                drop(glob.sync(0).await.unwrap());
+
+                let mut expected = Vec::new();
+                for value in [values[0], values[1], values[0]] {
+                    // A byte array encodes as its raw bytes.
+                    let start = expected.len();
+                    match compression {
+                        Some(level) => expected.extend(compress(&value, i32::from(level)).unwrap()),
+                        None => expected.extend_from_slice(&value),
+                    }
+                    let checksum = Crc32::checksum(&expected[start..]);
+                    expected.put_u32(checksum);
+                }
+                let (blob, size) = context
+                    .open(&cfg.partition, &0u64.to_be_bytes())
+                    .await
+                    .unwrap();
+                assert_eq!(size, expected.len() as u64);
+                let stored = blob
+                    .read_at(0, expected.len(), ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce();
+                assert_eq!(stored.as_ref(), expected.as_slice());
+            });
+        }
     }
 
     #[test_traced]
