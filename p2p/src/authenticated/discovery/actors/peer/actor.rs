@@ -1,27 +1,40 @@
 use super::{Config, Error, Mailbox, Message};
-use crate::authenticated::{
-    channels::{self, Channels},
-    data::EncodedData,
-    discovery::{
-        actors::tracker,
-        metrics,
-        types::{self, InfoVerifier},
+use crate::{
+    Channel,
+    authenticated::{
+        channels::{self, Channels},
+        data::EncodedData,
+        discovery::{
+            actors::tracker,
+            metrics,
+            types::{self, InfoVerifier},
+        },
+        relay::{Message as RelayMessage, Prioritized, Relay, recv_prioritized, try_recv},
+        throttle::Throttle,
     },
-    relay::{Message as RelayMessage, Prioritized, Relay, recv_prioritized, try_recv},
 };
 use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
-    telemetry::metrics::CounterFamily,
+    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner,
+    iobuf::EncodeExt,
+    telemetry::metrics::{CounterFamily, raw::Counter},
 };
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRng;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, time::Duration};
 use tracing::debug;
+
+/// Send counters for one connection.
+struct Sent {
+    greeting: Counter,
+    bit_vec: Counter,
+    peers: Counter,
+    data: HashMap<Channel, Counter>,
+}
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
@@ -67,49 +80,35 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         )
     }
 
-    /// Converts a control message into an outbound metric/payload pair.
+    /// Converts a control message into an outbound counter/payload pair.
     ///
     /// Returns `Err` for `Kill` so the caller can terminate the connection.
-    fn prepare_control<S, R>(
+    fn prepare_control<'a, S, R>(
         peer: &C,
         msg: Message<C>,
         pool: &commonware_runtime::BufferPool,
-    ) -> Result<(metrics::Message<C>, IoBufs), Error<S, R>> {
-        let (metric, payload) = match msg {
-            Message::BitVec(bit_vec) => (
-                metrics::Message::new_bit_vec(peer),
-                types::Payload::BitVec(bit_vec),
-            ),
-            Message::Peers(peers) => (
-                metrics::Message::new_peers(peer),
-                types::Payload::Peers(peers),
-            ),
+        sent: &'a Sent,
+    ) -> Result<(&'a Counter, IoBufs), Error<S, R>> {
+        let (counter, payload) = match msg {
+            Message::BitVec(bit_vec) => (&sent.bit_vec, types::Payload::BitVec(bit_vec)),
+            Message::Peers(peers) => (&sent.peers, types::Payload::Peers(peers)),
             Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
         };
-        Ok((metric, payload.encode_with_pool(pool)))
+        Ok((counter, payload.encode_with_pool(pool)))
     }
 
-    /// Converts pre-encoded data into an outbound metric/payload pair.
-    fn prepare_data<V>(
-        peer: &C,
-        msg: EncodedData,
-        rate_limits: &HashMap<u64, V>,
-    ) -> (metrics::Message<C>, IoBufs) {
-        let encoded = msg.validate_channel(rate_limits);
-        (
-            metrics::Message::new_data(peer, encoded.channel),
-            encoded.payload,
-        )
+    /// Converts pre-encoded data into an outbound counter/payload pair.
+    fn prepare_data(msg: EncodedData, sent: &Sent) -> (&Counter, IoBufs) {
+        let counter = sent
+            .data
+            .get(&msg.channel)
+            .expect("outbound message on invalid channel");
+        (counter, msg.payload)
     }
 
     /// Records the send metric and appends the payload to the batch.
-    fn push_batched(
-        sent_messages: &CounterFamily<metrics::Message<C>>,
-        batch: &mut Vec<IoBufs>,
-        metric: metrics::Message<C>,
-        payload: IoBufs,
-    ) {
-        sent_messages.get_or_create(&metric).inc();
+    fn push_batched(batch: &mut Vec<IoBufs>, counter: &Counter, payload: IoBufs) {
+        counter.inc();
         batch.push(payload);
     }
 
@@ -118,7 +117,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     /// Priority order: control > high > low. Only consumes messages that are
     /// already ready, so batching adds no buffering latency.
     #[allow(clippy::too_many_arguments)]
-    fn extend_send_many<V, S, R>(
+    fn extend_send_many<S, R>(
         peer: &C,
         batch_size: usize,
         batch: &mut Vec<IoBufs>,
@@ -126,23 +125,22 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         pool: &commonware_runtime::BufferPool,
         high: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-        rate_limits: &HashMap<u64, V>,
-        sent_messages: &CounterFamily<metrics::Message<C>>,
+        sent: &Sent,
     ) -> Result<(), Error<S, R>> {
         while batch.len() < batch_size {
             if let Ok(msg) = control.try_recv() {
-                let (metric, payload) = Self::prepare_control(peer, msg, pool)?;
-                Self::push_batched(sent_messages, batch, metric, payload);
+                let (counter, payload) = Self::prepare_control(peer, msg, pool, sent)?;
+                Self::push_batched(batch, counter, payload);
                 continue;
             }
             if let Some(msg) = try_recv(high) {
-                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
-                Self::push_batched(sent_messages, batch, metric, payload);
+                let (counter, payload) = Self::prepare_data(msg, sent);
+                Self::push_batched(batch, counter, payload);
                 continue;
             }
             if let Some(msg) = try_recv(low) {
-                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
-                Self::push_batched(sent_messages, batch, metric, payload);
+                let (counter, payload) = Self::prepare_data(msg, sent);
+                Self::push_batched(batch, counter, payload);
                 continue;
             }
             break;
@@ -158,32 +156,40 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         tracker: tracker::Mailbox<C>,
         channels: Channels<C>,
     ) -> Result<(), Error<S::Error, R::Error>> {
-        // Instantiate rate limiters for each message type
-        let mut rate_limits = HashMap::new();
-        let mut senders = HashMap::new();
+        // Create per-connection counters and rate limiters
+        let (received, rate_limited) = (&self.received_messages, &self.rate_limited);
+        let sent_counter = |label| self.sent_messages.get_or_create_owned(&label);
+        let mut sent = Sent {
+            greeting: sent_counter(metrics::Message::new_greeting(&peer)),
+            bit_vec: sent_counter(metrics::Message::new_bit_vec(&peer)),
+            peers: sent_counter(metrics::Message::new_peers(&peer)),
+            data: HashMap::new(),
+        };
+        let mut inbound = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
+            let label = metrics::Message::new_data(&peer, channel);
+            sent.data.insert(channel, sent_counter(label.clone()));
             let rate_limiter = RateLimiter::direct_with_clock(
                 rate,
                 self.context
                     .child("rate_limiter")
                     .with_attribute("channel", channel),
             );
-            rate_limits.insert(channel, rate_limiter);
-            senders.insert(channel, sender);
+            let throttle = Throttle::new(rate_limiter, received, rate_limited, &label);
+            inbound.insert(channel, (throttle, sender));
         }
-        let rate_limits = Arc::new(rate_limits);
+        let received_greeting =
+            received.get_or_create_owned(&metrics::Message::new_greeting(&peer));
+        let received_invalid = received.get_or_create_owned(&metrics::Message::new_invalid(&peer));
         let pool = self.context.network_buffer_pool().clone();
 
         // Send/Receive messages from the peer
         let mut send_handler = self.context.child("sender").spawn({
             let peer = peer.clone();
             let tracker = tracker.clone();
-            let rate_limits = rate_limits.clone();
             move |context| async move {
                 // Send the greeting before queued messages while the receiver runs concurrently.
-                self.sent_messages
-                    .get_or_create(&metrics::Message::new_greeting(&peer))
-                    .inc();
+                sent.greeting.inc();
                 conn_sender
                     .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
                     .await
@@ -209,14 +215,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     // drain already-queued messages into one `send_many` call.
                     // Priority order: control > high > low.
                     msg = recv_prioritized(control, high, low) => {
-                        let (metric, payload) = match msg {
+                        let (counter, payload) = match msg {
                             Prioritized::Closed => return Err(Error::PeerDisconnected),
-                            Prioritized::Control(msg) => Self::prepare_control(&peer, msg, &pool)?,
-                            Prioritized::Data(encoded) => {
-                                Self::prepare_data(&peer, encoded, &rate_limits)
+                            Prioritized::Control(msg) => {
+                                Self::prepare_control(&peer, msg, &pool, &sent)?
                             }
+                            Prioritized::Data(encoded) => Self::prepare_data(encoded, &sent),
                         };
-                        Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
+                        Self::push_batched(&mut batch, counter, payload);
                         Self::extend_send_many(
                             &peer,
                             self.send_batch_size,
@@ -225,8 +231,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                             &pool,
                             high,
                             low,
-                            &rate_limits,
-                            &self.sent_messages,
+                            &sent,
                         )?;
                         conn_sender
                             .send_many(batch.drain(..))
@@ -246,10 +251,15 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 // jitter at message boundaries.
                 let half = (self.gossip_bit_vec_frequency / 2).max(SYSTEM_TIME_PRECISION);
                 let rate = Quota::with_period(half).unwrap();
-                let bit_vec_rate_limiter =
+                let (received, rate_limited) = (&self.received_messages, &self.rate_limited);
+                let rate_limiter =
                     RateLimiter::direct_with_clock(rate, context.child("bit_vec_rate_limiter"));
-                let peers_rate_limiter =
+                let label = metrics::Message::new_bit_vec(&peer);
+                let bit_vec_throttle = Throttle::new(rate_limiter, received, rate_limited, &label);
+                let rate_limiter =
                     RateLimiter::direct_with_clock(rate, context.child("peers_rate_limiter"));
+                let label = metrics::Message::new_peers(&peer);
+                let peers_throttle = Throttle::new(rate_limiter, received, rate_limited, &label);
                 let mut greeting_received = false;
                 let mut first_bit_vec_received = false;
                 let mut first_peers_received = false;
@@ -267,18 +277,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, ?peer, "failed to decode message");
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_invalid(&peer))
-                                .inc();
+                            received_invalid.inc();
                             return Err(Error::DecodeFailed(err));
                         }
                     };
 
                     // Handle greeting messages first (they `continue` the loop).
                     if let types::Payload::Greeting(info) = msg {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_greeting(&peer))
-                            .inc();
+                        received_greeting.inc();
                         if greeting_received {
                             debug!(?peer, "received duplicate greeting");
                             return Err(Error::DuplicateGreeting);
@@ -302,71 +308,38 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         return Err(Error::MissingGreeting);
                     }
 
-                    // Validate channel and resolve rate limiter before emitting
-                    // any channel-labeled metrics (to avoid unbounded cardinality
-                    // from attacker-controlled channel values).
-                    //
                     // We skip rate limiting for the first BitVec and first Peers message
                     // because they are expected immediately after the greeting exchange
                     // (we send BitVec right after our greeting, and they respond with Peers).
-                    let (metric, rate_limiter) = match &msg {
-                        types::Payload::Data(data) => match rate_limits.get(&data.channel) {
-                            Some(rate_limit) => {
-                                (metrics::Message::new_data(&peer, data.channel), Some(rate_limit))
-                            }
-                            None => {
-                                debug!(?peer, channel = data.channel, "invalid channel");
-                                self.received_messages
-                                    .get_or_create(&metrics::Message::new_invalid(&peer))
-                                    .inc();
-                                return Err(Error::InvalidChannel);
-                            }
-                        },
-                        types::Payload::Greeting(_) => unreachable!(),
-                        types::Payload::BitVec(_) => {
-                            let rate_limiter = if first_bit_vec_received {
-                                Some(&bit_vec_rate_limiter)
-                            } else {
-                                first_bit_vec_received = true;
-                                None
-                            };
-                            (metrics::Message::new_bit_vec(&peer), rate_limiter)
-                        }
-                        types::Payload::Peers(_) => {
-                            let rate_limiter = if first_peers_received {
-                                Some(&peers_rate_limiter)
-                            } else {
-                                first_peers_received = true;
-                                None
-                            };
-                            (metrics::Message::new_peers(&peer), rate_limiter)
-                        }
-                    };
-                    self.received_messages.get_or_create(&metric).inc();
-                    if let Some(rate_limiter) = rate_limiter
-                        && let Err(wait_until) = rate_limiter.check() {
-                            self.rate_limited.get_or_create(&metric).inc();
-                            let wait_duration = wait_until.wait_time_from(context.now());
-                            context.sleep(wait_duration).await;
-                        }
-
                     match msg {
                         types::Payload::Data(data) => {
+                            let Some((throttle, sender)) = inbound.get(&data.channel) else {
+                                debug!(?peer, channel = data.channel, "invalid channel");
+                                received_invalid.inc();
+                                return Err(Error::InvalidChannel);
+                            };
+                            throttle.receive(&context, true).await;
+
                             // Send message to application without blocking.
                             //
                             // We intentionally drop messages when the application buffer is
                             // full rather than blocking. Blocking here would also block
                             // processing of gossip messages (BitVec, Peers), causing the
                             // peer connection to stall and potentially disconnect.
-                            let sender = senders.get_mut(&data.channel).unwrap();
                             let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
                         }
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {
+                            bit_vec_throttle.receive(&context, first_bit_vec_received).await;
+                            first_bit_vec_received = true;
+
                             // Gather useful peers
                             tracker.bit_vec(peer.clone(), bit_vec);
                         }
                         types::Payload::Peers(peers) => {
+                            peers_throttle.receive(&context, first_peers_received).await;
+                            first_peers_received = true;
+
                             // Verify all info is valid
                             self.info_verifier.validate(&context, &peers).map_err(Error::Types)?;
 

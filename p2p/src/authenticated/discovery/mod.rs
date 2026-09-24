@@ -315,7 +315,8 @@ mod tests {
 
     /// Ensure no message rate limiting occurred.
     ///
-    /// If a message is rate limited, it would be formatted as:
+    /// Each connection registers its rate-limited counters at zero. A rate-limited
+    /// message would be formatted as:
     ///
     /// ```text
     /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
@@ -323,7 +324,10 @@ mod tests {
     /// ```
     fn assert_no_rate_limiting(metrics: &str) {
         assert!(
-            !metrics.contains("messages_rate_limited_total{"),
+            metrics
+                .lines()
+                .filter(|line| line.contains("messages_rate_limited_total{"))
+                .all(|line| line.ends_with(" 0")),
             "no messages should be rate limited: {metrics}"
         );
     }
