@@ -5,8 +5,8 @@
 //! `prune` while live batches read concurrently. Locking (not snapshotting) keeps memory at
 //! O(bitmap size). Snapshots would couple memory to live-batch count and lifetime.
 //!
-//! Reads through an invalidated `MerkleizedBatch` (see its "Branch validity" docs) return
-//! inconsistent bytes; callers must drop invalid batches.
+//! Reads through a stale `MerkleizedBatch` (see its "Branch validity" docs) are refused by
+//! the batch-chain gate before they reach this bitmap.
 
 #[cfg(test)]
 use commonware_utils::bitmap::Readable as _;

@@ -170,7 +170,7 @@ where
                 self.metadata,
                 self.inactivity_floor.unwrap_or_default(),
             )
-            .await;
+            .await?;
         Ok(KeylessUnjournaledMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -525,7 +525,8 @@ mod tests {
             .new_batch()
             .append(U64::new(7))
             .merkleize(&source, Some(U64::new(9)), floor)
-            .await;
+            .await
+            .unwrap();
         let (source, _) = source.apply_batch(batch).await.unwrap();
         source.sync().await.unwrap()
     }
@@ -753,7 +754,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&source, Some(U64::new(9)), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let first_target = sync::CompactTarget {
@@ -766,7 +768,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(8))
                 .merkleize(&source, Some(U64::new(10)), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let second_target = sync::CompactTarget {
@@ -809,7 +812,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&source, Some(U64::new(9)), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let target = source.target();
@@ -898,7 +902,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(7))
                 .merkleize(&source, Some(U64::new(9)), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let stale_target = source.target();
@@ -908,7 +913,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(8))
                 .merkleize(&source, Some(U64::new(10)), floor)
-                .await;
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = source.sync().await.unwrap();
             let latest_target = source.target();
@@ -968,7 +974,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(1))
                 .merkleize(&db, Some(U64::new(11)), floor)
-                .await;
+                .await
+                .unwrap();
             (db, _) = db.apply_batch(batch).await.unwrap();
             db = db.sync().await.unwrap();
             let first_target = <FixedDb as ManagedDb<_>>::sync_target(&db);
@@ -980,7 +987,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(i))
                     .merkleize(&db, Some(U64::new(i * 11)), floor)
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
             }
@@ -1020,7 +1028,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(i))
                     .merkleize(&db, Some(U64::new(i * 11)), floor)
-                    .await;
+                    .await
+                    .unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 db = db.sync().await.unwrap();
                 targets.push(<FixedDb as ManagedDb<_>>::sync_target(&db));

@@ -156,7 +156,8 @@ mod tests {
             .new_batch()
             .set(key, value)
             .merkleize(&db, None, floor)
-            .await;
+            .await
+            .unwrap();
         let (db, _) = db.apply_batch(batch).await.unwrap();
         db
     }
@@ -329,7 +330,8 @@ mod tests {
                 .new_batch()
                 .set(key, value)
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (db, _) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(&key).await.unwrap(), Some(value));
             assert_eq!(db.get_many(&[&key]).await.unwrap(), vec![Some(value)]);
@@ -539,6 +541,9 @@ mod tests {
         test_fixed_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
         test_fixed_bounded_initialization_after_reopen_repeated_key_retained =>
             run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
+        test_fixed_dropped_ancestor_reads => run_dropped_ancestor_reads, open;
+        test_fixed_merkleize_across_prune => run_merkleize_across_prune, open;
+        test_fixed_stale_fork_refuses => run_stale_fork_refuses, open;
     }
 
     #[boxed]
@@ -559,13 +564,15 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&db, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&compact, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 
@@ -651,7 +658,10 @@ mod tests {
                 for i in 1..=100 {
                     batch = batch.set(key(i), value(1, i));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 102);
@@ -662,7 +672,10 @@ mod tests {
                 for i in 101..=200 {
                     batch = batch.set(key(i), value(2, i));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
@@ -686,7 +699,10 @@ mod tests {
                 for i in 201..=250 {
                     batch = batch.set(key(i), value(3, i));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let root_n = batch.root();
                 let (db, range) = db.apply_batch(batch).await.unwrap();
                 assert_eq!((*range.start, *range.end), (102, 153));
@@ -733,7 +749,8 @@ mod tests {
                     .new_batch()
                     .set(key(255), value(5, 255))
                     .merkleize(&db, None, db.inactivity_floor_loc())
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 let size = *db.bounds().end;
