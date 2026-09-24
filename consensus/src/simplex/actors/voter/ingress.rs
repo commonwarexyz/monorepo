@@ -364,15 +364,9 @@ mod tests {
             &mut overflow,
             timeout_msg(View::new(2), TimeoutReason::LeaderTimeout),
         );
-        Message::handle(
-            &mut overflow,
-            verified_msg(nullification(View::new(2))),
-        );
+        Message::handle(&mut overflow, verified_msg(nullification(View::new(2))));
         Message::handle(&mut overflow, proposal_msg(View::new(4)));
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3))),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
@@ -406,24 +400,15 @@ mod tests {
     #[test]
     fn queued_finalization_rejects_covered_messages() {
         let mut overflow = Pending::default();
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3))),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
 
         Message::handle(&mut overflow, proposal_msg(View::new(3)));
         Message::handle(
             &mut overflow,
             timeout_msg(View::new(2), TimeoutReason::LeaderTimeout),
         );
-        Message::handle(
-            &mut overflow,
-            verified_msg(nullification(View::new(2))),
-        );
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(2))),
-        );
+        Message::handle(&mut overflow, verified_msg(nullification(View::new(2))));
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(2))));
         Message::handle(&mut overflow, proposal_msg(View::new(4)));
 
         let mut overflow = drain(overflow);
@@ -442,14 +427,8 @@ mod tests {
     #[test]
     fn duplicate_finalization_is_dropped() {
         let mut overflow = Pending::default();
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3))),
-        );
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3))),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
@@ -463,15 +442,9 @@ mod tests {
     #[test]
     fn newer_finalization_replaces_older_pruning_floor() {
         let mut overflow = Pending::default();
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3))),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
         Message::handle(&mut overflow, proposal_msg(View::new(4)));
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(5))),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(5))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
