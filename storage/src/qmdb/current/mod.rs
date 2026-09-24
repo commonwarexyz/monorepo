@@ -2030,6 +2030,104 @@ pub mod tests {
     }
 
     #[test_traced]
+    fn test_current_unordered_merkleize_rejects_foreign_instance() {
+        deterministic::Runner::default().start(|context| async move {
+            // Independent instances begin with the same committed state.
+            let db_a = UnorderedFixedDb::init(
+                context.child("a"),
+                fixed_config::<OneCap>("foreign-instance-unordered-a", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let db_b = UnorderedFixedDb::init(
+                context.child("b"),
+                fixed_config::<OneCap>("foreign-instance-unordered-b", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db_a.root(), db_b.root());
+
+            // Pending batches retain A's bitmap.
+            let pending = db_a.new_batch().write(key(2), Some(val(2)));
+            let staged_keys = [key(2)];
+            let staged_refs: Vec<_> = staged_keys.iter().collect();
+            let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
+
+            // Applying a sibling changes A's bitmap while B remains at the original commitment.
+            let sibling = db_a
+                .new_batch()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (_db_a, _) = db_a.apply_batch(sibling).await.unwrap();
+
+            // B matches the commitment the batches were created from, but is not their instance.
+            assert!(matches!(
+                pending.merkleize(&db_b, None).await,
+                Err(Error::StaleBatch)
+            ));
+            assert!(matches!(
+                staged
+                    .merkleize(vec![(0, Some(val(3)))], Vec::new(), None, &db_b)
+                    .await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_current_ordered_merkleize_rejects_foreign_instance() {
+        deterministic::Runner::default().start(|context| async move {
+            // Independent instances begin with the same committed state.
+            let db_a = OrderedFixedDb::init(
+                context.child("a"),
+                fixed_config::<OneCap>("foreign-instance-ordered-a", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            let db_b = OrderedFixedDb::init(
+                context.child("b"),
+                fixed_config::<OneCap>("foreign-instance-ordered-b", &context),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(db_a.root(), db_b.root());
+
+            // Pending batches retain A's bitmap.
+            let pending = db_a.new_batch().write(key(2), Some(val(2)));
+            let staged_keys = [key(2)];
+            let staged_refs: Vec<_> = staged_keys.iter().collect();
+            let (_, staged) = db_a.new_batch().stage(&staged_refs, &db_a).await.unwrap();
+
+            // Applying a sibling changes A's bitmap while B remains at the original commitment.
+            let sibling = db_a
+                .new_batch()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (_db_a, _) = db_a.apply_batch(sibling).await.unwrap();
+
+            // B matches the commitment the batches were created from, but is not their instance.
+            assert!(matches!(
+                pending.merkleize(&db_b, None).await,
+                Err(Error::StaleBatch)
+            ));
+            assert!(matches!(
+                staged
+                    .merkleize(vec![(0, Some(val(3)))], Vec::new(), None, &db_b)
+                    .await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
+    #[test_traced]
     fn test_current_merkleize_rejects_stale_sibling() {
         deterministic::Runner::default().start(|context| async move {
             let db = OrderedFixedDb::init(

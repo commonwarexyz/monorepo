@@ -514,7 +514,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
     ///
     /// # Panics
     ///
@@ -542,6 +543,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same source the floor
@@ -584,7 +586,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
     ///
     /// # Panics
     ///
@@ -612,6 +615,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
@@ -638,7 +642,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize",
         level = "info",
@@ -659,6 +664,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
@@ -688,7 +694,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize",
         level = "info",
@@ -709,6 +716,7 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
@@ -1005,6 +1013,19 @@ impl<const N: usize> BitmapBatch<N> {
         match self {
             Self::Base(s) => s,
             Self::Layer(layer) => &layer.shared,
+        }
+    }
+
+    /// Return [`Error::StaleBatch`] unless this chain terminates in `bitmap`.
+    ///
+    /// Each database instance owns one committed bitmap, so this binds a batch to the instance
+    /// that created it. Another instance with the same commitment cannot stand in for it, because
+    /// the retained chain reads the originating instance's bitmap.
+    fn ensure_based_on<F: Graftable>(&self, bitmap: &Arc<Shared<N>>) -> Result<(), Error<F>> {
+        if Arc::ptr_eq(self.shared(), bitmap) {
+            Ok(())
+        } else {
+            Err(Error::StaleBatch)
         }
     }
 
