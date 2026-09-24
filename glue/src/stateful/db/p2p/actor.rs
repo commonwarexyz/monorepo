@@ -486,7 +486,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all<T>(&mut self, fetches: Vec<T>) -> Feedback
+        fn fetch_all<T>(&mut self, fetches: impl IntoIterator<Item = T>) -> Feedback
         where
             T: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {

@@ -33,6 +33,7 @@ use commonware_storage::{
     translator::Translator,
 };
 use commonware_utils::{Array, channel::mpsc, non_empty_range};
+use core::borrow::Borrow;
 use std::{ops::Deref, sync::Arc};
 
 /// Shared handle to an immutable database.
@@ -113,7 +114,10 @@ where
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<K> + Sync],
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &db).await
     }
@@ -203,7 +207,10 @@ where
     /// Read multiple values by key, falling back to applied state.
     ///
     /// Returns results in the same order as the input keys.
-    pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
+    pub async fn get_many(
+        &self,
+        keys: &[impl Borrow<K> + Sync],
+    ) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.inner.get_many(keys, &db).await
     }

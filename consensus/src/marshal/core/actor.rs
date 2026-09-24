@@ -2382,12 +2382,10 @@ where
         let missing_items = self
             .finalized_blocks
             .missing_items(start, self.max_repair.get());
-        let requests: Vec<_> = missing_items.into_iter().map(Request::finalized).collect();
-        if !requests.is_empty() {
-            self.floor
-                .fetch_all_if_permitted(resolver, requests)
-                .ignore();
-        }
+        let requests = missing_items.into_iter().map(Request::finalized);
+        self.floor
+            .fetch_all_if_permitted(resolver, requests)
+            .ignore();
         (self, wrote)
     }
 

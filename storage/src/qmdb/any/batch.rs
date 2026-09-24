@@ -28,6 +28,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
 use core::{
+    borrow::Borrow,
     cmp::Ordering,
     ops::{
         Bound::{Excluded, Included},
@@ -523,7 +524,7 @@ fn resolve_pending_from_diffs<'a, K, F: Family, V: Clone + Send + Sync + 'a, S: 
 /// `on_diff_hit` is invoked with each slot resolved by a diff entry (see
 /// [`resolve_pending_from_diffs`]). Slots resolved by `local` do not report.
 fn resolve_reads<'a, K, F: Family, V, S: Strategy>(
-    keys: &[&'a K],
+    keys: &'a [impl Borrow<K>],
     local: impl Fn(&K) -> Option<Option<V>>,
     diffs: &[&DiffSlice<K, F, V>],
     strategy: &S,
@@ -538,11 +539,12 @@ where
     let mut pending = Vec::new();
 
     for (i, key) in keys.iter().enumerate() {
+        let key = key.borrow();
         if let Some(value) = local(key) {
             results[i] = value;
             resolved[i] = true;
         } else {
-            pending.push((i, *key));
+            pending.push((i, key));
         }
     }
     resolve_pending_from_diffs(
@@ -1307,7 +1309,7 @@ where
     )]
     pub async fn expand<E, C, I, const N: usize>(
         mut self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<(Range<usize>, Vec<Option<U::Value>>, Self), crate::qmdb::Error<F>>
     where
@@ -1688,7 +1690,7 @@ where
     /// ancestor resolutions.
     fn resolve_uncommitted_reads<'a>(
         &self,
-        keys: &[&'a U::Key],
+        keys: &'a [impl Borrow<U::Key>],
         strategy: &S,
         on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
     ) -> UncommittedReadResolution<'a, U::Key, U::Value>
@@ -1764,7 +1766,7 @@ where
     /// [`stage`](Self::stage) only the writable keys.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
@@ -1809,7 +1811,7 @@ where
     )]
     pub async fn stage<E, C, I, const N: usize>(
         self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<(Vec<Option<U::Value>>, Staged<F, H, U, S>), crate::qmdb::Error<F>>
     where
@@ -1834,7 +1836,7 @@ where
     #[allow(clippy::type_complexity)]
     async fn stage_reads<E, C, I, const N: usize>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<
         (
@@ -1890,7 +1892,7 @@ where
         .await?;
         Ok((
             results,
-            keys.iter().map(|key| (*key).to_owned()).collect(),
+            keys.iter().map(|key| key.borrow().clone()).collect(),
             resolutions,
         ))
     }
@@ -2773,7 +2775,7 @@ where
     /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I, H, const N: usize>(
         &self,
-        keys: &[&U::Key],
+        keys: &[impl Borrow<U::Key> + Sync],
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
@@ -4055,8 +4057,7 @@ mod tests {
                     let db = db.commit().await.unwrap();
 
                     // Read set with duplicate slots for k0 (0,4) and missing (2,5), plus del_read at 7.
-                    let read_keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
-                    let keys: Vec<_> = read_keys.iter().collect();
+                    let keys = [k0, read_only, missing, k1, k0, missing, k2, del_read];
                     // (read_slot, Some=upsert | None=delete). Slot 7 deletes a committed-resolved read
                     // key. Duplicate slots exercise last-write-wins by update order. For the
                     // ordered kind a staged delete must fall back to a normal mutation (the deleted
@@ -4096,24 +4097,34 @@ mod tests {
                     let mut explicit = db.new_batch();
                     let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
                     for (slot, value) in &indexed_updates {
-                        explicit = explicit.write(read_keys[*slot], *value);
+                        explicit = explicit.write(keys[*slot], *value);
                     }
                     for (key, value) in &upserts {
                         explicit = explicit.write(*key, *value);
                     }
                     let explicit = explicit.merkleize(&db, None).await.unwrap();
 
-                    let (staged_values, staged) = db.new_batch().stage(&keys, &db).await.unwrap();
+                    let (staged_values, staged) =
+                        db.new_batch().stage(&keys.each_ref(), &db).await.unwrap();
                     let staged_merkleized = staged
                         .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                         .await
                         .unwrap();
 
                     let split = 3;
-                    let (mut expanded_values, staged) =
-                        db.new_batch().stage(&keys[..split], &db).await.unwrap();
+                    let (empty_values, staged) =
+                        db.new_batch().stage(&keys[..0], &db).await.unwrap();
+                    assert!(empty_values.is_empty());
+                    let (range, mut expanded_values, staged) =
+                        staged.expand(&keys[..split], &db).await.unwrap();
+                    assert_eq!(range, 0..split);
+                    let borrowed_keys = keys.each_ref();
+                    let (range, empty_values, staged) =
+                        staged.expand(&borrowed_keys[..0], &db).await.unwrap();
+                    assert_eq!(range, split..split);
+                    assert!(empty_values.is_empty());
                     let (range, suffix_values, staged) =
-                        staged.expand(&keys[split..], &db).await.unwrap();
+                        staged.expand(&borrowed_keys[split..], &db).await.unwrap();
                     assert_eq!(range, split..keys.len());
                     expanded_values.extend(suffix_values);
                     let expanded = staged
@@ -4566,9 +4577,7 @@ mod tests {
                         let parent = parent.merkleize(&db, None).await.unwrap();
 
                         let child = if staged_read {
-                            let read_keys: Vec<_> =
-                                suffixes.iter().map(|suffix| key(*suffix)).collect();
-                            let keys: Vec<_> = read_keys.iter().collect();
+                            let keys: Vec<_> = suffixes.iter().map(|suffix| key(*suffix)).collect();
                             let child = parent.new_batch::<Sha256>();
                             // Stage a prefix before the ancestor commit and expand with the rest after
                             // it, so one staged handle holds cache entries resolved against both

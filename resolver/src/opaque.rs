@@ -98,7 +98,7 @@ where
         self.send(Message::Fetch(vec![FetchKey::from(fetch.into())]))
     }
 
-    fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+    fn fetch_all<F>(&mut self, fetches: impl IntoIterator<Item = F>) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
@@ -136,14 +136,14 @@ where
         <Self as crate::Resolver>::fetch(self, fetch)
     }
 
-    fn fetch_all_targeted<F>(&mut self, fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>) -> Feedback
+    fn fetch_all_targeted<F>(
+        &mut self,
+        fetches: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
+    ) -> Feedback
     where
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
-        <Self as crate::Resolver>::fetch_all(
-            self,
-            fetches.into_iter().map(|(fetch, _)| fetch).collect(),
-        )
+        <Self as crate::Resolver>::fetch_all(self, fetches.into_iter().map(|(fetch, _)| fetch))
     }
 }
 

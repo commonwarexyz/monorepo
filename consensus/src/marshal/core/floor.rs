@@ -170,16 +170,16 @@ impl<S: Scheme, C: Digest> State<S, C> {
     pub(super) fn fetch_all_if_permitted<R>(
         &self,
         resolver: &mut R,
-        fetches: Vec<Request<C>>,
+        fetches: impl IntoIterator<Item = Request<C>>,
     ) -> FetchAdmission
     where
         R: Resolver<Key = Key<C>, Subscriber = Annotation>,
     {
-        let fetches = fetches
+        let mut fetches = fetches
             .into_iter()
             .filter(|fetch| self.permits(fetch))
-            .collect::<Vec<_>>();
-        if fetches.is_empty() {
+            .peekable();
+        if fetches.peek().is_none() {
             return FetchAdmission::Denied;
         }
         resolver.fetch_all(fetches);
@@ -247,7 +247,7 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_all<F>(&mut self, fetches: Vec<F>) -> Feedback
+        fn fetch_all<F>(&mut self, fetches: impl IntoIterator<Item = F>) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         {
@@ -279,7 +279,7 @@ mod tests {
 
         fn fetch_all_targeted<F>(
             &mut self,
-            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+            fetches: impl IntoIterator<Item = (F, NonEmptyVec<Self::PublicKey>)>,
         ) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,

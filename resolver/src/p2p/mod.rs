@@ -2440,7 +2440,7 @@ mod tests {
             // - key1 targeted to peer 2 (has data) -> should succeed from target
             // - key2 targeted to peer 4 (has data) -> should succeed from target
             // - key3 no targeting -> fetched from any peer (peer 3 has it)
-            mailbox1.fetch_all_targeted(vec![
+            mailbox1.fetch_all_targeted([
                 (key1.clone(), non_empty_vec![peers[1].clone()]), // peer 2 has key1
                 (key2.clone(), non_empty_vec![peers[3].clone()]), // peer 4 has key2
             ]);

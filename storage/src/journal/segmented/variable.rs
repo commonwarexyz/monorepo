@@ -98,6 +98,9 @@ use std::{
 };
 use tracing::{trace, warn};
 
+// Cap eager reservations from iterator hints; larger batches grow as needed.
+const MAX_INITIAL_CAPACITY: usize = 16 * 1024;
+
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
 pub struct Config<C> {
@@ -236,8 +239,13 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     }
 
     /// See [Journal::get_many].
-    async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
-        if offsets.is_empty() {
+    async fn get_many(
+        &self,
+        section: u64,
+        offsets: impl IntoIterator<Item = u64, IntoIter: Send> + Send,
+    ) -> Result<Vec<V>, Error> {
+        let mut offsets = offsets.into_iter().peekable();
+        if offsets.peek().is_none() {
             return Ok(Vec::new());
         }
         let blob = self
@@ -247,8 +255,8 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
 
         let compressed = self.compression.is_some();
         let cfg = &self.codec_config;
-        let mut items = Vec::with_capacity(offsets.len());
-        for &offset in offsets {
+        let mut items = Vec::with_capacity(offsets.size_hint().0.min(MAX_INITIAL_CAPACITY));
+        for offset in offsets {
             let (_, _, item) = Self::read(compressed, cfg, blob, offset).await?;
             items.push(item);
         }
@@ -553,7 +561,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Read multiple items from the same section.
     ///
     /// Offsets should be sorted in ascending order.
-    pub async fn get_many(&self, section: u64, offsets: &[u64]) -> Result<Vec<V>, Error> {
+    pub async fn get_many(
+        &self,
+        section: u64,
+        offsets: impl IntoIterator<Item = u64, IntoIter: Send> + Send,
+    ) -> Result<Vec<V>, Error> {
         self.0.get_many(section, offsets).await
     }
 
@@ -1493,6 +1505,54 @@ mod tests {
 
             // Cleanup
             journal.destroy().await.expect("Failed to destroy journal");
+        });
+    }
+
+    #[test_traced]
+    fn test_get_many() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "batch-reads".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::<_, u64>::init(context, cfg).await.unwrap();
+            let mut offsets = Vec::new();
+            for value in 0..5u64 {
+                let offset;
+                (journal, offset, _) = journal.append(0, &value).await.unwrap();
+                offsets.push(offset);
+            }
+            assert_eq!(
+                journal
+                    .get_many(0, offsets.iter().copied().step_by(2))
+                    .await
+                    .unwrap(),
+                vec![0, 2, 4],
+            );
+            assert!(
+                journal
+                    .get_many(99, core::iter::empty::<u64>())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(matches!(
+                journal.get_many(99, core::iter::once(0)).await,
+                Err(Error::SectionOutOfRange(99)),
+            ));
+            for count in [1, usize::MAX] {
+                assert!(
+                    journal
+                        .get_many(0, core::iter::repeat_n(u64::MAX, count))
+                        .await
+                        .is_err()
+                );
+            }
+            journal.destroy().await.unwrap();
         });
     }
 

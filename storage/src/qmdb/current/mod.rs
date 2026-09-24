@@ -630,7 +630,7 @@ pub mod tests {
                         // key(60) is untouched by the depth-1/2 ancestors, so its staged read
                         // stays committed-resolved and exercises staged cached-location reuse
                         // behind stacked batches.
-                        let read_keys = [
+                        let keys = [
                             key(5),
                             key(6),
                             key(9000),
@@ -640,7 +640,6 @@ pub mod tests {
                             key(60),
                             key(105),
                         ];
-                        let keys: Vec<&Digest> = read_keys.iter().collect();
                         let indexed_updates = vec![
                             (0, Some(val(5_000))),
                             (2, Some(val(5_001))),
@@ -660,14 +659,15 @@ pub mod tests {
                         let mut explicit = new_batch();
                         let explicit_values = explicit.get_many(&keys, &db).await.unwrap();
                         for (slot, value) in &indexed_updates {
-                            explicit = explicit.write(read_keys[*slot], *value);
+                            explicit = explicit.write(keys[*slot], *value);
                         }
                         for (k, v) in &upserts {
                             explicit = explicit.write(*k, *v);
                         }
                         let explicit_root = explicit.merkleize(&db, None).await.unwrap().root();
 
-                        let (staged_values, staged) = new_batch().stage(&keys, &db).await.unwrap();
+                        let (staged_values, staged) =
+                            new_batch().stage(&keys.each_ref(), &db).await.unwrap();
                         let staged_root = staged
                             .merkleize(indexed_updates.clone(), upserts.clone(), None, &db)
                             .await
@@ -733,8 +733,8 @@ pub mod tests {
                             .unwrap()
                             .root();
                         let expected_duplicate_root = new_batch()
-                            .write(read_keys[0], Some(planned))
-                            .write(read_keys[0], Some(duplicate_update))
+                            .write(keys[0], Some(planned))
+                            .write(keys[0], Some(duplicate_update))
                             .merkleize(&db, None)
                             .await
                             .unwrap()

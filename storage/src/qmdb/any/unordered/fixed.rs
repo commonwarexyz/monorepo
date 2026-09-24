@@ -464,8 +464,7 @@ pub(crate) mod test {
             let repeats: Vec<Digest> = keys.iter().step_by(37).copied().collect();
             keys.extend_from_slice(&repeats);
             keys.extend_from_slice(&repeats[..20]);
-            let refs: Vec<&Digest> = keys.iter().collect();
-            let fused = db.get_many(&refs).await.unwrap();
+            let fused = db.get_many(&keys).await.unwrap();
             assert_eq!(fused.len(), keys.len());
             for (key, result) in keys.iter().zip(fused) {
                 assert_eq!(result, db.get(key).await.unwrap());
@@ -1325,8 +1324,7 @@ pub(crate) mod test {
                     .map(|i| key(i * 50))
                     .chain((0..5).map(|i| key(8000 + i)))
                     .collect();
-                let unwritten_refs: Vec<&Digest> = unwritten.iter().collect();
-                fb.get_many(&unwritten_refs, &db).await.unwrap();
+                fb.get_many(&unwritten, &db).await.unwrap();
                 let values = fb.get_many(&keys, &db).await.unwrap();
                 let plain = new_batch().get_many(&keys, &db).await.unwrap();
                 assert_eq!(values, plain, "value mismatch at depth={depth}");
