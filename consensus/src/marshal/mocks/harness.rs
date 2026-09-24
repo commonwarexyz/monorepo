@@ -1941,6 +1941,7 @@ impl TestHarness for StandardHarness {
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
             mailbox_size: config.mailbox_size,
+            ingress_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
             codec_config: (),
@@ -2179,6 +2180,7 @@ impl TestHarness for StandardHarness {
         let broadcast_config = buffered::Config {
             public_key: validator.clone(),
             mailbox_size: config.mailbox_size,
+            ingress_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
             codec_config: (),
