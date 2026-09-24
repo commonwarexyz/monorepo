@@ -58,10 +58,10 @@ use super::{
 use crate::{
     Context, SyncCompletion,
     journal::{Error, durability::Barrier},
-    metadata::{Config as MetadataConfig, Metadata},
+    metadata::{Config as MetadataConfig, Error as MetadataError, Metadata},
 };
 use commonware_codec::{Codec, CodecFixedShared, CodecShared};
-use commonware_runtime::{Handle, ReadOptions};
+use commonware_runtime::{Error as RError, Handle, ReadOptions};
 use commonware_utils::sequence::U64 as SectionKey;
 use futures::{FutureExt as _, future::try_join};
 use std::{
@@ -116,6 +116,11 @@ pub struct Config<C> {
     pub codec_config: C,
 }
 
+/// Wrap a failed marker generation sync.
+const fn marker_sync_error(err: RError) -> Error {
+    Error::Metadata(MetadataError::Runtime(err))
+}
+
 /// Durable recovery state for a journal that validates every uncommitted value during replay.
 struct Tracking<E: Context> {
     /// Per-section committed item counts, including staged updates awaiting marker persistence.
@@ -143,6 +148,15 @@ impl<E: Context> Tracking<E> {
         }
     }
 
+    /// Stage every `(section, floor)` marker, returning whether any changed.
+    fn stage_markers(&mut self, markers: impl IntoIterator<Item = (u64, u64)>) -> bool {
+        let mut dirty = false;
+        for (section, floor) in markers {
+            dirty |= self.stage_marker(section, floor);
+        }
+        dirty
+    }
+
     /// Return the section's barrier, seeding a replacement at its staged floor.
     ///
     /// A staged floor never exceeds durably synced data, so it is the newest boundary a
@@ -168,7 +182,7 @@ impl<E: Context> Tracking<E> {
         let Some(result) = completion.now_or_never() else {
             return Ok(true);
         };
-        result.map_err(|err| Error::Metadata(crate::metadata::Error::Runtime(err)))?;
+        result.map_err(marker_sync_error)?;
         self.marker_sync_pending = None;
 
         // Retire only barriers whose proof is fully published. A barrier still awaiting a
@@ -239,6 +253,16 @@ struct Pending<E: Context, I: Record, V: Codec> {
     /// Unpublished values; bytes owned by a discarded index suffix are released only after its
     /// truncation is durable.
     values: GlobRecovery<E, V>,
+}
+
+/// Return each index section with its item count.
+fn section_lengths<E: Context, I: Record>(
+    index: &FixedJournal<E, I>,
+) -> Result<Vec<(u64, u64)>, Error> {
+    index
+        .sections()
+        .map(|section| Ok((section, index.section_len(section)?)))
+        .collect()
 }
 
 impl<E: Context, I: Record, V: CodecShared> std::fmt::Debug for Oversized<E, I, V> {
@@ -466,12 +490,7 @@ impl<E: Context, I: Record, V: CodecShared> Pending<E, I, V> {
         self,
         mut tracking: Tracking<E>,
     ) -> Result<Oversized<E, I, V>, Error> {
-        let mut dirty = false;
-        for section in self.index.sections() {
-            let items = self.index.section_len(section)?;
-            dirty |= tracking.stage_marker(section, items);
-        }
-        if dirty {
+        if tracking.stage_markers(section_lengths(&self.index)?) {
             let marker;
             (tracking.metadata, marker) = tracking.metadata.start_sync().await?;
             tracking.marker_sync_pending = Some(marker.boxed().shared());
@@ -734,11 +753,7 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
                 .filter(|(section, _)| !active.contains(section))
                 .map(|(&section, barrier)| (section, barrier.boundary()))
                 .collect::<Vec<_>>();
-            let mut metadata_dirty = false;
-            for (section, floor) in publish {
-                metadata_dirty |= tracking.stage_marker(section, floor);
-            }
-            if metadata_dirty {
+            if tracking.stage_markers(publish) {
                 let handle;
                 (tracking.metadata, handle) = tracking.metadata.start_sync().await?;
                 tracking.marker_sync_pending = Some(handle.boxed().shared());
@@ -820,6 +835,10 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
     }
 
     /// Make all accepted entries durable, persist their tracked recovery markers, and close.
+    ///
+    /// A journal opened without tracked recovery has no markers, so closing it only syncs every
+    /// section.
+    #[commonware_macros::stability(ALPHA)]
     pub async fn close(self) -> Result<(), Error> {
         let mut journal = self.sync_all().await?;
         let Some(mut tracking) = journal.tracking.take() else {
@@ -827,16 +846,9 @@ impl<E: Context, I: Record, V: CodecShared> Oversized<E, I, V> {
         };
 
         if let Some(marker) = tracking.marker_sync_pending.take() {
-            marker
-                .await
-                .map_err(|err| Error::Metadata(crate::metadata::Error::Runtime(err)))?;
+            marker.await.map_err(marker_sync_error)?;
         }
-
-        let mut dirty = false;
-        for section in journal.index.sections() {
-            dirty |= tracking.stage_marker(section, journal.index.section_len(section)?);
-        }
-        if dirty {
+        if tracking.stage_markers(section_lengths(&journal.index)?) {
             tracking.metadata.sync().await?;
         }
         Ok(())
@@ -1443,6 +1455,40 @@ mod tests {
                 TestEntry::SIZE as u64
             );
             journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_close_untracked_syncs_data() {
+        let (_, checkpoint) =
+            deterministic::Runner::default().start_and_recover(|context| async move {
+                let cfg = test_cfg();
+                let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                    context,
+                    cfg,
+                    (0, 0),
+                )
+                .await
+                .expect("failed to init");
+                let (journal, _, _, _) = journal
+                    .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                    .await
+                    .expect("failed to append");
+                journal.close().await.expect("failed to close");
+            });
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let cfg = test_cfg();
+            let journal = Oversized::<_, TestEntry, TestValue>::init_with_checkpoint(
+                context,
+                cfg,
+                (1, TestEntry::SIZE as u64),
+            )
+            .await
+            .expect("failed to reopen");
+            let entry = journal.get(1, 0).await.expect("closed entry was lost");
+            assert_eq!(entry.id, 1);
+            let (offset, size) = entry.value_location();
+            assert_eq!(journal.get_value(1, offset, size).await.unwrap(), [1; 16]);
         });
     }
 
