@@ -4,7 +4,7 @@
 //! zstd-compressed) encoded item.
 
 use super::Error;
-use bytes::BufMut;
+use bytes::{BufMut, Bytes, TryGetError, buf::Take};
 use commonware_codec::{
     Buf, Codec, EncodeSize, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
@@ -152,6 +152,68 @@ pub(super) fn decode_item<V: Codec>(
         V::decode_cfg(decompressed, cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
+    }
+}
+
+/// A length-limited codec buffer that forwards bulk copies to its backing buffer.
+///
+/// [`Take`] otherwise falls back to copying through [`bytes::Buf::chunk`] and
+/// [`bytes::Buf::advance`], bypassing specialized bulk-copy implementations.
+pub(super) struct Limited<B> {
+    inner: Take<B>,
+}
+
+impl<B: Buf> Limited<B> {
+    pub(super) fn new(inner: B, limit: usize) -> Self {
+        Self {
+            inner: inner.take(limit),
+        }
+    }
+}
+
+impl<B: Buf> Buf for Limited<B> {}
+
+impl<B: Buf> bytes::Buf for Limited<B> {
+    fn remaining(&self) -> usize {
+        self.inner.remaining()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        self.inner.chunk()
+    }
+
+    fn advance(&mut self, cnt: usize) {
+        self.inner.advance(cnt);
+    }
+
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        self.inner.copy_to_bytes(len)
+    }
+
+    fn copy_to_slice(&mut self, dst: &mut [u8]) {
+        let len = dst.len();
+        if len > self.inner.remaining() {
+            // Preserve Take's overread panic without copying or advancing.
+            return self.inner.copy_to_slice(dst);
+        }
+
+        self.inner.get_mut().copy_to_slice(dst);
+        self.inner.set_limit(self.inner.limit() - len);
+    }
+
+    fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
+        let len = dst.len();
+        let available = self.inner.remaining();
+        if len > available {
+            return Err(TryGetError {
+                requested: len,
+                available,
+            });
+        }
+
+        self.inner.get_mut().try_copy_to_slice(dst)?;
+        self.inner.set_limit(self.inner.limit() - len);
+        Ok(())
     }
 }
 
@@ -334,17 +396,151 @@ mod tests {
     use super::*;
     use crate::utils::codec::View;
     use bytes::Bytes;
-    use commonware_codec::{Copying, Encode, Read};
+    use commonware_codec::{Copying, Encode, Error as CodecError, Read};
     use commonware_utils::test_rng;
     use rand::{Rng as _, RngExt as _};
-    use std::cell::Cell;
+    use std::{
+        cell::Cell,
+        panic::{AssertUnwindSafe, catch_unwind},
+    };
     use zstd::bulk::compress;
+
+    struct TrackingBuf {
+        inner: Bytes,
+        copies: usize,
+        try_copies: usize,
+    }
+
+    impl TrackingBuf {
+        fn new(inner: Bytes) -> Self {
+            Self {
+                inner,
+                copies: 0,
+                try_copies: 0,
+            }
+        }
+    }
+
+    impl Buf for TrackingBuf {}
+
+    impl bytes::Buf for TrackingBuf {
+        fn remaining(&self) -> usize {
+            self.inner.remaining()
+        }
+
+        fn chunk(&self) -> &[u8] {
+            self.inner.chunk()
+        }
+
+        fn advance(&mut self, cnt: usize) {
+            self.inner.advance(cnt);
+        }
+
+        fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+            self.inner.copy_to_bytes(len)
+        }
+
+        fn copy_to_slice(&mut self, dst: &mut [u8]) {
+            self.copies += 1;
+            self.inner.copy_to_slice(dst);
+        }
+
+        fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
+            self.try_copies += 1;
+            self.inner.try_copy_to_slice(dst)
+        }
+    }
 
     /// Frame a single item and return the raw frame bytes.
     fn frame<V: Codec>(compression: Option<u8>, item: &V) -> Vec<u8> {
         let mut buf = Vec::new();
         encode_frame_into(compression, item, &mut buf).unwrap();
         buf
+    }
+
+    #[test]
+    fn test_limited_buf_forwards_bulk_copies() {
+        let mut backing = TrackingBuf::new(Bytes::from_static(b"abcdefghijNEXT"));
+        {
+            let mut limited = Limited::new(&mut backing, 10);
+
+            let mut empty = [];
+            limited.try_copy_to_slice(&mut empty).unwrap();
+
+            let mut prefix = [0; 4];
+            limited.try_copy_to_slice(&mut prefix).unwrap();
+            assert_eq!(&prefix, b"abcd");
+
+            let mut rest = [0; 6];
+            limited.copy_to_slice(&mut rest);
+            assert_eq!(&rest, b"efghij");
+            assert_eq!(limited.remaining(), 0);
+        }
+
+        assert_eq!(backing.try_copies, 2);
+        assert_eq!(backing.copies, 1);
+        assert_eq!(backing.inner.as_ref(), b"NEXT");
+    }
+
+    #[test]
+    fn test_limited_buf_rejects_overreads_without_mutation() {
+        let mut backing = TrackingBuf::new(Bytes::from_static(b"dataNEXT"));
+        let mut limited = Limited::new(&mut backing, 4);
+
+        let mut dst = [0xAA; 5];
+        let err = limited.try_copy_to_slice(&mut dst).unwrap_err();
+        assert_eq!(err.requested, 5);
+        assert_eq!(err.available, 4);
+        assert_eq!(dst, [0xAA; 5]);
+        assert_eq!(limited.remaining(), 4);
+        assert_eq!(limited.inner.get_ref().inner.as_ref(), b"dataNEXT");
+        assert_eq!(limited.inner.get_ref().try_copies, 0);
+
+        let mut dst = [0xBB; 5];
+        assert!(catch_unwind(AssertUnwindSafe(|| limited.copy_to_slice(&mut dst))).is_err());
+        assert_eq!(dst, [0xBB; 5]);
+        assert_eq!(limited.remaining(), 4);
+        assert_eq!(limited.inner.get_ref().inner.as_ref(), b"dataNEXT");
+
+        let err = limited.try_get_u64().unwrap_err();
+        assert_eq!(err.requested, 8);
+        assert_eq!(err.available, 4);
+        assert_eq!(limited.remaining(), 4);
+
+        let mut short = TrackingBuf::new(Bytes::from_static(b"abc"));
+        let mut limited = Limited::new(&mut short, usize::MAX);
+        let err = limited.try_copy_to_slice(&mut [0; 4]).unwrap_err();
+        assert_eq!(err.requested, 4);
+        assert_eq!(err.available, 3);
+        assert_eq!(limited.remaining(), 3);
+        assert_eq!(limited.inner.get_ref().inner.as_ref(), b"abc");
+    }
+
+    #[test]
+    fn test_limited_buf_preserves_owned_bytes_and_frame_bounds() {
+        let source = Bytes::from_static(b"abcdefghNEXT");
+        let source_ptr = source.as_ptr();
+        let retained = {
+            let mut limited = Limited::new(source.clone(), 8);
+            limited.copy_to_bytes(8)
+        };
+        assert_eq!(retained.as_ptr(), source_ptr);
+        drop(source);
+        assert_eq!(retained.as_ref(), b"abcdefgh");
+
+        let mut source = Bytes::from_static(b"abcdefghNEXT");
+        assert!(matches!(
+            decode_item::<u8>(Limited::new(&mut source, 8), &(), false),
+            Err(Error::Codec(CodecError::ExtraData(7)))
+        ));
+        assert!(source.as_ref().ends_with(b"NEXT"));
+
+        let mut source = Bytes::from_static(b"abcdefghNEXT");
+        assert!(matches!(
+            decode_item::<u64>(Limited::new(&mut source, 7), &(), false),
+            Err(Error::Codec(CodecError::EndOfBuffer))
+        ));
+        assert_eq!(source.as_ref(), b"abcdefghNEXT");
     }
 
     #[test]
