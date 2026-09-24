@@ -6,11 +6,10 @@ use commonware_utils::Widen;
 use std::{collections::VecDeque, num::NonZeroU16, sync::Arc};
 use tracing::error;
 
-/// State for a single buffer of pages read from the blob.
+/// Buffered pages from storage or a frozen logical tail.
 ///
-/// Each fill produces one `BufferState` containing all pages read in that batch.
-/// Navigation skips CRCs by computing offsets rather than creating separate
-/// `Bytes` slices per page.
+/// Storage batches contain pages with interleaved CRCs. The frozen tail contains one partial
+/// logical page without CRCs. Navigation uses offsets rather than separate `Bytes` slices per page.
 pub(super) struct BufferState {
     /// Page bytes, with interleaved CRCs when read from storage.
     buffer: Bytes,

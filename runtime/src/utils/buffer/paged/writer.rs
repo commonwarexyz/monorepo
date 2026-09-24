@@ -521,8 +521,7 @@ impl<B: Blob> Writer<B> {
     /// This writes buffered bytes to the blob layout but does not make them durable. Call
     /// [`Self::sync`] if the returned handle's bytes must survive a crash.
     ///
-    /// Later appends preserve this view, including its frozen partial page. Close all
-    /// disk-backed views before reopening the storage.
+    /// Later appends preserve this view, including its frozen partial page.
     pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))

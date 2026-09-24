@@ -2228,8 +2228,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Open at most `max_size` items, including pruned positions.
     ///
     /// The discarded suffix is durably removed before success. Subsequent appends may exceed
-    /// the cap. A cap below the retained start returns [Error::ItemPruned]. Previous handles
-    /// accessing these partitions must be dropped before reopening them.
+    /// the cap. A cap below the retained start returns [Error::ItemPruned].
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -2311,8 +2310,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
-    ///
-    /// Close storage-backed snapshots before reopening these partitions.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, V>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))

@@ -525,7 +525,8 @@ impl crate::Blob for Blob {
         };
 
         // Plain syscall paths own mutation debt before submission, including worker unwind.
-        // Durability is fused for one submission. Larger writes finish with one full-file flush.
+        // On Linux, a SYNC write fitting one submission fuses the barrier into that write.
+        // Other SYNC writes finish with a full-file flush.
         cfg_if! {
             if #[cfg(target_os = "linux")] {
                 let flags = (sync && bufs.chunk_count() <= IOVEC_BATCH_SIZE)
@@ -971,16 +972,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_reopen_canceled_during_final_metadata() {
-        // Leave a dirty predecessor and pause its successor before the final flush and
-        // length read, after namespace dispatch has finished.
+        // Leave a dirty predecessor and pause its successor before reading the debt and
+        // the captured file's length.
         let (storage, directory) = storage_for_reopen_test("canceled_metadata", Layout::ALL);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         blob.write_at(0, b"old", WriteOptions::default())
             .await
             .unwrap();
-        let (flush_entered, _flush_entering) = oneshot::channel();
-        let (flush_release, flush_gate) = mpsc::channel();
-        *storage.pending.test.before_complete.lock() = Some((flush_entered, flush_gate));
         drop(blob);
         let (entered, entering) = oneshot::channel();
         let (release, gate) = mpsc::channel();
@@ -988,16 +986,17 @@ mod tests {
         let mut opening = Box::pin(storage.open("partition", b"blob"));
         assert!((&mut opening).now_or_never().is_none());
         storage.scan("partition").await.unwrap();
-        flush_release.send(()).unwrap();
         commonware_macros::select! {
             entered = entering => entered.unwrap(),
             _ = &mut opening => panic!("open must wait for metadata"),
         }
+        assert_eq!(storage.pending.completions(), 0);
 
         // Canceling the awaiter must leave completion owned by the blocking operation.
         drop(opening);
 
-        // The retry waits for that operation and observes exactly one successful flush.
+        // Attach the retry before releasing the stale completion.
+        // Only the retry may flush the debt.
         let mut retry = Box::pin(storage.open("partition", b"blob"));
         assert!((&mut retry).now_or_never().is_none());
         storage.scan("partition").await.unwrap();

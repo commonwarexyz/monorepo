@@ -3382,6 +3382,8 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
         );
 
         // Restart marshal and confirm the processed height restored from metadata.
+        setup.actor_handle.abort();
+        let _ = setup.actor_handle.await;
         let restart = H::setup_validator_with(
             context
                 .child("validator_restart")

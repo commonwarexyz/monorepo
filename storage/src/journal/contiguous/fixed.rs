@@ -1504,8 +1504,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// A cap above the recovered end preserves that end. A cap below the retained start returns
     /// [Error::ItemPruned]. Successful initialization durably discards the suffix. Subsequent
-    /// appends may exceed the cap. All handles into these partitions must be dropped before
-    /// reopening them.
+    /// appends may exceed the cap.
     pub async fn init_at_most(context: E, cfg: Config, max_size: u64) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         let recovery = Recovery::<E, A>::open(context, cfg, checkpoint, Some(max_size)).await?;
@@ -1576,8 +1575,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Capture an owned snapshot ([`Reader`]) over the current journal. Bounds are frozen at
     /// creation, and the snapshot stays readable across concurrent appends and prunes.
-    ///
-    /// Close storage-backed snapshots before reopening these partitions.
     pub async fn snapshot(mut self) -> Result<(Self, Reader<'static, E, A>), Error> {
         let reader = self.0.snapshot().await?;
         Ok((self, reader))
