@@ -1634,7 +1634,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = test_cfg(&context);
+            let cfg = aligned_cfg(&context);
             let mut journal = Journal::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");

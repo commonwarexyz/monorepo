@@ -19,7 +19,7 @@ use std::num::NonZeroUsize;
 /// # Access
 ///
 /// [Write] is a single-owner buffered handle that owns mutation ordering and durability
-/// bookkeeping for the wrapped [Blob]. Raw [Blob] handles cloned before wrapping observe only
+/// bookkeeping for the wrapped [Blob]. Raw [Blob] handles shared before wrapping observe only
 /// flushed data and may not see the latest buffered writes until [Self::sync], [Self::resize], or
 /// an overlapping [Self::write_at] flushes them. Those raw handles must not be used to write,
 /// resize, or otherwise mutate the blob while a [Write] exists. External mutations bypass the

@@ -112,7 +112,7 @@ impl<B> Opened<'_, B> {
     }
 }
 
-/// Marks a blob as open until its last handle clone drops or the blob is removed.
+/// Marks a blob as open until it is dropped or removed.
 struct Live {
     key: Key,
     opens: Arc<Opens>,
@@ -130,8 +130,7 @@ impl Drop for Live {
     }
 }
 
-/// A blob handle whose open stays exclusive until every clone drops or the blob is removed.
-#[derive(Clone)]
+/// A blob handle whose open stays exclusive until it is dropped or removed.
 pub struct Blob<B> {
     inner: B,
     _live: Arc<Live>,

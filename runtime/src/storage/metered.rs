@@ -100,7 +100,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
             Blob {
                 inner,
                 partition: partition.into(),
-                metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
+                metrics: MetricsHandle::new(self.metrics.clone()),
             },
             len,
             blob_version,
@@ -117,16 +117,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 }
 
 /// A wrapper around a `Blob` implementation that tracks metrics
-#[derive(Clone)]
 pub struct Blob<B> {
     inner: B,
-    partition: Arc<str>,
-    metrics: Arc<MetricsHandle>,
+    partition: String,
+    metrics: MetricsHandle,
 }
 
-/// A wrapper around a `Metrics` implementation that updates
-/// metrics when a blob (that may have been cloned multiple times)
-/// is dropped.
+/// Counts the blob as open until its inner handle drops.
 struct MetricsHandle(Arc<Metrics>);
 
 impl MetricsHandle {
@@ -147,7 +144,6 @@ impl Deref for MetricsHandle {
 
 impl Drop for MetricsHandle {
     fn drop(&mut self) {
-        // Only decrement when the last reference to the blob is dropped
         self.0.open_blobs.dec();
     }
 }
@@ -483,15 +479,16 @@ mod tests {
         );
     }
 
-    /// Test that cloned blobs share the same metrics and only decrement when the last clone is dropped.
+    /// Shared blob owners count as one open until the final owner drops.
     #[tokio::test]
-    async fn test_cloned_blobs_share_metrics() {
+    async fn test_shared_blob_owners_share_metrics() {
         let mut registry = Registry::default();
         let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         // Open a blob
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let blob = Arc::new(blob);
 
         // Verify that the open_blobs metric is incremented
         assert_eq!(
@@ -500,54 +497,54 @@ mod tests {
             "open_blobs metric was not incremented after opening a blob"
         );
 
-        // Clone the blob multiple times
-        let clone1 = blob.clone();
-        let clone2 = blob.clone();
+        // Share one open blob across several owners.
+        let owner1 = blob.clone();
+        let owner2 = blob.clone();
 
-        // Verify that cloning doesn't change the open_blobs metric
+        // Sharing the open does not change the open_blobs metric.
         assert_eq!(
             storage.metrics.open_blobs.get(),
             1,
-            "open_blobs metric should not change when blobs are cloned"
+            "open_blobs metric should not change when its owner is shared"
         );
 
-        // Use the clones for some operations to verify they share metrics
+        // Operations through every owner update the same metrics.
         blob.write_at(0, b"hello", WriteOptions::default())
             .await
             .unwrap();
-        clone1
+        owner1
             .write_at(5, b"world", WriteOptions::default())
             .await
             .unwrap();
-        let _ = clone1.read_at(0, 10, ReadOptions::default()).await.unwrap();
-        let _ = clone2.read_at(0, 10, ReadOptions::default()).await.unwrap();
+        let _ = owner1.read_at(0, 10, ReadOptions::default()).await.unwrap();
+        let _ = owner2.read_at(0, 10, ReadOptions::default()).await.unwrap();
 
-        // Verify that operations on clones update the shared metrics
+        // Verify that operations through shared owners update the metrics.
         assert_eq!(
             storage.metrics.storage_writes.get(),
             2,
-            "Operations on cloned blobs should update shared metrics"
+            "Operations on shared blob owners should update shared metrics"
         );
 
         assert_eq!(
             storage.metrics.storage_reads.get(),
             2,
-            "Operations on cloned blobs should update shared metrics"
+            "Operations on shared blob owners should update shared metrics"
         );
 
-        // Drop individual clones and verify the metric doesn't change
-        drop(clone1);
+        // Dropping an owner leaves the open count unchanged while others remain.
+        drop(owner1);
         assert_eq!(
             storage.metrics.open_blobs.get(),
             1,
-            "open_blobs metric should not change when individual clones are dropped"
+            "open_blobs metric should not change when other owners are dropped"
         );
 
-        drop(clone2);
+        drop(owner2);
         assert_eq!(
             storage.metrics.open_blobs.get(),
             1,
-            "open_blobs metric should not change when individual clones are dropped"
+            "open_blobs metric should not change when other owners are dropped"
         );
 
         // Sync and drop the original blob - this should finally decrement the counter
@@ -555,7 +552,7 @@ mod tests {
         assert_eq!(
             storage.metrics.open_blobs.get(),
             0,
-            "open_blobs metric should be decremented only when the last blob reference is dropped"
+            "open_blobs metric should be decremented only when the last blob owner is dropped"
         );
     }
 }

@@ -713,7 +713,6 @@ impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
 
 /// Blob wrapper that records read and write options before delegating each operation.
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
 pub struct RecordingBlob<B> {
     inner: B,
     recordings: Recordings,
@@ -768,29 +767,28 @@ impl<B: Blob> Blob for RecordingBlob<B> {
 /// Blob wrapper that yields after the first backend poll of each read, allowing a test to
 /// hand the unresolved read future to another task even when the backend completes immediately.
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
 pub struct MigratingReadBlob<B> {
     /// Wrapped blob.
     inner: B,
     /// Whether each read must remain pending after its first backend poll.
     require_pending: bool,
-    /// Reads started across all clones.
-    reads: Arc<AtomicUsize>,
+    /// Reads started through this blob.
+    reads: AtomicUsize,
 }
 
 #[cfg(any(test, feature = "test-utils"))]
 impl<B> MigratingReadBlob<B> {
     /// Wrap `inner`, optionally requiring the first backend poll of each read to return pending.
     /// Set `require_pending` when a test must exercise registered backend I/O.
-    pub fn new(inner: B, require_pending: bool) -> Self {
+    pub const fn new(inner: B, require_pending: bool) -> Self {
         Self {
             inner,
             require_pending,
-            reads: Arc::new(AtomicUsize::new(0)),
+            reads: AtomicUsize::new(0),
         }
     }
 
-    /// Number of reads started across all clones.
+    /// Number of reads started through this blob.
     pub fn reads(&self) -> usize {
         self.reads.load(Ordering::Relaxed)
     }
@@ -908,7 +906,7 @@ impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             DelayedSyncBlob {
-                inner,
+                inner: Arc::new(inner),
                 pending: self.pending.clone(),
             },
             len,
@@ -926,9 +924,8 @@ impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
 }
 
 /// Blob wrapper that parks each started sync and supports one-shot blocking sync tracking.
-#[derive(Clone)]
 pub struct DelayedSyncBlob<B> {
-    inner: B,
+    inner: Arc<B>,
     pending: PendingSyncs,
 }
 
@@ -938,7 +935,7 @@ impl<B> DelayedSyncBlob<B> {
         let pending = PendingSyncs::default();
         (
             Self {
-                inner,
+                inner: Arc::new(inner),
                 pending: pending.clone(),
             },
             pending,
@@ -1262,7 +1259,6 @@ impl<E: crate::Storage> crate::Storage for WriteFaultContext<E> {
 }
 
 /// Blob wrapper that fails `write_at` while its [WriteFaults] is armed.
-#[derive(Clone)]
 pub struct WriteFaultBlob<B> {
     inner: B,
     faults: WriteFaults,
@@ -1352,7 +1348,6 @@ impl<E: crate::Storage> crate::Storage for SyncFaultContext<E> {
 }
 
 /// Blob wrapper that fails `sync` and `start_sync` when marked faulty.
-#[derive(Clone)]
 pub struct SyncFaultBlob<B> {
     inner: B,
     faulty: bool,

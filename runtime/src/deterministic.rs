@@ -926,7 +926,7 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
-/// A blob handle whose open stays exclusive until every clone drops or the blob is removed.
+/// A blob handle whose open stays exclusive until its final owner drops or the blob is removed.
 pub type Blob = OpenBlob<MeteredBlob<AuditedBlob<FaultyBlob<MemBlob>>>>;
 
 fn build_storage(
@@ -1777,6 +1777,7 @@ mod tests {
             };
 
             // An old handle's cleanup cannot release the replacement's logical open.
+            let current = Arc::new(current);
             let retained = current.clone();
             drop(old);
             drop(current);
@@ -1815,6 +1816,7 @@ mod tests {
         ));
         let (_, checkpoint) = Runner::new(cfg).start_and_recover(|context| async move {
             let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            let blob = Arc::new(blob);
             blob.write_at(0, b"saved", WriteOptions::SYNC)
                 .await
                 .unwrap();
@@ -1828,6 +1830,7 @@ mod tests {
 
             // Retained write fragments keep their replay targets, but release every user lease.
             let (reopened, len) = context.open("partition", b"blob").await.unwrap();
+            let reopened = Arc::new(reopened);
             assert_eq!(len, 5);
             assert_eq!(
                 reopened
@@ -1902,6 +1905,7 @@ mod tests {
                 |context| async move {
                     let (a, _) = context.open("partition", b"a").await.unwrap();
                     let (b, _) = context.open("partition", b"b").await.unwrap();
+                    let b = Arc::new(b);
                     let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
                     let payload = Bytes::from_owner(Owner {
                         data: b"saved".to_vec(),
@@ -1972,6 +1976,7 @@ mod tests {
                 |context| async move {
                     let (a, _) = context.open("partition", b"a").await.unwrap();
                     let (b, _) = context.open("partition", b"b").await.unwrap();
+                    let b = Arc::new(b);
                     let (retiring, retired) = std::sync::mpsc::channel();
                     a.write_at(
                         0,

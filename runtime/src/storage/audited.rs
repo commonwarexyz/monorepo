@@ -86,7 +86,6 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
     }
 }
 
-#[derive(Clone)]
 pub struct Blob<B: crate::Blob> {
     auditor: Arc<Auditor>,
     partition: String,
@@ -442,7 +441,6 @@ mod tests {
         );
     }
 
-    #[derive(Clone)]
     struct RecordingBlob {
         writes: Arc<Mutex<Vec<(usize, WriteOptions)>>>,
     }

@@ -203,7 +203,7 @@ enum PendingMutation<B> {
     /// selection.
     Write {
         generation: Arc<FileGeneration>,
-        blob: B,
+        blob: Arc<B>,
         offset: u64,
         bufs: IoBufs,
         retention: Arc<PendingWriteRetention>,
@@ -212,7 +212,7 @@ enum PendingMutation<B> {
     /// A successful resize already selected to survive a simulated crash.
     Resize {
         generation: Arc<FileGeneration>,
-        blob: B,
+        blob: Arc<B>,
         len: u64,
     },
     /// A full-sync cut whose completion determines whether earlier mutations remain pending.
@@ -612,14 +612,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 }
 
 /// A blob wrapper that injects deterministic faults based on configuration.
-#[derive(Clone)]
 pub struct Blob<B: crate::Blob> {
-    inner: B,
+    inner: Arc<B>,
     ctx: Oracle,
     pending: PendingMutations<B>,
     generation: Arc<FileGeneration>,
     /// Tracked size for partial resize support.
-    size: Arc<AtomicU64>,
+    size: AtomicU64,
 }
 
 impl<B: crate::Blob> Blob<B> {
@@ -631,11 +630,11 @@ impl<B: crate::Blob> Blob<B> {
         size: u64,
     ) -> Self {
         Self {
-            inner,
+            inner: Arc::new(inner),
             ctx,
             pending,
             generation,
-            size: Arc::new(AtomicU64::new(size)),
+            size: AtomicU64::new(size),
         }
     }
 
@@ -991,7 +990,7 @@ mod tests {
     }
 
     struct OperationGate<B, C> {
-        inner: B,
+        inner: Arc<B>,
         context: Arc<C>,
         pause_after_write: bool,
         armed: Arc<AtomicBool>,
@@ -1000,7 +999,7 @@ mod tests {
         completed: Arc<tokio::sync::Notify>,
     }
 
-    impl<B: Clone, C> Clone for OperationGate<B, C> {
+    impl<B, C> Clone for OperationGate<B, C> {
         fn clone(&self) -> Self {
             Self {
                 inner: self.inner.clone(),
@@ -1139,7 +1138,7 @@ mod tests {
             let started = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
             let gated = OperationGate {
-                inner,
+                inner: Arc::new(inner),
                 context: Arc::new(context),
                 pause_after_write: false,
                 armed: Arc::new(AtomicBool::new(true)),
@@ -1183,7 +1182,7 @@ mod tests {
         let release = Arc::new(tokio::sync::Notify::new());
         let completed = Arc::new(tokio::sync::Notify::new());
         let gated = OperationGate {
-            inner,
+            inner: Arc::new(inner),
             context: Arc::new(context.child("gate")),
             pause_after_write: false,
             armed: Arc::new(AtomicBool::new(true)),
@@ -1199,6 +1198,7 @@ mod tests {
             gated,
             4,
         );
+        let blob = Arc::new(blob);
 
         let barrier_blob = blob.clone();
         let barrier = context.child("barrier").spawn(move |_| async move {
@@ -1277,7 +1277,7 @@ mod tests {
             let started = Arc::new(tokio::sync::Notify::new());
             let release = Arc::new(tokio::sync::Notify::new());
             let gated = OperationGate {
-                inner,
+                inner: Arc::new(inner),
                 context: Arc::new(context),
                 pause_after_write: true,
                 armed: Arc::new(AtomicBool::new(true)),
@@ -1293,6 +1293,7 @@ mod tests {
                 gated,
                 5,
             );
+            let blob = Arc::new(blob);
 
             let mut stale = Box::pin(blob.write_at(0, b"stale", WriteOptions::default()));
             assert!(poll_once(stale.as_mut()).is_pending());
@@ -1729,6 +1730,7 @@ mod tests {
             partial_rate: probability!(1.0),
         }));
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        let blob = Arc::new(blob);
         blob.write_at(0, b"abcdefghij", WriteOptions::SYNC)
             .await
             .unwrap();

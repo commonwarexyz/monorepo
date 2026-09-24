@@ -867,6 +867,7 @@ pub mod tests {
         for promoted in [false, true] {
             runner().start(|context| async move {
                 let (blob, _) = context.open("forwarded_write", b"file").await.unwrap();
+                let blob = Arc::new(blob);
                 let (fd, _peer) = socket();
                 let mut blocker = recv(fd, None);
                 assert!(poll!(&mut blocker).is_pending());

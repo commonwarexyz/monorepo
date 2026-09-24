@@ -199,35 +199,11 @@ impl Shared {
     }
 }
 
-/// One open of a blob, shared by its clones.
-///
-/// Dropping the last clone releases the name and registers the settlement a
-/// later open waits for, which [Shared] publishes once every operation issued
-/// through this open has finished.
-struct Open {
-    shared: Arc<Shared>,
-    generation: Arc<Generation>,
-}
-
-impl Deref for Open {
-    type Target = Shared;
-
-    fn deref(&self) -> &Shared {
-        &self.shared
-    }
-}
-
-impl Drop for Open {
-    fn drop(&mut self) {
-        if let Some(sender) = self.generation.release() {
-            let _ = self.shared.promise.set(sender);
-        }
-    }
-}
-
-#[derive(Clone)]
 pub struct Blob {
-    open: Arc<Open>,
+    /// File state retained by issued operations.
+    shared: Arc<Shared>,
+    /// The logical open's namespace identity.
+    generation: Arc<Generation>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
@@ -236,12 +212,21 @@ pub struct Blob {
     dont_cache_supported: Arc<AtomicBool>,
 }
 
+impl Drop for Blob {
+    fn drop(&mut self) {
+        // Register settlement before releasing the file and namespace identity.
+        if let Some(sender) = self.generation.release() {
+            let _ = self.shared.promise.set(sender);
+        }
+    }
+}
+
 impl Blob {
     /// Establish what the settled predecessor left unflushed, then read the captured file's
     /// length. A failed flush is retained for every later open of the name.
     pub(super) async fn complete(&self) -> Result<u64, Error> {
-        let shared = self.open.shared.clone();
-        let identity = Arc::downgrade(&self.open.generation);
+        let shared = self.shared.clone();
+        let identity = Arc::downgrade(&self.generation);
         let offset = self.data_offset;
         task::spawn_blocking(move || {
             #[cfg(test)]
@@ -284,7 +269,8 @@ impl Blob {
             test: TestState::default(),
         });
         Self {
-            open: Arc::new(Open { shared, generation }),
+            shared,
+            generation,
             pool,
             data_offset,
             dont_cache_supported: Arc::new(AtomicBool::new(true)),
@@ -294,7 +280,7 @@ impl Blob {
     /// Number of syncs this open skipped because it had nothing to persist.
     #[cfg(test)]
     pub(super) fn skipped_syncs(&self) -> u64 {
-        self.open.tracker.skipped()
+        self.shared.tracker.skipped()
     }
 
     #[cfg(target_os = "linux")]
@@ -475,7 +461,7 @@ impl crate::Blob for Blob {
         if len == 0 {
             return Ok(bufs);
         }
-        let file = self.open.shared.clone();
+        let file = self.shared.clone();
         let pool = self.pool.clone();
         let cache = if options.contains(ReadOptions::DONT_CACHE) {
             Cache::Disabled(self.dont_cache_supported.clone())
@@ -520,11 +506,11 @@ impl crate::Blob for Blob {
             .filter(|end| *end <= i64::MAX as u64)
             .ok_or(Error::OffsetOverflow)?;
 
-        let file = self.open.shared.clone();
+        let file = self.shared.clone();
 
         // Derive per-write policy from the requested options and cached backend support.
         let sync = options.contains(WriteOptions::SYNC);
-        if sync && let Some(error) = self.open.tracker.failure() {
+        if sync && let Some(error) = self.shared.tracker.failure() {
             return Err(error);
         }
         let cache = if options.contains(WriteOptions::DONT_CACHE) {
@@ -545,7 +531,7 @@ impl crate::Blob for Blob {
         }
         let fused = flags.is_some();
         if !fused {
-            self.open.tracker.write();
+            self.shared.tracker.write();
         }
         task::spawn_blocking(move || {
             // Preserve the single-buffer fast path when no option requires per-write flags.
@@ -601,11 +587,11 @@ impl crate::Blob for Blob {
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
-        let file = self.open.shared.clone();
+        let file = self.shared.clone();
         let len = len
             .checked_add(self.data_offset)
             .ok_or(Error::OffsetOverflow)?;
-        self.open.tracker.write();
+        self.shared.tracker.write();
         task::spawn_blocking(move || {
             #[cfg(test)]
             file.wait_before_mutation();
@@ -617,44 +603,44 @@ impl crate::Blob for Blob {
         .map_err(|e| e.into())
         .and_then(|r: std::io::Result<()>| r)
         .map_err(|e| {
-            let (partition, name) = &self.open.key;
+            let (partition, name) = &self.shared.key;
             Error::BlobResizeFailed(partition.clone(), hex(name), e.into())
         })?;
         Ok(())
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        if let Some(error) = self.open.tracker.failure() {
+        if let Some(error) = self.shared.tracker.failure() {
             return Err(error);
         }
-        if !self.open.tracker.is_dirty() {
+        if !self.shared.tracker.is_dirty() {
             #[cfg(test)]
-            self.open.tracker.skip_sync();
+            self.shared.tracker.skip_sync();
             return Ok(());
         }
-        let file = self.open.shared.clone();
-        let seen = self.open.tracker.begin_sync();
+        let file = self.shared.clone();
+        let seen = self.shared.tracker.begin_sync();
         task::spawn_blocking(move || file.flush(seen))
             .await
             .map_err(|e| {
                 let err: std::io::Error = e.into();
-                let (partition, name) = &self.open.key;
+                let (partition, name) = &self.shared.key;
                 Error::BlobSyncFailed(partition.clone(), hex(name), err.into())
             })?
     }
 
     async fn start_sync(&self) -> Handle<()> {
-        if let Some(error) = self.open.tracker.failure() {
+        if let Some(error) = self.shared.tracker.failure() {
             return Handle::ready(Err(error));
         }
-        if !self.open.tracker.is_dirty() {
+        if !self.shared.tracker.is_dirty() {
             #[cfg(test)]
-            self.open.tracker.skip_sync();
+            self.shared.tracker.skip_sync();
             return Handle::ready(Ok(()));
         }
         let (tx, rx) = oneshot::channel();
-        let file = self.open.shared.clone();
-        let seen = self.open.tracker.begin_sync();
+        let file = self.shared.clone();
+        let seen = self.shared.tracker.begin_sync();
         #[cfg(test)]
         let after_start_sync = file.test.after_start_sync.lock().take();
         task::spawn_blocking(move || {
@@ -745,7 +731,7 @@ mod tests {
                         // Pause the first barrier before its result reaches the tracker.
                         let (entered, entering) = ::tokio::sync::oneshot::channel();
                         let (release, gate) = mpsc::channel();
-                        *blob.open.shared.test.after_sync.lock() = Some((entered, gate));
+                        *blob.shared.test.after_sync.lock() = Some((entered, gate));
                         if failure_first {
                             *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
                         }
@@ -760,7 +746,7 @@ mod tests {
                         assert!((&mut first).now_or_never().is_none());
                         entering.await.unwrap();
                         assert!(
-                            blob.open.durability.try_lock().is_none(),
+                            blob.shared.durability.try_lock().is_none(),
                             "barrier released admission before accounting"
                         );
                         let first = if cancel {
@@ -793,14 +779,14 @@ mod tests {
                         if failure_first {
                             assert!(matches!(first, None | Some(Err(Error::Closed))));
                             assert!(matches!(second, Err(Error::Closed)));
-                            assert!(blob.open.tracker.is_dirty());
+                            assert!(blob.shared.tracker.is_dirty());
                         } else {
                             if let Some(first) = first {
                                 first.unwrap();
                             }
                             assert!(matches!(second, Err(Error::Closed)));
                         }
-                        assert!(matches!(blob.open.tracker.failure(), Some(Error::Closed)));
+                        assert!(matches!(blob.shared.tracker.failure(), Some(Error::Closed)));
                         drop(blob);
                         assert!(matches!(
                             storage.open("partition", b"blob").await,
@@ -851,7 +837,7 @@ mod tests {
         }
         let (entered, entering) = ::tokio::sync::oneshot::channel();
         let (release, gate) = mpsc::channel();
-        *blob.open.shared.test.before_mutation.lock() = Some((entered, gate));
+        *blob.shared.test.before_mutation.lock() = Some((entered, gate));
         let mut mutation = Box::pin(async {
             if shrink {
                 blob.resize(0).await
@@ -1033,7 +1019,7 @@ mod tests {
             // Gate a plain write inside the blocking pool so the open settles only on release.
             let (entered, entering) = ::tokio::sync::oneshot::channel();
             let (release, gate) = mpsc::channel();
-            *blob.open.shared.test.before_mutation.lock() = Some((entered, gate));
+            *blob.shared.test.before_mutation.lock() = Some((entered, gate));
             let mut mutation = Box::pin(blob.write_at(0, b"orphaned", WriteOptions::default()));
             assert!((&mut mutation).now_or_never().is_none());
             entering.await.unwrap();
@@ -1196,14 +1182,14 @@ mod tests {
 
         let accounted = Arc::new(AtomicBool::new(false));
         let bufs = bytes::Bytes::from_owner(WriteErrorObserver {
-            shared: Arc::downgrade(&blob.open.shared),
+            shared: Arc::downgrade(&blob.shared),
             accounted: accounted.clone(),
         });
 
         // The read-only descriptor makes the fused syscall fail after submission.
         // Its terminal accounting must precede retirement of the supplied buffer.
         let result = blob.write_at(0, bufs, WriteOptions::SYNC).await;
-        let poisoned = blob.open.tracker.failure().is_some();
+        let poisoned = blob.shared.tracker.failure().is_some();
         drop(blob);
         let retained = storage.pending.attach("partition", b"readonly");
         drop(storage);
@@ -1255,8 +1241,8 @@ mod tests {
                         ),
                         "chunks={chunks} options={options:?}"
                     );
-                    assert!(!blob.open.tracker.is_dirty());
-                    assert!(blob.open.tracker.failure().is_none());
+                    assert!(!blob.shared.tracker.is_dirty());
+                    assert!(blob.shared.tracker.failure().is_none());
                 }
             }
 
@@ -1311,7 +1297,8 @@ mod tests {
         for _ in 1..count {
             chunks.push(crate::IoBuf::from(vec![b'x']));
         }
-        let writing_blob = blob.clone();
+        let blob = Arc::new(blob);
+        let writing_blob = Arc::clone(&blob);
         let writing =
             ::tokio::spawn(
                 async move { writing_blob.write_at(0, chunks, WriteOptions::SYNC).await },
@@ -1363,7 +1350,7 @@ mod tests {
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let (entered, entering) = ::tokio::sync::oneshot::channel();
         let (release, released) = mpsc::channel();
-        *blob.open.test.after_start_sync.lock() = Some((entered, released));
+        *blob.shared.test.after_start_sync.lock() = Some((entered, released));
 
         // Keep the completed sync worker alive while the caller writes and closes the blob.
         blob.write_at(0, b"before", WriteOptions::default())

@@ -3299,7 +3299,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
-            let cfg = test_cfg(&context);
+            let cfg = entry_cfg(&context);
             let page_cache = cfg.index_page_cache.clone();
             let mut oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context, cfg).await.expect("Failed to init");

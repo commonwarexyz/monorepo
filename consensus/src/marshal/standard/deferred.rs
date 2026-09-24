@@ -1762,6 +1762,7 @@ mod tests {
 
             // After certify, the block must be durable across an unclean restart.
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(marshaled);
             drop(marshal);
 

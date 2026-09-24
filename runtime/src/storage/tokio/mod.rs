@@ -1586,34 +1586,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    /// Clones share one tracker: debt is recorded only when the last clone drops dirty, and a
-    /// sync through any clone clears the state.
+    /// Shared owners retain one open: debt is recorded when its last owner drops dirty, and a
+    /// sync through any owner clears the state.
     #[tokio::test]
-    async fn test_clones_share_dirty_state() {
+    async fn test_shared_blob_dirty_state() {
         let storage_directory =
-            env::temp_dir().join(format!("storage_tokio_clones_{}", random_suffix()));
+            env::temp_dir().join(format!("storage_tokio_shared_{}", random_suffix()));
         let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-        let clone = blob.clone();
+        let blob = Arc::new(blob);
+        let retained = Arc::clone(&blob);
         blob.write_at(0, b"hello", WriteOptions::default())
             .await
             .unwrap();
         drop(blob);
         assert_eq!(storage.pending.outstanding(), 0);
         assert!(!storage.pending.owes("partition", b"blob"));
-        clone.sync().await.unwrap();
-        drop(clone);
+        retained.sync().await.unwrap();
+        drop(retained);
         settle(&storage).await;
         assert!(!storage.pending.owes("partition", b"blob"));
 
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-        let clone = blob.clone();
+        let blob = Arc::new(blob);
+        let retained = Arc::clone(&blob);
         blob.resize(0).await.unwrap();
         drop(blob);
         assert!(!storage.pending.owes("partition", b"blob"));
-        drop(clone);
+        drop(retained);
         settle(&storage).await;
         assert!(storage.pending.owes("partition", b"blob"));
         drop(storage.open("partition", b"blob").await.unwrap());

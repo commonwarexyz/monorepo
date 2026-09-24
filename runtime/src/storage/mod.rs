@@ -565,6 +565,7 @@ pub(crate) mod tests {
         WriteOptions,
     };
     use futures::FutureExt;
+    use std::sync::Arc;
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) mod shared {
@@ -576,7 +577,7 @@ pub(crate) mod tests {
         use std::{
             env,
             process::Command,
-            sync::mpsc,
+            sync::{Arc, mpsc},
             thread,
             time::{Duration, Instant},
         };
@@ -852,15 +853,16 @@ pub(crate) mod tests {
 
                 let (current, len) = storage.open(partition, name).await.unwrap();
                 assert_eq!(len, 0);
+                let current = Arc::new(current);
                 let reader = current.clone();
                 current
                     .write_at(0, b"new", WriteOptions::default())
                     .await
                     .unwrap();
 
-                // Block the reopen's flush. The replacement stays alive through a clone while
-                // the removed open drops, so only the replacement may record debt. Dropping
-                // the sender also releases the worker if an assertion unwinds.
+                // Block the reopen's flush. A shared owner keeps the replacement alive while the
+                // removed open drops, so only the replacement may record debt. Dropping the sender
+                // also releases the worker if an assertion unwinds.
                 let (entered, entering) = ::tokio::sync::oneshot::channel();
                 let (release, gate) = mpsc::channel();
                 *pending.test.before_complete.lock() = Some((entered, gate));
@@ -1221,7 +1223,7 @@ pub(crate) mod tests {
         test_read_after_remove_partition(&storage).await;
         test_recreate_after_remove(&storage).await;
         test_read_after_remove_unsynced(&storage).await;
-        test_read_after_remove_handle_clones(&storage).await;
+        test_read_after_remove_shared_owners(&storage).await;
         test_recreate_generations(&storage).await;
         test_read_after_remove_partition_multi(&storage).await;
         test_scan(&storage).await;
@@ -1434,17 +1436,18 @@ pub(crate) mod tests {
         assert_eq!(read.coalesce().as_ref(), &data[data.len() - 1..]);
     }
 
-    /// Removal liveness is per-open, not per-handle: clones taken before or after removal keep
-    /// reading regardless of other handles' lifetimes, and out-of-bounds reads still fail.
-    async fn test_read_after_remove_handle_clones<S>(storage: &S)
+    /// Shared owners keep reading after removal regardless of other owners' lifetimes,
+    /// and out-of-bounds reads still fail.
+    async fn test_read_after_remove_shared_owners<S>(storage: &S)
     where
         S: Storage + Send + Sync,
         S::Blob: Send + Sync,
     {
         let (first, _) = storage
-            .open("read_after_remove_clones", b"name")
+            .open("read_after_remove_shared", b"name")
             .await
             .unwrap();
+        let first = Arc::new(first);
         let data: Vec<u8> = (0u8..=255).collect();
         first
             .write_at(0, data.clone(), WriteOptions::default())
@@ -1454,11 +1457,11 @@ pub(crate) mod tests {
         let second = first.clone();
 
         storage
-            .remove("read_after_remove_clones", Some(b"name"))
+            .remove("read_after_remove_shared", Some(b"name"))
             .await
             .unwrap();
 
-        // A clone taken after removal reads too, and outlives the handle it was cloned from.
+        // An owner retained after removal can outlive the original owner.
         let third = first.clone();
         drop(first);
 
@@ -1623,6 +1626,7 @@ pub(crate) mod tests {
         S::Blob: Send + Sync,
     {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        let blob = Arc::new(blob);
 
         // Initialize blob with data of sufficient length first
         blob.write_at(0, b"concurrent write", WriteOptions::default())

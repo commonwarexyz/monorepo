@@ -625,12 +625,13 @@ pub(super) mod tests {
         let physical = page.len() + CHECKSUM_SIZE as usize;
         let source = format!("{partition}-source");
         let (raw, size) = context.open(&source, b"source").await.unwrap();
+        let raw = Arc::new(raw);
         let cache = CacheRef::from_pooler(
             context,
             (page.len() as u16).try_into().unwrap(),
             commonware_utils::NZUsize!(4),
         );
-        let mut writer = Writer::new(raw.clone(), size, 2 * page.len(), cache)
+        let mut writer = Writer::new(Arc::clone(&raw), size, 2 * page.len(), cache)
             .await
             .unwrap();
         writer.append(page).await.unwrap();
@@ -642,7 +643,7 @@ pub(super) mod tests {
             .coalesce();
 
         // The empty tip and page-aligned direct append issue one unsynced write wholly beyond
-        // the acknowledged page. The same-open raw clone observes exactly those submitted bytes.
+        // the acknowledged page. The raw handle shares the writer's open and observes those bytes.
         writer
             .append_owned(page.repeat(suffix_pages).into())
             .await

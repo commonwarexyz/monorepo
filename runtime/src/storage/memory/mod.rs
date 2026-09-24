@@ -250,13 +250,12 @@ impl crate::Storage for Storage {
     }
 }
 
-#[derive(Clone)]
 pub struct Blob {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     generations: Arc<Mutex<Generations>>,
     partition: String,
     name: Vec<u8>,
-    content: Arc<RwLock<Vec<u8>>>,
+    content: RwLock<Vec<u8>>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
@@ -279,7 +278,7 @@ impl Blob {
             generations,
             partition,
             name,
-            content: Arc::new(RwLock::new(content)),
+            content: RwLock::new(content),
             pool,
             data_offset,
             generation,
@@ -301,7 +300,7 @@ impl Blob {
         &self,
         #[cfg(test)] before_publication: impl FnOnce(),
     ) -> Result<(), crate::Error> {
-        // Hold the live contents until the snapshot is published so a concurrent clone cannot
+        // Hold the live contents until the snapshot is published so a concurrent sync cannot
         // publish a newer image that this snapshot then overwrites.
         let live = self.content.read();
         let new_content = live.clone();
@@ -549,8 +548,9 @@ mod tests {
     fn test_concurrent_sync_preserves_durable_append(#[case] range: bool) {
         let storage = Storage::new(test_pool());
         let (blob, _) = block_on(storage.open("partition", b"blob")).unwrap();
+        let blob = Arc::new(blob);
         block_on(blob.write_at(0, b"old", WriteOptions::SYNC)).unwrap();
-        let snapshot = blob.clone();
+        let snapshot = Arc::clone(&blob);
         let (entered, entering) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let sync = std::thread::spawn(move || {
@@ -608,11 +608,12 @@ mod tests {
         for name in [Some(b"blob".as_slice()), None] {
             // Storage clones and forwarding wrappers share the same logical open.
             let (first, _) = storage.open("partition", b"blob").await.unwrap();
+            let first = Arc::new(first);
             first
                 .write_at(0, b"saved", WriteOptions::SYNC)
                 .await
                 .unwrap();
-            let clone = first.clone();
+            let retained = Arc::clone(&first);
             assert!(matches!(
                 shared.open("partition", b"blob").await,
                 Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
@@ -622,7 +623,7 @@ mod tests {
                 shared.open_versioned("partition", b"blob", crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION).await,
                 Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
             ));
-            drop(clone);
+            drop(retained);
             let (old, len) = shared.open("partition", b"blob").await.unwrap();
             assert_eq!(len, 5);
 
