@@ -120,17 +120,22 @@ pub mod tests {
             request::{RecvRequest, SendRequest},
             sleep::Sleep,
         },
+        storage::{hold::Hold, iouring::Shared},
         utils::{extract_panic_message, reschedule},
     };
     use futures::{FutureExt as _, future::pending, poll};
     use std::{
+        fs::{self, OpenOptions},
         future::Future,
         io::Write as _,
         mem,
         os::{fd::OwnedFd, unix::net::UnixStream},
         panic::{AssertUnwindSafe, catch_unwind},
         pin::pin,
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc,
+        },
         task::{Context, Poll, RawWaker, RawWakerVTable},
         thread,
         time::{Duration, Instant},
@@ -304,6 +309,9 @@ pub mod tests {
 
         runner().start(|context| async move {
             let (blob, _) = context.open("observer_sync", b"file").await.unwrap();
+            blob.write_at(0, b"dirty", WriteOptions::default())
+                .await
+                .unwrap();
             let (fd, _peer) = socket();
             let mut blocker = recv(fd, None);
             assert!(poll!(&mut blocker).is_pending());
@@ -367,6 +375,11 @@ pub mod tests {
         let callbacks = Arc::new(Reentrant::default());
         runner().start(|context| async move {
             let (blob, _) = context.open("observer_closed", b"file").await.unwrap();
+
+            // Dirty the open so start_sync submits a request to the closed worker.
+            blob.write_at(0, b"x", WriteOptions::default())
+                .await
+                .unwrap();
             let (fd, _peer) = socket();
             let mut operation = recv(fd.clone(), None);
             let waker = callbacks.waker();
@@ -678,6 +691,50 @@ pub mod tests {
     }
 
     #[test]
+    fn test_foreign_gate_waiter_observes_origin_closure() {
+        let directory =
+            std::env::temp_dir().join(format!("commonware_operation_gate_{}", std::process::id()));
+        let hold = Hold::acquire(&directory).unwrap();
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(directory.join("blob"))
+            .unwrap();
+        let shared = Shared::detached(file, hold);
+
+        let (operation, release) = runner().start(|_| async {
+            let gate = shared.durability.clone();
+            let mailbox = Local::current().unwrap().borrow().mailbox.clone();
+            let (acquired, ready) = mpsc::channel();
+            let release = thread::spawn(move || {
+                let permit = futures::executor::block_on(gate.lock());
+                acquired.send(()).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while mailbox.is_open() {
+                    assert!(Instant::now() < deadline, "origin mailbox did not close");
+                    thread::yield_now();
+                }
+                drop(permit);
+            });
+            ready.recv_timeout(Duration::from_secs(10)).unwrap();
+
+            let mut operation = Operation::register(Request::Sync(SyncRequest::new(shared)));
+            assert!(poll!(&mut operation).is_pending());
+            let operation = poll_on_foreign_thread(operation, Waker::noop().clone());
+            (operation, release)
+        });
+
+        release.join().unwrap();
+        assert!(matches!(
+            futures::executor::block_on(operation),
+            Err(Error::Closed)
+        ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn test_operation_can_move_between_threads() {
         for (in_flight, completed) in [(false, false), (true, false), (true, true)] {
             for return_to_owner in [false, true] {
@@ -810,6 +867,7 @@ pub mod tests {
         for promoted in [false, true] {
             runner().start(|context| async move {
                 let (blob, _) = context.open("forwarded_write", b"file").await.unwrap();
+                let blob = Arc::new(blob);
                 let (fd, _peer) = socket();
                 let mut blocker = recv(fd, None);
                 assert!(poll!(&mut blocker).is_pending());

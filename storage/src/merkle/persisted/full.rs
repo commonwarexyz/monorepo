@@ -276,7 +276,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Recover at most `max_leaves` leaves and durably discard the remaining suffix.
     ///
     /// A cap above the recovered end preserves that end. The cap must permit the persisted
-    /// pruning boundary. All previous storage-dependent readers must be dropped before open.
+    /// pruning boundary.
     pub async fn init_at_most(
         context: E,
         hasher: &impl Hasher<F, Digest = D>,

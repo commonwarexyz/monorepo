@@ -10,7 +10,7 @@ use super::{CacheRef, tip::Buffer};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use commonware_utils::Widen;
 use futures::stream::{FuturesUnordered, StreamExt};
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// Logical bytes served from memory at the end of a paged blob.
 #[derive(Clone, Copy)]
@@ -105,7 +105,7 @@ impl<'a, I: Iterator<Item = &'a [u8]>> Cursor<'a, I> {
 /// A borrowed view over a paged blob.
 pub struct View<'a, B: Blob> {
     /// Underlying blob, used for bytes below `tail_offset` not resident in the cache.
-    pub(super) blob: &'a B,
+    pub(super) blob: &'a Arc<B>,
     /// Page cache used for bytes below `tail_offset`.
     pub(super) cache_ref: &'a CacheRef,
     /// Page-cache id of the originating blob.

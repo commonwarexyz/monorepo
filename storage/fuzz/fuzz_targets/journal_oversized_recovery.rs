@@ -411,10 +411,11 @@ async fn blob_sizes(context: &deterministic::Context) -> BTreeMap<(bool, u64), u
         for name in context.scan(partition).await.expect("size scan failed") {
             let section =
                 u64::from_be_bytes(name.as_slice().try_into().expect("invalid section name"));
-            let (_, size) = context
-                .open(partition, &name)
-                .await
-                .expect("size open failed");
+
+            let size = context
+                .logical_blob(partition, &name)
+                .expect("size blob missing")
+                .len() as u64;
             sizes.insert((is_index, section), size);
         }
     }

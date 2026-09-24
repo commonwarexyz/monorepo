@@ -725,10 +725,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// from `start_position` in `start_section`.
     ///
     /// Setup flushes buffered pages so the reader observes every accepted write. It
-    /// validates replay setup but does not allocate `buffer` bytes per blob. Page buffers
-    /// are allocated lazily as the reader advances. Every backing blob read performed by
-    /// the returned replay uses `read_options`, including reads after advancing to
-    /// another section.
+    /// validates replay setup and copies each replayed section's partial tail page, but
+    /// does not allocate `buffer` bytes per blob. Read buffers are allocated lazily as the
+    /// reader advances. Every backing blob read performed by the returned replay uses
+    /// `read_options`, including reads after advancing to another section.
     ///
     /// A nonzero start must be a boundary already validated by a prior replay or a durable
     /// marker: torn-page repair treats everything below it as proven.
@@ -1634,7 +1634,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let (context, recordings) = RecordingContext::new(context);
-            let cfg = test_cfg(&context);
+            let cfg = aligned_cfg(&context);
             let mut journal = Journal::init(context.child("storage"), cfg)
                 .await
                 .expect("failed to init");
@@ -2442,6 +2442,7 @@ mod tests {
             blob.resize(size - 1).await.expect("failed to truncate");
             blob.sync().await.expect("failed to sync");
 
+            drop(blob);
             let mut journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-init");

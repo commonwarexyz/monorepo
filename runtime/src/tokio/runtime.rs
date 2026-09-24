@@ -473,12 +473,12 @@ impl crate::Runner for Runner {
             &mut runtime_registry,
         );
 
-        // Make any storage a prior process left in the page cache crash-durable before we open it,
-        // so the data read during init is durable. This runs under the hold, after any straggling
-        // writes from a previous run have landed, so the flush covers them too.
+        // Under the hold, a prior run's operations have finished. Linux flushes the filesystem.
+        // Other platforms sync the storage directory here so inherited partition removals are
+        // durable, then partition directories and existing blob contents on first access.
         if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
             panic!(
-                "failed to sync storage filesystem at startup ({}): {e}",
+                "failed to sync storage at startup ({}): {e}",
                 self.cfg.storage_directory.display()
             );
         }

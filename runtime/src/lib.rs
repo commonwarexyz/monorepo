@@ -178,6 +178,8 @@ stability_scope!(BETA {
         PartitionMissing(String),
         #[error("partition corrupt: {0}")]
         PartitionCorrupt(String),
+        #[error("blob already open: {0}/{1}")]
+        BlobAlreadyOpen(String, String),
         #[error("blob open failed: {0}/{1} error: {2}")]
         BlobOpenFailed(String, String, Arc<IoError>),
         #[error("blob missing: {0}/{1}")]
@@ -669,6 +671,10 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// A blob reopened within a run has the same durability guarantee. Opening
+    /// waits for outstanding operations from the previous open to finish and
+    /// ensures that any data readable when it returns is crash-durable.
+    ///
     /// # Cancellation
     ///
     /// Dropping an operation's future does not guarantee cancellation: the
@@ -707,10 +713,20 @@ stability_scope!(BETA {
         /// Open an existing blob in a given partition or create a new one, returning
         /// the blob and its length.
         ///
-        /// Multiple instances of the same blob can be opened concurrently, however,
-        /// writing to the same blob concurrently may lead to undefined behavior.
+        /// # Uniqueness
+        ///
+        /// Only one handle can be opened for a blob at a time. Use an [Arc] to share the
+        /// handle, and drop all owners before reopening the blob.
+        ///
+        /// An otherwise valid open returns [`Error::BlobAlreadyOpen`] if a handle from an earlier
+        /// open of the blob is still alive and the blob has not been removed since.
+        ///
+        /// # Durability
         ///
         /// An Ok result indicates the blob is durably created (or already exists).
+        ///
+        /// A runtime may retain a durability failure across logical opens. Later opens
+        /// can return that failure even after every handle has been dropped.
         ///
         /// # Versions
         ///
@@ -857,23 +873,21 @@ stability_scope!(BETA {
     /// To support blob implementations that enable concurrent reads and
     /// writes, blobs are responsible for maintaining synchronization.
     ///
-    /// Cloning a blob is similar to wrapping a single file descriptor in
-    /// a lock whereas opening a new blob (of the same name) is similar to
-    /// opening a new file descriptor. If multiple blobs are opened with the same
-    /// name, they are not expected to coordinate access to underlying storage
-    /// and writing to both is undefined behavior.
+    /// A blob represents one open. Opening it again while it is alive fails unless the
+    /// blob was removed since, see [`Storage::open_versioned`]. Wrap the blob in an [Arc]
+    /// to share access to that open.
     ///
-    /// When a blob is dropped, any unsynced changes may be discarded. Implementations
-    /// may attempt to sync during drop but errors will go unhandled. Call `sync`
-    /// before dropping to ensure all changes are durably persisted.
+    /// When a blob is dropped, any unsynced changes may be discarded. Dropping
+    /// does not synchronize the blob. Call [`Blob::sync`] before dropping to
+    /// ensure all changes are durably persisted.
     ///
     /// # Durability
     ///
-    /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
+    /// After a crash, a write not covered by a completed [`Blob::sync`] may be torn: any
     /// subset of its bytes may be durable. Bytes outside the written range remain
     /// unchanged.
     #[allow(clippy::len_without_is_empty)]
-    pub trait Blob: Clone + Send + Sync + 'static {
+    pub trait Blob: Send + Sync + 'static {
         /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///
         /// Returns the same buffers with their chunk layout preserved.
@@ -915,15 +929,57 @@ stability_scope!(BETA {
         /// If the length is less than the current length, the blob is resized.
         fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Ensure all pending data is durably persisted.
+        /// Make every write and resize that completed before this call durable.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Request that all pending data is durably persisted.
+        /// Request that every write and resize that completed before this call is durable.
         ///
         /// Awaiting this future waits until the runtime accepts responsibility for
         /// the sync. It continues even if the returned [`Handle`] is dropped.
         /// Awaiting that handle waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
+    }
+
+    impl<B: Blob> Blob for Arc<B> {
+        fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send {
+            self.as_ref().read_at_buf(offset, len, bufs, options)
+        }
+
+        fn read_at(
+            &self,
+            offset: u64,
+            len: usize,
+            options: ReadOptions,
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send {
+            self.as_ref().read_at(offset, len, options)
+        }
+
+        fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+            options: WriteOptions,
+        ) -> impl Future<Output = Result<(), Error>> + Send {
+            self.as_ref().write_at(offset, bufs, options)
+        }
+
+        fn resize(&self, len: u64) -> impl Future<Output = Result<(), Error>> + Send {
+            self.as_ref().resize(len)
+        }
+
+        fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send {
+            self.as_ref().sync()
+        }
+
+        fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send {
+            self.as_ref().start_sync()
+        }
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
@@ -1548,6 +1604,99 @@ mod tests {
         all(target_os = "linux", feature = "iouring"),
         case::iouring(iouring::Runner::default())
     )]
+    fn test_duplicate_open_returns_error<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Storage,
+    {
+        runner.start(|context| async move {
+            // Cloning the Arc shares one open. A second open fails while that open is alive.
+            let partition = "duplicate_open";
+            let name = b"blob";
+            let (first, _) = context.open(partition, name).await.unwrap();
+            let first = Arc::new(first);
+            first
+                .write_at(0, b"old", WriteOptions::default())
+                .await
+                .unwrap();
+            let retained = Arc::clone(&first);
+            assert!(matches!(
+                context.open(partition, name).await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == partition && n == "626c6f62"
+            ));
+
+            // Dropping the original owner leaves the clone holding the open. `open_versioned`
+            // still fails. The clone reads the unsynced write and syncs new contents.
+            drop(first);
+            assert!(matches!(
+                context.open_versioned(
+                    partition, name, DEFAULT_BLOB_VERSION..=DEFAULT_BLOB_VERSION
+                ).await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == partition && n == "626c6f62"
+            ));
+            assert_eq!(
+                retained
+                    .read_at(0, 3, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"old".as_slice()
+            );
+            retained
+                .write_at(0, b"new", WriteOptions::default())
+                .await
+                .unwrap();
+            retained.sync().await.unwrap();
+            drop(retained);
+
+            // The final owner's drop permits reopening the synchronized contents.
+            let (old, size) = context.open(partition, name).await.unwrap();
+            assert_eq!(size, 3);
+            assert_eq!(
+                old.read_at(0, 3, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"new".as_slice()
+            );
+
+            // Removal permits a replacement while the old handle remains alive. Dropping that
+            // old handle must not release the replacement's registration.
+            context.remove(partition, Some(name)).await.unwrap();
+            let (current, size) = context.open(partition, name).await.unwrap();
+            assert_eq!(size, 0);
+            drop(old);
+            assert!(matches!(
+                context.open(partition, name).await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == partition && n == "626c6f62"
+            ));
+            current
+                .write_at(0, b"replacement", WriteOptions::default())
+                .await
+                .unwrap();
+            current.sync().await.unwrap();
+            drop(current);
+
+            // Reopening the replacement must return its own durable contents.
+            let (reopened, size) = context.open(partition, name).await.unwrap();
+            assert_eq!(size, 11);
+            assert_eq!(
+                reopened
+                    .read_at(0, 11, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"replacement".as_slice()
+            );
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_storage_operations<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1590,6 +1739,7 @@ mod tests {
             assert!(blobs.contains(&name.to_vec()));
 
             // Reopen the blob
+            drop(blob);
             let (blob, len) = context
                 .open(partition, name)
                 .await
@@ -1724,6 +1874,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after write");
 
             // Re-open and check length
+            drop(blob);
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, data.len() as u64);
 
@@ -1735,6 +1886,7 @@ mod tests {
             blob.sync().await.expect("Failed to sync after resize");
 
             // Re-open and check length again
+            drop(blob);
             let (blob, len) = context.open(partition, name).await.unwrap();
             assert_eq!(len, new_len);
 
@@ -1757,6 +1909,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Reopen to check truncation
+            drop(blob);
             let (blob, size) = context.open(partition, name).await.unwrap();
             assert_eq!(size, data.len() as u64);
 
@@ -1870,7 +2023,7 @@ mod tests {
         all(target_os = "linux", feature = "iouring"),
         case::iouring(iouring::Runner::default())
     )]
-    fn test_blob_clone_and_concurrent_read<R: Runner>(#[case] runner: R)
+    fn test_blob_shared_concurrent_read<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Storage + Metrics,
     {
@@ -1883,6 +2036,7 @@ mod tests {
                 .open(partition, name)
                 .await
                 .expect("Failed to open blob");
+            let blob = Arc::new(blob);
 
             // Write data to the blob
             let data = b"Hello, Storage!";
@@ -1893,7 +2047,7 @@ mod tests {
             // Sync the blob
             blob.sync().await.expect("Failed to sync blob");
 
-            // Read data from the blob in clone
+            // Shared owners issue concurrent reads through the same open.
             let check1 = context.child("check1").spawn({
                 let blob = blob.clone();
                 let data_len = data.len();
