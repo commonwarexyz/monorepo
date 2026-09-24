@@ -426,14 +426,10 @@ where
 
     /// Remove the active request matching `id` and `peer`.
     fn pop_request(&mut self, id: ID, peer: &P) -> Option<ActiveRequest<P, Key>> {
-        let Entry::Occupied(entry) = self.requests.entry(id) else {
-            return None;
+        let req = match self.requests.entry(id) {
+            Entry::Occupied(entry) if &entry.get().peer == peer => entry.remove(),
+            _ => return None,
         };
-        if &entry.get().peer != peer {
-            return None;
-        }
-
-        let req = entry.remove();
         self.active.remove(&id);
         self.key_to_id.remove(&req.key);
         Some(req)
@@ -1079,20 +1075,13 @@ mod tests {
             add_test_active(&mut fetcher, 100, MockKey(10));
 
             assert!(fetcher.pop_response(999, &peer).is_none());
-            let other_peer = PrivateKey::from_seed(2).public_key();
-            assert!(fetcher.pop_response(100, &other_peer).is_none());
             assert_eq!(fetcher.len_active(), 1);
-            assert!(fetcher.active.contains(&100));
-            assert_eq!(fetcher.key_to_id.get(&MockKey(10)), Some(&100));
 
             fetcher.context.sleep(Duration::from_millis(20)).await;
             let (key, elapsed) = fetcher.pop_response(100, &peer).expect("matching response");
             assert_eq!(key, MockKey(10));
             assert_eq!(elapsed, Duration::from_millis(20));
             assert_eq!(fetcher.len_active(), 0);
-            assert!(fetcher.active.is_empty());
-            assert!(!fetcher.key_to_id.contains_key(&key));
-            assert!(fetcher.pop_response(100, &peer).is_none());
 
             // Receiving bytes is not enough to score the peer: the consumer may
             // decide the key became obsolete before inspecting the response.
@@ -1101,6 +1090,33 @@ mod tests {
             fetcher.record_response(&peer, elapsed, 1);
             let observed = throughput(Duration::from_millis(20), 1);
             assert_eq!(fetcher.participants.get(&peer), Some(Reverse(observed / 2)));
+        });
+    }
+
+    #[test]
+    fn test_pop_response_requires_matching_peer() {
+        let runner = Runner::default();
+        runner.start(|context| async {
+            let mut fetcher = create_test_fetcher::<FailMockSender>(context);
+            let peer = PrivateKey::from_seed(1).public_key();
+            let other_peer = PrivateKey::from_seed(2).public_key();
+            add_test_active(&mut fetcher, 100, MockKey(10));
+
+            // A response from another peer leaves the request active
+            assert!(fetcher.pop_response(100, &other_peer).is_none());
+            assert_eq!(fetcher.len_active(), 1);
+            assert!(fetcher.active.contains(&100));
+            assert_eq!(fetcher.key_to_id.get(&MockKey(10)), Some(&100));
+
+            // The requested peer's response removes it from every map
+            let (key, _) = fetcher.pop_response(100, &peer).expect("matching response");
+            assert_eq!(key, MockKey(10));
+            assert_eq!(fetcher.len_active(), 0);
+            assert!(fetcher.active.is_empty());
+            assert!(!fetcher.key_to_id.contains_key(&key));
+
+            // A repeated response is ignored
+            assert!(fetcher.pop_response(100, &peer).is_none());
         });
     }
 

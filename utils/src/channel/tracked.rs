@@ -112,7 +112,7 @@ struct State<B> {
     next: u64,
     watermark: u64,
     batches: HashMap<B, usize>,
-    /// Whether each sequence after `watermark` has been delivered, oldest first.
+    /// `pending[i]` is whether sequence `watermark + 1 + i` has been delivered.
     pending: VecDeque<bool>,
 }
 

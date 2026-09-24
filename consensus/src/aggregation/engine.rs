@@ -956,10 +956,10 @@ impl<
 
     /// Appends an activity to the journal.
     async fn record(mut self, activity: &Activity<P::Scheme, D>) -> Self {
-        let height = match *activity {
-            Activity::Ack(ref ack) => ack.item.height,
-            Activity::Certified(ref certificate) => certificate.item.height,
-            Activity::Tip(h) => h,
+        let height = match activity {
+            Activity::Ack(ack) => ack.item.height,
+            Activity::Certified(certificate) => certificate.item.height,
+            Activity::Tip(h) => *h,
         };
         let section = self.get_journal_section(height);
         rebind(&mut self.journal, |journal| {

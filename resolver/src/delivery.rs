@@ -252,12 +252,12 @@ where
         context: Context,
         value: Con::Value,
     ) {
+        let entry = self.entries.get_mut(&delivery.key).expect("delivery entry");
         let generation = self.next_generation;
         self.next_generation = self
             .next_generation
             .checked_add(1)
             .expect("delivery generation overflow");
-        let key = delivery.key.clone();
         let completed = delivery.clone();
         let mut consumer = self.consumer.clone();
         let receiver = consumer.deliver(delivery, value);
@@ -278,7 +278,6 @@ where
                 },
             }
         });
-        let entry = self.entries.get_mut(&key).expect("delivery entry");
         assert!(
             entry
                 .delivery
