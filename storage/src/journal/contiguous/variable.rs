@@ -1606,8 +1606,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             }
         }
 
-        // Release excess capacity for batches that callers may retain. Compact before building
-        // PreparedAppend so it can be constructed directly in the caller's return slot.
+        // Deferred batches (COMPACT) may be held across unrelated work, so shrink a buffer
+        // that compression left mostly unused (see PREPARED_SPARE_LIMIT). Do it here, while
+        // the buffer is still a local. Doing it on the returned PreparedAppend in
+        // Journal::prepare_append adds a struct copy to every call, including uncompressed ones.
         if COMPACT && self.compression.is_some() {
             let (len, capacity) = (encoded.len(), encoded.capacity());
             if capacity - len > PREPARED_SPARE_LIMIT && len <= capacity / 4 {
