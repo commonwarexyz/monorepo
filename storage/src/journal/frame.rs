@@ -238,7 +238,7 @@ pub(super) fn compress_into(level: u8, data: &[u8], buf: &mut Vec<u8>) -> Result
 /// Existing contents of `buf` are preserved; this allows callers to accumulate
 /// multiple encoded items into a single buffer.
 ///
-/// Returns the payload length, excluding the size prefix.
+/// Returns the payload length, excluding the length prefix.
 pub(super) fn encode_frame_into<V: Codec>(
     compression: Option<u8>,
     item: &V,
@@ -293,9 +293,9 @@ fn encode_compressed_frame_into<V: Codec>(
 /// An uncompressed item with its length prefix, sized and validated before encoding.
 pub(super) struct UncompressedFrame<'a, V> {
     item: &'a V,
-    /// Encoded item length, excluding the size prefix.
+    /// Encoded item length, excluding the length prefix.
     pub(super) item_len: u32,
-    /// Encoded frame length, including the size prefix.
+    /// Encoded frame length, including the length prefix.
     frame_len: usize,
 }
 
@@ -493,7 +493,7 @@ mod tests {
             }
         }
 
-        // Cover each side of the one-, two-, and three-byte size prefix boundaries.
+        // Cover empty payloads and both sides of the transitions to two and three prefix bytes.
         for len in [0, 127, 128, 16_383, 16_384] {
             let bytes = vec![7; len];
             let item = Counted {

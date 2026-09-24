@@ -115,15 +115,18 @@ impl Buffer {
     ///
     /// Returns `None` without encoding or changing the buffer if the value does not fit.
     pub(super) fn try_append_value<T: EncodeSize + Write>(&mut self, value: &T) -> Option<u64> {
+        // Enforce the logical flush threshold independently of the tail's backing capacity.
         let size = value.encode_size();
         if size > self.capacity.checked_sub(self.len)? {
             return None;
         }
+
         let offset = self.size();
         let spare = self.tail_spare();
         if size <= spare {
-            // Write to the tail directly to keep its specialized copies. The tail cannot grow,
-            // so a mis-sized encoder panics at its capacity or at the length check.
+            // Write to the tail without a Limit so IoBufMut's put_slice and put_bytes overrides
+            // apply. The tail cannot grow, so a mis-sized encoder panics at the tail's capacity
+            // or at the length check.
             let before = self.tail.len();
             value.write(&mut self.tail);
             assert_eq!(

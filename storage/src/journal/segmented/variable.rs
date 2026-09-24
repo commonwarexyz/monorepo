@@ -190,8 +190,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         read_frame_at(blob, offset, cfg, compressed).await
     }
 
-    /// Returns the writer for `section`, requiring a reopened nonempty section to finish replay
-    /// first.
+    /// Returns the writer for `section`, creating it if absent.
     async fn append_writer(&mut self, section: u64) -> Result<&mut PagedRecovery<E::Blob>, Error> {
         assert!(
             !self.unrecovered.contains(&section),
@@ -204,6 +203,7 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
     async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
         // Frames are sized and validated before the section is created.
         let (offset, item_len) = if self.compression.is_some() {
+            // Buffer compressed output to determine its length before appending the frame.
             let mut buf = Vec::new();
             let item_len = encode_frame_into(self.compression, item, &mut buf)?;
             let blob = self.append_writer(section).await?;
@@ -3773,6 +3773,8 @@ mod tests {
             (journal, fallback_offset, fallback_len) = journal.append(1, &fallback).await.unwrap();
             assert_eq!(fallback_offset, 2048);
             assert_eq!(fallback_len, 128);
+
+            // Reopen and replay the section to verify both append paths on disk.
             journal = journal.sync(1).await.unwrap();
             drop(journal);
 

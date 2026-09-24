@@ -39,15 +39,18 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                     .await
                     .unwrap();
 
-                    // Warm the tip allocation outside the timed region. Neither these appends
-                    // nor the timed appends fill the tip.
+                    // Create section 0 and its first tip page outside the timed region.
                     (journal, _, _) = journal.append(0, &item).await.unwrap();
+
+                    // All frames together stay below the flush threshold, so the timed appends
+                    // perform no I/O.
                     let start = Instant::now();
                     for _ in 0..items {
                         (journal, _, _) = journal.append(0, black_box(&item)).await.unwrap();
                     }
                     black_box(&journal);
                     elapsed += start.elapsed();
+
                     journal.destroy().await.unwrap();
                 }
                 elapsed

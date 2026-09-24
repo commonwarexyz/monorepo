@@ -1433,6 +1433,7 @@ mod tests {
 
     #[test_traced]
     fn test_append_variable_value_encodes_in_place() {
+        // Record encoder calls and the first writable address to detect staging copies.
         struct Value {
             size: usize,
             size_calls: Cell<usize>,
@@ -1497,6 +1498,7 @@ mod tests {
             assert_eq!(value.writes.get(), 5);
             assert_eq!(writer.size(), 64);
 
+            // Reopen the blob to verify that directly encoded bytes persist.
             writer.sync().await.unwrap();
             drop(writer);
             let (blob, size) = context.open("variable_value", b"blob").await.unwrap();
