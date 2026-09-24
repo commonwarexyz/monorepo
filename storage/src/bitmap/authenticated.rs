@@ -206,8 +206,6 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
 
     /// Verify whether `proof` proves that the `chunk` containing the given bit belongs to the
     /// bitmap corresponding to `root`.
-    ///
-    /// `proof.leaves` is the bitmap's total bit length, which `root` authenticates.
     pub fn verify_bit_inclusion(
         hasher: &impl Hasher<mmr::Family, Digest = D>,
         proof: &Proof<D>,
@@ -230,7 +228,7 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
             return false;
         }
 
-        // Proof indices need not fit usize, even on 32-bit platforms.
+        // The chunk index should always be < MAX_LEAVES.
         let chunked_leaves = Location::new(bit_len / Self::CHUNK_SIZE_BITS);
         let mut mmr_proof = Proof {
             leaves: chunked_leaves,
