@@ -117,10 +117,9 @@
 //!
 //! # Compression
 //!
-//! [Archive] supports compressing data before storing it on disk. This can be enabled by setting
-//! the `compression` field in the `Config` struct to a valid `zstd` compression level. This setting
-//! can be changed between initializations of [Archive], however, it must remain populated if any
-//! data was written with compression enabled.
+//! [Archive] supports optional zstd compression through [Config::compression]. Keep the choice
+//! between `None` and `Some(_)` fixed while stored values are retained. Only the compression level
+//! may change between initializations when compression is enabled.
 //!
 //! # Querying for Gaps
 //!

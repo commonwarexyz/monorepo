@@ -27,15 +27,18 @@
 //! 5. Decode value
 
 use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
-use crate::{Context, journal::Error};
+use crate::{
+    Context,
+    journal::{Error, frame},
+};
 use bytes::Bytes;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::{Blob as _, ReadOptions, Storage, WriteOptions};
 use commonware_runtime::{BufMut, Error as RError, Handle, IoBuf, IoBufMut};
-use std::{collections::BTreeMap, io::Cursor, num::NonZeroUsize};
-use zstd::{bulk::compress, decode_all};
+use std::{collections::BTreeMap, num::NonZeroUsize};
+use zstd::zstd_safe::compress_bound;
 
 /// Physical overhead appended to every frame: the CRC32 of the frame's data.
 pub(crate) const CHECKSUM_SIZE: usize = crc32::Digest::SIZE;
@@ -46,7 +49,10 @@ pub struct Config<C> {
     /// The partition to use for storing blobs.
     pub partition: String,
 
-    /// Optional compression level (using `zstd`) to apply to data before storing.
+    /// Optional zstd compression level for stored values.
+    ///
+    /// Keep the choice between `None` and `Some(_)` fixed while stored values are retained.
+    /// Only the compression level may change between initializations when compression is enabled.
     pub compression: Option<u8>,
 
     /// The codec configuration to use for encoding and decoding items.
@@ -92,8 +98,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         let buf = if let Some(level) = self.compression {
             // Compressed: encode first, then compress, then append checksum
             let encoded = value.encode();
-            let mut compressed =
-                compress(&encoded, level as i32).map_err(|_| Error::CompressionFailed)?;
+            let mut compressed = Vec::with_capacity(compress_bound(encoded.len()) + CHECKSUM_SIZE);
+            frame::compress_into(level, &encoded, &mut compressed)?;
             let checksum = Crc32::checksum(&compressed);
             compressed.put_u32(checksum);
             IoBuf::from(compressed)
@@ -152,8 +158,7 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 
         // Decompress if needed and decode
         let value = if self.compression.is_some() {
-            let decompressed =
-                decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
+            let decompressed = frame::decompress(compressed_data)?;
             V::decode_cfg(decompressed, &self.codec_config).map_err(Error::Codec)?
         } else {
             // Share one Bytes owner instead of boxing the pooled IoBuf owner for every field
@@ -495,9 +500,11 @@ pub async fn corrupt_frame(
 mod tests {
     use super::*;
     use crate::utils::codec::MisreportedSize;
+    use commonware_codec::Encode as _;
     use commonware_macros::test_traced;
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{NZUsize, probability};
+    use rand::Rng as _;
 
     impl<E: crate::Context, V: CodecShared> Glob<E, V> {
         pub(in super::super) fn test_configuration(&self) -> (E, Config<V::Cfg>) {
@@ -674,6 +681,64 @@ mod tests {
             // Get the value back
             let retrieved = glob.get(1, offset, size).await.expect("Failed to get");
             assert_eq!(retrieved, value);
+
+            glob.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_glob_compressed_entries_match_reference_format() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: Some(19),
+                codec_config: ((..).into(), ()),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut glob: Glob<_, Vec<u8>> = Glob::init(context.child("first"), cfg.clone())
+                .await
+                .expect("Failed to init glob");
+
+            // Random bytes stay larger than the write buffer after compression, so that entry
+            // is written through to the blob.
+            let mut values: Vec<Vec<u8>> = [0usize, 1, 127, 4096, 70_000]
+                .into_iter()
+                .map(|len| (0..len).map(|i| (i % 7) as u8).collect())
+                .collect();
+            let mut random = vec![0; 4096];
+            context.fill_bytes(&mut random);
+            values.push(random);
+
+            let mut entries = Vec::new();
+            for value in values {
+                let offset;
+                let size;
+                (glob, offset, size) = glob.append(1, &value).await.expect("Failed to append");
+
+                let mut expected = zstd::bulk::compress(&value.encode(), 19).unwrap();
+                let checksum = Crc32::checksum(&expected);
+                expected.put_u32(checksum);
+                let writer = glob.0.manager.get(1).unwrap().unwrap();
+                let stored = writer.read_at(offset, size as usize).await.unwrap();
+                assert_eq!(stored.coalesce().as_ref(), expected.as_slice());
+                assert_eq!(glob.get(1, offset, size).await.unwrap(), value);
+                entries.push((offset, size, expected, value));
+            }
+            assert!(entries.last().unwrap().1 > 1024);
+            let glob = glob.sync(1).await.expect("Failed to sync");
+            drop(glob);
+
+            // Persisted entries keep the same bytes and values.
+            let glob: Glob<_, Vec<u8>> = Glob::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to reinit glob");
+            let writer = glob.0.manager.get(1).unwrap().unwrap();
+            for (offset, size, expected, value) in &entries {
+                let stored = writer.read_at(*offset, *size as usize).await.unwrap();
+                assert_eq!(stored.coalesce().as_ref(), expected.as_slice());
+                assert_eq!(glob.get(1, *offset, *size).await.unwrap(), *value);
+            }
 
             glob.destroy().await.expect("Failed to destroy");
         });
