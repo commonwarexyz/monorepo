@@ -26,7 +26,9 @@
 //! 4. Decompress remaining bytes if compression enabled
 //! 5. Decode value
 
-use super::manager::{Config as ManagerConfig, Manager, WriteFactory, stored_names};
+#[commonware_macros::stability(ALPHA)]
+use super::manager::stored_names;
+use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
 use crate::{
     Context,
     journal::{Error, frame},
@@ -36,8 +38,16 @@ use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{Crc32, crc32};
 #[cfg(any(test, feature = "test-utils"))]
 use commonware_runtime::WriteOptions;
-use commonware_runtime::{Blob, BufMut, Error as RError, Handle, ReadOptions, Storage};
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc};
+// Shared by the ALPHA reader and the test-only corrupt_frame helper.
+#[cfg_attr(
+    not(any(test, feature = "test-utils")),
+    commonware_macros::stability(ALPHA)
+)]
+use commonware_runtime::{Blob, ReadOptions, Storage};
+use commonware_runtime::{BufMut, Error as RError, Handle};
+use std::{collections::BTreeMap, num::NonZeroUsize};
+#[commonware_macros::stability(ALPHA)]
+use std::{iter, ops::Range, sync::Arc};
 use zstd::zstd_safe::compress_bound;
 
 /// Physical overhead appended to every frame: the CRC32 of the frame's data.
@@ -62,6 +72,7 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
+/// Verify and decode one frame (see the module's format section).
 fn decode<V: Codec>(
     buf: impl AsRef<[u8]> + Into<Bytes>,
     compressed: bool,
@@ -90,6 +101,35 @@ fn decode<V: Codec>(
     }
 }
 
+/// Split `locations` into consecutive runs of byte-adjacent frames spanning at most `max_bytes`.
+///
+/// A frame larger than `max_bytes` forms its own run. Every location must already be range
+/// checked so that its end does not overflow.
+#[commonware_macros::stability(ALPHA)]
+fn coalesced_runs(
+    locations: &[(u64, u32)],
+    max_bytes: NonZeroUsize,
+) -> impl Iterator<Item = Range<usize>> + '_ {
+    let max_bytes = max_bytes.get() as u64;
+    let mut start = 0;
+    iter::from_fn(move || {
+        let (offset, size) = *locations.get(start)?;
+        let mut byte_end = offset + u64::from(size);
+        let mut end = start + 1;
+        while let Some(&(next_offset, next_size)) = locations.get(end) {
+            let next_end = next_offset + u64::from(next_size);
+            if next_offset != byte_end || next_end - offset > max_bytes {
+                break;
+            }
+            byte_end = next_end;
+            end += 1;
+        }
+        let run = start..end;
+        start = end;
+        Some(run)
+    })
+}
+
 /// An owned read-only view of one Glob section with a fixed byte extent.
 ///
 /// Appends do not extend this reader's bounds. Dropping the glob or removing its section does
@@ -97,6 +137,7 @@ fn decode<V: Codec>(
 /// unspecified; callers must finish those reads before reusing their locations.
 ///
 /// The reader shares the section's open blob handle; see [Storage::open] for handle uniqueness.
+#[commonware_macros::stability(ALPHA)]
 pub struct Reader<B: Blob, V: Codec> {
     blob: Arc<B>,
     size: u64,
@@ -104,6 +145,7 @@ pub struct Reader<B: Blob, V: Codec> {
     codec_config: V::Cfg,
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl<B: Blob, V: Codec> Clone for Reader<B, V> {
     fn clone(&self) -> Self {
         Self {
@@ -115,6 +157,7 @@ impl<B: Blob, V: Codec> Clone for Reader<B, V> {
     }
 }
 
+#[commonware_macros::stability(ALPHA)]
 impl<B: Blob, V: CodecShared> Reader<B, V> {
     /// Open an existing section without recovering, writing, or syncing its contents.
     ///
@@ -194,25 +237,12 @@ impl<B: Blob, V: CodecShared> Reader<B, V> {
         }
 
         let mut values = Vec::with_capacity(locations.len());
-        let mut start = 0;
-        while start < locations.len() {
-            let (offset, size) = locations[start];
-            let mut byte_end = offset + u64::from(size);
-            let mut end = start + 1;
-            while end < locations.len() {
-                let (next_offset, next_size) = locations[end];
-                if next_offset != byte_end {
-                    break;
-                }
-                let next_end = next_offset + u64::from(next_size);
-                if next_end - offset > max_batch_bytes.get() as u64 {
-                    break;
-                }
-                byte_end = next_end;
-                end += 1;
-            }
-
-            let len = usize::try_from(byte_end - offset).map_err(|_| Error::SizeOverflow)?;
+        for run in coalesced_runs(locations, max_batch_bytes) {
+            let frames = &locations[run];
+            let (offset, _) = frames[0];
+            let (last_offset, last_size) = frames[frames.len() - 1];
+            let len = usize::try_from(last_offset + u64::from(last_size) - offset)
+                .map_err(|_| Error::SizeOverflow)?;
             let buf = self
                 .blob
                 .read_at(offset, len, ReadOptions::default())
@@ -222,7 +252,7 @@ impl<B: Blob, V: CodecShared> Reader<B, V> {
             // Share one Bytes owner across the frames in this physical read.
             let buf = Bytes::from(buf);
             let mut cursor = 0;
-            for &(_, size) in &locations[start..end] {
+            for &(_, size) in frames {
                 let next = cursor + size as usize;
                 values.push(decode(
                     buf.slice(cursor..next),
@@ -231,7 +261,6 @@ impl<B: Blob, V: CodecShared> Reader<B, V> {
                 )?);
                 cursor = next;
             }
-            start = end;
         }
         Ok(values)
     }
@@ -332,6 +361,21 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 .expect("checksum is 4 bytes"),
         );
         Ok(Crc32::checksum(&buf.as_ref()[..data_len]) == stored_checksum)
+    }
+
+    /// See [Glob::capture].
+    #[commonware_macros::stability(ALPHA)]
+    fn capture(&self, section: u64) -> Result<Reader<E::Blob, V>, Error> {
+        let writer = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+        Ok(Reader {
+            blob: writer.blob().clone(),
+            size: writer.size(),
+            compressed: self.compression.is_some(),
+            codec_config: self.codec_config.clone(),
+        })
     }
 
     /// See [Glob::inject].
@@ -456,37 +500,26 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     ///
     /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
     /// [Error::SectionOutOfRange] for a missing section.
+    #[commonware_macros::stability(ALPHA)]
     pub async fn snapshot(self, section: u64) -> Result<(Self, Reader<E::Blob, V>), Error> {
-        let (glob, handle, reader) = self.start_sync_with_snapshot(section).await?;
+        let (glob, handle) = self.start_sync(section).await?;
+        let reader = glob.capture(section)?;
         handle.await.map_err(Error::Runtime)?;
         Ok((glob, reader))
     }
 
-    /// Starts a durability cut and captures an owned reader of its flushed extent.
+    /// Capture an owned reader of the current extent of `section` without I/O.
     ///
-    /// The reader is usable before durability completes. An error reported by the returned
-    /// handle is fatal to the glob: the caller must stop using the returned glob.
-    pub(super) async fn start_sync_with_snapshot(
-        mut self,
-        section: u64,
-    ) -> Result<(Self, Handle<()>, Reader<E::Blob, V>), Error> {
-        self.0
-            .manager
-            .get(section)?
-            .ok_or(Error::SectionOutOfRange(section))?;
-        let handle = self.0.manager.start_sync(section).await?;
-        let writer = self
-            .0
-            .manager
-            .get(section)?
-            .expect("section sync was started");
-        let reader = Reader {
-            blob: writer.blob.clone(),
-            size: writer.size(),
-            compressed: self.0.compression.is_some(),
-            codec_config: self.0.codec_config.clone(),
-        };
-        Ok((self, handle, reader))
+    /// Call after a flush of `section` (such as [Glob::start_sync]) and before any further append
+    /// to it: the reader reads the blob directly, so buffered bytes count toward its extent but
+    /// are unreadable. The reader is usable before the sync completes; if the sync handle fails,
+    /// discard the reader along with the glob.
+    ///
+    /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
+    /// [Error::SectionOutOfRange] for a missing section.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) fn capture(&self, section: u64) -> Result<Reader<E::Blob, V>, Error> {
+        self.0.capture(section)
     }
 
     /// Inject arbitrary bytes at `offset` in `section`, bypassing entry framing.
@@ -680,7 +713,10 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Runner, Supervisor as _, deterministic,
-        mocks::{DelayedSyncContext, PendingSyncs, fail_pending_syncs, release_pending_syncs},
+        mocks::{
+            DelayedSyncContext, PendingSyncs, RecordingContext, WriteFaultContext, WriteFaults,
+            fail_pending_syncs, release_pending_syncs,
+        },
     };
     use commonware_utils::{NZUsize, probability};
     use rand::Rng as _;
@@ -767,7 +803,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_with_snapshot_exposes_one_pending_cut() {
+    fn test_capture_after_start_sync() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
@@ -776,15 +812,18 @@ mod tests {
             };
             let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
             let (glob, offset, size) = glob.append(0, &42).await.unwrap();
-            let (glob, first, reader) = glob.start_sync_with_snapshot(0).await.unwrap();
+            let (glob, first) = glob.start_sync(0).await.unwrap();
+            let reader = glob.capture(0).unwrap();
 
             assert_eq!(pending.starts(), 1);
             assert_eq!(pending.completions(), 0);
             assert_eq!(reader.get(offset, size).await.unwrap(), 42);
 
-            let (glob, second, repeated) = glob.start_sync_with_snapshot(0).await.unwrap();
+            let (glob, second) = glob.start_sync(0).await.unwrap();
+            let repeated = glob.capture(0).unwrap();
             assert_eq!(pending.starts(), 1, "the pending cut should be reused");
             assert_eq!(repeated.size(), reader.size());
+            assert!(matches!(glob.capture(1), Err(Error::SectionOutOfRange(1))));
 
             release_pending_syncs(&pending);
             first.await.unwrap();
@@ -801,7 +840,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_with_snapshot_handle_error_is_fatal() {
+    fn test_capture_keeps_sync_failure() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             let context = DelayedSyncContext {
@@ -810,7 +849,8 @@ mod tests {
             };
             let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
             let (glob, _, _) = glob.append(0, &42).await.unwrap();
-            let (glob, handle, _) = glob.start_sync_with_snapshot(0).await.unwrap();
+            let (glob, handle) = glob.start_sync(0).await.unwrap();
+            let _reader = glob.capture(0).unwrap();
 
             fail_pending_syncs(&pending);
             assert!(matches!(handle.await, Err(RError::Io(_))));
@@ -819,9 +859,23 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_capture_pruned_section() {
+        deterministic::Runner::default().start(|context| async move {
+            let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
+            let (glob, _, _) = glob.append(1, &42).await.unwrap();
+            let (glob, pruned) = glob.prune(2).await.unwrap();
+            assert!(pruned);
+            assert!(matches!(
+                glob.capture(1),
+                Err(Error::AlreadyPrunedToSection(2))
+            ));
+        });
+    }
+
+    #[test_traced]
     fn test_snapshot_bounds_before_io() {
         deterministic::Runner::default().start(|context| async move {
-            let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
+            let (context, recordings) = RecordingContext::new(context);
             let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
             let (glob, _, size) = glob.append(0, &42).await.unwrap();
             let (glob, reader) = glob.snapshot(0).await.unwrap();
@@ -860,8 +914,8 @@ mod tests {
     #[test_traced]
     fn test_snapshot_flush_failure() {
         deterministic::Runner::default().start(|context| async move {
-            let faults = commonware_runtime::mocks::WriteFaults::default();
-            let context = commonware_runtime::mocks::WriteFaultContext {
+            let faults = WriteFaults::default();
+            let context = WriteFaultContext {
                 inner: context,
                 faults: faults.clone(),
             };
@@ -883,15 +937,13 @@ mod tests {
             let (glob, offset, size) = glob.append(1, &42).await.unwrap();
             drop(glob.sync(1).await.unwrap());
 
-            let pending = commonware_runtime::mocks::PendingSyncs::default();
+            let pending = PendingSyncs::default();
             pending.arm();
             pending.unblock();
-            let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(
-                commonware_runtime::mocks::DelayedSyncContext {
-                    inner: context.child("reader"),
-                    pending: pending.clone(),
-                },
-            );
+            let (context, recordings) = RecordingContext::new(DelayedSyncContext {
+                inner: context.child("reader"),
+                pending: pending.clone(),
+            });
             assert!(matches!(
                 Reader::<_, u32>::open(&context, cfg.clone(), 2).await,
                 Err(Error::SectionOutOfRange(2))
@@ -914,8 +966,7 @@ mod tests {
     fn test_reader_get_many_coalesces_with_budget() {
         for compression in [None, Some(3)] {
             deterministic::Runner::default().start(|context| async move {
-                let (context, recordings) =
-                    commonware_runtime::mocks::RecordingContext::new(context);
+                let (context, recordings) = RecordingContext::new(context);
                 let cfg = Config {
                     compression,
                     ..test_cfg()
@@ -955,10 +1006,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_coalesced_runs() {
+        let locations = [(0, 8), (8, 8), (16, 8), (32, 8), (40, 64), (104, 8), (0, 8)];
+        let runs = |max: usize| {
+            coalesced_runs(&locations, NonZeroUsize::new(max).unwrap()).collect::<Vec<_>>()
+        };
+        assert_eq!(runs(usize::MAX), vec![0..3, 3..6, 6..7]);
+        assert_eq!(runs(16), vec![0..2, 2..3, 3..4, 4..5, 5..6, 6..7]);
+        assert_eq!(coalesced_runs(&[], NZUsize!(1)).count(), 0);
+    }
+
     #[test_traced]
     fn test_reader_get_many_rejects_ranges_before_io() {
         deterministic::Runner::default().start(|context| async move {
-            let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
+            let (context, recordings) = RecordingContext::new(context);
             let glob = Glob::<_, u32>::init(context, test_cfg()).await.unwrap();
             let (glob, offset, size) = glob.append(0, &42).await.unwrap();
             let (_, reader) = glob.snapshot(0).await.unwrap();
@@ -978,7 +1040,7 @@ mod tests {
     #[test_traced]
     fn test_reader_get_many_checks_each_frame() {
         deterministic::Runner::default().start(|context| async move {
-            let (context, recordings) = commonware_runtime::mocks::RecordingContext::new(context);
+            let (context, recordings) = RecordingContext::new(context);
             let cfg = test_cfg();
             let mut glob = Glob::<_, u32>::init(context.child("writer"), cfg.clone())
                 .await

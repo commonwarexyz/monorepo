@@ -19,7 +19,6 @@ use std::{
     future::Future,
     mem::take,
     num::{NonZeroU16, NonZeroUsize},
-    ops::{Deref, DerefMut},
     sync::Arc,
 };
 use tracing::debug;
@@ -128,48 +127,28 @@ impl<B: Blob> SectionBuffer for PagedRecovery<B> {
     }
 }
 
-/// A buffered writer over a shared blob handle, so owned readers can share the section's open.
-pub struct WriteBuffer<B: Blob> {
-    pub blob: Arc<B>,
-    writer: Write<Arc<B>>,
-}
-
-impl<B: Blob> Deref for WriteBuffer<B> {
-    type Target = Write<Arc<B>>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.writer
-    }
-}
-
-impl<B: Blob> DerefMut for WriteBuffer<B> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.writer
-    }
-}
-
 // Glob's recovery owner controls access to truncation for uncached sections.
-impl<B: Blob> SectionBuffer for WriteBuffer<B> {
+impl<B: Blob> SectionBuffer for Write<B> {
     fn size(&self) -> u64 {
-        self.writer.size()
+        Self::size(self)
     }
 
     async fn sync(&mut self) -> Result<(), RError> {
-        self.writer.sync().await
+        Self::sync(self).await
     }
 
     async fn start_sync(&mut self) -> Handle<()> {
-        self.writer.start_sync().await
+        Self::start_sync(self).await
     }
 
     async fn wait_for_sync(&mut self) -> Result<(), RError> {
-        self.writer.wait_for_sync().await
+        Self::wait_for_sync(self).await
     }
 
     async fn truncate(&mut self, len: u64) -> Result<(), RError> {
-        if len < self.writer.size() {
-            self.writer.resize(len).await?;
-            self.writer.sync().await?;
+        if len < self.size() {
+            self.resize(len).await?;
+            self.sync().await?;
         }
         Ok(())
     }
@@ -221,14 +200,10 @@ pub struct WriteFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for WriteFactory {
-    type Buffer = WriteBuffer<B>;
+    type Buffer = Write<Arc<B>>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        let blob = Arc::new(blob);
-        Ok(WriteBuffer {
-            writer: Write::new(blob.clone(), size, self.capacity, self.pool.clone()),
-            blob,
-        })
+        Ok(Write::new(Arc::new(blob), size, self.capacity, self.pool.clone()))
     }
 }
 
