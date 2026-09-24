@@ -41,27 +41,6 @@ impl<T: Attributable> Phase<T> {
     }
 }
 
-#[cfg(test)]
-impl<T: Attributable> Phase<T> {
-    fn insert(&mut self, vote: T) -> bool {
-        match self {
-            Self::Full(votes) => votes.insert(vote),
-            Self::Compacted => false,
-        }
-    }
-
-    const fn len(&self) -> usize {
-        match self {
-            Self::Full(votes) => votes.len(),
-            Self::Compacted => 0,
-        }
-    }
-
-    fn reset(&mut self, participants: usize) {
-        *self = Self::new(participants);
-    }
-}
-
 /// Tracks notarize/nullify/finalize votes for a view.
 ///
 /// Each vote type is stored in its own lazily allocated phase so a validator can
@@ -375,83 +354,6 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
 }
 
 #[cfg(test)]
-impl<S: Scheme, D: Digest> VoteTracker<S, D> {
-    fn clear_compacted(&mut self, cleared: u8) {
-        for flags in &mut self.compacted {
-            *flags &= !cleared;
-        }
-        if self.compacted.iter().all(|&flags| flags == 0) {
-            self.compacted = Vec::new();
-        }
-    }
-
-    /// Inserts a notarize vote if the signer has not already voted.
-    pub(super) fn insert_notarize(&mut self, vote: Notarize<S, D>) -> bool {
-        self.notarizes.insert(vote)
-    }
-
-    /// Inserts a nullify vote if the signer has not already voted.
-    pub(super) fn insert_nullify(&mut self, vote: Nullify<S>) -> bool {
-        self.nullifies.insert(vote)
-    }
-
-    /// Inserts a finalize vote if the signer has not already voted.
-    pub(super) fn insert_finalize(&mut self, vote: Finalize<S, D>) -> bool {
-        self.finalizes.insert(vote)
-    }
-
-    /// Iterates over notarize votes in signer order.
-    pub(super) fn iter_notarizes(&self) -> impl Iterator<Item = &Notarize<S, D>> {
-        self.notarizes.iter()
-    }
-
-    /// Iterates over nullify votes in signer order.
-    pub(super) fn iter_nullifies(&self) -> impl Iterator<Item = &Nullify<S>> {
-        self.nullifies.iter()
-    }
-
-    /// Returns how many notarize votes have been recorded.
-    pub(super) fn len_notarizes(&self) -> u32 {
-        let len = self.notarizes.len();
-        u32::try_from(len).expect("too many notarize votes")
-    }
-
-    /// Returns how many nullify votes have been recorded.
-    pub(super) fn len_nullifies(&self) -> u32 {
-        let len = self.nullifies.len();
-        u32::try_from(len).expect("too many nullify votes")
-    }
-
-    /// Returns how many finalize votes have been recorded.
-    pub(super) fn len_finalizes(&self) -> u32 {
-        let len = self.finalizes.len();
-        u32::try_from(len).expect("too many finalize votes")
-    }
-
-    /// Returns `true` if the given signer has a notarize vote recorded.
-    pub(super) fn has_notarize(&self, signer: Participant) -> bool {
-        self.notarize(signer).is_some()
-    }
-
-    /// Returns `true` if a finalize vote has been recorded for `signer`.
-    pub(super) fn has_finalize(&self, signer: Participant) -> bool {
-        self.finalize(signer).is_some()
-    }
-
-    /// Clears all notarize votes and releases their storage.
-    pub(super) fn clear_notarizes(&mut self) {
-        self.notarizes.reset(self.participants);
-        self.clear_compacted(Self::NOTARIZE_SEEN | Self::NOTARIZE_HAS_PROPOSAL);
-    }
-
-    /// Clears all finalize votes and releases their storage.
-    pub(super) fn clear_finalizes(&mut self) {
-        self.finalizes.reset(self.participants);
-        self.clear_compacted(Self::FINALIZE_SEEN | Self::FINALIZE_HAS_PROPOSAL);
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
@@ -469,87 +371,49 @@ mod tests {
     }
 
     #[test]
-    fn test_vote_tracker_clears_compacted_state() {
-        let mut rng = test_rng();
-        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 2);
-        let round = Round::new(Epoch::new(0), View::new(1));
-        let mut tracker = VoteTracker::<ed25519::Scheme, Sha256>::new(2, false);
-        let signer = Participant::new(1);
-        let scheme = &fixture.schemes[usize::from(signer)];
-        let proposal = Proposal::new(round, View::zero(), sample_digest(1));
-        let notarize = Vote::Notarize(Notarize::sign(scheme, proposal.clone()).unwrap());
-        let finalize = Vote::Finalize(Finalize::sign(scheme, proposal.clone()).unwrap());
-
-        tracker.release_notarizes(&proposal);
-        tracker.release_finalizes(&proposal);
-        assert!(matches!(
-            tracker.record(&notarize, Some(&proposal)),
-            Outcome::Added { retained: false }
-        ));
-        assert!(matches!(
-            tracker.record(&finalize, Some(&proposal)),
-            Outcome::Added { retained: false }
-        ));
-        assert!(tracker.has_notarize_for(signer, &proposal));
-        assert!(tracker.has_finalize_for(signer, &proposal));
-
-        tracker.clear_notarizes();
-        assert!(!tracker.has_notarize_for(signer, &proposal));
-        assert!(matches!(
-            tracker.record(&notarize, Some(&proposal)),
-            Outcome::Added { retained: true }
-        ));
-
-        tracker.clear_finalizes();
-        assert!(!tracker.has_finalize_for(signer, &proposal));
-        assert_eq!(tracker.compacted.capacity(), 0);
-        assert!(matches!(
-            tracker.record(&finalize, Some(&proposal)),
-            Outcome::Added { retained: true }
-        ));
-    }
-
-    #[test]
-    fn test_vote_tracker_insert_and_accessors() {
+    fn test_vote_tracker_record_and_release() {
         let mut rng = test_rng();
         let fixture = ed25519::fixture(&mut rng, NAMESPACE, 2);
         let round = Round::new(Epoch::new(0), View::new(1));
         let proposal = Proposal::new(round, View::zero(), sample_digest(1));
         let scheme = &fixture.schemes[0];
         let signer = Participant::new(0);
-        let notarize = Notarize::sign(scheme, proposal.clone()).unwrap();
-        let nullify = Nullify::sign::<Sha256>(scheme, round).unwrap();
-        let finalize = Finalize::sign(scheme, proposal.clone()).unwrap();
+        let votes = [
+            Vote::Notarize(Notarize::sign(scheme, proposal.clone()).unwrap()),
+            Vote::Nullify(Nullify::sign::<Sha256>(scheme, round).unwrap()),
+            Vote::Finalize(Finalize::sign(scheme, proposal.clone()).unwrap()),
+        ];
         let mut tracker = VoteTracker::new(2, false);
 
-        assert!(tracker.insert_notarize(notarize.clone()));
-        assert!(tracker.insert_nullify(nullify.clone()));
-        assert!(tracker.insert_finalize(finalize.clone()));
-        assert_eq!(tracker.len_notarizes(), 1);
-        assert_eq!(tracker.len_nullifies(), 1);
-        assert_eq!(tracker.len_finalizes(), 1);
-        assert!(tracker.has_notarize(signer));
+        for vote in &votes {
+            assert!(matches!(
+                tracker.record(vote, Some(&proposal)),
+                Outcome::Added { retained: true }
+            ));
+        }
+        assert!(tracker.notarize(signer).is_some());
         assert!(tracker.has_nullify(signer));
-        assert!(tracker.has_finalize(signer));
+        assert!(tracker.finalize(signer).is_some());
 
         tracker.release_notarizes(&proposal);
         tracker.release_nullifies();
         tracker.release_finalizes(&proposal);
-        assert_eq!(tracker.len_notarizes(), 0);
-        assert_eq!(tracker.len_nullifies(), 0);
-        assert_eq!(tracker.len_finalizes(), 0);
-        assert!(!tracker.has_notarize(signer));
+        assert!(tracker.notarize(signer).is_none());
         assert!(!tracker.has_nullify(signer));
-        assert!(!tracker.has_finalize(signer));
-        assert!(tracker.iter_notarizes().next().is_none());
-        assert!(tracker.iter_nullifies().next().is_none());
+        assert!(tracker.finalize(signer).is_none());
         assert!(tracker.iter_finalizes().next().is_none());
-        assert!(!tracker.insert_notarize(notarize));
-        assert!(!tracker.insert_nullify(nullify));
-        assert!(!tracker.insert_finalize(finalize));
+        assert!(tracker.has_notarize_for(signer, &proposal));
+        assert!(tracker.has_finalize_for(signer, &proposal));
+        for vote in &votes {
+            assert!(matches!(
+                tracker.record(vote, Some(&proposal)),
+                Outcome::Duplicate { retained: false }
+            ));
+        }
 
         // Releasing a compacted phase is idempotent.
         tracker.release_notarizes(&proposal);
+        assert!(tracker.has_notarize_for(signer, &proposal));
     }
 
     #[test]
