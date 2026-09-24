@@ -26,7 +26,9 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy};
+use commonware_codec::{
+    Buf, EncodeSize, Error, FixedSize, Read, ReadExt, Write, types::lazy::Lazy,
+};
 use commonware_parallel::Strategy;
 use commonware_utils::{
     Participant,
@@ -1053,6 +1055,7 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
+        assert_eq!(Some(encoded.len()), schemes[0].certificate_max_size());
         let decoded =
             Certificate::<V>::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);

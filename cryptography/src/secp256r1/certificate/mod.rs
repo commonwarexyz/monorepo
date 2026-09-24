@@ -1063,6 +1063,35 @@ mod tests {
     }
 
     #[test]
+    fn test_certificate_max_size() {
+        let mut rng = test_rng();
+        let (schemes, _) = setup_signers(&mut rng, 4);
+        let max_size = schemes[0].certificate_max_size().unwrap();
+        let quorum = N3f1::quorum(schemes.len()) as usize;
+
+        for count in [quorum, schemes.len()] {
+            let attestations: Vec<_> = schemes
+                .iter()
+                .take(count)
+                .map(|s| {
+                    s.sign::<Sha256Digest>(TestSubject {
+                        message: Bytes::from_static(MESSAGE),
+                    })
+                    .unwrap()
+                })
+                .collect();
+            let certificate = schemes[0]
+                .assemble(non_empty![@attestations], &Sequential)
+                .unwrap();
+            let size = certificate.encode().len();
+            assert!(size <= max_size);
+            if count == schemes.len() {
+                assert_eq!(size, max_size);
+            }
+        }
+    }
+
+    #[test]
     fn test_certificate_rejects_sub_quorum() {
         let mut rng = test_rng();
         let (schemes, _) = setup_signers(&mut rng, 4);

@@ -1046,6 +1046,9 @@ where
     }
 
     /// Handle a produce request from a remote peer.
+    ///
+    /// Response shapes must match the budget in
+    /// [`max_recovery_overhead`](crate::marshal::max_recovery_overhead).
     #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,

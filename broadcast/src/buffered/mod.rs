@@ -11,7 +11,7 @@
 //!
 //! Each broadcast sends the complete encoded message as one P2P message. Applications must
 //! bound this encoding, including length prefixes and application wrappers, by the P2P message
-//! size limit. [`Config::codec_config`] controls decoding; it does not limit locally submitted
+//! size limit. [`Config::codec_config`] controls decoding. It does not limit locally submitted
 //! messages. The engine does not fragment messages, and authenticated P2P panics on oversized
 //! sends.
 //!

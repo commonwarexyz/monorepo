@@ -7,8 +7,8 @@ use commonware_utils::Span;
 /// Maximum number of bytes added to a produced value in a P2P resolver response.
 ///
 /// Includes an 8-byte request ID, a 1-byte response tag, and a value-length varint of at most
-/// 5 bytes. This overhead counts toward the underlying P2P application's message size limit;
-/// it excludes P2P framing and encryption overhead.
+/// 5 bytes. This overhead counts toward the underlying P2P application's message size limit.
+/// It excludes P2P framing and encryption overhead.
 pub const MAX_RESPONSE_OVERHEAD: u32 = (u64::SIZE + u8::SIZE + MAX_U32_VARINT_SIZE) as u32;
 
 /// Represents a message sent between peers.

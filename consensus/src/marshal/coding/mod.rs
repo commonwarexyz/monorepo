@@ -46,8 +46,8 @@
 //!
 //! Recovery sends the complete application block in one resolver message, with coding configuration
 //! and a certificate as required by the request. Follow marshal's
-//! [message size requirements](crate::marshal#message-sizes) when setting block and P2P bounds;
-//! fitting each dissemination shard is insufficient.
+//! [message size requirements](crate::marshal#message-sizes) when setting block and P2P bounds.
+//! Fitting each dissemination shard is insufficient.
 //!
 //! # When to Use
 //!
