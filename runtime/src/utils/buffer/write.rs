@@ -96,6 +96,15 @@ impl<B: Blob> Write<B> {
         self.buffer.size()
     }
 
+    /// Returns the wrapped blob.
+    ///
+    /// The blob observes only flushed data and must not be mutated while this writer exists (see
+    /// [Write]).
+    #[commonware_macros::stability(ALPHA)]
+    pub const fn blob(&self) -> &B {
+        &self.blob
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // Ensure the read doesn't overflow.
