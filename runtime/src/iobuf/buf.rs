@@ -102,18 +102,16 @@ impl IoBuf {
         IoBufMut::from(data).freeze()
     }
 
-    /// Create a buffer by encoding `value`.
+    /// Create a buffer by encoding `value` into exactly
+    /// [`EncodeSize::encode_size`] bytes.
     ///
-    /// The payload capacity is exactly [`EncodeSize::encode_size`]. Nonempty
-    /// encodings use one native heap allocation, including the inline owner
-    /// header; empty encodings allocate nothing. This avoids the external owner
-    /// allocation in `IoBuf::from(value.encode())`, but the inline header can
-    /// increase allocator space at size-class boundaries (see [module docs](crate::iobuf)).
+    /// Like [`IoBuf::copy_from_slice`], the result is one native heap
+    /// allocation, so it supports zero-copy [`IoBuf::try_into_mut`].
     ///
     /// # Panics
     ///
-    /// Panics if [`EncodeSize::encode_size`] does not match the number of
-    /// bytes written by [`Write::write`].
+    /// Panics if [`Write::write`] writes a different number of bytes than
+    /// [`EncodeSize::encode_size`].
     pub fn encode(value: &impl Encode) -> Self {
         let len = value.encode_size();
         let mut buf = IoBufMut::with_capacity(len);
@@ -1241,16 +1239,16 @@ mod tests {
         assert_eq!(buf.try_into_mut().unwrap().capacity(), 0);
     }
 
-    /// Claims a larger encoding than `write` produces.
-    struct UnderWriter;
+    /// Claims a 4-byte encoding but writes the given number of bytes.
+    struct Misreported(usize);
 
-    impl Write for UnderWriter {
+    impl Write for Misreported {
         fn write(&self, buf: &mut impl BufMut) {
-            buf.put_slice(b"ab");
+            buf.put_bytes(0, self.0);
         }
     }
 
-    impl EncodeSize for UnderWriter {
+    impl EncodeSize for Misreported {
         fn encode_size(&self) -> usize {
             4
         }
@@ -1259,7 +1257,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "write() did not write expected bytes")]
     fn test_iobuf_encode_rejects_short_write() {
-        let _ = IoBuf::encode(&UnderWriter);
+        let _ = IoBuf::encode(&Misreported(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobuf_encode_rejects_long_write() {
+        let _ = IoBuf::encode(&Misreported(5));
     }
 
     #[test]

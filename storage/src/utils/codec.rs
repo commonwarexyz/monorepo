@@ -4,19 +4,19 @@ use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, Error, FixedSize, Read, Write, util::at_least};
 
 /// Claims a fixed encoded size but writes the configured number of bytes.
-pub(crate) struct MisreportedSize<const SIZE: usize>(pub(crate) usize);
+pub(crate) struct MisreportedSize<const N: usize>(pub(crate) usize);
 
 impl<const N: usize> FixedSize for MisreportedSize<N> {
     const SIZE: usize = N;
 }
 
-impl<const SIZE: usize> Write for MisreportedSize<SIZE> {
+impl<const N: usize> Write for MisreportedSize<N> {
     fn write(&self, buf: &mut impl BufMut) {
         buf.put_bytes(0, self.0);
     }
 }
 
-impl<const SIZE: usize> Read for MisreportedSize<SIZE> {
+impl<const N: usize> Read for MisreportedSize<N> {
     type Cfg = ();
 
     fn read_cfg(_: &mut impl Buf, _: &()) -> Result<Self, Error> {

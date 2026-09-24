@@ -659,7 +659,7 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         // Encode directly into the write buffer when the item fits. The owned fallback handles
         // flushing and items larger than the buffer.
         if writer.try_append_value(item).is_none() {
-            writer.append_owned(item.encode_mut().into()).await?;
+            writer.append_owned(IoBuf::encode(item)).await?;
         }
 
         // Completed blobs remain open until publication. Flush them here so each retains at most a

@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use commonware_actor::{Feedback, Unreliable};
-use commonware_codec::{DecodeExt, FixedSize};
+use commonware_codec::{DecodeExt, FixedSize, ReadExt as _};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -1414,11 +1414,11 @@ impl<P: PublicKey> Peer<P> {
 
                         // Continually receive messages from the dialer and send them to the inbox
                         while let Ok(data) = recv_frame(&mut stream, max_frame_size).await {
-                            let data = data.coalesce();
-                            let channel = Channel::from_be_bytes(
-                                data.as_ref()[..Channel::SIZE].try_into().unwrap(),
-                            );
-                            let message = data.slice(Channel::SIZE..);
+                            let mut message = data.coalesce();
+                            let Ok(channel) = Channel::read(&mut message) else {
+                                error!("received message without a channel");
+                                break;
+                            };
                             if let Err(err) =
                                 inbox_sender.send((channel, (dialer.clone(), message)))
                             {

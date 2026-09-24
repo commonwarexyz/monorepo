@@ -95,16 +95,17 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     /// See [Glob::append].
     async fn append(&mut self, section: u64, value: &V) -> Result<(u64, u32), Error> {
         // Encode and optionally compress, then append checksum
-        let buf = if let Some(level) = self.compression {
+        let (buf, entry_size) = if let Some(level) = self.compression {
             // Compressed: encode first, then compress, then append checksum
             let encoded = value.encode();
             let mut compressed = Vec::with_capacity(compress_bound(encoded.len()) + CHECKSUM_SIZE);
             frame::compress_into(level, &encoded, &mut compressed)?;
             let checksum = Crc32::checksum(&compressed);
             compressed.put_u32(checksum);
-            IoBuf::from(compressed)
+            let entry_size = u32::try_from(compressed.len()).map_err(|_| Error::ValueTooLarge)?;
+            (IoBuf::from(compressed), entry_size)
         } else {
-            // Uncompressed: pre-allocate exact size to avoid copying
+            // Uncompressed: reject oversized entries before allocating their exact size
             let len = value.encode_size();
             let entry_size = len
                 .checked_add(CHECKSUM_SIZE)
@@ -115,11 +116,10 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
             assert_eq!(buf.len(), len, "write() did not write expected bytes");
             let checksum = Crc32::checksum(buf.as_ref());
             buf.put_u32(checksum);
-            buf.freeze()
+            (buf.freeze(), entry_size)
         };
 
         // Write to blob
-        let entry_size = u32::try_from(buf.len()).map_err(|_| Error::ValueTooLarge)?;
         let writer = self.manager.get_or_create(section).await?;
         let offset = writer.size();
         writer.write_at(offset, buf).await.map_err(Error::Runtime)?;
@@ -295,11 +295,11 @@ impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Both should be stored in the index entry for later retrieval.
     ///
     /// Returns [Error::ValueTooLarge] if the stored entry, including its checksum,
-    /// exceeds `u32::MAX` bytes. Uncompressed sizes are checked before allocation.
+    /// exceeds `u32::MAX` bytes.
     ///
     /// # Panics
     ///
-    /// Panics if the bytes written do not match the value's declared encoded size.
+    /// Panics if the value writes a different number of bytes than its encoded size.
     pub async fn append(mut self, section: u64, value: &V) -> Result<(Self, u64, u32), Error> {
         let (offset, size) = self.0.append(section, value).await?;
         Ok((self, offset, size))

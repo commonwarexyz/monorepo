@@ -661,9 +661,8 @@ mod test {
     fn test_handshake_frame_is_contiguous() {
         deterministic::Runner::default().start(|_| async move {
             let (sink, mut stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
             let chunk_counts = Arc::new(Mutex::new(Vec::new()));
-            let mut sink = CountingSink::new(sink, sends.clone(), chunk_counts.clone());
+            let mut sink = CountingSink::new(sink, Arc::default(), chunk_counts.clone());
             let message = [7u8; 128];
 
             send_handshake_frame(&mut sink, message).await.unwrap();
@@ -674,7 +673,6 @@ mod test {
                 stream.recv(expected.len()).await.unwrap().coalesce(),
                 expected.as_slice()
             );
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
             assert_eq!(*chunk_counts.lock(), vec![1]);
         });
     }
