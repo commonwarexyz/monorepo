@@ -458,18 +458,14 @@ impl<F: Family, D: Digest> Mem<F, D> {
             for (&pos, &digest) in overwrites.iter() {
                 self.overwrite(pos, digest);
             }
-            for &digest in appended.iter() {
-                self.nodes.push_back(digest);
-            }
+            self.nodes.extend(appended.iter());
         }
 
         // Apply this batch's own data.
         for (&pos, &digest) in batch.overwrites.iter() {
             self.overwrite(pos, digest);
         }
-        for &digest in batch.appended.iter() {
-            self.nodes.push_back(digest);
-        }
+        self.nodes.extend(batch.appended.iter());
 
         // Detect missing ancestor data. If an uncommitted ancestor was dropped
         // before this batch was merkleized, its appended nodes are absent and the
