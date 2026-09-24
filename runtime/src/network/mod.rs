@@ -601,7 +601,9 @@ mod tests {
         let (closed_sender, closed_receiver) = oneshot::channel();
 
         // Server sends a response, waits for the client to buffer it, then
-        // closes the connection so the client's next send eventually fails.
+        // closes the connection with the client's byte unread. Closing with
+        // unread data aborts both TCP and MPTCP connections, whereas an MPTCP
+        // zero-linger close is graceful on kernels without the Linux 7.1 fix.
         let server = context.child("server").spawn(move |_| async move {
             let (_, mut sink, stream) = listener.accept().await.expect("Failed to accept");
 
@@ -628,6 +630,9 @@ mod tests {
                 .dial(listener_addr)
                 .await
                 .expect("Failed to dial server");
+            sink.send(vec![7u8])
+                .await
+                .expect("Failed to send byte the server leaves unread");
 
             let prefix = stream.recv(2).await.expect("Failed to receive response");
             assert_eq!(prefix.coalesce(), &DATA[..2]);

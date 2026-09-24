@@ -68,6 +68,12 @@
 //! Host configuration therefore owns which additional addresses and ports a
 //! connection may use.
 //!
+//! Zero linger (enabled by default) resets MPTCP connections on close only with
+//! Linux 7.1 or a stable kernel carrying the same fix. Older kernels close them
+//! gracefully, so the peer's sends can keep succeeding until the closing host's
+//! `net.mptcp.close_timeout` (60 seconds by default) expires. Closing with unread
+//! data resets the connection on all MPTCP kernels, as it does with TCP.
+//!
 //! # Status
 //!
 //! Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

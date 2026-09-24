@@ -226,7 +226,8 @@ pub struct Config {
     storage_blob_layouts: RangeInclusive<BlobLayout>,
     /// Optional TCP_NODELAY override, defaulting to Some(true).
     tcp_nodelay: Option<bool>,
-    /// Request immediate reset on socket close, defaulting to true.
+    /// Request immediate reset on socket close, defaulting to true. MPTCP
+    /// connections may close gracefully instead, depending on the kernel.
     zero_linger: bool,
     /// Request Multipath TCP for dialed and listening sockets, defaulting to false.
     mptcp: bool,

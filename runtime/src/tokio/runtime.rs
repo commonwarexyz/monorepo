@@ -81,7 +81,8 @@ pub struct NetworkConfig {
     /// When enabled, causes an immediate RST on close, avoiding
     /// `TIME_WAIT` state. This is useful in adversarial environments to
     /// reclaim socket resources immediately when closing connections to
-    /// misbehaving peers.
+    /// misbehaving peers. MPTCP connections may close gracefully instead,
+    /// depending on the kernel. See [Multipath TCP](crate#multipath-tcp).
     ///
     /// Defaults to `true`.
     zero_linger: bool,
