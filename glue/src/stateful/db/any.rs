@@ -7,8 +7,8 @@
 //! traits can be implemented without a DB parameter.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{Codec, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -479,9 +479,6 @@ where
 /// `new_batch` captures the [`Shared`] database handle in the returned
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// applied state.
-///
-/// `finalize` applies the merkleized batch's changeset and starts
-/// persisting it, reporting durability on the returned handle.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -524,8 +521,19 @@ where
     type Config = FixedConfig<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -550,9 +558,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -565,18 +577,6 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -628,8 +628,19 @@ where
     >;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -654,9 +665,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -669,18 +684,6 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -813,6 +816,7 @@ mod tests {
                 metadata_partition: format!("stateful-any-metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -821,9 +825,10 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         }
@@ -833,7 +838,7 @@ mod tests {
     fn unmerkleized_batch_falls_through_to_applied_state() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("unordered-fixed-live-fallback", &context);
-            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -847,11 +852,14 @@ mod tests {
                 .unwrap();
 
             let (slot, database) = db.write().await;
-            let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database, winner)
+            let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, winner)
+                .await
+                .unwrap();
+            let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
                 .await
                 .unwrap();
             slot.put(database);
-            sync.await.expect("finalize flush failed");
+            sync.await.expect("database sync failed");
 
             // The batch commitment does not provide a historical database view.
             assert_eq!(pre_finalization.get(&key).await.unwrap(), Some(value));
@@ -867,7 +875,7 @@ mod tests {
     fn unordered_fixed_staged_merkleize_matches_explicit_writes() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("unordered-fixed-glue-staged", &context);
-            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
+            let db = <UnorderedFixedDb as ManagedDb<_>>::init(context.child("db"), config, None)
                 .await
                 .unwrap();
             let db = Shared::new("test", db);
@@ -876,7 +884,7 @@ mod tests {
             let val = |i: u64| Sha256::hash(&[&(i + 10_000).to_be_bytes()]);
             let metadata = Sha256::hash(&[b"metadata"]);
 
-            // Seed keys 0..50 and finalize.
+            // Seed keys 0..50 and persist them.
             let mut seed = db.new_batch_for_test::<_>().await;
             for i in 0..50u64 {
                 seed = seed.write(key(i), Some(val(i)));
@@ -886,12 +894,14 @@ mod tests {
                 .unwrap();
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) =
-                    <UnorderedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
-                        .await
-                        .unwrap();
+                let database = <UnorderedFixedDb as ManagedDb<_>>::apply(database, merkleized)
+                    .await
+                    .unwrap();
+                let (database, sync) = <UnorderedFixedDb as ManagedDb<_>>::finalize(database)
+                    .await
+                    .unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
 
             // Read set: key(1) updated, key(2) deleted, key(999) missing -> created.
@@ -955,11 +965,8 @@ mod tests {
         Sequential,
     >;
 
-    /// `finalize` must return, with the batch readable through the shared
-    /// handle, while its flush is still parked at the storage layer.
-    /// Durability is reported only on the returned handle.
     #[test]
-    fn finalize_defers_flush_to_returned_handle() {
+    fn apply_does_not_finalize() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
@@ -969,7 +976,7 @@ mod tests {
             let config = fixed_config("unordered-fixed-deferred", &delayed);
             let db = drive_pending_syncs(
                 &pending,
-                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config),
+                <DelayedFixedDb as ManagedDb<_>>::init(delayed.child("db"), config, None),
             )
             .await
             .unwrap();
@@ -982,21 +989,28 @@ mod tests {
                 .await
                 .unwrap();
 
+            let starts = pending.starts();
             let (slot, database) = db.write().await;
-            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database, merkleized)
+            let database = <DelayedFixedDb as ManagedDb<_>>::apply(database, merkleized)
                 .await
                 .unwrap();
             slot.put(database);
 
-            // The flush is parked, yet the batch is already readable.
-            assert!(
-                pending.starts() > pending.completions(),
-                "finalize must leave its flush parked",
-            );
+            assert_eq!(pending.starts(), starts, "apply must not start durability");
             {
                 let guard = db.read().await;
                 assert_eq!(guard.get(&key).await.unwrap(), Some(value));
             }
+
+            let (slot, database) = db.write().await;
+            let (database, sync) = <DelayedFixedDb as ManagedDb<_>>::finalize(database)
+                .await
+                .unwrap();
+            slot.put(database);
+            assert!(
+                pending.starts() > pending.completions(),
+                "finalize must leave its flush parked",
+            );
 
             release_pending_syncs(&pending);
             drive_pending_syncs(&pending, sync)

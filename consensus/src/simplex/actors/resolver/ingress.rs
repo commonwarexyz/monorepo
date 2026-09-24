@@ -43,7 +43,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         view: View,
         /// The certificate that is needed.
         kind: Kind,
-        /// Preferred peer, or `None` to use ordinary resolver peer selection.
+        /// When set, the resolver queries only this peer.
         target: Option<S::PublicKey>,
     },
 }
@@ -147,10 +147,13 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
             return;
         }
 
-        // Ignore the message if it is a duplicate
+        // Ignore duplicate work. Resolve requests with the same proposal,
+        // requested view, and kind share one network fetch. An unrestricted
+        // duplicate removes the target. Different kinds remain distinct
+        // because their certificates are not interchangeable.
         if overflow
             .messages
-            .iter()
+            .iter_mut()
             .any(|old_message| match (&message, old_message) {
                 (
                     Self::Certificate {
@@ -178,14 +181,26 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                     Self::Resolve {
                         proposal: new_proposal,
                         view: new_view,
+                        kind: new_kind,
+                        target: new_target,
                         ..
                     },
                     Self::Resolve {
                         proposal: old_proposal,
                         view: old_view,
+                        kind: old_kind,
+                        target: old_target,
                         ..
                     },
-                ) => new_proposal == old_proposal && new_view == old_view,
+                ) if new_proposal == old_proposal
+                    && new_view == old_view
+                    && new_kind == old_kind =>
+                {
+                    if new_target.is_none() {
+                        *old_target = None;
+                    }
+                    true
+                }
                 _ => false,
             })
         {
@@ -231,7 +246,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Requests missing proposal ancestry, preferring `target` when provided.
+    /// Requests missing proposal ancestry. If `target` is provided, the
+    /// resolver queries only that peer.
     pub(crate) fn resolve(
         &mut self,
         proposal: View,
@@ -279,7 +295,7 @@ impl HandlerMessage {
     }
 }
 
-/// Pending resolver handler messages retained after the mailbox fills.
+/// Deliveries retained while the ready queue is full.
 #[derive(Default)]
 pub(crate) struct HandlerPending(VecDeque<HandlerMessage>);
 
@@ -309,6 +325,14 @@ impl Policy for HandlerMessage {
     type Overflow = HandlerPending;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
+        // Drop produce requests so the serve backlog stays bounded by the ready
+        // queue. We prefer handling our own responses over serving peers, who can
+        // ask a less loaded peer instead.
+        if matches!(message, Self::Produce { .. }) {
+            return;
+        }
+
+        // Retain deliveries that still have a waiting requester.
         if message.response_closed() {
             return;
         }
@@ -378,7 +402,7 @@ mod tests {
     use commonware_actor::mailbox::Policy;
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_utils::test_rng;
+    use commonware_utils::{non_empty, test_rng};
     use std::collections::VecDeque;
 
     type TestScheme = ed25519::Scheme;
@@ -408,7 +432,8 @@ mod tests {
             .map(|scheme| Nullify::sign::<Sha256Digest>(scheme, round).expect("nullify"))
             .collect();
         Certificate::Nullification(
-            Nullification::from_nullifies(&verifier, &votes, &Sequential).expect("nullification"),
+            Nullification::from_nullifies(&verifier, non_empty![@&votes], &Sequential)
+                .expect("nullification"),
         )
     }
 
@@ -420,7 +445,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("finalize"))
             .collect();
         Certificate::Finalization(
-            Finalization::from_finalizes(&verifier, &votes, &Sequential).expect("finalization"),
+            Finalization::from_finalizes(&verifier, non_empty![@&votes], &Sequential)
+                .expect("finalization"),
         )
     }
 
@@ -468,39 +494,62 @@ mod tests {
         }
     }
 
-    #[test]
-    fn handler_drain_skips_closed_responses() {
-        let mut overflow = HandlerPending::default();
+    fn unrestricted_resolve_msg(
+        proposal: View,
+        view: View,
+        kind: Kind,
+    ) -> MailboxMessage<TestScheme, Sha256Digest> {
+        MailboxMessage::Resolve {
+            span: Span::none(),
+            proposal,
+            view,
+            kind,
+            target: None,
+        }
+    }
 
-        let (closed_response, closed_receiver) = oneshot::channel();
+    #[test]
+    fn handle_retains_open_deliveries_only() {
+        let mut overflow = HandlerPending::default();
+        let deliver = |view: u64, response| HandlerMessage::Deliver {
+            span: Span::none(),
+            view: View::new(view),
+            data: Bytes::new(),
+            asks: NonEmptyVec::new(Ask::backfill()),
+            response,
+        };
+
+        // An overflowed produce request is dropped and its requester sees the
+        // closed response.
+        let (response, mut produce) = oneshot::channel();
         HandlerMessage::handle(
             &mut overflow,
             HandlerMessage::Produce {
                 view: View::new(1),
-                response: closed_response,
+                response,
             },
         );
-        drop(closed_receiver);
+        assert!(matches!(
+            produce.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
 
-        let (open_response, _open_receiver) = oneshot::channel();
-        HandlerMessage::handle(
-            &mut overflow,
-            HandlerMessage::Produce {
-                view: View::new(2),
-                response: open_response,
-            },
-        );
+        // Deliveries are retained, and drain skips one whose requester left.
+        let (response, closed) = oneshot::channel();
+        HandlerMessage::handle(&mut overflow, deliver(2, response));
+        let (response, _open) = oneshot::channel();
+        HandlerMessage::handle(&mut overflow, deliver(3, response));
+        drop(closed);
 
         let mut messages = Vec::new();
         Overflow::drain(&mut overflow, |message| {
             messages.push(message);
             None
         });
-
         assert_eq!(messages.len(), 1);
         assert!(matches!(
             messages.pop(),
-            Some(HandlerMessage::Produce { view, .. }) if view == View::new(2)
+            Some(HandlerMessage::Deliver { view, .. }) if view == View::new(3)
         ));
     }
 
@@ -567,7 +616,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_deduplicates_by_proposal_and_requested_view() {
+    fn resolve_deduplicates_by_proposal_view_and_kind() {
         let mut overflow = Pending::default();
         for kind in [Kind::Nullification, Kind::Nullification, Kind::Notarization] {
             MailboxMessage::handle(
@@ -577,7 +626,7 @@ mod tests {
         }
 
         let overflow = drain(overflow);
-        assert_eq!(overflow.len(), 1);
+        assert_eq!(overflow.len(), 2);
         assert!(matches!(
             &overflow[0],
             MailboxMessage::Resolve {
@@ -585,6 +634,87 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            &overflow[1],
+            MailboxMessage::Resolve {
+                kind: Kind::Notarization,
+                ..
+            }
+        ));
+    }
+
+    /// An unrestricted request must not modify a pending request for another
+    /// certificate kind.
+    #[test]
+    fn resolve_retains_target_across_kinds() {
+        let proposal = View::new(10);
+        let view = View::new(3);
+        let mut overflow = Pending::default();
+        MailboxMessage::handle(
+            &mut overflow,
+            resolve_msg(proposal, view, Kind::Nullification),
+        );
+        MailboxMessage::handle(
+            &mut overflow,
+            unrestricted_resolve_msg(proposal, view, Kind::Notarization),
+        );
+
+        let mut overflow = drain(overflow);
+        assert_eq!(overflow.len(), 2);
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Resolve {
+                kind: Kind::Nullification,
+                target: Some(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            overflow.pop_front(),
+            Some(MailboxMessage::Resolve {
+                kind: Kind::Notarization,
+                target: None,
+                ..
+            })
+        ));
+    }
+
+    /// An unrestricted duplicate must widen the pending request regardless of
+    /// arrival order.
+    #[test]
+    fn resolve_widens_duplicate_to_unrestricted() {
+        let proposal = View::new(10);
+        let view = View::new(3);
+        for unrestricted_first in [false, true] {
+            let messages = if unrestricted_first {
+                [
+                    unrestricted_resolve_msg(proposal, view, Kind::Notarization),
+                    resolve_msg(proposal, view, Kind::Notarization),
+                ]
+            } else {
+                [
+                    resolve_msg(proposal, view, Kind::Notarization),
+                    unrestricted_resolve_msg(proposal, view, Kind::Notarization),
+                ]
+            };
+            let mut overflow = Pending::default();
+            for message in messages {
+                MailboxMessage::handle(&mut overflow, message);
+            }
+
+            let mut overflow = drain(overflow);
+            assert_eq!(overflow.len(), 1);
+            assert!(matches!(
+                overflow.pop_front(),
+                Some(MailboxMessage::Resolve {
+                    proposal: actual_proposal,
+                    view: actual_view,
+                    kind: Kind::Notarization,
+                    target: None,
+                    ..
+                }) if actual_proposal == proposal && actual_view == view
+            ));
+        }
     }
 
     #[test]

@@ -32,6 +32,17 @@
 //! tries to advance the recovery watermark to bound startup recovery. `sync()` makes applied state
 //! durable and guarantees no recovery is needed on startup after a crash.
 //!
+//! # Initialization bounds
+//!
+//! With `Some(max_size)`, `init` opens the latest retained commit with at most `max_size`
+//! operations, counting commit records and pruned operations. `None` opens the latest retained
+//! state. Zero is invalid, and a bound above the stored size does not grow the database.
+//! Initialization fails if pruning removed history needed by the selected commit.
+//!
+//! Initialization durably removes later history before returning successfully. The bound does not
+//! limit future appends. Close all existing users of the storage before reopening.
+//! To require an exact checkpoint, also check the recovered root and range.
+//!
 //! # Ownership
 //!
 //! Mutating methods take the database by value and return it on success. If a mutating
@@ -68,22 +79,23 @@ use crate::{
     qmdb::operation::{Floored, Operation},
     translator::Translator,
 };
+use cache::Cache;
 use commonware_codec::Encode;
 use commonware_cryptography::Hasher;
-use commonware_runtime::Spawner;
+use commonware_runtime::{AbortOnDrop, ReadOptions, Spawner};
 use commonware_utils::{
     bitmap::{Atomic, BitMap},
-    cache::Clock,
     channel::mpsc,
 };
 use core::{num::NonZeroUsize, ops::Range};
-use futures::{StreamExt as _, future::join_all, pin_mut};
-use std::sync::Arc;
+use futures::{StreamExt as _, pin_mut};
+use std::{collections::VecDeque, sync::Arc};
 use thiserror::Error;
 
 pub mod any;
-pub mod batch_chain;
 pub(crate) mod bitmap;
+mod cache;
+pub mod chain;
 pub(crate) mod compact;
 #[cfg(test)]
 mod conformance;
@@ -100,6 +112,122 @@ pub use verify::{
     create_multi_proof, create_proof_store, verify_multi_proof, verify_proof,
     verify_proof_and_extract_digests, verify_proof_and_pinned_nodes,
 };
+
+/// Reject a bound that cannot retain the bootstrap commit.
+pub(crate) fn validate_initialization_bound<F: Family>(
+    bound: Option<Location<F>>,
+) -> Result<(), Error<F>> {
+    if bound.is_some_and(|size| size == 0) {
+        return Err(Error::InvalidInitializationBound);
+    }
+    Ok(())
+}
+
+/// Validate a selected commit against its retained history and return its floor.
+fn validate_initialization_commit<F: Family>(
+    start: u64,
+    size: u64,
+    fresh: bool,
+    commit: Option<&impl Floored<F>>,
+    replay_from_floor: bool,
+) -> Result<Option<Location<F>>, Error<F>> {
+    if size == 0 {
+        return if fresh {
+            Ok(None)
+        } else {
+            Err(Error::DataCorrupted("no retained commit"))
+        };
+    }
+    let floor = commit
+        .and_then(Floored::has_floor)
+        .ok_or(Error::DataCorrupted(
+            "selected operation has no commit floor",
+        ))?;
+    if *floor >= size {
+        return Err(Error::DataCorrupted(
+            "inactivity floor exceeds commit location",
+        ));
+    }
+    if replay_from_floor && *floor < start {
+        return Err(Error::HistoricalFloorPruned(Location::new(size)));
+    }
+    Ok(Some(floor))
+}
+
+/// Check the selected commit before recovery discards history. Rebuilding a snapshot from its floor
+/// additionally requires retaining that floor. Keyless only restores commit fields.
+pub(crate) async fn validate_initialization<F, E, C, H, S>(
+    pending: &crate::journal::authenticated::Recovery<F, E, C, H, S>,
+    replay_from_floor: bool,
+) -> Result<Option<Location<F>>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    let bounds = pending.bounds();
+    let commit = if bounds.end == 0 {
+        None
+    } else {
+        Some(pending.read(bounds.end - 1).await?)
+    };
+    validate_initialization_commit(
+        bounds.start,
+        bounds.end,
+        pending.is_fresh(),
+        commit.as_ref(),
+        replay_from_floor,
+    )
+}
+
+/// Select a QMDB commit before validating variant-specific reconstruction state.
+pub(crate) async fn prepare_initialization<F, E, C, H, S>(
+    context: E,
+    merkle: crate::merkle::full::Config<S>,
+    journal: C::Config,
+    max_size: Option<Location<F>>,
+) -> Result<crate::journal::authenticated::Recovery<F, E, C, H, S>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    validate_initialization_bound(max_size)?;
+    Ok(crate::journal::authenticated::Journal::prepare(
+        context,
+        merkle,
+        journal,
+        max_size.map(|size| *size),
+        |op: &C::Item| op.has_floor().is_some(),
+        ROOT_BAGGING,
+    )
+    .await?)
+}
+
+/// Publish a standard QMDB journal after validating the retained commit.
+#[commonware_macros::boxed]
+pub(crate) async fn init_journal<F, E, C, H, S>(
+    context: E,
+    merkle: crate::merkle::full::Config<S>,
+    journal: C::Config,
+    max_size: Option<Location<F>>,
+    replay_from_floor: bool,
+) -> Result<crate::journal::authenticated::Journal<F, E, C, H, S>, Error<F>>
+where
+    F: Family,
+    E: crate::Context,
+    C: crate::journal::authenticated::Backing<E, Item: Floored<F> + commonware_codec::EncodeShared>,
+    H: Hasher,
+    S: commonware_parallel::Strategy,
+{
+    let pending = prepare_initialization(context, merkle, journal, max_size).await?;
+    validate_initialization(&pending, replay_from_floor).await?;
+    Ok(pending.finish().await?)
+}
 
 /// Merkle peak bagging policy used by QMDB operation roots.
 pub(crate) const ROOT_BAGGING: Bagging = Bagging::BackwardFold;
@@ -185,6 +313,10 @@ where
 /// Errors that can occur when interacting with an authenticated database.
 #[derive(Error, Debug)]
 pub enum Error<F: Family> {
+    /// A QMDB initialization bound cannot exclude its initial commit.
+    #[error("initialization bound must allow at least one operation")]
+    InvalidInitializationBound,
+
     #[error("data corrupted: {0}")]
     DataCorrupted(&'static str),
 
@@ -222,7 +354,7 @@ pub enum Error<F: Family> {
 
     /// The batch was created from a different database state than the current one.
     ///
-    /// See [`batch_chain`] for more details on staleness detection.
+    /// See [`chain`] for more details on staleness detection.
     #[error("stale batch: current database state does not match the batch")]
     StaleBatch,
 
@@ -236,14 +368,8 @@ pub enum Error<F: Family> {
     #[error("floor beyond commit location: floor {0} > commit loc {1}")]
     FloorBeyondSize(Location<F>, Location<F>),
 
-    /// The inactivity floor that governed the requested `historical_size` is not retrievable from
-    /// the journal, so the wrapper cannot derive the `inactive_peaks` count needed to construct a
-    /// proof matching the historical root.
-    ///
-    /// Historical proofs require `historical_size` to be a commit-boundary: the operation at
-    /// `historical_size - 1` must itself be a commit op declaring the governing floor. This error
-    /// fires when the caller passes a non-commit-boundary size, or when pruning has removed the
-    /// commit that would have governed the size.
+    /// The commit at the given operation count cannot be reconstructed from retained history.
+    /// The payload is the requested or selected operation count, not its inactivity floor.
     #[error("historical floor pruned for size: {0}")]
     HistoricalFloorPruned(Location<F>),
 }
@@ -281,14 +407,18 @@ where
     Fn: FnMut(bool, Option<crate::merkle::Location<F>>),
 {
     let bounds = reader.bounds();
-    let stream = reader.replay(*inactivity_floor_loc, init_buffer).await?;
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
+    let stream = reader
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
+        .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
 
     // Memoize `(location -> key)` for replayed update ops so collision resolution in
     // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
     // log.
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
 
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
@@ -310,7 +440,7 @@ where
 
                 // This update op is now a `find_update_op` candidate for later ops of its key.
                 if let Some(cache) = cache.as_mut() {
-                    cache.put(loc, key.clone());
+                    cache.put(loc, op.into_key().expect("operation without key"));
                 }
             }
         } else if op.has_floor().is_some() {
@@ -327,7 +457,7 @@ async fn delete_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -343,12 +473,13 @@ where
 }
 
 /// Delete `key` at `cursor` (obtained from a `get_mut` lookup of `key`), returning its location if
-/// it was present among the cursor's conflicts.
+/// it was present among the cursor's conflicts. When supplied, the matched location is removed
+/// from `cache` with the snapshot deletion.
 async fn delete_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -357,10 +488,17 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? else {
+    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
+    else {
         return Ok(None);
     };
+
+    // Cache entries mirror current snapshot locations, so invalidate the matched location with
+    // the authoritative deletion.
     cursor.delete();
+    if let Some(cache) = cache {
+        cache.remove(*loc);
+    }
 
     Ok(Some(loc))
 }
@@ -371,7 +509,7 @@ async fn update_key<F, I, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -389,13 +527,14 @@ where
 
 /// Update `key` to `new_loc` at `cursor` (obtained from a `get_mut_or_insert` lookup of `key`),
 /// returning its old location if it was present among the cursor's conflicts; otherwise `new_loc`
-/// is inserted at the cursor.
+/// is inserted at the cursor. When supplied, the matched old location is removed from `cache` with
+/// the snapshot update.
 async fn update_at_cursor<F, C, R>(
     mut cursor: C,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
-    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -404,9 +543,16 @@ where
     R::Item: Operation<F>,
 {
     // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? {
+    if let Some(loc) =
+        find_update_op::<F, _>(reader, &mut cursor, key, cache.as_deref_mut()).await?
+    {
+        // Removing the superseded cache entry with the snapshot update lets the caller reuse its
+        // slot for `new_loc` instead of evicting another live entry.
         assert!(new_loc > loc);
         cursor.update(new_loc);
+        if let Some(cache) = cache {
+            cache.remove(*loc);
+        }
         return Ok(Some(loc));
     }
 
@@ -422,7 +568,7 @@ async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
     key: &<R::Item as Operation<F>>::Key,
-    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
+    mut cache: Option<&mut Cache<<R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -431,14 +577,17 @@ where
 {
     while let Some(&loc) = cursor.next() {
         // Consult the cache first; on a miss, read the log and populate.
-        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(&*loc)) {
+        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(*loc)) {
             *k == *key
         } else {
             let op = reader.read(*loc).await?;
             let k = op.key().expect("operation without key");
             let matches = *k == *key;
-            if let Some(cache) = cache.as_deref_mut() {
-                cache.put(*loc, k.clone());
+
+            // Every caller immediately mutates a match. Admitting it here could evict a live
+            // candidate before the caller invalidates this location.
+            if !matches && let Some(cache) = cache.as_deref_mut() {
+                cache.put(*loc, op.into_key().expect("operation without key"));
             }
             matches
         };
@@ -450,9 +599,6 @@ where
     Ok(None)
 }
 
-/// Number of operations the snapshot replay batches per worker-channel send during a parallel build.
-const SNAPSHOT_ROUTE_BATCH: usize = 4096;
-
 /// Bounded depth (in batches) of each per-worker channel during a parallel build. Backpressure keeps
 /// the replay from running arbitrarily far ahead of a slow worker.
 const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
@@ -460,6 +606,86 @@ const SNAPSHOT_CHANNEL_DEPTH: usize = 4;
 /// A batch of keyed operations routed to a snapshot-build worker: each entry is the op's key, its
 /// location, and whether it is a delete.
 type RoutedBatch<K> = Vec<(K, u64, bool)>;
+
+/// Parameters shared by the inline replay and decode chunks of one parallel build.
+#[derive(Clone, Copy)]
+struct SnapshotRouting {
+    /// Number of insert workers routed to.
+    workers: usize,
+    /// Maps a key to its index partition.
+    partition_of: fn(&[u8]) -> usize,
+    /// Partitions per worker range: worker = `partition_of(key) / range_size`.
+    range_size: usize,
+    /// Replay read-buffer size in bytes.
+    init_buffer: NonZeroUsize,
+}
+
+/// Number of operations the snapshot replay batches per worker-channel send during a parallel
+/// build. Build throughput is mostly insensitive to this value, so it is a constant rather than
+/// configuration. Small in tests so ordinary logs exercise batch boundaries.
+#[cfg(not(test))]
+const SNAPSHOT_ROUTE_BATCH: usize = 4096;
+#[cfg(test)]
+const SNAPSHOT_ROUTE_BATCH: usize = 3;
+
+/// Operations per decode chunk in a parallel build. Decoding the replay stream is the build's
+/// serial bottleneck at large sizes, so contiguous chunks of this many locations are decoded (and
+/// partition-routed) on concurrent tasks while the coordinator forwards finished chunks in position
+/// order. Together with the decoder count, this bounds the queued operations. Each decoder also
+/// reserves one batch per worker. Small in tests so ordinary logs exercise chunk boundaries.
+#[cfg(not(test))]
+const SNAPSHOT_DECODE_CHUNK: u64 = 1 << 17;
+#[cfg(test)]
+const SNAPSHOT_DECODE_CHUNK: u64 = 64;
+
+/// Replay `range` and send each worker's keyed operations in log order, in batches of at most
+/// [SNAPSHOT_ROUTE_BATCH] operations.
+///
+/// Stop if `send` returns false. The caller owns the receiving tasks and observes their errors when
+/// joining them.
+async fn route_snapshot<F, C, Fut>(
+    log: &C,
+    range: Range<u64>,
+    routing: SnapshotRouting,
+    mut send: impl FnMut(usize, RoutedBatch<<C::Item as Operation<F>>::Key>) -> Fut + Send,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    C: Contiguous<Item: Operation<F>>,
+    Fut: Future<Output = bool> + Send,
+{
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
+    let stream = log
+        .replay_range(range, routing.init_buffer, ReadOptions::DONT_CACHE)
+        .await?;
+    pin_mut!(stream);
+    let mut batches: Vec<RoutedBatch<_>> = (0..routing.workers)
+        .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
+        .collect();
+    while let Some(result) = stream.next().await {
+        let (loc, op) = result?;
+        let is_delete = op.is_delete();
+        let Some(key) = op.into_key() else { continue };
+        let w = (routing.partition_of)(key.as_ref()) / routing.range_size;
+        batches[w].push((key, loc, is_delete));
+        if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
+            let batch =
+                std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+            if !send(w, batch).await {
+                return Ok(());
+            }
+        }
+    }
+
+    // Flush remaining batches before the caller closes the channels.
+    for (w, batch) in batches.into_iter().enumerate() {
+        if !batch.is_empty() && !send(w, batch).await {
+            break;
+        }
+    }
+    Ok(())
+}
 
 /// Build one parallel-init worker's partial snapshot: apply the routed operations (streamed in log
 /// order over `rx`) to `index`, resolving translated-key collisions with the worker's own log
@@ -479,7 +705,7 @@ where
     C: Contiguous<Item: Operation<F>>,
     R: PartitionRange<Value = Location<F>>,
 {
-    let mut cache = cache_size.map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+    let mut cache = cache_size.map(Cache::<<C::Item as Operation<F>>::Key>::new);
     while let Some(batch) = rx.recv().await {
         for (key, loc, is_delete) in batch {
             if is_delete {
@@ -549,9 +775,10 @@ where
     Ok((active_keys, activity))
 }
 
-/// Build a snapshot by splitting the log replay across parallel workers, each owning a contiguous
-/// range of the index's partitions (see [Partitioned]). Returns the number of active keys and
-/// the activity bitmap (see [SnapshotBuild::build_snapshot]).
+/// Build a snapshot by decoding the log replay in contiguous chunks on concurrent decode tasks
+/// and routing each keyed operation to the parallel insert worker owning its partition range
+/// (see [Partitioned]). Returns the number of active keys and the activity bitmap (see
+/// [SnapshotBuild::build_snapshot]).
 async fn build_snapshot_parallel<F, E, C, I>(
     snapshot: &mut I,
     context: E,
@@ -568,7 +795,28 @@ where
     I: Partitioned + Index<Value = Location<F>>,
 {
     let count = snapshot.partition_count();
-    let workers = (init_concurrency.get() - 1).min(count);
+
+    // Split the `init_concurrency` budget between decode tasks and insert workers. When there is at
+    // least one decode task, this task only forwards batches and is mostly idle, so it does not
+    // count against the concurrency budget. At budgets of three or less, this task decodes inline
+    // and counts against the budget.
+    let concurrency = init_concurrency.get();
+
+    // Inserts cost more CPU than decoding: across widths on both journal types, throughput peaks
+    // near two decoders per five tasks. Spawned decoding always uses at least two decoders, since
+    // a lone decoder starves the workers. Below four tasks this task decodes inline instead.
+    let decoders = if concurrency <= 3 {
+        0
+    } else {
+        // Divide before multiplying to preserve the ratio without overflowing large budgets.
+        let share = concurrency / 5 * 2 + concurrency % 5 * 2 / 5;
+        share.max(2).min(concurrency / 2)
+    };
+    let workers = if decoders == 0 {
+        concurrency.saturating_sub(1).min(count)
+    } else {
+        (concurrency - decoders).min(count)
+    };
 
     // No workers: build on this task.
     if workers == 0 {
@@ -585,9 +833,9 @@ where
     let floor = *inactivity_floor_loc;
     let range_size = count.div_ceil(workers);
 
-    // `range_size` rounds up, so `range_size * workers` can exceed `count`, leaving trailing
-    // ranges empty (and a naive `count - lo` would underflow). Reduce to the number of
-    // non-empty ranges so routing (`p / range_size`) stays in `[0, workers)`.
+    // `range_size` rounds up, so the last ranges could start at or past `count`. Reduce
+    // `workers` to the number of non-empty ranges: every spawned worker then owns at least one
+    // partition and routing (`partition / range_size`) stays in `[0, workers)`.
     let workers = count.div_ceil(range_size);
     let per_worker_cache = cache_size.and_then(|n| NonZeroUsize::new(n.get() / workers));
     let end = log.bounds().end;
@@ -623,45 +871,82 @@ where
                     per_worker_cache,
                 )
             });
-        handles.push(handle);
+        handles.push(handle.abort_on_drop());
     }
 
-    // Replay the log once and route each keyed op to the worker owning its partition.
-    // Routing runs in an inner future so any replay failure is captured rather than
-    // returned immediately: returning while the worker handles are merely dropped would
-    // leave the workers running detached, retaining the log and their range allocations
-    // after init has already failed. The stream is also released before the join.
+    // Route each replayed op to the worker owning its partition, forwarding decoded chunks in
+    // position order to preserve the per-worker op order the insert path relies on. Routing runs in
+    // an inner future so a failure here still drains the workers below rather than leaving them
+    // running detached.
+    //
+    // A closed worker channel means that worker terminated early (e.g. returned an `Error<F>` while
+    // resolving a collision). Routing stops on the first such send failure and the join below
+    // surfaces that worker's error, rather than panicking on the send.
+    let mut pending = VecDeque::new();
+    let routing = SnapshotRouting {
+        workers,
+        partition_of: I::partition_of,
+        range_size,
+        init_buffer,
+    };
     let routing_result: Result<(), Error<F>> = async {
-        let stream = log.replay(floor, init_buffer).await?;
-        pin_mut!(stream);
-        let mut batches: Vec<RoutedBatch<_>> = (0..workers)
-            .map(|_| Vec::with_capacity(SNAPSHOT_ROUTE_BATCH))
-            .collect();
+        // With no decode tasks, decode and route on this task over one continuous replay to avoid
+        // per-chunk buffered-reader overhead (measured 265s vs 369s on a 1.66B-op log).
+        if decoders == 0 {
+            let senders = &senders;
+            return route_snapshot::<F, C, _>(&**log, floor..end, routing, |w, batch| async move {
+                senders[w].send(batch).await.is_ok()
+            })
+            .await;
+        }
 
-        // A closed channel means a worker terminated early (e.g. returned an `Error<F>`
-        // while resolving a collision). Stop routing on the first such send failure and
-        // let the join below surface that worker's error, rather than panicking on the
-        // send.
-        while let Some(result) = stream.next().await {
-            let (loc, op) = result?;
-            let is_delete = op.is_delete();
-            let Some(key) = op.into_key() else { continue };
-            let w = I::partition_of(key.as_ref()) / range_size;
-            batches[w].push((key, loc, is_delete));
-            if batches[w].len() >= SNAPSHOT_ROUTE_BATCH {
-                let batch =
-                    std::mem::replace(&mut batches[w], Vec::with_capacity(SNAPSHOT_ROUTE_BATCH));
+        // Each chunk's channel holds the whole chunk (full sub-batches plus a final partial per
+        // worker), so every decoder can finish regardless of which chunk is being forwarded.
+        let chunk_capacity = SNAPSHOT_DECODE_CHUNK as usize / SNAPSHOT_ROUTE_BATCH + workers;
+        let mut starts = (floor..end)
+            .step_by(usize::try_from(SNAPSHOT_DECODE_CHUNK).expect("chunk size fits usize"));
+        let mut spawn_next = |pending: &mut VecDeque<_>| {
+            let Some(start) = starts.next() else {
+                return false;
+            };
+            let log = log.clone();
+            let len = SNAPSHOT_DECODE_CHUNK.min(end - start);
+            let (tx, rx) = mpsc::channel(chunk_capacity);
+            let handle = context
+                .child("snapshot_decoder")
+                .dedicated()
+                .spawn(move |_| async move {
+                    let tx = &tx;
+                    route_snapshot::<F, C, _>(
+                        &*log,
+                        start..start + len,
+                        routing,
+                        |w, batch| async move { tx.send((w, batch)).await.is_ok() },
+                    )
+                    .await
+                });
+            pending.push_back((rx, handle.abort_on_drop()));
+            true
+        };
+
+        // Start decoding ahead of forwarding, with at most `decoders` chunks in flight.
+        for _ in 0..decoders {
+            if !spawn_next(&mut pending) {
+                break;
+            }
+        }
+
+        // Workers need operations in log order even when later chunks finish decoding first.
+        // Reuse each decoder slot only after forwarding its chunk and joining its task.
+        while let Some((rx, _)) = pending.front_mut() {
+            while let Some((w, batch)) = rx.recv().await {
                 if senders[w].send(batch).await.is_err() {
                     return Ok(());
                 }
             }
-        }
-
-        // Flush remaining batches before the channels close.
-        for (w, batch) in batches.into_iter().enumerate() {
-            if !batch.is_empty() && senders[w].send(batch).await.is_err() {
-                break;
-            }
+            let (_, decoder) = pending.pop_front().expect("front exists");
+            decoder.join().await??;
+            spawn_next(&mut pending);
         }
         Ok(())
     }
@@ -670,14 +955,20 @@ where
     // Close the channels so each worker's stream terminates and it returns its index.
     drop(senders);
 
+    // Abort and join any decode chunks still in flight, so no decoder outlives a failed init.
+    while let Some((rx, decoder)) = pending.pop_front() {
+        drop(rx);
+        decoder.abort().await;
+    }
+
     // Join workers before surfacing any replay failure, so none outlive a failed init.
-    let joined = join_all(handles).await;
+    let joined = AbortOnDrop::join_all::<Error<F>>(handles).await;
     routing_result?;
+    let joined = joined?;
 
     // Install each worker's partition range into the snapshot and fold its active-key count in.
     let mut total_items = 0;
-    for handle in joined {
-        let (worker_index, worker_keys) = handle??;
+    for (worker_index, worker_keys) in joined {
         snapshot.install_range(worker_index);
         total_items += worker_keys;
     }
@@ -711,18 +1002,15 @@ pub trait SnapshotBuild<F: Family>:
 {
     /// The concurrency configuration the build consumes. Index types that always build serially
     /// declare `()`, so a setting they cannot use is unrepresentable.
-    type Concurrency: Copy + Send + 'static;
+    type Concurrency: Copy + Send + Sync + 'static;
 
     /// Replay `log` from `inactivity_floor_loc`, populating `self`. Returns the number of active
     /// keys and the activity status of every replayed location, in location order: a location's
     /// bit is set iff it holds the current operation of an active key or is the last commit.
     ///
     /// `init_buffer` sizes the replay read buffer (in bytes), and `cache_size` bounds each
-    /// build's `(location -> key)` cache (`None` disables it).
-    // In-crate callers await this future at concrete index types, so the flexibility an explicit
-    // `Send` bound on the returned future would add is unused.
-    #[allow(async_fn_in_trait)]
-    async fn build_snapshot<E, C>(
+    /// build's `(location -> key)` cache in entries (`None` disables it).
+    fn build_snapshot<E, C>(
         &mut self,
         _context: E,
         inactivity_floor_loc: Location<F>,
@@ -730,12 +1018,14 @@ pub trait SnapshotBuild<F: Family>:
         _init_concurrency: Self::Concurrency,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
-    ) -> Result<(usize, BitMap), Error<F>>
+    ) -> impl Future<Output = Result<(usize, BitMap), Error<F>>> + Send
     where
         E: Spawner,
         C: Contiguous<Item: Operation<F>> + 'static,
     {
-        build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        async move {
+            build_snapshot_serial(inactivity_floor_loc, &**log, self, init_buffer, cache_size).await
+        }
     }
 }
 

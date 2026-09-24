@@ -5,7 +5,8 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, SHARING_MODE, VOTE_CHANNEL,
+        MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, REVEAL, SHARING_MODE,
+        VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -17,6 +18,7 @@ use commonware_glue::dkg::{
 };
 use commonware_p2p::authenticated::{self, discovery};
 use commonware_runtime::{Strategizer, Supervisor as _, tokio};
+use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZUsize, sequence::Unit};
 use std::{
     fs,
@@ -45,7 +47,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        node.signing_key.clone(),
+        Handshake::new(node.signer.clone()),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
@@ -71,13 +73,14 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let engine = bootstrap::Engine::new(
         context.child("bootstrap"),
         bootstrap::Config {
-            signer: node.signing_key,
+            signer: node.signer,
             manager: oracle.clone(),
             blocker: oracle.clone(),
             secret_store: store,
             strategy,
             namespace: NAMESPACE,
             sharing_mode: SHARING_MODE,
+            reveal: REVEAL,
             max_supported_mode: MAX_SUPPORTED_MODE,
             partition_prefix: "bootstrap".to_string(),
             participants: participants.get(Epoch::zero()),
@@ -187,7 +190,7 @@ mod tests {
             config::write_json(
                 &node_dir.join("node.json"),
                 &NodeConfig {
-                    signing_key: signer,
+                    signer,
                     listen: format!("127.0.0.1:{}", 4300 + i)
                         .parse()
                         .expect("valid address"),

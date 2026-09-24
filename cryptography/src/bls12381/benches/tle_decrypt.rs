@@ -15,7 +15,10 @@ fn bench_tle_decrypt(c: &mut Criterion) {
 
     c.bench_function(module_path!(), |b| {
         b.iter_batched(
-            || encrypt::<_, MinSig>(&mut rng, master_public, (b"_BENCH_TLE_", &target), &message),
+            || {
+                encrypt::<_, MinSig>(&mut rng, master_public, (b"_BENCH_TLE_", &target), &message)
+                    .expect("encryption should succeed")
+            },
             |ciphertext| {
                 black_box(decrypt::<MinSig>(&signature, &ciphertext).unwrap());
             },

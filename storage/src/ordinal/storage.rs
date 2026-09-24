@@ -1,10 +1,10 @@
 use super::{Config, Error};
 use crate::{Context, rmap::RMap};
-use commonware_codec::{CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{Buf, CodecFixed, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{Crc32, crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob, Buf, BufMut, Error as RError, WriteOptions,
+    Blob, BufMut, Error as RError, IoBuf, WriteOptions,
     buffer::{Read as ReadBuffer, Write},
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -36,8 +36,8 @@ impl<V: CodecFixed<Cfg = ()>> Record<V> {
 
     /// Deserialize a record, returning the value only if the stored CRC matches the raw
     /// value bytes.
-    fn decode_valid(mut buf: &[u8]) -> Option<V> {
-        let crc = Crc32::checksum(buf.get(..V::SIZE)?);
+    fn decode_valid(mut buf: IoBuf) -> Option<V> {
+        let crc = Crc32::checksum(buf.as_ref().get(..V::SIZE)?);
         let record = Self::read(&mut buf).ok()?;
         (record.crc == crc).then_some(record.value)
     }
@@ -219,8 +219,13 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 // to the records it marks
                 let mut set_indices = bits.as_ref().map(|bits| bits.ones_iter());
                 let mut all_indices = 0..items_per_blob;
-                let mut replay_blob =
-                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
+
+                // A committed bitmap already proves membership, so marked records are not
+                // re-read and damage surfaces at get. Membership of an unmarked section
+                // comes from record validity, so its records must be read.
+                let mut replay_blob = bits.is_none().then(|| {
+                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer)
+                });
                 while let Some(bit_index) = set_indices
                     .as_mut()
                     .map_or_else(|| all_indices.next(), |indices| indices.next())
@@ -235,10 +240,12 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                     }
 
                     // A committed record that is missing or invalid cannot be recovered
-                    replay_blob.seek_to(offset)?;
-                    let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();
-                    if Record::<V>::decode_valid(record_buf.as_ref()).is_none() {
-                        return Err(Error::MissingRecord(index));
+                    if let Some(replay_blob) = replay_blob.as_mut() {
+                        replay_blob.seek_to(offset)?;
+                        let record_buf = replay_blob.read(Record::<V>::SIZE).await?.coalesce();
+                        if Record::<V>::decode_valid(record_buf).is_none() {
+                            return Err(Error::MissingRecord(index));
+                        }
                     }
                     items += 1;
                     intervals.insert(index);
@@ -334,8 +341,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let read_buf = blob.read_at(offset, Record::<V>::SIZE).await?.coalesce();
 
         // If record is valid, return it
-        let value =
-            Record::<V>::decode_valid(read_buf.as_ref()).ok_or(Error::InvalidRecord(index))?;
+        let value = Record::<V>::decode_valid(read_buf).ok_or(Error::InvalidRecord(index))?;
         Ok(Some(value))
     }
 
@@ -571,7 +577,25 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::codec::View;
     use commonware_runtime::deterministic::Context;
+
+    #[test]
+    fn test_record_preserves_owned_byte_fields() {
+        let value = View::new(7);
+        let encoded = Record::encode(&value);
+        let source = IoBuf::from(encoded.clone());
+        let decoded = Record::<View>::decode_valid(source).unwrap();
+        assert_eq!(decoded.bytes, value.bytes);
+        decoded.assert_shared();
+
+        let mut corrupt = encoded.clone();
+        corrupt[0] ^= 1;
+        assert!(Record::<View>::decode_valid(corrupt.into()).is_none());
+        let mut truncated = encoded;
+        truncated.pop();
+        assert!(Record::<View>::decode_valid(truncated.into()).is_none());
+    }
 
     type TestOrdinal = Ordinal<Context, u64>;
 

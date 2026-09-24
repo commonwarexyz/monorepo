@@ -2,12 +2,17 @@
 
 use crate::{
     Context, SyncCompletion,
-    journal::{Error, frame::FrameReader},
+    journal::{
+        Error,
+        frame::{FrameReader, decode_item, decode_length_prefix},
+    },
 };
+use bytes::Bytes;
+use commonware_codec::{Buf, Codec, Error as CodecError, ReadExt};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    Blob as RBlob, Buf, Error as RError, Handle, IoBufMut, IoBufs,
-    buffer::paged::{CacheRef, Replay as PagedReplay, Sealed, Writer},
+    Blob as RBlob, Buf as _, Error as RError, Handle, IoBufMut, IoBufs, ReadOptions,
+    buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as PagedReplay, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
 };
 use futures::{
@@ -64,8 +69,17 @@ impl<E: Context> Partition<E> {
         Ok(Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone()).await?)
     }
 
+    /// Open a blob under exclusive initialization ownership.
+    pub(super) async fn open_recovery(&self, index: u64) -> Result<PagedRecovery<E::Blob>, Error> {
+        let (blob, size) = self.context.open(&self.name, &index.to_be_bytes()).await?;
+        Ok(
+            PagedRecovery::open(blob, size, self.write_buffer.get(), self.page_cache.clone())
+                .await?,
+        )
+    }
+
     /// Scan a partition's blob names, treating a missing partition as empty.
-    async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
+    pub(super) async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
         match context.scan(name).await {
             Ok(names) => Ok(names),
             Err(RError::PartitionMissing(_)) => Ok(Vec::new()),
@@ -73,11 +87,25 @@ impl<E: Context> Partition<E> {
         }
     }
 
-    /// Open every blob in `names` as a [`Writer`], keyed by blob index.
+    /// Parse blob names into sorted indices.
+    pub(super) fn indices(names: Vec<Vec<u8>>) -> Result<Vec<u64>, Error> {
+        let mut indices = Vec::with_capacity(names.len());
+        for name in names {
+            let bytes: [u8; 8] = name
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::InvalidBlobName(hex(&name)))?;
+            indices.push(u64::from_be_bytes(bytes));
+        }
+        indices.sort_unstable();
+        Ok(indices)
+    }
+
+    /// Open every blob in `names` as a [`PagedRecovery`], keyed by blob index.
     pub(super) async fn open_many(
         &self,
         names: Vec<Vec<u8>>,
-    ) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    ) -> Result<BTreeMap<u64, PagedRecovery<E::Blob>>, Error> {
         let mut blobs = BTreeMap::new();
         for name in names {
             let hex_name = hex(&name);
@@ -85,17 +113,38 @@ impl<E: Context> Partition<E> {
                 .try_into()
                 .map_err(|_| Error::InvalidBlobName(hex_name.clone()))?;
             let index = u64::from_be_bytes(bytes);
-            let writer = self.open(index).await?;
+            let writer = self.open_recovery(index).await?;
             debug!(index, blob = hex_name, "loaded blob");
             blobs.insert(index, writer);
         }
         Ok(blobs)
     }
 
-    /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
-    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    /// Scan the partition and open every existing blob as a [`PagedRecovery`], keyed by blob index.
+    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, PagedRecovery<E::Blob>>, Error> {
         let names = Self::scan_names(&self.context, &self.name).await?;
         self.open_many(names).await
+    }
+
+    /// Open only blobs that may contain items below a cap, returning discarded blob indices.
+    pub(super) async fn open_bounded(
+        &self,
+        max_size: u64,
+        items_per_blob: u64,
+    ) -> Result<(BTreeMap<u64, PagedRecovery<E::Blob>>, Vec<u64>), Error> {
+        let names = Self::scan_names(&self.context, &self.name).await?;
+        let indices = Self::indices(names)?;
+        let mut pending = BTreeMap::new();
+        let mut discarded = Vec::new();
+        for index in indices {
+            let first = super::blob_first_position(index, items_per_blob)?;
+            if first >= max_size {
+                discarded.push(index);
+            } else {
+                pending.insert(index, self.open_recovery(index).await?);
+            }
+        }
+        Ok((pending, discarded))
     }
 
     /// Remove the given blob.
@@ -175,7 +224,7 @@ impl<E: Context> Writable<E> {
     /// - Any blobs present must end at `tail_blob`.
     pub(super) async fn recover(
         partition: Partition<E>,
-        pending: BTreeMap<u64, Writer<E::Blob>>,
+        pending: BTreeMap<u64, PagedRecovery<E::Blob>>,
         tail_blob: u64,
     ) -> Result<Self, Error> {
         if let Some(&newest) = pending.keys().next_back()
@@ -191,6 +240,7 @@ impl<E: Context> Writable<E> {
         let mut tail: Option<Writer<E::Blob>> = None;
         let mut expected = oldest;
         for (blob, writer) in pending {
+            let writer: Writer<_> = writer.into();
             if expected != Some(blob) {
                 return Err(Error::Corruption(format!(
                     "retained blobs must be contiguous (expected {expected:?}, got {blob})"
@@ -278,8 +328,9 @@ impl<E: Context> Writable<E> {
     /// Seal the tail, start syncing it, and open the next blob as the new tail.
     pub(super) async fn seal_tail(&mut self) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
-        // seal() waits only for syncs the writer started: a commit whose flush failed before its
-        // sync began is retained solely in the tail sync slot, so it must be drained here too.
+
+        // The tail sync slot retains a failed `start_sync` flush even when its handle is dropped.
+        // Drain it before opening the next tail.
         self.drain_tail_sync().await?;
 
         // Open the next tail first so a failure leaves the current tail untouched.
@@ -326,74 +377,11 @@ impl<E: Context> Writable<E> {
         Ok(())
     }
 
-    /// Rewind the tail to `byte_offset`, shrinking it in place.
-    ///
-    /// # Invariants
-    ///
-    /// - `byte_offset <= tail size`
-    ///
-    pub(super) async fn rewind_tail(&mut self, byte_offset: u64) -> Result<(), Error> {
-        let current_bytes = self.tail.size();
-        assert!(byte_offset <= current_bytes);
-        if byte_offset < current_bytes {
-            self.drain_tail_predecessor_sync().await?;
-            self.drain_tail_sync().await?;
-            self.tail.resize(byte_offset).await?;
-        }
-        Ok(())
-    }
-
-    /// Rewind into a sealed blob: demote it to the writable tail, rewinding to `byte_offset`,
-    /// and discarding every newer blob.
-    ///
-    /// # Invariants
-    ///
-    /// - `blob < tail_blob_index`
-    pub(super) async fn rewind_into_sealed(
-        &mut self,
-        blob: u64,
-        byte_offset: u64,
-    ) -> Result<(), Error> {
-        self.drain_tail_predecessor_sync().await?;
-        self.drain_tail_sync().await?;
-
-        let idx = blob
-            .checked_sub(self.oldest_blob_index)
-            .map(|idx| idx as usize)
-            .filter(|&idx| idx < self.sealed.len())
-            .ok_or_else(|| Error::Corruption(format!("rewind target blob {blob} not retained")))?;
-
-        // Reopen the target as the writable tail and truncate in place. The fresh Writer
-        // gets a fresh page-cache id, so pages cached under the sealed handle's id are
-        // unreachable.
-        let mut new_writer = self.partition.open(blob).await?;
-        let current_bytes = new_writer.size();
-        if byte_offset < current_bytes {
-            new_writer.resize(byte_offset).await?;
-        }
-
-        // Remove blobs newest-first so a crash leaves a contiguous prefix: the old tail, then
-        // sealed blobs down to the target. Capture the old tail before truncating `sealed`
-        // (which redefines `tail_blob`).
-        let old_tail_blob = self.tail_blob_index();
-        self.tail = new_writer;
-        self.partition.remove(old_tail_blob).await?;
-        self.metrics.tracked.dec();
-        for newer in ((blob + 1)..old_tail_blob).rev() {
-            self.partition.remove(newer).await?;
-            self.metrics.tracked.dec();
-        }
-
-        // Sealed history now ends below the target, which is the tail.
-        self.sealed.truncate(idx);
-        self.sealed_snapshot = None;
-        Ok(())
-    }
-
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
     ///
     /// Safe with live readers, like [Self::prune]: snapshot readers keep their own handles, which
     /// the runtime's read-after-remove contract keeps valid.
+    #[commonware_macros::stability(ALPHA)]
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
         self.drain_tail_predecessor_sync().await?;
         self.drain_tail_sync().await?;
@@ -565,11 +553,12 @@ impl<'a, B: RBlob> Blob<'a, B> {
         self,
         offset: u64,
         buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> Result<Replay<'a, B>, Error> {
         match self {
             Self::Writer(writer) => Replay::view(Self::Writer(writer), offset, buffer_size),
             Self::Sealed(sealed) => {
-                let mut replay = sealed.replay(buffer_size)?;
+                let mut replay = sealed.replay(buffer_size, read_options)?;
                 replay.seek_to(offset)?;
                 Ok(Replay::paged(replay))
             }
@@ -632,6 +621,10 @@ impl<B: RBlob> FrameReader for Blob<'_, B> {
 }
 
 /// Sequential replay over either a sealed paged blob or a live writer view.
+///
+/// Decoding methods select a concrete backing buffer before reading fields so the
+/// compiler can specialize length checks and field-copy loops. Only the concrete
+/// buffers implement [`Buf`], keeping codec readers behind this dispatch.
 pub(super) struct Replay<'a, B: RBlob> {
     inner: ReplayInner<'a, B>,
 }
@@ -645,6 +638,36 @@ enum ReplayInner<'a, B: RBlob> {
 }
 
 impl<'a, B: RBlob> Replay<'a, B> {
+    /// Decode an item through its concrete backing buffer.
+    pub(super) fn read<A: ReadExt>(&mut self) -> Result<A, CodecError> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => A::read(replay),
+            ReplayInner::View(replay) => A::read(replay),
+        }
+    }
+
+    /// Decode a frame length through its concrete backing buffer.
+    #[inline]
+    pub(super) fn read_length(&mut self) -> Result<(usize, usize), Error> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => decode_length_prefix(replay),
+            ReplayInner::View(replay) => decode_length_prefix(replay),
+        }
+    }
+
+    /// Decode a frame payload bounded to `len` bytes through its concrete backing buffer.
+    pub(super) fn decode<V: Codec>(
+        &mut self,
+        len: usize,
+        cfg: &V::Cfg,
+        compressed: bool,
+    ) -> Result<V, Error> {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => decode_item::<V>(replay.take(len), cfg, compressed),
+            ReplayInner::View(replay) => decode_item::<V>(replay.take(len), cfg, compressed),
+        }
+    }
+
     /// Wrap a paged replay handle.
     const fn paged(replay: PagedReplay<B>) -> Self {
         Self {
@@ -678,7 +701,14 @@ impl<'a, B: RBlob> Replay<'a, B> {
     }
 }
 
-impl<B: RBlob> Buf for Replay<'_, B> {
+impl<B: RBlob> bytes::Buf for Replay<'_, B> {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        match &mut self.inner {
+            ReplayInner::Paged(replay) => replay.copy_to_bytes(len),
+            ReplayInner::View(replay) => replay.copy_to_bytes(len),
+        }
+    }
+
     fn remaining(&self) -> usize {
         match &self.inner {
             ReplayInner::Paged(replay) => replay.remaining(),
@@ -710,9 +740,7 @@ struct ViewReplay<'a, B: RBlob> {
     /// Minimum read size when more bytes are needed.
     buffer_size: NonZeroUsize,
     /// Buffered logical bytes.
-    buf: Vec<u8>,
-    /// Offset of the next unread byte in `buf`.
-    cursor: usize,
+    buf: IoBufs,
     /// Whether `offset` has reached the source blob's logical size.
     exhausted: bool,
 }
@@ -728,8 +756,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
             blob,
             offset,
             buffer_size,
-            buf: Vec::new(),
-            cursor: 0,
+            buf: IoBufs::default(),
             exhausted: false,
         })
     }
@@ -739,11 +766,9 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
         self.exhausted
     }
 
-    /// Ensure at least `n` bytes are available through the [`Buf`] implementation.
+    /// Ensure at least `n` bytes are available through the [`bytes::Buf`] implementation.
     async fn ensure(&mut self, n: usize) -> Result<bool, Error> {
         while self.remaining() < n && !self.exhausted {
-            self.compact();
-
             let blob_size = self.blob.size();
             let remaining = blob_size.saturating_sub(self.offset);
             if remaining == 0 {
@@ -767,7 +792,7 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
                 .offset
                 .checked_add(read as u64)
                 .ok_or(Error::OffsetOverflow)?;
-            self.buf.extend_from_slice(&buf.chunk()[..read]);
+            self.buf.append(buf.freeze());
             if self.offset == blob_size {
                 self.exhausted = true;
             }
@@ -775,38 +800,25 @@ impl<'a, B: RBlob> ViewReplay<'a, B> {
 
         Ok(self.remaining() >= n)
     }
-
-    /// Discard bytes already consumed through [`Buf::advance`].
-    fn compact(&mut self) {
-        match self.cursor {
-            0 => {}
-            cursor if cursor == self.buf.len() => {
-                self.buf.clear();
-                self.cursor = 0;
-            }
-            cursor => {
-                self.buf.drain(..cursor);
-                self.cursor = 0;
-            }
-        }
-    }
 }
 
-impl<B: RBlob> Buf for ViewReplay<'_, B> {
+impl<B: RBlob> Buf for ViewReplay<'_, B> {}
+
+impl<B: RBlob> bytes::Buf for ViewReplay<'_, B> {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        self.buf.copy_to_bytes(len)
+    }
+
     fn remaining(&self) -> usize {
-        self.buf.len() - self.cursor
+        self.buf.remaining()
     }
 
     fn chunk(&self) -> &[u8] {
-        &self.buf[self.cursor..]
+        self.buf.chunk()
     }
 
     fn advance(&mut self, cnt: usize) {
-        self.cursor = self
-            .cursor
-            .checked_add(cnt)
-            .expect("advance overflowed replay cursor");
-        assert!(self.cursor <= self.buf.len(), "advanced past replay buffer");
+        self.buf.advance(cnt);
     }
 }
 
@@ -830,10 +842,48 @@ impl<'a, B: RBlob> Blobs<'a, B> {
 }
 
 #[cfg(test)]
+impl<E: Context> Writable<E> {
+    pub(in crate::journal::contiguous) const fn has_tail_predecessor_sync(&self) -> bool {
+        self.tail_predecessor_sync.is_some()
+    }
+
+    /// Open `blob` as an independent writer, outside this journal's tracking
+    /// (simulates a crash-artifact blob).
+    pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
+        self.partition.open(blob).await
+    }
+
+    /// Make one blob durable.
+    pub(crate) async fn sync_blob(&mut self, blob: u64) -> Result<(), Error> {
+        if blob == self.tail_blob_index() {
+            self.tail.sync().await?;
+            return Ok(());
+        }
+        if blob < self.oldest_blob_index || blob >= self.tail_blob_index() {
+            return Ok(());
+        }
+        self.partition.open(blob).await?.sync().await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{journal::frame::encode_frame_into, utils::codec::View};
     use commonware_runtime::{IoBufMut, Runner as _, Storage as _, deterministic};
     use commonware_utils::{NZU16, NZUsize};
+
+    impl<E: crate::Context> Writable<E> {
+        pub(in super::super) fn test_configuration(&self) -> (E, String, CacheRef, NonZeroUsize) {
+            (
+                self.partition.context.child("recovery_fixture"),
+                self.partition.name.clone(),
+                self.partition.page_cache.clone(),
+                self.partition.write_buffer,
+            )
+        }
+    }
 
     fn assert_insufficient_length(result: Result<(IoBufMut, usize), Error>) {
         assert!(matches!(
@@ -842,29 +892,124 @@ mod tests {
         ));
     }
 
-    impl<E: Context> Writable<E> {
-        pub(in crate::journal::contiguous) const fn has_tail_predecessor_sync(&self) -> bool {
-            self.tail_predecessor_sync.is_some()
-        }
+    #[test]
+    fn test_replay_preserves_byte_views_across_fills() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+            let (blob, size) = context.open("replay-views", b"blob").await.unwrap();
+            let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+            writer.append(b"abcdefghijklmnopqrstuvwx").await.unwrap();
+            let snapshot = writer.snapshot().await.unwrap();
 
-        /// Open `blob` as an independent writer, outside this journal's tracking
-        /// (simulates a crash-artifact blob).
-        pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
-            self.partition.open(blob).await
-        }
+            for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
+                let paged = matches!(source, Blob::Sealed(_));
+                let mut replay = source
+                    .replay_from(0, NZUsize!(12), ReadOptions::default())
+                    .unwrap();
+                assert!(replay.ensure(12).await.unwrap());
+                let first_range = replay.chunk().as_ptr_range();
+                let first = replay.read::<View>().unwrap().bytes;
+                assert!(first_range.contains(&first.as_ptr()));
 
-        /// Make one blob durable.
-        pub(crate) async fn sync_blob(&mut self, blob: u64) -> Result<(), Error> {
-            if blob == self.tail_blob_index() {
-                self.tail.sync().await?;
-                return Ok(());
+                assert!(replay.ensure(16).await.unwrap());
+                let middle = replay.read::<View>().unwrap().bytes;
+                assert_eq!(first_range.contains(&middle.as_ptr()), paged);
+
+                let last_range = replay.chunk().as_ptr_range();
+                let last = replay.copy_to_bytes(8);
+                assert!(last_range.contains(&last.as_ptr()));
+                assert_eq!(replay.remaining(), 0);
+                assert!(!replay.ensure(1).await.unwrap());
+                assert!(replay.is_exhausted());
+                drop(replay);
+                assert_eq!(first.as_ref(), b"abcdefgh");
+                assert_eq!(middle.as_ref(), b"ijklmnop");
+                assert_eq!(last.as_ref(), b"qrstuvwx");
             }
-            if blob < self.oldest_blob_index || blob >= self.tail_blob_index() {
-                return Ok(());
+        });
+    }
+
+    #[test]
+    fn test_replay_decodes_bounded_frames() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let items = [
+                Bytes::from_static(b"abcdefgh"),
+                Bytes::from_static(b"ijklmnop"),
+                Bytes::from_static(b"qrstuvwx"),
+            ];
+            for compression in [None, Some(1)] {
+                let mut encoded = Vec::new();
+                for item in &items {
+                    encode_frame_into(compression, item, &mut encoded).unwrap();
+                }
+                let cache = CacheRef::from_pooler(&context, NZU16!(64), NZUsize!(3));
+                let (blob, size) = context
+                    .open("replay-frames", &[compression.unwrap_or(0)])
+                    .await
+                    .unwrap();
+                let mut writer = Writer::new(blob, size, 128, cache).await.unwrap();
+                writer.append(&encoded).await.unwrap();
+                let snapshot = writer.snapshot().await.unwrap();
+
+                for source in [Blob::Writer(&writer), Blob::Sealed(snapshot)] {
+                    let mut replay = source
+                        .clone()
+                        .replay_from(0, NZUsize!(12), ReadOptions::default())
+                        .unwrap();
+                    let mut retained = Vec::new();
+                    for _ in &items {
+                        assert!(replay.ensure(1).await.unwrap());
+                        let (len, prefix_len) = replay.read_length().unwrap();
+                        assert_eq!(prefix_len, 1);
+                        assert!(replay.ensure(len).await.unwrap());
+                        let contiguous = replay.chunk().len() >= len;
+                        let range = replay.chunk().as_ptr_range();
+                        let item = replay
+                            .decode::<Bytes>(len, &(8..=8).into(), compression.is_some())
+                            .unwrap();
+                        if compression.is_none() && contiguous {
+                            assert!(range.contains(&item.as_ptr()));
+                        }
+                        retained.push(item);
+                    }
+                    assert!(!replay.ensure(1).await.unwrap());
+                    assert_eq!(replay.remaining(), 0);
+                    drop(replay);
+                    assert_eq!(retained, items);
+
+                    if compression.is_none() {
+                        for case in 0..3 {
+                            let mut replay = source
+                                .clone()
+                                .replay_from(0, NZUsize!(12), ReadOptions::default())
+                                .unwrap();
+                            assert!(replay.ensure(12).await.unwrap());
+                            let (len, _) = replay.read_length().unwrap();
+                            match case {
+                                0 => assert!(matches!(
+                                    replay.decode::<Bytes>(len, &(..=7).into(), false),
+                                    Err(Error::Codec(CodecError::InvalidLength(8)))
+                                )),
+                                1 => {
+                                    let remaining = replay.remaining();
+                                    assert!(matches!(
+                                        replay.decode::<u64>(1, &(), false),
+                                        Err(Error::Codec(CodecError::EndOfBuffer))
+                                    ));
+                                    assert_eq!(replay.remaining(), remaining);
+                                }
+                                _ => assert!(matches!(
+                                    replay.decode::<u8>(len, &(), false),
+                                    Err(Error::Codec(CodecError::ExtraData(8)))
+                                )),
+                            }
+                        }
+                    }
+                }
             }
-            self.partition.open(blob).await?.sync().await?;
-            Ok(())
-        }
+        });
     }
 
     #[test]

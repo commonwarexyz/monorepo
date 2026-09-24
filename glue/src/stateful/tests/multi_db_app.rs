@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
@@ -27,7 +27,7 @@ use commonware_consensus::{
     },
     simplex::{
         self,
-        config::ForwardingPolicy,
+        config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
         mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
         types::Context,
@@ -42,7 +42,7 @@ use commonware_cryptography::{
 use commonware_p2p::utils::mux::Muxer;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Buf, BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
 use commonware_storage::{
     Context as StorageContext,
@@ -67,8 +67,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type QmdbA<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-/// The compact (witness-only) QMDB used as DB-B, so the suite drives deep rewind,
-/// pruning, and state sync through the compact path as well.
+/// The compact (witness-only) QMDB used as DB-B for bounded recovery, pruning, and state sync.
 pub(super) type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
@@ -93,6 +92,7 @@ pub(super) fn qmdb_config(
             metadata_partition: format!("{prefix}-qmdb-a-mmr-metadata"),
             items_per_blob: NZU64!(11),
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -101,9 +101,10 @@ pub(super) fn qmdb_config(
             items_per_blob: NZU64!(7),
             page_cache: page_cache.clone(),
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
         },
         translator: TwoCap,
-        init_cache_size: Some(NZUsize!(1024)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     };
@@ -118,6 +119,7 @@ pub(super) fn qmdb_config(
             codec_config: (),
             page_cache,
             write_buffer: IO_BUFFER_SIZE,
+            replay_buffer: IO_BUFFER_SIZE,
         },
         commit_codec_config: (),
     };
@@ -285,6 +287,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = MultiDatabaseSet<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -346,8 +349,26 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(Self::execute(block.height(), batches).await)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
     }
 
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
@@ -485,7 +506,6 @@ impl EngineDefinition for MultiDbEngine {
             peer_provider: oracle.manager(),
             blocker: oracle.control(public_key.clone()),
             mailbox_size: NZUsize!(100),
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -561,7 +581,7 @@ impl EngineDefinition for MultiDbEngine {
         let marshal_config = marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
-            start: plan.marshal_start(genesis_block.clone()),
+            start: plan.marshal_start(genesis_block.clone().into()),
             partition_prefix: partition_prefix.clone(),
             mailbox_size: NZUsize!(100),
             view_retention: ViewDelta::new(10),
@@ -595,7 +615,6 @@ impl EngineDefinition for MultiDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
                     max_serve_ops: NZU64!(16),
@@ -614,7 +633,6 @@ impl EngineDefinition for MultiDbEngine {
                     database: None,
                     mailbox_size: NZUsize!(100),
                     me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
                     timeout: Duration::from_secs(2),
                     fetch_retry_timeout: Duration::from_millis(100),
                     max_serve_ops: NZU64!(16),
@@ -716,9 +734,12 @@ impl EngineDefinition for MultiDbEngine {
             certification_timeout: Duration::from_secs(2),
             timeout_retry: Duration::from_millis(500),
             view_retention: ViewDelta::new(10),
-            skip_timeout: Duration::from_secs(5),
+            skip: SkipPolicy::Enabled {
+                timeout: Duration::from_secs(5),
+                budget: simplex::SkipBudget::Participants,
+            },
             fetch_timeout: Duration::from_secs(2),
-            forwarding: ForwardingPolicy::Disabled,
+            forward: ForwardPolicy::Disabled,
             track_historical_votes: false,
         };
 

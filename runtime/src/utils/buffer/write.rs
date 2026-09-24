@@ -1,5 +1,5 @@
 use crate::{
-    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs, WriteOptions,
+    Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs, ReadOptions, WriteOptions,
     buffer::{SyncState, tip::Buffer},
 };
 use std::num::NonZeroUsize;
@@ -137,7 +137,11 @@ impl<B: Blob> Write<B> {
 
     /// Read bytes from the underlying blob.
     async fn read_blob(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        Ok(self.blob.read_at(offset, len).await?.freeze())
+        Ok(self
+            .blob
+            .read_at(offset, len, ReadOptions::default())
+            .await?
+            .freeze())
     }
 
     /// Write bytes from `buf` at `offset`.
@@ -238,7 +242,8 @@ impl<B: Blob> Write<B> {
     ///
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
-    /// mutate the blob wait before issuing blob operations.
+    /// mutate the blob wait before issuing blob operations. A flush failure is retained the same
+    /// way: the handle reports it, and so does the next such call.
     pub async fn start_sync(&mut self) -> Handle<()> {
         if let Some((buf, offset)) = self.buffer.take()
             && let Err(err) = self
@@ -246,7 +251,7 @@ impl<B: Blob> Write<B> {
                 .write_at(&self.blob, offset, buf, WriteOptions::default())
                 .await
         {
-            return Handle::ready(Err(err));
+            return self.sync_state.fail(err);
         }
 
         self.sync_state.start_sync(&self.blob).await

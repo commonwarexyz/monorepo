@@ -23,7 +23,7 @@ _Primitives are designed for deployment in adversarial environments. If you find
 * [deployer](./deployer/README.md): Deploy infrastructure across cloud providers.
 * [glue](./glue/README.md): Default constructions that span multiple primitives.
 * [math](./math/README.md): Create and manipulate mathematical objects.
-* [p2p](./p2p/README.md): Communicate with authenticated peers over encrypted connections.
+* [p2p](./p2p/README.md): Communicate with authenticated peers.
 * [parallel](./parallel/README.md): Parallelize fold operations with pluggable execution strategies.
 * [resolver](./resolver/README.md): Resolve data identified by a fixed-length key.
 * [runtime](./runtime/README.md): Execute asynchronous tasks with a configurable scheduler.
@@ -54,6 +54,7 @@ _Sometimes, we opt to maintain software that is neither a primitive nor an examp
 * [macros](./macros/README.md): Augment the development of primitives with procedural macros.
 * [mcp](./mcp/README.md): Interact with the Commonware Library via MCP at https://mcp.commonware.xyz.
 * [pipeline](./pipeline): Mechanisms under development.
+* [sol](./sol/README.md): Verify proofs and certificates in Solidity.
 * [utils](./utils/README.md): Leverage common functionality across multiple primitives.
 
 ## Stability
@@ -83,6 +84,8 @@ RUSTFLAGS="--cfg commonware_stability_BETA" cargo build -p my-app
 ## Platform Compatibility
 
 The Commonware Library supports Linux and macOS, although only Linux is recommended for production use. Select primitives also support `wasm32-unknown-unknown` and `no_std` (for browsers and zkVMs).
+
+x86-64 SIMD extensions (AVX2, AVX-512) are detected at runtime. AArch64 builds assume NEON.
 
 _Windows is not a supported target. Running the Commonware Library on Windows may result in undefined behavior._
 

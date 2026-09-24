@@ -44,7 +44,7 @@ pub trait Journal<F: Family>: Sized + Send {
     fn size(&self) -> u64;
 
     /// Append a non-empty batch of operations.
-    fn append(self, ops: &[Self::Op]) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+    fn append(self, ops: Vec<Self::Op>) -> impl Future<Output = Result<Self, Self::Error>> + Send;
 }
 
 impl<F, E, V> Journal<F> for crate::journal::contiguous::variable::Journal<E, V>
@@ -63,7 +63,8 @@ where
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
-        Self::init_sync(context, config.clone(), *range.start()..*range.end()).await
+        crate::journal::authenticated::init_sync(context, config, *range.start()..*range.end())
+            .await
     }
 
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
@@ -83,8 +84,8 @@ where
         Contiguous::bounds(self).end
     }
 
-    async fn append(self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
-        let (journal, _) = self.append_many(Many::Flat(ops)).await?;
+    async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
+        let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
     }
 }
@@ -105,33 +106,8 @@ where
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
-        let mut journal = Self::init(context, config).await?;
-        let size = Contiguous::bounds(&journal).end;
-
-        // Fresh journal already aligned with the sync start - nothing to do.
-        if size == 0 && *range.start() == 0 {
-            return Ok(journal);
-        }
-
-        // A pruned start cannot be reconstructed from the retained suffix.
-        let bounds = journal.bounds();
-        if bounds.start > *range.start() {
-            return journal.clear_to_size(*range.start()).await;
-        }
-
-        // Sync targets describe the same append-only log, so progress beyond an older target can
-        // retain its authenticated prefix instead of refetching it.
-        if size > *range.end() {
-            journal = journal.rewind(*range.end()).await?;
-        }
-
-        if size <= *range.start() {
-            journal = journal.clear_to_size(*range.start()).await?;
-        } else {
-            (journal, _) = journal.prune(*range.start()).await?;
-        }
-
-        Ok(journal)
+        crate::journal::authenticated::init_sync(context, config, *range.start()..*range.end())
+            .await
     }
 
     async fn resize(self, start: Location<F>) -> Result<Self, Self::Error> {
@@ -151,8 +127,8 @@ where
         Contiguous::bounds(self).end
     }
 
-    async fn append(self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
-        let (journal, _) = self.append_many(Many::Flat(ops)).await?;
+    async fn append(self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
+        let (journal, _) = self.append_many(Many::Flat(&ops)).await?;
         Ok(journal)
     }
 }
@@ -175,7 +151,7 @@ impl<F, E, Op> Journal<F> for Memory<F, E, Op>
 where
     F: Family,
     E: Send,
-    Op: Clone + Send + Sync,
+    Op: Send + Sync,
 {
     type Context = E;
     type Config = ();
@@ -213,8 +189,8 @@ where
         *self.start + self.ops.len() as u64
     }
 
-    async fn append(mut self, ops: &[Self::Op]) -> Result<Self, Self::Error> {
-        self.ops.extend_from_slice(ops);
+    async fn append(mut self, ops: Vec<Self::Op>) -> Result<Self, Self::Error> {
+        self.ops.extend(ops);
         Ok(self)
     }
 }
@@ -241,6 +217,7 @@ mod tests {
             items_per_blob: NZU64!(5),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
         }
     }
 
@@ -251,6 +228,7 @@ mod tests {
             compression: None,
             codec_config: (),
             write_buffer: NZUsize!(2048),
+            replay_buffer: NZUsize!(2048),
             page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
         }
     }
@@ -268,7 +246,7 @@ mod tests {
             assert_eq!(journal.size(), 10);
 
             // Appends extend the size.
-            let journal = journal.append(&[1, 2, 3]).await.unwrap();
+            let journal = journal.append(vec![1, 2, 3]).await.unwrap();
             assert_eq!(journal.size(), 13);
 
             // A resize within the retained ops drains the prefix.
@@ -282,7 +260,7 @@ mod tests {
             let journal = <Mem as Journal<F>>::new((), (), range.clone())
                 .await
                 .unwrap();
-            let journal = journal.append(&[1, 2]).await.unwrap();
+            let journal = journal.append(vec![1, 2]).await.unwrap();
             let journal = journal.resize(Location::new(15)).await.unwrap();
             assert_eq!(journal.size(), 15);
             let (start, ops) = journal.into_parts();
@@ -291,7 +269,7 @@ mod tests {
 
             // A resize before the start clears.
             let journal = <Mem as Journal<F>>::new((), (), range).await.unwrap();
-            let journal = journal.append(&[1]).await.unwrap();
+            let journal = journal.append(vec![1]).await.unwrap();
             let journal = journal.resize(Location::new(5)).await.unwrap();
             assert_eq!(journal.size(), 5);
             let (start, ops) = journal.into_parts();
@@ -319,6 +297,7 @@ mod tests {
             context.remove(&blob_part, None).await.unwrap();
             let (blob, _) = context.open(&blob_part, &1u64.to_be_bytes()).await.unwrap();
             blob.sync().await.unwrap();
+            drop(blob);
 
             // Reopening must restore the requested start so locations 7-8 are not skipped.
             let range = non_empty_range!(
@@ -352,7 +331,7 @@ mod tests {
             let journal = journal.sync().await.unwrap();
             drop(journal);
 
-            // No operations exist to rewind, so opening resets to the requested start.
+            // No operations exist to retain, so opening resets to the requested start.
             let range = non_empty_range!(
                 crate::merkle::Location::<F>::new(7),
                 crate::merkle::Location::<F>::new(20)
@@ -372,7 +351,36 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_sync_journal_new_rewinds_ahead_and_discards_pruned_progress() {
+    fn test_fixed_sync_journal_preserves_metric_prefix() {
+        for reset in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                // Exercise both fresh storage and a retained start beyond the requested range.
+                let cfg = test_cfg(&context);
+                if reset {
+                    let journal =
+                        FixedJournal::init_at_size(context.child("seed"), cfg.clone(), 30)
+                            .await
+                            .unwrap();
+                    _ = journal.sync().await.unwrap();
+                }
+
+                // Initialization keeps the caller's metric prefix through either path.
+                let start = if reset { 7 } else { 0 };
+                let range = non_empty_range!(Location::<F>::new(start), Location::new(20));
+                let journal = <FixedJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+                    .await
+                    .unwrap();
+                assert_eq!(journal.bounds(), start..start);
+                let metrics = commonware_runtime::Metrics::encode(&context);
+                let expected = format!("sync_size {start}");
+                assert!(metrics.lines().any(|line| line == expected), "{metrics}");
+                assert!(!metrics.contains("sync_journal_"), "{metrics}");
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_fixed_sync_journal_caps_ahead_and_discards_pruned_progress() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg(&context);
             let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
@@ -424,7 +432,37 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_variable_sync_journal_new_rewinds_ahead_and_discards_pruned_progress() {
+    fn test_variable_sync_journal_preserves_metric_prefix() {
+        for reset in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                // Exercise both fresh storage and a retained start beyond the requested range.
+                let cfg = variable_test_cfg(&context);
+                if reset {
+                    let journal =
+                        VariableJournal::init_at_size(context.child("seed"), cfg.clone(), 30)
+                            .await
+                            .unwrap();
+                    _ = journal.sync().await.unwrap();
+                }
+
+                // Initialization keeps the caller's metric prefix through either path.
+                let start = if reset { 7 } else { 0 };
+                let range = non_empty_range!(Location::<F>::new(start), Location::new(20));
+                let journal =
+                    <VariableJournal as Journal<F>>::new(context.child("sync"), cfg, range)
+                        .await
+                        .unwrap();
+                assert_eq!(journal.bounds(), start..start);
+                let metrics = commonware_runtime::Metrics::encode(&context);
+                let expected = format!("sync_size {start}");
+                assert!(metrics.lines().any(|line| line == expected), "{metrics}");
+                assert!(!metrics.contains("sync_journal_"), "{metrics}");
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_variable_sync_journal_caps_ahead_and_discards_pruned_progress() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = variable_test_cfg(&context);
             let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())

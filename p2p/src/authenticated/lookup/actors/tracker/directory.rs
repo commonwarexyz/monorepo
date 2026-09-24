@@ -327,17 +327,19 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
     ///
     /// Peers can be blocked even if they don't have a record yet. The block will be applied
     /// when they are later added to a peer set.
-    pub fn block(&mut self, peer: &C) {
+    ///
+    /// Returns `true` if the peer was newly blocked.
+    pub fn block(&mut self, peer: &C) -> bool {
         // Already blocked
         if self.is_blocked(peer) {
-            return;
+            return false;
         }
 
         // If record exists, check if it's blockable
         if let Some(record) = self.peers.get(peer)
             && !record.is_blockable()
         {
-            return;
+            return false;
         }
 
         let blocked_until = self.context.current() + self.block_duration;
@@ -347,6 +349,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .blocked
             .get_or_create_by(peer)
             .try_set(blocked_until.epoch_millis());
+        true
     }
 
     // ---------- Getters ----------
@@ -431,6 +434,17 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Directory<E, C> {
             .filter_map(|(_, r)| r.egress_ip())
             .filter(|ip| self.allow_private_ips || IpAddrExt::is_global(ip))
             .collect()
+    }
+
+    /// Returns the peers that are currently blocked.
+    pub fn blocked_peers(&self) -> Set<C> {
+        let now = self.context.current();
+        Set::from_iter_dedup(
+            self.blocked
+                .iter()
+                .filter(|(_, until)| **until > now)
+                .map(|(peer, _)| peer.clone()),
+        )
     }
 
     /// Unblock all peers whose block has expired.

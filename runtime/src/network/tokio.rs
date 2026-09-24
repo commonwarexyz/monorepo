@@ -1,5 +1,5 @@
 use crate::{BufferPool, Error, IoBufs};
-use std::{convert::identity, net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _, BufReader},
     net::{
@@ -78,7 +78,7 @@ impl crate::Sink for Sink {
         // Time out if we take too long to write
         let result = timeout(write_timeout, send)
             .await
-            .map_or(Err(Error::Timeout), identity);
+            .unwrap_or(Err(Error::Timeout));
 
         // A failed send leaves the write-half unusable.
         if result.is_err() {
@@ -126,7 +126,7 @@ impl crate::Stream for Stream {
         // Time out if we take too long to read
         let result = timeout(self.read_timeout, recv)
             .await
-            .map_or(Err(Error::Timeout), identity);
+            .unwrap_or(Err(Error::Timeout));
 
         // Unpoison on success.
         if result.is_ok() {
@@ -237,7 +237,6 @@ pub struct Config {
     read_buffer_size: usize,
 }
 
-#[cfg_attr(feature = "iouring-network", allow(dead_code))]
 impl Config {
     // Setters
     /// See [Config]
@@ -384,9 +383,11 @@ impl crate::Network for Network {
 #[cfg(test)]
 mod tests {
     use crate::{
-        BufferPool, BufferPoolConfig, Listener as _, Network as _, Sink as _, Stream as _,
+        BufferPool, BufferPoolConfig, Listener as _, Network as _, Runner as _, Sink as _,
+        Stream as _,
         network::{tests, tokio as TokioNetwork},
         telemetry::metrics::Registry,
+        tokio::Runner,
     };
     use commonware_macros::test_group;
     use std::time::{Duration, Instant};
@@ -396,43 +397,49 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_network(), &mut registry)
     }
 
-    #[tokio::test]
-    async fn test_trait() {
-        tests::test_network_trait(|| {
-            TokioNetwork::Network::new(
-                TokioNetwork::Config::default()
-                    .with_read_timeout(Duration::from_secs(15))
-                    .with_write_timeout(Duration::from_secs(15)),
-                test_pool(),
-            )
-        })
-        .await;
+    #[test]
+    fn test_trait() {
+        Runner::default().start(|context| async move {
+            tests::test_network_trait(context, || {
+                TokioNetwork::Network::new(
+                    TokioNetwork::Config::default()
+                        .with_read_timeout(Duration::from_secs(15))
+                        .with_write_timeout(Duration::from_secs(15)),
+                    test_pool(),
+                )
+            })
+            .await;
+        });
     }
 
     #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn test_connect_timeout() {
-        let connect_timeout = Duration::from_millis(100);
-        let network = TokioNetwork::Network::new(
-            TokioNetwork::Config::default().with_connect_timeout(connect_timeout),
-            test_pool(),
-        );
+    #[test]
+    fn test_connect_timeout() {
+        Runner::default().start(|context| async move {
+            let connect_timeout = Duration::from_millis(100);
+            let network = TokioNetwork::Network::new(
+                TokioNetwork::Config::default().with_connect_timeout(connect_timeout),
+                test_pool(),
+            );
 
-        tests::test_network_connect_timeout(network, connect_timeout).await;
+            tests::test_network_connect_timeout(context, network, connect_timeout).await;
+        });
     }
 
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        tests::stress_test_network_trait(|| {
-            TokioNetwork::Network::new(
-                TokioNetwork::Config::default()
-                    .with_read_timeout(Duration::from_secs(15))
-                    .with_write_timeout(Duration::from_secs(15)),
-                test_pool(),
-            )
-        })
-        .await;
+    #[test]
+    fn test_stress_trait() {
+        Runner::default().start(|context| async move {
+            tests::stress_test_network_trait(context, || {
+                TokioNetwork::Network::new(
+                    TokioNetwork::Config::default()
+                        .with_read_timeout(Duration::from_secs(15))
+                        .with_write_timeout(Duration::from_secs(15)),
+                    test_pool(),
+                )
+            })
+            .await;
+        });
     }
 
     #[tokio::test]

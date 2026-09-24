@@ -121,7 +121,7 @@ impl<R: Receiver, V: Codec> WrappedReceiver<R, V> {
     /// Receive a message from an arbitrary recipient.
     pub async fn recv(&mut self) -> Result<WrappedMessage<R::PublicKey, V>, R::Error> {
         let (pk, bytes) = self.receiver.recv().await?;
-        let decoded = match V::decode_cfg(bytes.as_ref(), &self.config) {
+        let decoded = match V::decode_cfg(bytes, &self.config) {
             Ok(decoded) => decoded,
             Err(e) => {
                 return Ok((pk, Err(e)));
@@ -259,8 +259,8 @@ where
                 continue;
             } => {
                 let config = self.codec_config.clone();
-                let handle = self.strategy.spawn(move |_| {
-                    let result = V::decode_cfg(bytes.as_ref(), &config);
+                let handle = self.strategy.spawn(bytes.len(), move |_| {
+                    let result = V::decode_cfg(bytes, &config);
                     (peer, result)
                 });
                 decode_pool.push(handle);
@@ -293,18 +293,23 @@ mod tests {
         simulated::{self, Link, Network, Oracle},
     };
     use commonware_actor::Feedback;
-    use commonware_codec::Encode;
+    use commonware_codec::{Decode, Encode};
     use commonware_cryptography::{
         Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::test_traced;
-    use commonware_parallel::{Manual, Sequential, Strategy};
+    use commonware_parallel::{Sequential, mocks};
     use commonware_runtime::{Clock as _, IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, channel::mpsc, ordered::Set};
+    use commonware_utils::{
+        NZUsize,
+        channel::{mpsc, ring},
+        ordered::Set,
+        probability,
+    };
     use std::{
         io,
-        num::{NonZeroU32, NonZeroUsize},
+        num::NonZeroU32,
         sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -315,7 +320,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
         jitter: Duration::from_millis(0),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
 
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
@@ -399,123 +404,10 @@ mod tests {
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
             Feedback::Ok
         }
-    }
 
-    #[derive(Clone, Debug)]
-    struct TestStrategy {
-        parallelism: NonZeroUsize,
-        pending: bool,
-    }
-
-    impl TestStrategy {
-        const fn complete(parallelism: NonZeroUsize) -> Self {
-            Self {
-                parallelism,
-                pending: false,
-            }
-        }
-
-        const fn pending(parallelism: NonZeroUsize) -> Self {
-            Self {
-                parallelism,
-                pending: true,
-            }
-        }
-    }
-
-    impl Strategy for TestStrategy {
-        fn manual(&self) -> Manual<Self> {
-            Manual::new(self.clone(), self.parallelism)
-        }
-
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
-        where
-            F: FnOnce(Self) -> T + Send + 'static,
-            T: Send + 'static,
-        {
-            let pending = self.pending;
-            let s = self.clone();
-            async move {
-                if pending {
-                    futures::future::pending::<()>().await;
-                }
-                f(s)
-            }
-        }
-
-        fn fold_init<I, INIT, T, R, ID, F, RD>(
-            &self,
-            iter: I,
-            init: INIT,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> R
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            INIT: Fn() -> T + Send + Sync,
-            T: Send,
-            R: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            Sequential.fold_init(iter, init, identity, fold_op, reduce_op)
-        }
-
-        fn try_fold<I, R, E, ID, F, RD>(
-            &self,
-            iter: I,
-            identity: ID,
-            fold_op: F,
-            reduce_op: RD,
-        ) -> Result<R, E>
-        where
-            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
-            R: Send,
-            E: Send,
-            ID: Fn() -> R + Send + Sync,
-            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
-            RD: Fn(R, R) -> R + Send + Sync,
-        {
-            Sequential.try_fold(iter, identity, fold_op, reduce_op)
-        }
-
-        fn run<R, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> R
-        where
-            R: Send,
-            SEQ: FnOnce() -> R + Send,
-            PAR: FnOnce() -> R + Send,
-        {
-            Sequential.run(len, serial, parallel)
-        }
-
-        fn try_run<R, E, SEQ, PAR>(&self, len: usize, serial: SEQ, parallel: PAR) -> Result<R, E>
-        where
-            R: Send,
-            E: Send,
-            SEQ: FnOnce() -> Result<R, E> + Send,
-            PAR: FnOnce() -> Result<R, E> + Send,
-        {
-            Sequential.try_run(len, serial, parallel)
-        }
-
-        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
-        where
-            A: FnOnce() -> RA + Send,
-            B: FnOnce() -> RB + Send,
-            RA: Send,
-            RB: Send,
-        {
-            Sequential.join(a, b)
-        }
-
-        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
-        where
-            T: Send,
-            C: Fn(&T, &T) -> std::cmp::Ordering + Send + Sync,
-        {
-            Sequential.sort_by(items, compare);
+        fn blocked(&mut self) -> crate::BlockedSubscription<Self::PublicKey> {
+            let (_, receiver) = ring::channel(NZUsize!(1));
+            receiver
         }
     }
 
@@ -678,7 +570,7 @@ mod tests {
                 (),
                 control2.clone(),
                 NZUsize!(50),
-                TestStrategy::complete(NZUsize!(4)),
+                mocks::inline(NZUsize!(4)),
             );
             let _handle = bg.start();
 
@@ -812,7 +704,7 @@ mod tests {
                 (),
                 NoopBlocker,
                 NZUsize!(16),
-                TestStrategy::pending(NZUsize!(2)),
+                mocks::pending(NZUsize!(2)),
             );
             let handle = bg.start();
 
@@ -860,6 +752,76 @@ mod tests {
             values.sort_unstable();
 
             assert_eq!(values, (0..count).collect::<Vec<u32>>());
+        });
+    }
+
+    #[test_traced]
+    fn test_recv_view() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let sender = pk(0);
+            let value: Vec<IoBuf> = (0..8).map(|_| IoBuf::from(vec![1u8; 17])).collect();
+            let frame = value.encode();
+            let cfg = ((..).into(), (..).into());
+            let range = frame.as_ptr_range();
+
+            // Decoding the received frame by value hands out views of it
+            let (tx, rx) = mpsc::unbounded_channel();
+            tx.send((sender.clone(), IoBuf::from(frame.clone())))
+                .expect("mock receiver should be open");
+            let mut receiver =
+                WrappedReceiver::<_, Vec<IoBuf>>::new(cfg, MockReceiver { receiver: rx });
+            let (from, decoded) = receiver.recv().await.unwrap();
+            let decoded = decoded.unwrap();
+            assert_eq!(from, sender);
+            assert_eq!(decoded, value);
+            assert!(decoded.iter().all(|b| range.contains(&b.as_ref().as_ptr())));
+
+            // Decoding a slice of the frame copies every field
+            let copied = Vec::<IoBuf>::decode_cfg(commonware_codec::Copying(&frame), &cfg).unwrap();
+            assert_eq!(copied, value);
+            assert!(copied.iter().all(|b| !range.contains(&b.as_ref().as_ptr())));
+        });
+    }
+
+    #[test_traced]
+    fn test_background_recv_view() {
+        deterministic::Runner::default().start(|context| async move {
+            let sender = pk(0);
+            let value: Vec<IoBuf> = (0..8).map(|_| IoBuf::from(vec![1u8; 17])).collect();
+            let encoded = value.encode();
+            let frames = [
+                ("external", IoBuf::from(encoded.clone())),
+                ("native", IoBuf::copy_from_slice(&encoded)),
+            ];
+            drop(encoded);
+
+            for (label, frame) in frames {
+                let range = frame.as_ref().as_ptr_range();
+                let (tx, receiver) = mpsc::unbounded_channel();
+                tx.send((sender.clone(), frame.clone())).unwrap();
+                drop(tx);
+                let (bg, mut rx) = WrappedBackgroundReceiver::<_, _, _, _, Vec<IoBuf>, _>::new(
+                    context.child(label),
+                    MockReceiver { receiver },
+                    ((..).into(), (..).into()),
+                    NoopBlocker,
+                    NZUsize!(1),
+                    mocks::inline(NZUsize!(2)),
+                );
+                bg.start().await.unwrap();
+
+                let (from, decoded) = rx.recv().await.unwrap();
+                assert_eq!(from, sender);
+                assert!(
+                    decoded
+                        .iter()
+                        .all(|field| range.contains(&field.as_ref().as_ptr()))
+                );
+                drop(frame);
+                assert_eq!(decoded, value);
+                assert!(rx.recv().await.is_none());
+            }
         });
     }
 }

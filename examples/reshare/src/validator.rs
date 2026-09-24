@@ -8,7 +8,7 @@ use crate::{
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
         LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
         MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
-        RESOLVER_CHANNEL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
+        RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -18,7 +18,11 @@ use commonware_consensus::{
     marshal::{
         self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
     },
-    simplex::{config::ForwardingPolicy, elector::RoundRobin},
+    simplex::{
+        SkipBudget,
+        config::{ForwardPolicy, SkipPolicy},
+        elector::RoundRobin,
+    },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{ed25519, sha256::Sha256};
@@ -39,6 +43,7 @@ use commonware_p2p::authenticated::{self, discovery};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
+use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
@@ -70,7 +75,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        node.signing_key.clone(),
+        Handshake::new(node.signer.clone()),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
@@ -126,7 +131,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             peer_provider: oracle.clone(),
             blocker: oracle.clone(),
             mailbox_size: MAILBOX_SIZE,
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
@@ -213,7 +217,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         marshal::Config {
             provider: provider.clone(),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-            start: plan.marshal_start(genesis.clone()),
+            start: plan.marshal_start(genesis.clone().into()),
             partition_prefix: partition_prefix.to_string(),
             mailbox_size: MAILBOX_SIZE,
             view_retention: ViewDelta::new(10),
@@ -238,7 +242,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             database: None,
             mailbox_size: MAILBOX_SIZE,
             me: Some(local.clone()),
-            initial: Duration::from_secs(1),
             timeout: Duration::from_secs(2),
             fetch_retry_timeout: Duration::from_millis(100),
             max_serve_ops: NZU64!(16),
@@ -276,7 +279,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
         reshare::Config {
-            signer: node.signing_key,
+            signer: node.signer,
             manager: oracle.clone(),
             blocker: oracle.clone(),
             participants_provider: participants,
@@ -288,6 +291,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             fence,
             namespace: NAMESPACE,
             sharing_mode: SHARING_MODE,
+            reveal: REVEAL,
             mailbox_size: MAILBOX_SIZE,
             partition_prefix: format!("{partition_prefix}-reshare"),
             max_participants: MAX_PARTICIPANTS,
@@ -344,8 +348,11 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 timeout_retry: Duration::from_millis(500),
                 fetch_timeout: Duration::from_secs(2),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(5),
-                forwarding: ForwardingPolicy::Disabled,
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(5),
+                    budget: SkipBudget::Participants,
+                },
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
             gate,
@@ -394,6 +401,7 @@ fn archive_config<C>(
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{prefix}-{name}-metadata"),
         key_partition: format!("{prefix}-{name}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{prefix}-{name}-value"),

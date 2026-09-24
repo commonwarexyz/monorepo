@@ -3,6 +3,8 @@
 //! This crate provides a collection of runtimes that can be
 //! used to execute asynchronous tasks in a variety of ways. For production use,
 //! the `tokio` module provides a runtime backed by [Tokio](https://tokio.rs).
+//! On Linux, the `iouring` feature enables a single-threaded runtime backed by
+//! io_uring that drives tasks and I/O together on the calling thread.
 //! For testing and simulation, the `deterministic` module provides a runtime
 //! that allows for deterministic execution of tasks (given a fixed seed).
 //!
@@ -39,8 +41,8 @@ stability_scope!(ALPHA {
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
     pub mod benchmarks;
 });
-stability_scope!(ALPHA, cfg(any(feature = "iouring-storage", feature = "iouring-network")) {
-    mod iouring;
+stability_scope!(ALPHA, cfg(all(target_os = "linux", feature = "iouring")) {
+    pub mod iouring;
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub mod tokio;
@@ -75,8 +77,71 @@ stability_scope!(BETA {
 
     pub mod telemetry;
 
-    /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
-    pub const DEFAULT_BLOB_VERSION: u16 = 0;
+    /// Runtime-owned layout of a [`Blob`].
+    ///
+    /// This determines the container format, including its header and data offset, not the
+    /// application-owned contents version passed to [`Storage::open_versioned`].
+    ///
+    /// Restricting the layouts a runtime accepts can be used to orchestrate rollback-safe
+    /// upgrades.
+    #[repr(u16)]
+    #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub enum BlobLayout {
+        /// An 8-byte header, with data beginning immediately after it.
+        ///
+        /// A V0 header has no checksum, so an interrupted creation is not reliably
+        /// recognized: an image whose magic and layout version are durable parses as a
+        /// complete header and reopens as blob version 0 or fails as a version mismatch
+        /// until the blob is removed.
+        #[deprecated(note = "unaligned pages can degrade performance")]
+        V0 = 0,
+        /// A header padded to one 4096-byte page, so data begins on an aligned boundary.
+        V1 = 1,
+    }
+
+    /// Latest supported [`BlobLayout`], used to create new [`Blob`]s unless the runtime
+    /// restricts layouts to an older range.
+    pub const DEFAULT_BLOB_LAYOUT: BlobLayout = BlobLayout::V1;
+
+    impl BlobLayout {
+        /// All blob layouts supported by this runtime.
+        #[allow(deprecated)]
+        pub const ALL: std::ops::RangeInclusive<Self> = Self::V0..=DEFAULT_BLOB_LAYOUT;
+    }
+
+    /// Application-owned version of a [`Blob`]'s contents.
+    ///
+    /// This is independent of the runtime-owned [`BlobLayout`].
+    #[derive(Clone, Copy, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+    pub struct BlobVersion(u16);
+
+    impl BlobVersion {
+        /// Creates a blob version from a `u16`.
+        pub const fn new(version: u16) -> Self {
+            Self(version)
+        }
+
+        /// Returns the underlying `u16`.
+        pub const fn get(self) -> u16 {
+            self.0
+        }
+    }
+
+    impl std::fmt::Display for BlobVersion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    impl std::fmt::Debug for BlobVersion {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "{}", self.0)
+        }
+    }
+
+    /// Default application-owned [`Blob`] contents version used by [`Storage::open`].
+    pub const DEFAULT_BLOB_VERSION: BlobVersion = BlobVersion::new(0);
 
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug, Clone)]
@@ -125,10 +190,15 @@ stability_scope!(BETA {
         BlobInsufficientLength,
         #[error("blob corrupt: {0}/{1} reason: {2}")]
         BlobCorrupt(String, String, String),
+        #[error("blob layout mismatch: expected one of {expected:?}, found {found:?}")]
+        BlobLayoutMismatch {
+            expected: std::ops::RangeInclusive<BlobLayout>,
+            found: BlobLayout,
+        },
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]
         BlobVersionMismatch {
-            expected: std::ops::RangeInclusive<u16>,
-            found: u16,
+            expected: std::ops::RangeInclusive<BlobVersion>,
+            found: BlobVersion,
         },
         #[error("invalid or missing checksum")]
         InvalidChecksum,
@@ -436,10 +506,10 @@ stability_scope!(BETA {
         fn current(&self) -> SystemTime;
 
         /// Sleep for the given duration.
-        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<Self>;
 
         /// Sleep until the given deadline.
-        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static;
+        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static + use<Self>;
 
         /// Await a future with a timeout, returning `Error::Timeout` if it expires.
         ///
@@ -599,11 +669,22 @@ stability_scope!(BETA {
     /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
+    /// # Cancellation
+    ///
+    /// Dropping an operation's future does not guarantee cancellation: the
+    /// operation may still complete, and later operations may observe its
+    /// effect.
+    ///
+    /// Runtimes must ensure that no operation issued by a previous run against
+    /// the same storage is still in flight when a new run begins.
+    ///
     /// # Partition Names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric
     /// characters, dashes (`-`), or underscores (`_`). Names containing other
-    /// characters (e.g., `/`, `.`, spaces) will return an error.
+    /// characters (e.g., `/`, `.`, spaces) will return an error. On case-insensitive
+    /// filesystems, partition names that differ only by letter case must not both
+    /// be used.
     pub trait Storage: Send + Sync + 'static {
         /// The readable/writeable storage buffer that can be opened by this Storage.
         type Blob: Blob;
@@ -634,12 +715,14 @@ stability_scope!(BETA {
         /// # Versions
         ///
         /// Blobs are versioned. If the blob's version is not in `versions`, returns
-        /// [Error::BlobVersionMismatch].
+        /// [Error::BlobVersionMismatch]. `versions` must be non-empty.
         ///
         /// # Layout
         ///
-        /// New blobs are created with the latest header layout. Reopening an existing blob
-        /// honors the layout recorded in its header.
+        /// New blobs are created with the latest layout allowed by the runtime. Reopening an
+        /// existing blob honors the layout recorded in its header when the runtime's
+        /// configured layout range allows it, and returns [Error::BlobLayoutMismatch]
+        /// otherwise.
         ///
         /// # Returns
         ///
@@ -648,8 +731,8 @@ stability_scope!(BETA {
             &self,
             partition: &str,
             name: &[u8],
-            versions: std::ops::RangeInclusive<u16>,
-        ) -> impl Future<Output = Result<(Self::Blob, u64, u16), Error>> + Send;
+            versions: std::ops::RangeInclusive<BlobVersion>,
+        ) -> impl Future<Output = Result<(Self::Blob, u64, BlobVersion), Error>> + Send;
 
         /// Remove a blob from a given partition.
         ///
@@ -680,6 +763,47 @@ stability_scope!(BETA {
         -> impl Future<Output = Result<Vec<Vec<u8>>, Error>> + Send;
     }
 
+    /// Options that alter one [`Blob::read_at`] or [`Blob::read_at_buf`] operation.
+    ///
+    /// [`ReadOptions::default`] applies no options.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct ReadOptions(u8);
+
+    impl ReadOptions {
+        /// Advise that data brought in by this read need not remain in the OS page cache.
+        ///
+        /// This is a best-effort performance hint for callers that retain the data or
+        /// do not expect to read it again soon. Implementations may ignore it, and it
+        /// does not guarantee that the range is absent from the OS page cache.
+        pub const DONT_CACHE: Self = Self(1 << 0);
+
+        /// Return whether all of `options` are set.
+        #[must_use]
+        pub const fn contains(self, options: Self) -> bool {
+            self.0 & options.0 == options.0
+        }
+
+        /// Return these options with `options` cleared.
+        #[must_use]
+        pub const fn without(self, options: Self) -> Self {
+            Self(self.0 & !options.0)
+        }
+    }
+
+    impl std::ops::BitOr for ReadOptions {
+        type Output = Self;
+
+        fn bitor(self, rhs: Self) -> Self::Output {
+            Self(self.0 | rhs.0)
+        }
+    }
+
+    impl std::ops::BitOrAssign for ReadOptions {
+        fn bitor_assign(&mut self, rhs: Self) {
+            self.0 |= rhs.0;
+        }
+    }
+
     /// Options that alter one [`Blob::write_at`] operation.
     ///
     /// [`WriteOptions::default`] applies no options.
@@ -690,13 +814,15 @@ stability_scope!(BETA {
     impl WriteOptions {
         /// Durably persist the submitted bytes before returning.
         ///
-        /// This is not a durability barrier for earlier operations.
+        /// This is not a durability barrier for earlier writes without
+        /// [`WriteOptions::SYNC`] or earlier [`Blob::resize`] calls.
         pub const SYNC: Self = Self(1 << 0);
 
         /// Advise that the submitted bytes need not remain in the OS page cache.
         ///
         /// This is a best-effort performance hint for callers that maintain their own cache.
-        /// Implementations may ignore it. It does not change visibility or durability.
+        /// Implementations may ignore it. It does not change visibility or durability, or
+        /// guarantee that the range is absent from the OS page cache.
         pub const DONT_CACHE: Self = Self(1 << 1);
 
         /// Return whether all of `options` are set.
@@ -740,19 +866,17 @@ stability_scope!(BETA {
     /// When a blob is dropped, any unsynced changes may be discarded. Implementations
     /// may attempt to sync during drop but errors will go unhandled. Call `sync`
     /// before dropping to ensure all changes are durably persisted.
+    ///
+    /// # Durability
+    ///
+    /// After a crash, a write not covered by a completed [Blob::sync] may be torn: any
+    /// subset of its bytes may be durable. Bytes outside the written range remain
+    /// unchanged.
     #[allow(clippy::len_without_is_empty)]
     pub trait Blob: Clone + Send + Sync + 'static {
-        /// Read `len` bytes at `offset` into caller-provided buffer(s).
+        /// Read exactly `len` bytes at `offset` into caller-provided buffers.
         ///
-        /// The caller provides the buffer(s), and the implementation fills it with
-        /// exactly `len` bytes of data read from the blob starting at `offset`.
-        /// Returns the same buffer(s), filled with data.
-        ///
-        /// # Contract
-        ///
-        /// - The returned buffers reuse caller-provided storage, with exactly `len`
-        ///   bytes filled from `offset`.
-        /// - Caller-provided chunk layout is preserved.
+        /// Returns the same buffers with their chunk layout preserved.
         ///
         /// # Panics
         ///
@@ -762,24 +886,22 @@ stability_scope!(BETA {
             offset: u64,
             len: usize,
             bufs: impl Into<IoBufsMut> + Send,
+            options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Read `len` bytes at `offset`, returning a buffer(s) with exactly `len` bytes
-        /// of data read from the blob starting at `offset`.
+        /// Read exactly `len` bytes at `offset`.
         ///
         /// To reuse a buffer(s), use [`Blob::read_at_buf`].
         fn read_at(
             &self,
             offset: u64,
             len: usize,
+            options: ReadOptions,
         ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
-        /// Write `bufs` to the blob at the given offset with composable [`WriteOptions`].
+        /// Write every remaining byte in `bufs` to the blob at `offset`.
         ///
-        /// With [`WriteOptions::SYNC`], the submitted bytes are durably persisted before this
-        /// operation returns. This is not a durability barrier for previous operations: earlier
-        /// writes without [`WriteOptions::SYNC`] and earlier [`Blob::resize`] calls require
-        /// [`Blob::sync`] to become durable.
+        /// The buffers are treated as one logical byte sequence in chunk order.
         fn write_at(
             &self,
             offset: u64,
@@ -798,8 +920,9 @@ stability_scope!(BETA {
 
         /// Request that all pending data is durably persisted.
         ///
-        /// Awaiting this future waits until the sync has started. Awaiting the returned
-        /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
+        /// Awaiting this future waits until the runtime accepts responsibility for
+        /// the sync. It continues even if the returned [`Handle`] is dropped.
+        /// Awaiting that handle waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 
@@ -890,6 +1013,7 @@ mod tests {
     };
     use rstest::rstest;
     use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
         pin::Pin,
         sync::{
             Arc,
@@ -898,6 +1022,31 @@ mod tests {
         task::{Context as TContext, Poll, Waker},
     };
     use utils::reschedule;
+
+    #[test]
+    fn test_blob_version() {
+        let version = BlobVersion::new(7);
+        assert_eq!(version.get(), 7);
+        assert_eq!(version.to_string(), "7");
+        assert_eq!(format!("{version:?}"), "7");
+        assert_eq!(BlobVersion::default(), DEFAULT_BLOB_VERSION);
+        assert!((BlobVersion::new(3)..=BlobVersion::new(7)).contains(&version));
+    }
+
+    #[test]
+    fn test_read_options_compose() {
+        // The flag must compose, assign, remove, and remain absent from the default.
+        let options = ReadOptions::default() | ReadOptions::DONT_CACHE;
+        let mut assigned = ReadOptions::default();
+        assigned |= ReadOptions::DONT_CACHE;
+        assert!(options.contains(ReadOptions::DONT_CACHE));
+        assert_eq!(assigned, options);
+        assert_eq!(
+            options.without(ReadOptions::DONT_CACHE),
+            ReadOptions::default()
+        );
+        assert!(!ReadOptions::default().contains(ReadOptions::DONT_CACHE));
+    }
 
     #[test]
     fn test_write_options_compose() {
@@ -919,6 +1068,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_error_future<R: Runner>(#[case] runner: R) {
         #[allow(clippy::unused_async)]
         async fn error_future() -> Result<&'static str, &'static str> {
@@ -931,6 +1084,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_handle_can_use_futures_pool<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             let mut pool = FuturesPool::<Result<(), Error>>::default();
@@ -942,6 +1099,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_clock_sleep<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -961,6 +1122,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_clock_sleep_until<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock + Metrics,
@@ -979,6 +1144,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_clock_sleep_until_far_future<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -993,6 +1162,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_clock_timeout<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1024,6 +1197,64 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_clock_futures_move_between_tasks<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            for kind in ["sleep", "sleep_until", "timeout", "stop"] {
+                // Holding a shutdown observer keeps the stop case pending until its timeout.
+                let clock = context.child("clock");
+                let stopped = (kind == "stop").then(|| context.stopped());
+                let duration = Duration::from_millis(50);
+                let deadline = context.current() + duration;
+
+                // Cover direct sleeps and operations that wait on a timer.
+                let mut future = async move {
+                    match kind {
+                        "sleep" => clock.sleep(duration).await,
+                        "sleep_until" => clock.sleep_until(deadline).await,
+                        "timeout" => assert!(matches!(
+                            clock.timeout(duration, pending::<()>()).await,
+                            Err(Error::Timeout)
+                        )),
+                        _ => assert!(matches!(
+                            clock.stop(7, Some(duration)).await,
+                            Err(Error::Timeout)
+                        )),
+                    }
+                }
+                .boxed();
+
+                // Register this task's waker before transferring the pending future.
+                // The destination must receive the eventual wakeup.
+                assert!(futures::poll!(&mut future).is_pending());
+                let moved = context.child("moved").dedicated().spawn(move |_| future);
+
+                // The source task's independent timeout detects a missing destination wakeup.
+                select! {
+                    result = moved => result.unwrap(),
+                    _ = context.sleep(Duration::from_secs(2)) => panic!("moved {kind} did not complete"),
+                }
+
+                // Changing tasks must preserve the operation's deadline.
+                assert!(context.current() >= deadline);
+                drop(stopped);
+            }
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_root_finishes<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -1040,6 +1271,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_after_abort<R>(#[case] runner: R)
     where
         R: Runner,
@@ -1066,6 +1301,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_abort<R: Runner>(
         #[case] runner: R,
         #[values(
@@ -1099,7 +1338,12 @@ mod tests {
         deterministic::Config::default().with_catch_panics(true)
     ))]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     #[case::tokio_caught(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring_caught(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
     #[should_panic(expected = "blah")]
     fn test_panic_aborts_root<R: Runner>(#[case] runner: R) {
         let result: Result<(), Error> = runner.start(|_| async move {
@@ -1111,6 +1355,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     #[should_panic(expected = "blah")]
     fn test_panic_aborts_spawn<R: Runner>(#[case] runner: R)
     where
@@ -1133,6 +1381,7 @@ mod tests {
         deterministic::Config::default().with_catch_panics(true)
     ))]
     #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
     fn test_panic_aborts_spawn_caught<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1149,6 +1398,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     #[should_panic(expected = "boom")]
     fn test_multiple_panics<R: Runner>(#[case] runner: R)
     where
@@ -1177,6 +1430,7 @@ mod tests {
         deterministic::Config::default().with_catch_panics(true)
     ))]
     #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
     fn test_multiple_panics_caught<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1202,6 +1456,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_select<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             // Test first branch
@@ -1233,6 +1491,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_select_loop<R: Runner>(#[case] runner: R)
     where
         R::Context: Clock,
@@ -1282,6 +1544,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_storage_operations<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1308,7 +1574,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, data.len())
+                .read_at(0, data.len(), ReadOptions::default())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -1331,7 +1597,10 @@ mod tests {
             assert_eq!(len, data.len() as u64);
 
             // Read data part of message back
-            let read = blob.read_at(7, 7).await.expect("Failed to read data");
+            let read = blob
+                .read_at(7, 7, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             assert_eq!(read.coalesce(), b"Storage");
 
             // Sync the blob
@@ -1365,6 +1634,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_blob_read_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1390,13 +1663,16 @@ mod tests {
                 .expect("Failed to write data2");
 
             // Read data back
-            let read = blob.read_at(0, 10).await.expect("Failed to read data");
+            let read = blob
+                .read_at(0, 10, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data2);
 
             // Read past end of blob
-            let result = blob.read_at(10, 10).await;
+            let result = blob.read_at(10, 10, ReadOptions::default()).await;
             assert!(result.is_err());
 
             // Rewrite data without affecting length
@@ -1406,13 +1682,16 @@ mod tests {
                 .expect("Failed to write data3");
 
             // Read data back
-            let read = blob.read_at(0, 10).await.expect("Failed to read data");
+            let read = blob
+                .read_at(0, 10, ReadOptions::default())
+                .await
+                .expect("Failed to read data");
             let read = read.coalesce();
             assert_eq!(&read.as_ref()[..5], data1);
             assert_eq!(&read.as_ref()[5..], data3);
 
             // Read past end of blob
-            let result = blob.read_at(10, 10).await;
+            let result = blob.read_at(10, 10, ReadOptions::default()).await;
             assert!(result.is_err());
         });
     }
@@ -1420,6 +1699,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_blob_resize<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1456,11 +1739,17 @@ mod tests {
             assert_eq!(len, new_len);
 
             // Read original data
-            let read_buf = blob.read_at(0, data.len()).await.unwrap();
+            let read_buf = blob
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(read_buf.coalesce(), data);
 
             // Read extended part (should be zeros)
-            let extended_part = blob.read_at(data.len() as u64, data.len()).await.unwrap();
+            let extended_part = blob
+                .read_at(data.len() as u64, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(extended_part.coalesce(), vec![0; data.len()].as_slice());
 
             // Truncate the blob
@@ -1472,7 +1761,10 @@ mod tests {
             assert_eq!(size, data.len() as u64);
 
             // Read truncated data
-            let read_buf = blob.read_at(0, data.len()).await.unwrap();
+            let read_buf = blob
+                .read_at(0, data.len(), ReadOptions::default())
+                .await
+                .unwrap();
             assert_eq!(read_buf.coalesce(), data);
             blob.sync().await.unwrap();
         });
@@ -1481,6 +1773,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_many_partition_read_write<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1520,7 +1816,7 @@ mod tests {
 
                 // Read data back
                 let read = blob
-                    .read_at(0, 10 + additional)
+                    .read_at(0, 10 + additional, ReadOptions::default())
                     .await
                     .expect("Failed to read data");
                 let read = read.coalesce();
@@ -1533,6 +1829,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_blob_read_past_length<R: Runner>(#[case] runner: R)
     where
         R::Context: Storage,
@@ -1548,7 +1848,7 @@ mod tests {
                 .expect("Failed to open blob");
 
             // Read data past file length (empty file)
-            let result = blob.read_at(0, 10).await;
+            let result = blob.read_at(0, 10, ReadOptions::default()).await;
             assert!(result.is_err());
 
             // Write data to the blob
@@ -1558,7 +1858,7 @@ mod tests {
                 .expect("Failed to write to blob");
 
             // Read data past file length (non-empty file)
-            let result = blob.read_at(0, 20).await;
+            let result = blob.read_at(0, 20, ReadOptions::default()).await;
             assert!(result.is_err());
         })
     }
@@ -1566,6 +1866,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_blob_clone_and_concurrent_read<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Storage + Metrics,
@@ -1595,7 +1899,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, data_len)
+                        .read_at(0, data_len, ReadOptions::default())
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1606,7 +1910,7 @@ mod tests {
                 let data_len = data.len();
                 move |_| async move {
                     let read = blob
-                        .read_at(0, data_len)
+                        .read_at(0, data_len, ReadOptions::default())
                         .await
                         .expect("Failed to read from blob");
                     assert_eq!(read.coalesce(), data);
@@ -1620,7 +1924,7 @@ mod tests {
 
             // Read data from the blob
             let read = blob
-                .read_at(0, data.len())
+                .read_at(0, data.len(), ReadOptions::default())
                 .await
                 .expect("Failed to read from blob");
             assert_eq!(read.coalesce(), data);
@@ -1637,6 +1941,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_shutdown<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -1672,6 +1980,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_shutdown_multiple_signals<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -1726,6 +2038,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_shutdown_timeout<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -1755,6 +2071,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_shutdown_multiple_stop_calls<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -1820,6 +2140,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_unfulfilled_shutdown<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics,
@@ -1843,6 +2167,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_dedicated<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner,
@@ -1856,6 +2184,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1897,6 +2229,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_abort_on_parent_abort<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1935,6 +2271,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_abort_on_parent_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -1970,6 +2310,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_cascading_abort<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2048,6 +2392,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_child_survives_sibling_completion<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2109,6 +2457,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_clone_chain<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2165,6 +2517,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_sparse_clone_chain<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Clock,
@@ -2205,6 +2561,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_spawn_blocking<R: Runner>(
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
@@ -2226,6 +2586,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     #[should_panic(expected = "blocking task panicked")]
     fn test_spawn_blocking_panic<R: Runner>(
         #[case] runner: R,
@@ -2254,6 +2618,7 @@ mod tests {
         deterministic::Config::default().with_catch_panics(true)
     ))]
     #[case::tokio(tokio::Runner::new(tokio::Config::default().with_catch_panics(true)))]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring(iouring::Runner::new(iouring::Config::default().with_catch_panics(true))))]
     fn test_spawn_blocking_panic_caught<R: Runner>(
         #[case] runner: R,
         #[values(Execution::Shared(true), Execution::Dedicated)] execution: Execution,
@@ -2276,6 +2641,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_circular_reference_prevents_cleanup<R: Runner>(#[case] runner: R) {
         runner.start(|_| async move {
             // Setup tracked resource
@@ -2333,6 +2702,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_late_waker<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics + Spawner,
@@ -2399,6 +2772,41 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
+    fn test_factory_panic_finishes_running_metric<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Metrics,
+    {
+        // A task factory that unwinds must finish the running gauge and close its
+        // supervision node, even though the execution wrapper never received them.
+        runner.start(|context| async move {
+            let child = context.child("panicking_factory");
+            let panic = catch_unwind(AssertUnwindSafe(|| {
+                child.spawn(|_| -> std::future::Ready<()> { panic!("factory failed") })
+            }))
+            .err()
+            .expect("factory panic must reach its caller");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"factory failed"));
+
+            // The attempted spawn stays counted, but nothing is left running.
+            assert_eq!(count_running_tasks(&context, "panicking_factory"), 0);
+            let buffer = context.encode();
+            assert!(buffer.contains(
+                "runtime_tasks_spawned_total{name=\"panicking_factory\",kind=\"Task\",execution=\"Shared\"} 1"
+            ));
+        });
+    }
+
+    #[rstest]
+    #[case::deterministic(deterministic::Runner::default())]
+    #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_metrics<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2436,6 +2844,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_metrics_with_attribute<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2512,6 +2924,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_metrics_attribute_with_nested_label<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2561,6 +2977,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_metrics_attributes_isolated_between_contexts<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2619,6 +3039,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_metrics_spawn_attribute_cardinality<R: Runner>(#[case] runner: R)
     where
         R::Context: Spawner + Metrics + Clock,
@@ -2701,6 +3125,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_metrics_attributes_sorted_deterministically<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2751,6 +3179,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_metrics_nested_labels_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2857,6 +3289,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_metrics_family_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2956,6 +3392,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_register_and_encode<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -2978,6 +3418,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_register_drop_removes_metrics<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3017,6 +3461,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_register_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3072,6 +3520,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_reregister_after_drop<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3096,6 +3548,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_register_clone_keeps_metric_alive<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3133,6 +3589,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_encode_single_eof<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3171,6 +3631,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_family_with_attributes<R: Runner>(#[case] runner: R)
     where
         R::Context: Metrics,
@@ -3228,6 +3692,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_strategy<R: Runner>(#[case] runner: R)
     where
         R::Context: Strategizer + Metrics,
@@ -3246,6 +3714,10 @@ mod tests {
     #[rstest]
     #[case::deterministic(deterministic::Runner::default())]
     #[case::tokio(tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default())
+    )]
     fn test_nested_strategy_runs_inline<R: Runner>(#[case] runner: R)
     where
         R::Context: Strategizer + Metrics,
@@ -3254,7 +3726,7 @@ mod tests {
             let strategy = context.child("pool").strategy(NZUsize!(1)).manual();
 
             let output = strategy
-                .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+                .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
                 .await;
 
             assert_eq!(output, vec![1, 2]);
@@ -3277,6 +3749,10 @@ mod tests {
         8
     )]
     #[case::tokio(tokio::Runner::default(), 4096, 64)]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(iouring::Runner::default(), 4096, 64)
+    )]
     #[case::tokio_custom(
         tokio::Runner::new(
             tokio::Config::default()
@@ -3290,6 +3766,19 @@ mod tests {
         64,
         8
     )]
+    #[cfg_attr(all(target_os = "linux", feature = "iouring"), case::iouring_custom(
+        iouring::Runner::new(
+            iouring::Config::default()
+                .with_network_buffer_pool_config(
+                    BufferPoolConfig::for_network().with_max_per_class(NZU32!(64)),
+                )
+                .with_storage_buffer_pool_config(
+                    BufferPoolConfig::for_storage().with_max_per_class(NZU32!(8)),
+                ),
+        ),
+        64,
+        8
+    ))]
     fn test_buffer_pooler<R: Runner>(
         #[case] runner: R,
         #[case] expected_network_max_per_class: u32,

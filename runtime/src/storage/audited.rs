@@ -1,4 +1,7 @@
-use crate::{Error, Handle, IoBufs, IoBufsMut, WriteOptions, deterministic::Auditor};
+use crate::{
+    BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions,
+    deterministic::Auditor,
+};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -25,13 +28,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         &self,
         partition: &str,
         name: &[u8],
-        versions: std::ops::RangeInclusive<u16>,
-    ) -> Result<(Self::Blob, u64, u16), Error> {
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
         self.auditor.event(b"open", |hasher| {
             hasher.update(partition.as_bytes());
             hasher.update(name);
-            hasher.update(versions.start().to_be_bytes());
-            hasher.update(versions.end().to_be_bytes());
+            hasher.update(versions.start().get().to_be_bytes());
+            hasher.update(versions.end().get().to_be_bytes());
         });
         self.inner
             .open_versioned(partition, name, versions)
@@ -81,14 +84,20 @@ pub struct Blob<B: crate::Blob> {
 }
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
-    async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
         self.auditor.event(b"read_at", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
             hasher.update(offset.to_be_bytes());
             hasher.update(len.to_be_bytes());
+            hasher.update([options.0]);
         });
-        self.inner.read_at(offset, len).await
+        self.inner.read_at(offset, len, options).await
     }
 
     async fn read_at_buf(
@@ -96,6 +105,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         offset: u64,
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
     ) -> Result<IoBufsMut, Error> {
         let bufs = bufs.into();
         self.auditor.event(b"read_at_buf", |hasher| {
@@ -103,8 +113,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(&self.name);
             hasher.update(offset.to_be_bytes());
             hasher.update(len.to_be_bytes());
+            hasher.update([options.0]);
         });
-        self.inner.read_at_buf(offset, len, bufs).await
+        self.inner.read_at_buf(offset, len, bufs, options).await
     }
 
     async fn write_at(
@@ -119,6 +130,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(&self.name);
             hasher.update(offset.to_be_bytes());
             hasher.update_bufs(&bufs);
+            hasher.update([options.0]);
         });
         self.inner.write_at(offset, bufs, options).await
     }
@@ -152,9 +164,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
-        Storage as _, WriteOptions,
+        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufMut, IoBufs, IoBufsMut,
+        ReadOptions, Runner, Spawner, Storage as _, WriteOptions,
         deterministic::Auditor,
+        mocks::RecordingContext,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
@@ -162,6 +175,7 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use commonware_utils::sync::Mutex;
+    use rstest::rstest;
     use std::sync::Arc;
 
     fn test_pool() -> BufferPool {
@@ -169,13 +183,23 @@ mod tests {
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
     }
 
-    #[tokio::test]
-    async fn test_audited_storage() {
-        let inner = MemStorage::new(test_pool());
-        let auditor = Arc::new(crate::deterministic::Auditor::default());
-        let storage = AuditedStorage::new(inner, auditor.clone());
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_audited_storage<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            let inner = MemStorage::new(test_pool());
+            let auditor = Arc::new(crate::deterministic::Auditor::default());
+            let storage = AuditedStorage::new(inner, auditor.clone());
 
-        run_storage_tests(storage).await;
+            run_storage_tests(context, storage).await;
+        });
     }
 
     #[tokio::test]
@@ -192,24 +216,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_write_options_do_not_change_audit_event() {
-        let auditor1 = Arc::new(Auditor::default());
-        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
-        let auditor2 = Arc::new(Auditor::default());
-        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
+    async fn test_write_options_change_audit_event() {
+        let mut states = Vec::new();
+        for options in [
+            WriteOptions::default(),
+            WriteOptions::SYNC,
+            WriteOptions::DONT_CACHE,
+            WriteOptions::SYNC | WriteOptions::DONT_CACHE,
+        ] {
+            let auditor = Arc::new(Auditor::default());
+            let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+            blob.write_at(0, b"data", options).await.unwrap();
+            states.push(auditor.state());
+        }
 
-        let (blob1, _) = storage1.open("partition", b"blob").await.unwrap();
-        let (blob2, _) = storage2.open("partition", b"blob").await.unwrap();
-        blob1
-            .write_at(0, b"data", WriteOptions::default())
+        states.sort_unstable();
+        states.dedup();
+        assert_eq!(states.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_read_options_change_audit_event() {
+        for use_provided_buffer in [false, true] {
+            let mut states = Vec::new();
+            for options in [ReadOptions::default(), ReadOptions::DONT_CACHE] {
+                let auditor = Arc::new(Auditor::default());
+                let storage = AuditedStorage::new(MemStorage::new(test_pool()), auditor.clone());
+                let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+                blob.write_at(0, b"data", WriteOptions::default())
+                    .await
+                    .unwrap();
+
+                if use_provided_buffer {
+                    blob.read_at_buf(0, 4, IoBufMut::with_capacity(4), options)
+                        .await
+                        .unwrap();
+                } else {
+                    blob.read_at(0, 4, options).await.unwrap();
+                }
+                states.push(auditor.state());
+            }
+            assert_ne!(states[0], states[1]);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_audited_blob_forwards_read_options() {
+        let (inner, recordings) = RecordingContext::new(MemStorage::new(test_pool()));
+        let storage = AuditedStorage::new(inner, Arc::new(Auditor::default()));
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"data", WriteOptions::default())
             .await
             .unwrap();
-        blob2
-            .write_at(0, b"data", WriteOptions::SYNC | WriteOptions::DONT_CACHE)
+        recordings.clear();
+
+        // Both read entry points must preserve their independently selected policy.
+        blob.read_at(0, 4, ReadOptions::DONT_CACHE).await.unwrap();
+        blob.read_at_buf(0, 4, IoBufMut::with_capacity(4), ReadOptions::default())
             .await
             .unwrap();
 
-        assert_eq!(auditor1.state(), auditor2.state());
+        assert_eq!(
+            recordings.snapshot().reads,
+            vec![ReadOptions::DONT_CACHE, ReadOptions::default()]
+        );
     }
 
     #[tokio::test]
@@ -281,13 +352,13 @@ mod tests {
         );
 
         // Read data from the blobs
-        let read = blob1.read_at(0, 11).await.unwrap();
+        let read = blob1.read_at(0, 11, ReadOptions::default()).await.unwrap();
         assert_eq!(
             read.coalesce(),
             b"hello world",
             "Blob1 content does not match"
         );
-        let read = blob2.read_at(0, 11).await.unwrap();
+        let read = blob2.read_at(0, 11, ReadOptions::default()).await.unwrap();
         assert_eq!(
             read.coalesce(),
             b"hello world",
@@ -366,7 +437,12 @@ mod tests {
     }
 
     impl crate::Blob for RecordingBlob {
-        async fn read_at(&self, _offset: u64, _len: usize) -> Result<IoBufsMut, Error> {
+        async fn read_at(
+            &self,
+            _offset: u64,
+            _len: usize,
+            _options: ReadOptions,
+        ) -> Result<IoBufsMut, Error> {
             unreachable!("not used in test");
         }
 
@@ -375,6 +451,7 @@ mod tests {
             _offset: u64,
             _len: usize,
             _bufs: impl Into<IoBufsMut> + Send,
+            _options: ReadOptions,
         ) -> Result<IoBufsMut, Error> {
             unreachable!("not used in test");
         }

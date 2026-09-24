@@ -5,7 +5,7 @@ use crate::{
     error::Result,
     report::Stats,
 };
-use commonware_runtime::{Blob, IoBufMut, IoBufs, WriteOptions};
+use commonware_runtime::{Blob, IoBufMut, IoBufs, ReadOptions, WriteOptions};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
 use std::time::Instant;
 
@@ -56,7 +56,9 @@ pub async fn warm_read_loop(
     let mut buffer = IoBufMut::with_capacity(io_size).into();
     for _ in 0..ops {
         let offset = next_block() * io_size as u64;
-        buffer = blob.read_at_buf(offset, io_size, buffer).await?;
+        buffer = blob
+            .read_at_buf(offset, io_size, buffer, ReadOptions::default())
+            .await?;
     }
     Ok(())
 }
@@ -74,7 +76,9 @@ pub async fn run_read_loop(
     while should_continue(deadline, stats.ops) {
         let offset = next_block() * io_size as u64;
         let started = should_sample_latency(stats.ops).then(Instant::now);
-        buffer = blob.read_at_buf(offset, io_size, buffer).await?;
+        buffer = blob
+            .read_at_buf(offset, io_size, buffer, ReadOptions::default())
+            .await?;
         stats.record(io_size as u64, started.map(|s| s.elapsed()));
     }
     Ok(stats)

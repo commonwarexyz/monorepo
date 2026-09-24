@@ -51,6 +51,7 @@ pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
 pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+pub const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 pub const INIT_CACHE_SIZE: Option<NonZeroUsize> = Some(NZUsize!(1 << 18));
 
 // -- Fixed value (Digest), fixed storage layout --
@@ -101,7 +102,7 @@ pub type KeylessDb<F> = Keyless<F, Context, Vec<u8>, Sha256, Rayon>;
 /// Open a keyless benchmark database using the shared benchmark configuration.
 pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
     let cfg = keyless_cfg(&ctx);
-    KeylessDb::<F>::init(ctx, cfg).await.unwrap()
+    KeylessDb::<F>::init(ctx, cfg, None).await.unwrap()
 }
 
 // -- Config builders --
@@ -122,6 +123,7 @@ fn merkle_cfg(
         metadata_partition: format!("metadata-{suffix}"),
         items_per_blob,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
         strategy: ctx.strategy(THREADS),
         page_cache,
     }
@@ -133,6 +135,7 @@ fn fix_log_cfg(suffix: &str, page_cache: CacheRef, items_per_blob: NonZeroU64) -
         items_per_blob,
         page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
     }
 }
 
@@ -149,6 +152,7 @@ fn var_log_cfg<C>(
         codec_config,
         page_cache,
         write_buffer: WRITE_BUFFER_SIZE,
+        replay_buffer: REPLAY_BUFFER_SIZE,
     }
 }
 
@@ -176,7 +180,7 @@ pub fn any_fix_cfg_full<B>(
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency,
     }
@@ -191,7 +195,6 @@ pub fn imm_fix_cfg_with(
         merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
     }
 }
@@ -210,7 +213,7 @@ pub fn cur_fix_cfg_with(
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -231,7 +234,7 @@ pub fn any_var_digest_cfg_with(
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -253,7 +256,7 @@ pub fn cur_var_digest_cfg_with(
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -282,7 +285,7 @@ pub fn any_var_vec_cfg_with(
             items_per_blob,
         ),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -309,7 +312,7 @@ pub fn cur_var_vec_cfg_with(
         ),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
-        init_cache_size: INIT_CACHE_SIZE,
+        init_cache: INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -379,7 +382,7 @@ macro_rules! define_db_variants {
                             let ctx = $ctx_expr;
                             let cfg = $cfg(&ctx);
                             #[allow(unused_mut)]
-                            let mut $db_name = <$db>::init(ctx.child("storage"), cfg).await.unwrap();
+                            let mut $db_name = <$db>::init(ctx.child("storage"), cfg, None).await.unwrap();
                             $body
                         }
                     )+
@@ -395,12 +398,12 @@ macro_rules! define_db_variants {
                         $enum_name::$entry => {
                             let ctx = $ctx_expr;
                             let mut cfg = $cfg(&ctx);
-                            cfg.init_cache_size = $cache_size;
+                            cfg.init_cache = $cache_size;
                             let start = std::time::Instant::now();
                             for _ in 0..$iters {
                                 #[allow(unused_mut)]
                                 let mut $db_name =
-                                    <$db>::init(ctx.child("storage"), cfg.clone()).await.unwrap();
+                                    <$db>::init(ctx.child("storage"), cfg.clone(), None).await.unwrap();
                                 $body
                             }
                             start.elapsed()

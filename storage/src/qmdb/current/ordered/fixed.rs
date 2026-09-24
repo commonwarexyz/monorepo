@@ -5,9 +5,9 @@
 //! proofs (proving a key is currently inactive). Use [crate::qmdb::current::unordered::fixed] if
 //! exclusion proofs are not needed.
 //!
-//! See [Db] for the main database type and [super::ExclusionProof] for proving key inactivity.
+//! See [Db] for the main database type and
+//! [ExclusionProof](super::proof::constant::ExclusionProof) for proving key inactivity.
 
-pub use super::db::KeyValueProof;
 use crate::{
     Context,
     index::ordered::Index,
@@ -50,8 +50,15 @@ impl<
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
-    pub async fn init(context: E, config: Config<T, S>) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config).await
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+    /// while `None` selects the latest retained state. Initialization fails with
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
+    pub async fn init(
+        context: E,
+        config: Config<T, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::current::init(context, config, max_size).await
     }
 }
 
@@ -93,11 +100,16 @@ pub mod partitioned {
     > Db<F, E, K, V, H, T, P, N, S>
     {
         /// Initializes a [Db] authenticated database from the given `config`.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+        /// while `None` selects the latest retained state. Initialization fails with
+        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
+        /// floor.
         pub async fn init(
             context: E,
             config: Config<T, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config).await
+            crate::qmdb::current::init(context, config, max_size).await
         }
     }
 }
@@ -106,7 +118,8 @@ pub mod partitioned {
 pub mod test {
     use super::*;
     use crate::{
-        mmr,
+        merkle::Graftable,
+        mmb, mmr,
         qmdb::{
             Error,
             current::{
@@ -126,23 +139,26 @@ pub mod test {
     };
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest =
-        Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
+    type CurrentTest<F = mmr::Family> =
+        Db<F, deterministic::Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;
 
     /// Return an [Db] database initialized with a fixed config.
-    async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
+    async fn open_db<F: Graftable>(
+        context: deterministic::Context,
+        partition_prefix: String,
+    ) -> CurrentTest<F> {
         let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
-        CurrentTest::init(context, cfg).await.unwrap()
+        CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
-        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db);
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_range_proofs() {
-        shared::test_range_proofs(open_db);
+        shared::test_range_proofs(open_db::<mmr::Family>);
     }
 
     /// Regression test: requesting a range proof for a location in a pruned bitmap chunk
@@ -152,7 +168,7 @@ pub mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let partition = "range-proofs-pruned".to_string();
-            let mut db = open_db(context.child("db"), partition).await;
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
 
             let chunk_bits = BitMap::<32>::CHUNK_SIZE_BITS;
 
@@ -193,22 +209,37 @@ pub mod test {
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_key_value_proof() {
-        shared::test_key_value_proof(open_db);
+        shared::test_key_value_proof(open_db::<mmr::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_key_value_proof_mmb() {
+        shared::test_key_value_proof(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_exclusion_proofs_mmb() {
+        shared::test_exclusion_proofs(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_inactive_proof_mmb() {
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmb::Family>);
     }
 
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
-        shared::test_proving_repeated_updates(open_db);
+        shared::test_proving_repeated_updates(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_exclusion_proofs() {
-        shared::test_exclusion_proofs(open_db);
+        shared::test_exclusion_proofs(open_db::<mmr::Family>);
     }
 
     crate::qmdb::current::tests::staged_merkleize_parity_test!(
         test_current_ordered_fixed_staged_merkleize_parity,
-        open_db
+        open_db::<mmr::Family>
     );
 
     /// Build a `P`-partitioned current db with churny ops across two commits (so the second commit's
@@ -247,7 +278,7 @@ pub mod test {
         }
 
         let cfg = fixed_config_partitioned::<OneCap>(partition, &context);
-        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
 
@@ -292,7 +323,7 @@ pub mod test {
             let ctx = context
                 .child("reopen")
                 .with_attribute("concurrency", concurrency);
-            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            let db = PartDb::<P, Sequential>::init(ctx, cfg, None).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,

@@ -17,7 +17,7 @@ use rand::{SeedableRng, rngs::StdRng};
 #[allow(unused)]
 pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
     let bytes: [u8; G1_ELEMENT_BYTE_LENGTH] = u.arbitrary()?;
-    match G1::read(&mut bytes.as_slice()) {
+    match G1::read(&mut commonware_codec::Copying(&bytes)) {
         Ok(point) => Ok(point),
         Err(_) => Ok(if u.arbitrary()? {
             G1::zero()
@@ -30,7 +30,7 @@ pub fn arbitrary_g1(u: &mut Unstructured) -> Result<G1, arbitrary::Error> {
 #[allow(unused)]
 pub fn arbitrary_g2(u: &mut Unstructured) -> Result<G2, arbitrary::Error> {
     let bytes: [u8; G2_ELEMENT_BYTE_LENGTH] = u.arbitrary()?;
-    match G2::read(&mut bytes.as_slice()) {
+    match G2::read(&mut commonware_codec::Copying(&bytes)) {
         Ok(point) => Ok(point),
         Err(_) => Ok(if u.arbitrary()? {
             G2::zero()

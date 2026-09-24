@@ -1,6 +1,8 @@
 use super::Checksum;
-use crate::{Blob, Buf, Error, IoBuf};
-use commonware_codec::FixedSize;
+use crate::{Blob, Error, ReadOptions};
+use bytes::{BufMut, Bytes, BytesMut, TryGetError};
+use commonware_codec::{Buf, FixedSize};
+use commonware_utils::Widen;
 use std::{collections::VecDeque, num::NonZeroU16};
 use tracing::error;
 
@@ -11,7 +13,7 @@ use tracing::error;
 /// `Bytes` slices per page.
 pub(super) struct BufferState {
     /// The raw physical buffer containing pages with interleaved CRCs.
-    buffer: IoBuf,
+    buffer: Bytes,
     /// Number of pages in this buffer.
     num_pages: usize,
     /// Logical length of the last page (may be partial).
@@ -37,6 +39,8 @@ pub(super) struct PageReader<B: Blob> {
     blob_page: u64,
     /// Number of pages to prefetch at once.
     prefetch_count: usize,
+    /// Options applied to every blob read.
+    read_options: ReadOptions,
 }
 
 impl<B: Blob> PageReader<B> {
@@ -54,6 +58,7 @@ impl<B: Blob> PageReader<B> {
         logical_blob_size: u64,
         prefetch_count: usize,
         page_size: NonZeroU16,
+        read_options: ReadOptions,
     ) -> Self {
         let page_size = page_size.get() as usize;
         let physical_page_size = page_size + Checksum::SIZE;
@@ -74,6 +79,7 @@ impl<B: Blob> PageReader<B> {
             logical_blob_size,
             blob_page: 0,
             prefetch_count,
+            read_options,
         }
     }
 
@@ -106,27 +112,28 @@ impl<B: Blob> PageReader<B> {
             return Ok(None); // No more data
         }
 
-        // Calculate how many pages to read
-        let remaining_physical = (self.physical_blob_size - start_offset) as usize;
-        let max_pages = remaining_physical / self.physical_page_size;
-        let pages_to_read = max_pages.min(self.prefetch_count);
+        // Keep the total page count in u64 and narrow only the bounded batch.
+        let max_pages =
+            (self.physical_blob_size - start_offset) / Widen::widen(self.physical_page_size);
+        let pages_to_read = max_pages.min(Widen::widen(self.prefetch_count)) as usize;
         if pages_to_read == 0 {
             return Ok(None);
         }
         let bytes_to_read = pages_to_read * self.physical_page_size;
 
         // Read physical data
-        let physical_buf = self
-            .blob
-            .read_at(start_offset, bytes_to_read)
-            .await?
-            .coalesce()
-            .freeze();
+        let physical_buf = Bytes::from(
+            self.blob
+                .read_at(start_offset, bytes_to_read, self.read_options)
+                .await?
+                .coalesce()
+                .freeze(),
+        );
 
         // Validate CRCs and compute total logical bytes
         let mut total_logical = 0usize;
         let mut last_len = 0usize;
-        let is_final_batch = pages_to_read == max_pages;
+        let is_final_batch = Widen::widen(pages_to_read) == max_pages;
         for page_idx in 0..pages_to_read {
             let page_start = page_idx * self.physical_page_size;
             let page_slice =
@@ -159,7 +166,7 @@ impl<B: Blob> PageReader<B> {
             total_logical += exposed_len;
             last_len = exposed_len;
         }
-        self.blob_page += pages_to_read as u64;
+        self.blob_page += Widen::widen(pages_to_read);
 
         let state = BufferState {
             buffer: physical_buf,
@@ -235,9 +242,58 @@ impl ReplayBuf {
     }
 }
 
-impl Buf for ReplayBuf {
+impl Buf for ReplayBuf {}
+
+impl bytes::Buf for ReplayBuf {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        assert!(len <= self.remaining, "copy_to_bytes out of bounds");
+        if len == 0 {
+            return Bytes::new();
+        }
+        if len <= self.chunk().len() {
+            let buffer = &self.buffers.front().expect("readable buffer").buffer;
+            let start = self.current_page * self.physical_page_size + self.offset_in_page;
+            let bytes = buffer.slice(start..start + len);
+            self.advance(len);
+            return bytes;
+        }
+
+        // A field spanning pages must be coalesced around the interleaved checksums
+        let mut bytes = BytesMut::with_capacity(len);
+        bytes.put(self.take(len));
+        bytes.freeze()
+    }
+
     fn remaining(&self) -> usize {
         self.remaining
+    }
+
+    fn try_copy_to_slice(&mut self, mut dst: &mut [u8]) -> Result<(), TryGetError> {
+        if dst.len() > self.remaining {
+            return Err(TryGetError {
+                requested: dst.len(),
+                available: self.remaining,
+            });
+        }
+
+        // Fast path: the request ends strictly inside the current page, so the cursor
+        // stays on this page and no page or buffer transition is needed.
+        let chunk = self.chunk();
+        if dst.len() < chunk.len() {
+            dst.copy_from_slice(&chunk[..dst.len()]);
+            self.offset_in_page += dst.len();
+            self.remaining -= dst.len();
+            return Ok(());
+        }
+
+        while !dst.is_empty() {
+            let src = self.chunk();
+            let cnt = usize::min(src.len(), dst.len());
+            dst[..cnt].copy_from_slice(&src[..cnt]);
+            dst = &mut dst[cnt..];
+            self.advance(cnt);
+        }
+        Ok(())
     }
 
     fn chunk(&self) -> &[u8] {
@@ -288,6 +344,10 @@ impl Buf for ReplayBuf {
 ///
 /// This combines async I/O (`PageReader`) with sync buffering (`ReplayBuf`)
 /// to provide an `ensure(n)` + `Buf` interface for codec decoding.
+///
+/// Nonempty byte fields within one page share the allocation backing the entire prefetched batch.
+/// Retaining such a field keeps that allocation alive after the replay advances or is dropped,
+/// delaying reuse of pooled buffers. Fields spanning pages are copied into separate allocations.
 pub struct Replay<B: Blob> {
     /// Async I/O component.
     reader: PageReader<B>,
@@ -365,9 +425,19 @@ impl<B: Blob> Replay<B> {
     }
 }
 
-impl<B: Blob> Buf for Replay<B> {
+impl<B: Blob> Buf for Replay<B> {}
+
+impl<B: Blob> bytes::Buf for Replay<B> {
+    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        self.buffer.copy_to_bytes(len)
+    }
+
     fn remaining(&self) -> usize {
         self.buffer.remaining()
+    }
+
+    fn try_copy_to_slice(&mut self, dst: &mut [u8]) -> Result<(), TryGetError> {
+        self.buffer.try_copy_to_slice(dst)
     }
 
     fn chunk(&self) -> &[u8] {
@@ -383,8 +453,83 @@ impl<B: Blob> Buf for Replay<B> {
 mod tests {
     use super::{super::writer::Writer, *};
     use crate::{Runner as _, Storage as _, deterministic};
+    use bytes::Buf as _;
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize};
+
+    #[test]
+    fn test_replay_buf_bytes_share_pages() {
+        let source = bytes::Bytes::from_static(b"abcd............efgh............");
+        let range = source.as_ptr_range();
+        let mut replay = ReplayBuf::new(16, 4);
+        replay.push(
+            BufferState {
+                buffer: source,
+                num_pages: 2,
+                last_page_len: 4,
+            },
+            8,
+        );
+
+        let first = replay.copy_to_bytes(3);
+        assert_eq!(first.as_ref(), b"abc");
+        assert!(range.contains(&first.as_ptr()));
+
+        let crossing = replay.copy_to_bytes(3);
+        assert_eq!(crossing.as_ref(), b"def");
+        assert!(!range.contains(&crossing.as_ptr()));
+
+        let last = replay.copy_to_bytes(2);
+        assert_eq!(last.as_ref(), b"gh");
+        assert!(range.contains(&last.as_ptr()));
+        assert_eq!(replay.remaining(), 0);
+    }
+
+    #[test]
+    fn test_replay_buf_copy_to_slice_page_boundaries() {
+        let source = bytes::Bytes::from_static(b"abcd............efgh............ijkl............");
+        let mut replay = ReplayBuf::new(16, 4);
+        replay.push(
+            BufferState {
+                buffer: source,
+                num_pages: 3,
+                last_page_len: 4,
+            },
+            12,
+        );
+
+        // Ends inside the first page.
+        let mut inside = [0u8; 3];
+        replay.try_copy_to_slice(&mut inside).unwrap();
+        assert_eq!(&inside, b"abc");
+        assert_eq!(replay.chunk(), b"d");
+        assert_eq!(replay.remaining(), 9);
+
+        // Ends exactly at the end of a non-final page.
+        let mut boundary = [0u8; 1];
+        replay.try_copy_to_slice(&mut boundary).unwrap();
+        assert_eq!(&boundary, b"d");
+        assert_eq!(replay.chunk(), b"efgh");
+        assert_eq!(replay.remaining(), 8);
+
+        // Spans the page boundary.
+        let mut spanning = [0u8; 6];
+        replay.try_copy_to_slice(&mut spanning).unwrap();
+        assert_eq!(&spanning, b"efghij");
+        assert_eq!(replay.chunk(), b"kl");
+        assert_eq!(replay.remaining(), 2);
+
+        // Ends exactly at the end of the last page.
+        let mut tail = [0u8; 2];
+        replay.try_copy_to_slice(&mut tail).unwrap();
+        assert_eq!(&tail, b"kl");
+        assert_eq!(replay.chunk(), b"");
+        assert_eq!(replay.remaining(), 0);
+
+        let err = replay.try_copy_to_slice(&mut [0u8; 1]).unwrap_err();
+        assert_eq!(err.requested, 1);
+        assert_eq!(err.available, 0);
+    }
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103);
     const BUFFER_PAGES: usize = 2;
@@ -408,7 +553,10 @@ mod tests {
             append.sync().await.unwrap();
 
             // Create Replay
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Ensure all data is available
             replay.ensure(300).await.unwrap();
@@ -445,7 +593,10 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Ensure all data is available
             replay.ensure(data.len()).await.unwrap();
@@ -477,7 +628,10 @@ mod tests {
             // Create Replay with buffer size that results in prefetch_count=1.
             // Physical page size = 103 + 12 = 115 bytes.
             // Buffer size of 115 gives prefetch_pages = 115/115 = 1.
-            let mut replay = append.replay(NZUsize!(115)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(115), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Ensure all data - this requires 4 separate fill() calls (one per page).
             // Each fill() creates a new BufferState, so we'll have 4 BufferStates.
@@ -529,7 +683,10 @@ mod tests {
             assert_eq!(append.size(), 0);
 
             // Create Replay on empty blob
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Verify initial state - remaining is 0, but not yet marked exhausted
             // (exhausted is set after first fill attempt)
@@ -569,7 +726,10 @@ mod tests {
             append.append(&data).await.unwrap();
             append.sync().await.unwrap();
 
-            let mut replay = append.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut replay = append
+                .replay(NZUsize!(BUFFER_PAGES), ReadOptions::default())
+                .await
+                .unwrap();
 
             // Seek forward, read, then seek backward
             replay.seek_to(150).unwrap();

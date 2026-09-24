@@ -2,7 +2,10 @@ use clap::{Arg, Command, value_parser};
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Signer as _,
-    bls12381::{dkg::feldman_desmedt::deal_anonymous, primitives::variant::MinSig},
+    bls12381::{
+        dkg::feldman_desmedt::deal_anonymous,
+        primitives::{sharing::Mode, variant::MinSig},
+    },
     ed25519,
 };
 use commonware_formatting::hex;
@@ -48,7 +51,8 @@ fn main() {
 
     // Generate secret
     let mut rng = StdRng::seed_from_u64(seed);
-    let (public, shares) = deal_anonymous::<MinSig, N3f1>(&mut rng, Default::default(), NZU32!(n));
+    let (public, shares) =
+        deal_anonymous::<MinSig, N3f1>(&mut rng, Mode::NonZeroCounter, NZU32!(n));
 
     // Log secret
     println!("polynomial: {}", hex(&public.encode()));

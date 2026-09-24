@@ -12,12 +12,14 @@
 //! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
 //! and the page cache.
 
-use super::{CHECKSUM_SIZE, CacheRef, Replay, read::PageReader, view::View};
-use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
-use std::{
-    num::{NonZeroU16, NonZeroUsize},
-    sync::Arc,
+use super::{
+    CHECKSUM_SIZE, CacheRef, Replay,
+    read::PageReader,
+    view::{Tail, View},
 };
+use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs, ReadOptions};
+use commonware_utils::Widen;
+use std::{num::NonZeroUsize, sync::Arc};
 
 /// An immutable, page-cache-backed read handle for a [Blob]. The read-only counterpart to
 /// [`super::Writer`].
@@ -49,8 +51,8 @@ struct SealedInner<B: Blob> {
     cache_ref: CacheRef,
 
     /// Page-cache id. [`super::Writer::seal`] preserves the writer id so hot full pages remain
-    /// valid across the transition. [`super::Writer::snapshot`] uses a fresh id because the writer
-    /// can keep mutating its own cache namespace.
+    /// valid across the transition. Snapshots share this identity. Full pages stay immutable within
+    /// one writer incarnation, and each snapshot owns its frozen partial page.
     id: u64,
 }
 
@@ -98,11 +100,12 @@ impl<B: Blob> Sealed<B> {
             id: self.inner.id,
             size: self.inner.size,
             tail_offset: self.partial_offset(),
-            tail: self
-                .inner
-                .partial_page
-                .as_ref()
-                .map_or(&[][..], |p| p.as_ref()),
+            tail: Tail::Sealed(
+                self.inner
+                    .partial_page
+                    .as_ref()
+                    .map_or(&[][..], |p| p.as_ref()),
+            ),
         }
     }
 
@@ -172,10 +175,16 @@ impl<B: Blob> Sealed<B> {
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
     ///
     /// Sealed values have no write buffer to flush, so unlike [`super::Writer::replay`] this method
-    /// is not async.
-    pub fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
-        let page_size = self.inner.cache_ref.page_size();
-        let page_size_nz = NonZeroU16::new(page_size as u16).expect("page_size is non-zero");
+    /// is not async. Replay reads the partial page from storage too. It does not use the frozen
+    /// partial-page copy used by [`Self::read_at`]. Every underlying blob read performed by the
+    /// returned replay uses `read_options`, including refills after seeking.
+    pub fn replay(
+        &self,
+        buffer_size: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> Result<Replay<B>, Error> {
+        let page_size_nz = self.inner.cache_ref.page_size();
+        let page_size: u64 = page_size_nz.widen();
         let physical_page_size = page_size
             .checked_add(CHECKSUM_SIZE)
             .ok_or(Error::OffsetOverflow)?;
@@ -199,6 +208,7 @@ impl<B: Blob> Sealed<B> {
             logical_blob_size,
             prefetch_pages,
             page_size_nz,
+            read_options,
         );
         Ok(Replay::new(reader))
     }
@@ -222,6 +232,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_utils::{NZU16, NZUsize};
+    use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky page size to test alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
@@ -563,10 +574,12 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             sync.await.unwrap();
 
-            // Items: page 0, page 1, straddling page 1 and the tail, pure tail.
+            // Items: page 0, straddling pages 0 and 1, page 1, straddling page 1 and the tail,
+            // and pure tail.
             let offsets = [
                 0u64,
-                page_size as u64,
+                (page_size - 2) as u64,
+                (page_size + 2) as u64,
                 (page_size * 2 - 2) as u64,
                 (page_size * 2 + 10) as u64,
             ];
@@ -586,15 +599,15 @@ mod tests {
             sealed.read_at(0, page_size).await.unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
-            assert_eq!(misses, vec![1, 2]);
-            check(&out, &[0, 3]);
+            assert_eq!(misses, vec![1, 2, 3]);
+            check(&out, &[0, 4]);
 
-            // With only page 1 cached, item 0 becomes the miss and the straddler is served.
+            // With only page 1 cached, the first two items need page 0.
             sealed.read_at(page_size as u64, page_size).await.unwrap();
             let mut out = vec![0u8; offsets.len() * item_size];
             let misses = sealed.try_read_many_sync_into(&mut out, &offsets, NZUsize!(item_size));
-            assert_eq!(misses, vec![0]);
-            check(&out, &[1, 2, 3]);
+            assert_eq!(misses, vec![0, 1]);
+            check(&out, &[2, 3, 4]);
         });
     }
 
@@ -851,7 +864,9 @@ mod tests {
             let (sealed, sync) = append.seal().await.unwrap();
             sync.await.unwrap();
 
-            let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            let mut replay = sealed
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
             assert_eq!(replay.blob_size(), total as u64);
 
             // Drain all logical bytes.
@@ -894,7 +909,9 @@ mod tests {
                 .await
                 .unwrap()
                 .coalesce();
-            let mut replay = snapshot.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            let mut replay = snapshot
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
             assert_eq!(replay.blob_size(), original.len() as u64);
 
             writer.append(b"newtail").await.unwrap();
@@ -937,7 +954,9 @@ mod tests {
             assert_eq!(range_syncs, 0);
             sync.await.unwrap();
 
-            let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            let mut replay = sealed
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
             assert_eq!(replay.blob_size(), total as u64);
 
             let mut out = Vec::with_capacity(total);
@@ -975,7 +994,9 @@ mod tests {
             let read = sealed.read_at(0, total).await.unwrap().coalesce();
             assert_eq!(read.as_ref(), &data[..]);
 
-            let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            let mut replay = sealed
+                .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                .unwrap();
             assert_eq!(replay.blob_size(), total as u64);
             let mut replayed = Vec::new();
             while replay.ensure(1).await.unwrap() {

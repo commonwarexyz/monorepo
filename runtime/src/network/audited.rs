@@ -187,7 +187,8 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Error, IoBuf, IoBufs, Listener as _, Network as _, Sink as _, Stream as _,
+        Clock, Error, IoBuf, IoBufs, Listener as _, Network as _, Runner, Sink as _, Spawner,
+        Stream as _,
         deterministic::Auditor,
         network::{
             audited::Network as AuditedNetwork, deterministic::Network as DeterministicNetwork,
@@ -195,7 +196,8 @@ mod tests {
         },
     };
     use commonware_macros::test_group;
-    use commonware_utils::sync::Mutex;
+    use commonware_utils::{iter::zip_eq, sync::Mutex};
+    use rstest::rstest;
     use std::{net::SocketAddr, sync::Arc};
 
     #[derive(Clone)]
@@ -225,27 +227,47 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_trait() {
-        tests::test_network_trait(|| {
-            AuditedNetwork::new(
-                DeterministicNetwork::default(),
-                Arc::new(Auditor::default()),
-            )
-        })
-        .await;
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_trait<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            tests::test_network_trait(context, || {
+                AuditedNetwork::new(
+                    DeterministicNetwork::default(),
+                    Arc::new(Auditor::default()),
+                )
+            })
+            .await;
+        });
     }
 
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        tests::stress_test_network_trait(|| {
-            AuditedNetwork::new(
-                DeterministicNetwork::default(),
-                Arc::new(Auditor::default()),
-            )
-        })
-        .await;
+    fn test_stress_trait<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            tests::stress_test_network_trait(context, || {
+                AuditedNetwork::new(
+                    DeterministicNetwork::default(),
+                    Arc::new(Auditor::default()),
+                )
+            })
+            .await;
+        });
     }
 
     // Test that running the same network operations on two audited networks
@@ -282,53 +304,31 @@ mod tests {
         ];
         verify_auditors("after binding");
 
-        // Step 2: Test accepting connections
-        let mut server_handles = Vec::new();
-        for mut listener in listeners {
-            let handle = tokio::spawn(async move {
-                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+        // Step 2: Run the same ordered exchange on each network so audit equality does
+        // not depend on how the runtime schedules separate client and server tasks.
+        for (network, mut listener) in zip_eq(&networks, listeners) {
+            let (mut client_sink, mut client_stream) = network.dial(listener_addr).await.unwrap();
+            let (_, mut server_sink, mut server_stream) = listener.accept().await.unwrap();
 
-                // Receive data from client
-                let received = stream.recv(CLIENT_MSG.len()).await.unwrap();
-                assert_eq!(received.coalesce(), CLIENT_MSG.as_bytes());
+            // Send and receive the client request before replying from the server.
+            client_sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
+            let received = server_stream.recv(CLIENT_MSG.len()).await.unwrap();
+            assert_eq!(received.coalesce(), CLIENT_MSG.as_bytes());
 
-                // Send response
-                sink.send(SERVER_MSG.as_bytes()).await.unwrap();
-            });
-            server_handles.push(handle);
-        }
-        verify_auditors("after accepting connections");
-
-        // Step 3: Test dialing and data exchange
-        let mut client_handles = Vec::new();
-        for network in &networks {
-            let network = network.clone();
-            let handle = tokio::spawn(async move {
-                let (mut sink, mut stream) = network.dial(listener_addr).await.unwrap();
-
-                // Send data to server
-                sink.send(CLIENT_MSG.as_bytes()).await.unwrap();
-
-                // Receive response
-                let received = stream.recv(SERVER_MSG.len()).await.unwrap();
-                assert_eq!(received.coalesce(), SERVER_MSG.as_bytes());
-            });
-            client_handles.push(handle);
-        }
-        // Wait for all tasks to complete
-        for handle in server_handles {
-            handle.await.unwrap();
+            server_sink.send(SERVER_MSG.as_bytes()).await.unwrap();
+            let received = client_stream.recv(SERVER_MSG.len()).await.unwrap();
+            assert_eq!(received.coalesce(), SERVER_MSG.as_bytes());
         }
         verify_auditors("after network operations");
 
-        // Step 4: Test error conditions (attempting to bind to same address again)
+        // Step 3: Test error conditions (attempting to bind to same address again)
         for network in &networks {
             let result = network.bind(listener_addr).await;
             assert!(result.is_err());
         }
         verify_auditors("after bind error");
 
-        // Step 5: Test dialing to non-existent server
+        // Step 4: Test dialing to non-existent server
         let bad_addr = SocketAddr::from(([127, 0, 0, 1], 9999));
         for network in &networks {
             let result = network.dial(bad_addr).await;

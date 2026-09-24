@@ -8,18 +8,21 @@ use crate::{
     authenticated::lookup::actors::{listener, peer, tracker::ingress::Releaser},
 };
 use commonware_actor::mailbox;
-use commonware_cryptography::Signer;
+use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
 };
-use commonware_utils::channel::{fallible::FallibleExt, mpsc};
+use commonware_utils::{
+    channel::{fallible::FallibleExt, mpsc, ring},
+    ordered::Set,
+};
 use rand_core::Rng;
 use std::collections::HashMap;
 use tracing::debug;
 
 /// The tracker actor that manages peer discovery and connection reservations.
-pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
+pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> {
     context: ContextCell<E>,
 
     // ---------- Message-Passing ----------
@@ -27,27 +30,30 @@ pub struct Actor<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> {
     ///
     /// We use this to support sending a [`Message::Release`] message to the actor
     /// during [`Drop`].
-    receiver: mailbox::Receiver<Message<C::PublicKey>>,
+    receiver: mailbox::Receiver<Message<C>>,
 
     /// The mailbox for the listener.
     listener: listener::Mailbox,
 
     // ---------- State ----------
     /// Tracks peer sets and peer connectivity information.
-    directory: Directory<E, C::PublicKey>,
+    directory: Directory<E, C>,
 
     /// Maps a peer's public key to its mailbox.
     /// Set when a peer connects and cleared when it is blocked or released.
-    mailboxes: HashMap<C::PublicKey, peer::Mailbox>,
+    mailboxes: HashMap<C, peer::Mailbox>,
 
     /// Subscribers to peer set updates.
-    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C::PublicKey>>>,
+    subscribers: Vec<mpsc::UnboundedSender<PeerSetUpdate<C>>>,
+
+    /// Subscribers to the set of blocked peers.
+    blocked_subscribers: Vec<ring::Sender<Set<C>>>,
 }
 
-impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
+impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: PublicKey> Actor<E, C> {
     /// Create a new tracker [Actor] from the given `context` and `cfg`.
     #[allow(clippy::type_complexity)]
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C::PublicKey>, Oracle<C::PublicKey>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C>, Oracle<C>) {
         // General initialization
         let directory_cfg = directory::Config {
             max_sets: cfg.tracked_peer_sets,
@@ -60,7 +66,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
 
         // Create the mailboxes
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let local = cfg.crypto.public_key();
+        let local = cfg.public_key;
         let oracle = Oracle::new(sender.clone(), local.clone(), cfg.max_peers_per_set);
         let releaser = Releaser::new(sender.clone());
 
@@ -75,6 +81,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
                 listener: cfg.listener,
                 mailboxes: HashMap::new(),
                 subscribers: Vec::new(),
+                blocked_subscribers: Vec::new(),
             },
             Mailbox::new(sender),
             oracle,
@@ -95,6 +102,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             _ = self.directory.wait_for_unblock() => {
                 if self.directory.unblock_expired() {
                     let _ = self.listener.set(self.directory.listenable());
+                    self.notify_blocked();
                 }
             },
             Some(msg) = self.receiver.recv() else {
@@ -106,8 +114,16 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         }
     }
 
+    /// Send the current blocked set to every blocked-set subscriber, dropping
+    /// subscribers that have gone away.
+    fn notify_blocked(&mut self) {
+        let blocked = self.directory.blocked_peers();
+        self.blocked_subscribers
+            .retain(|subscriber| subscriber.send_lossy(blocked.clone()));
+    }
+
     /// Handle a [`Message`].
-    fn handle_msg(&mut self, msg: Message<C::PublicKey>) {
+    fn handle_msg(&mut self, msg: Message<C>) {
         match msg {
             Message::Register { index, peers } => {
                 // Identify peers whose connection state should be torn down.
@@ -204,13 +220,22 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
             }
             Message::Block { public_key } => {
                 // Block the peer
-                self.directory.block(&public_key);
+                if self.directory.block(&public_key) {
+                    self.notify_blocked();
+                }
 
                 // Kill the peer if we're connected to it
                 self.kill_peer(&public_key);
 
                 // Send the updated listenable IPs to the listener.
                 let _ = self.listener.set(self.directory.listenable());
+            }
+            Message::SubscribeBlocked { sender } => {
+                // Start the subscriber from the current blocked set rather than
+                // the next change.
+                if sender.send_lossy(self.directory.blocked_peers()) {
+                    self.blocked_subscribers.push(sender);
+                }
             }
             Message::Release { metadata } => {
                 // Clear the peer handle if it exists
@@ -222,7 +247,7 @@ impl<E: Spawner + Rng + Clock + RuntimeMetrics, C: Signer> Actor<E, C> {
         }
     }
 
-    fn kill_peer(&mut self, public_key: &C::PublicKey) {
+    fn kill_peer(&mut self, public_key: &C) {
         if let Some(peer) = self.mailboxes.remove(public_key) {
             peer.kill();
         }
@@ -255,11 +280,14 @@ mod tests {
     };
 
     // Test Configuration Setup
-    fn test_config<C: Signer>(crypto: C, bypass_ip_check: bool) -> (Config<C>, listener::Updates) {
+    fn test_config<C: Signer>(
+        signer: C,
+        bypass_ip_check: bool,
+    ) -> (Config<C::PublicKey>, listener::Updates) {
         let (registered_ips_sender, registered_ips_receiver) = listener::Mailbox::new();
         (
             Config {
-                crypto,
+                public_key: signer.public_key(),
                 mailbox_size: NZUsize!(1024),
                 max_peers_per_set: 1024,
                 tracked_peer_sets: NZUsize!(2),
@@ -289,7 +317,7 @@ mod tests {
 
     fn setup_actor(
         runner_context: deterministic::Context,
-        cfg_to_clone: Config<PrivateKey>, // Pass by value to allow cloning
+        cfg_to_clone: Config<PublicKey>, // Pass by value to allow cloning
     ) -> TestHarness {
         // Actor::new takes ownership, so clone again if cfg_to_clone is needed later
         let (actor, mailbox, oracle) = Actor::new(runner_context, cfg_to_clone);
@@ -344,6 +372,63 @@ mod tests {
 
             let dialable = mailbox.dialable().await;
             assert!(!dialable.peers.iter().any(|peer| peer == &pk));
+        });
+    }
+
+    #[test]
+    fn test_blocked_subscription_tracks_block_and_expiry() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let (cfg, _) = test_config(PrivateKey::from_seed(0), false);
+            let block_duration = cfg.block_duration;
+            let TestHarness { mut oracle, .. } = setup_actor(context.child("actor"), cfg);
+
+            let (_, pk) = new_signer_and_pk(1);
+            let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1001);
+            oracle.track(
+                0,
+                Map::<_, crate::Address>::try_from([(pk.clone(), addr.into())]).unwrap(),
+            );
+
+            // A new subscription starts with the current, empty set.
+            let mut blocked = crate::Blocker::blocked(&mut oracle);
+            assert!(blocked.next().await.unwrap().iter().next().is_none());
+
+            // Blocking publishes the peer.
+            crate::block_peer(&mut oracle, pk.clone());
+            assert_eq!(
+                blocked
+                    .next()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![pk.clone()]
+            );
+
+            // Blocking an already blocked peer changes nothing, so nothing is published,
+            // while a subscriber that joins now starts from the current set.
+            crate::block_peer(&mut oracle, pk.clone());
+            context.sleep(Duration::from_millis(10)).await;
+            assert!(blocked.try_recv().is_err());
+            let mut late = crate::Blocker::blocked(&mut oracle);
+            assert_eq!(
+                late.next()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![pk]
+            );
+
+            // Expiry removes the peer for every subscriber.
+            context
+                .sleep(block_duration + Duration::from_millis(10))
+                .await;
+            assert!(blocked.next().await.unwrap().iter().next().is_none());
+            assert!(late.next().await.unwrap().iter().next().is_none());
         });
     }
 
@@ -747,7 +832,7 @@ mod tests {
     fn test_register_disconnects_removed_peers() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let (signer, my_pk) = new_signer_and_pk(0);
             let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
 
             let pk_1 = new_signer_and_pk(1).1;
@@ -755,7 +840,7 @@ mod tests {
             let pk_2 = new_signer_and_pk(2).1;
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (mut cfg, mut listener_receiver) = test_config(signer, false);
             cfg.tracked_peer_sets = NZUsize!(1);
             cfg.max_peers_per_set = 2;
 
@@ -812,13 +897,13 @@ mod tests {
     fn test_register_keeps_connected_peer_present_across_rollover() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 9001);
             let pk_2 = new_signer_and_pk(2).1;
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (mut cfg, mut listener_receiver) = test_config(signer, false);
             cfg.tracked_peer_sets = NZUsize!(1);
             let TestHarness {
                 mailbox,
@@ -865,13 +950,13 @@ mod tests {
     fn test_reserved_removed_peer_rejected_on_connect() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(Ipv4Addr::new(127, 0, 0, 2).into(), 9001);
             let pk_2 = new_signer_and_pk(2).1;
             let addr_2 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9002);
 
-            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (mut cfg, mut listener_receiver) = test_config(signer, false);
             cfg.tracked_peer_sets = NZUsize!(1);
             let TestHarness {
                 mailbox,
@@ -914,12 +999,12 @@ mod tests {
     fn test_reserved_peer_killed_on_connect_after_tracked_address_change() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk = new_signer_and_pk(1).1;
             let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
             let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
 
-            let (mut cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (mut cfg, mut listener_receiver) = test_config(signer, false);
             cfg.tracked_peer_sets = NZUsize!(2);
             let TestHarness {
                 mailbox,
@@ -960,12 +1045,12 @@ mod tests {
     fn test_reserved_peer_killed_on_connect_after_overwrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk = new_signer_and_pk(1).1;
             let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
             let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
 
-            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (cfg, mut listener_receiver) = test_config(signer, false);
             let TestHarness {
                 mailbox,
                 mut oracle,
@@ -1002,12 +1087,12 @@ mod tests {
     fn test_stale_inbound_source_rejected_after_overwrite() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, _) = new_signer_and_pk(0);
+            let (signer, _) = new_signer_and_pk(0);
             let pk = new_signer_and_pk(1).1;
             let addr_a = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 1001);
             let addr_b = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 1002);
 
-            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (cfg, mut listener_receiver) = test_config(signer, false);
             let TestHarness {
                 mailbox,
                 mut oracle,
@@ -1042,14 +1127,14 @@ mod tests {
     fn test_overwrite_triggers_listener() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let (signer, my_pk) = new_signer_and_pk(0);
             let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
 
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
 
-            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (cfg, mut listener_receiver) = test_config(signer, false);
             let TestHarness { mut oracle, .. } = setup_actor(context.child("actor"), cfg);
 
             oracle.track(
@@ -1114,14 +1199,14 @@ mod tests {
     fn test_overwrite_blocked_peer_not_in_listenable() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let (my_sk, my_pk) = new_signer_and_pk(0);
+            let (signer, my_pk) = new_signer_and_pk(0);
             let my_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 9000);
 
             let pk_1 = new_signer_and_pk(1).1;
             let addr_1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 9001);
             let addr_2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9)), 9002);
 
-            let (cfg, mut listener_receiver) = test_config(my_sk, false);
+            let (cfg, mut listener_receiver) = test_config(signer, false);
             let TestHarness { mut oracle, .. } = setup_actor(context.child("actor"), cfg);
 
             oracle.track(

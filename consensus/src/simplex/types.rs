@@ -5,15 +5,16 @@ use crate::{
     simplex::scheme::{self, CertificateVerifier},
     types::{Epoch, Participant, Round, View},
 };
-use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
+use bytes::BufMut;
+use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, ReadRangeExt, Write, varint::UInt};
 use commonware_cryptography::{
     Digest, PublicKey,
-    certificate::{Attestation, Scheme},
+    certificate::{AssemblyError, Attestation, Scheme},
 };
 use commonware_parallel::Strategy;
+use commonware_utils::{iter::NonEmpty, non_empty};
 use rand_core::CryptoRng;
-use std::{collections::HashSet, fmt::Debug, hash::Hash, iter::once};
+use std::{collections::HashSet, fmt::Debug, hash::Hash};
 
 /// Context is a collection of metadata from consensus about a given payload.
 /// It provides information about the current epoch/view and the parent payload that new proposals are built on.
@@ -287,10 +288,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             finalizes: Phase::new(participants),
         }
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     /// Records monotonic signer facts after a phase releases its full vote map.
     ///
     /// A later matching vote can record that the signer has the authoritative
@@ -517,10 +515,7 @@ impl<S: Scheme, D: Digest> VoteTracker<S, D> {
             |vote: &Finalize<S, D>| &vote.proposal == proposal,
         );
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl<S: Scheme, D: Digest> VoteTracker<S, D> {
     fn clear_compacted(&mut self, cleared: u8) {
         for flags in &mut self.compacted {
             *flags &= !cleared;
@@ -786,14 +781,28 @@ impl std::fmt::Display for Kind {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Returns this certificate's type.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn kind(&self) -> Kind {
         match self {
             Self::Notarization(_) => Kind::Notarization,
             Self::Nullification(_) => Kind::Nullification,
             Self::Finalization(_) => Kind::Finalization,
+        }
+    }
+
+    /// Verifies this certificate against the provided signing scheme.
+    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
+    where
+        S: scheme::Scheme<D>,
+    {
+        match self {
+            Self::Notarization(notarization) => notarization.verify(rng, scheme, strategy),
+            Self::Nullification(nullification) => {
+                nullification.verify::<_, D>(rng, scheme, strategy)
+            }
+            Self::Finalization(finalization) => finalization.verify(rng, scheme, strategy),
         }
     }
 }
@@ -869,22 +878,6 @@ impl<S: Scheme, D: Digest> Viewable for Certificate<S, D> {
             Self::Notarization(v) => v.view(),
             Self::Nullification(v) => v.view(),
             Self::Finalization(v) => v.view(),
-        }
-    }
-}
-
-impl<S: Scheme, D: Digest> Certificate<S, D> {
-    /// Verifies this certificate against the provided signing scheme.
-    pub fn verify<R: CryptoRng>(&self, rng: &mut R, scheme: &S, strategy: &impl Strategy) -> bool
-    where
-        S: scheme::Scheme<D>,
-    {
-        match self {
-            Self::Notarization(notarization) => notarization.verify(rng, scheme, strategy),
-            Self::Nullification(nullification) => {
-                nullification.verify::<_, D>(rng, scheme, strategy)
-            }
-            Self::Finalization(finalization) => finalization.verify(rng, scheme, strategy),
         }
     }
 }
@@ -1358,38 +1351,45 @@ pub struct Notarization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Notarization<S, D> {
-    /// Builds a notarization certificate from owned notarize votes for the same proposal,
-    /// consuming the votes to avoid cloning each attestation.
+    /// Builds a notarization certificate from non-empty owned notarize votes for the same
+    /// proposal, consuming the votes to avoid cloning each attestation.
     pub fn from_owned_notarizes<I>(
         scheme: &S,
-        notarizes: I,
+        notarizes: NonEmpty<I>,
         strategy: &impl Strategy,
-    ) -> Option<Self>
+    ) -> Result<Self, AssemblyError>
     where
-        I: IntoIterator<Item = Notarize<S, D>>,
-        I::IntoIter: Send,
+        I: Iterator<Item = Notarize<S, D>> + Send,
     {
-        let mut notarizes = notarizes.into_iter();
+        let (first, notarizes) = notarizes.into_parts();
         let Notarize {
             proposal,
             attestation,
-        } = notarizes.next()?;
-        let attestations = once(attestation).chain(notarizes.map(|n| n.attestation));
+        } = first;
+        let attestations =
+            NonEmpty::new(attestation, notarizes.map(|notarize| notarize.attestation));
         let certificate = scheme.assemble(attestations, strategy)?;
 
-        Some(Self {
+        Ok(Self {
             proposal,
             certificate,
         })
     }
 
-    /// Builds a notarization certificate from notarize votes for the same proposal.
-    pub fn from_notarizes<'a, I>(scheme: &S, notarizes: I, strategy: &impl Strategy) -> Option<Self>
+    /// Builds a notarization certificate from non-empty notarize votes for the same proposal.
+    pub fn from_notarizes<'a, I>(
+        scheme: &S,
+        notarizes: NonEmpty<I>,
+        strategy: &impl Strategy,
+    ) -> Result<Self, AssemblyError>
     where
-        I: IntoIterator<Item = &'a Notarize<S, D>>,
-        I::IntoIter: Send,
+        I: Iterator<Item = &'a Notarize<S, D>> + Send,
     {
-        Self::from_owned_notarizes(scheme, notarizes.into_iter().cloned(), strategy)
+        Self::from_owned_notarizes(
+            scheme,
+            non_empty![@notarizes.into_iter().cloned()],
+            strategy,
+        )
     }
 
     /// Verifies the notarization certificate against the provided signing scheme.
@@ -1612,32 +1612,41 @@ pub struct Nullification<S: Scheme> {
 }
 
 impl<S: Scheme> Nullification<S> {
-    /// Builds a nullification certificate from owned nullify votes from the same round,
+    /// Builds a nullification certificate from non-empty owned nullify votes from the same round,
     /// consuming the votes to avoid cloning each attestation.
     pub fn from_owned_nullifies<I>(
         scheme: &S,
-        nullifies: I,
+        nullifies: NonEmpty<I>,
         strategy: &impl Strategy,
-    ) -> Option<Self>
+    ) -> Result<Self, AssemblyError>
     where
-        I: IntoIterator<Item = Nullify<S>>,
-        I::IntoIter: Send,
+        I: Iterator<Item = Nullify<S>> + Send,
     {
-        let mut nullifies = nullifies.into_iter();
-        let Nullify { round, attestation } = nullifies.next()?;
-        let attestations = once(attestation).chain(nullifies.map(|n| n.attestation));
+        let (first, nullifies) = nullifies.into_parts();
+        let round = first.round;
+        let attestations = NonEmpty::new(
+            first.attestation,
+            nullifies.map(|nullify| nullify.attestation),
+        );
         let certificate = scheme.assemble(attestations, strategy)?;
 
-        Some(Self { round, certificate })
+        Ok(Self { round, certificate })
     }
 
-    /// Builds a nullification certificate from nullify votes from the same round.
-    pub fn from_nullifies<'a, I>(scheme: &S, nullifies: I, strategy: &impl Strategy) -> Option<Self>
+    /// Builds a nullification certificate from non-empty nullify votes from the same round.
+    pub fn from_nullifies<'a, I>(
+        scheme: &S,
+        nullifies: NonEmpty<I>,
+        strategy: &impl Strategy,
+    ) -> Result<Self, AssemblyError>
     where
-        I: IntoIterator<Item = &'a Nullify<S>>,
-        I::IntoIter: Send,
+        I: Iterator<Item = &'a Nullify<S>> + Send,
     {
-        Self::from_owned_nullifies(scheme, nullifies.into_iter().cloned(), strategy)
+        Self::from_owned_nullifies(
+            scheme,
+            non_empty![@nullifies.into_iter().cloned()],
+            strategy,
+        )
     }
 
     /// Verifies the nullification certificate against the provided signing scheme.
@@ -1868,38 +1877,45 @@ pub struct Finalization<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Finalization<S, D> {
-    /// Builds a finalization certificate from owned finalize votes for the same proposal,
+    /// Builds a finalization certificate from non-empty owned finalize votes for the same proposal,
     /// consuming the votes to avoid cloning each attestation.
     pub fn from_owned_finalizes<I>(
         scheme: &S,
-        finalizes: I,
+        finalizes: NonEmpty<I>,
         strategy: &impl Strategy,
-    ) -> Option<Self>
+    ) -> Result<Self, AssemblyError>
     where
-        I: IntoIterator<Item = Finalize<S, D>>,
-        I::IntoIter: Send,
+        I: Iterator<Item = Finalize<S, D>> + Send,
     {
-        let mut finalizes = finalizes.into_iter();
+        let (first, finalizes) = finalizes.into_parts();
         let Finalize {
             proposal,
             attestation,
-        } = finalizes.next()?;
-        let attestations = once(attestation).chain(finalizes.map(|f| f.attestation));
+        } = first;
+        let attestations =
+            NonEmpty::new(attestation, finalizes.map(|finalize| finalize.attestation));
         let certificate = scheme.assemble(attestations, strategy)?;
 
-        Some(Self {
+        Ok(Self {
             proposal,
             certificate,
         })
     }
 
-    /// Builds a finalization certificate from finalize votes for the same proposal.
-    pub fn from_finalizes<'a, I>(scheme: &S, finalizes: I, strategy: &impl Strategy) -> Option<Self>
+    /// Builds a finalization certificate from non-empty finalize votes for the same proposal.
+    pub fn from_finalizes<'a, I>(
+        scheme: &S,
+        finalizes: NonEmpty<I>,
+        strategy: &impl Strategy,
+    ) -> Result<Self, AssemblyError>
     where
-        I: IntoIterator<Item = &'a Finalize<S, D>>,
-        I::IntoIter: Send,
+        I: Iterator<Item = &'a Finalize<S, D>> + Send,
     {
-        Self::from_owned_finalizes(scheme, finalizes.into_iter().cloned(), strategy)
+        Self::from_owned_finalizes(
+            scheme,
+            non_empty![@finalizes.into_iter().cloned()],
+            strategy,
+        )
     }
 
     /// Verifies the finalization certificate against the provided signing scheme.
@@ -2181,7 +2197,8 @@ impl<S: Scheme, D: Digest> Response<S, D> {
     where
         S: scheme::Scheme<D>,
     {
-        // Prepare to verify
+        // An honest peer may have no certificate for the requested views. Treating the empty
+        // response as valid lets the requester immediately try another peer.
         if self.notarizations.is_empty() && self.nullifications.is_empty() {
             return true;
         }
@@ -2202,7 +2219,10 @@ impl<S: Scheme, D: Digest> Response<S, D> {
             (context, &nullification.certificate)
         });
 
-        scheme.verify_certificates::<_, D, _>(rng, notarizations.chain(nullifications), strategy)
+        let certificates = NonEmpty::try_new(notarizations.chain(nullifications))
+            .expect("non-empty response must contain a certificate");
+
+        scheme.verify_certificates::<_, D, _>(rng, certificates, strategy)
     }
 }
 
@@ -2286,9 +2306,9 @@ where
 ///
 /// # Verification
 ///
-/// Some activities issued by consensus are not guaranteed to be cryptographically verified (i.e. if not needed
-/// to produce a minimum quorum certificate). Use [`Activity::verified`] to check if an activity may not be verified,
-/// and [`Activity::verify`] to perform verification.
+/// Some activities issued by consensus are not guaranteed to be cryptographically verified. Use
+/// [`Activity::verified`] to check whether an activity may be unverified, and [`Activity::verify`] to
+/// perform verification.
 ///
 /// # Activity Filtering
 ///
@@ -3013,7 +3033,6 @@ mod tests {
             ed25519, secp256r1,
         },
     };
-    use bytes::Bytes;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
@@ -3107,7 +3126,8 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_notarizes(&fixture.schemes[0], non_empty![@&notarizes], &Sequential)
+                .expect("quorum notarization");
         let encoded = notarization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Notarization::decode_cfg(encoded, &cfg).unwrap();
@@ -3167,8 +3187,12 @@ mod tests {
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification =
-            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+        let nullification = Nullification::from_nullifies(
+            &fixture.schemes[0],
+            non_empty![@&nullifies],
+            &Sequential,
+        )
+        .unwrap();
         let encoded = nullification.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Nullification::decode_cfg(encoded, &cfg).unwrap();
@@ -3231,7 +3255,8 @@ mod tests {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let finalization =
-            Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential).unwrap();
+            Finalization::from_finalizes(&fixture.schemes[0], non_empty![@&finalizes], &Sequential)
+                .unwrap();
         let encoded = finalization.encode();
         let cfg = fixture.schemes[0].certificate_codec_config();
         let decoded = Finalization::decode_cfg(encoded, &cfg).unwrap();
@@ -3278,15 +3303,20 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_notarizes(&fixture.schemes[0], non_empty![@&notarizes], &Sequential)
+                .expect("quorum notarization");
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification =
-            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+        let nullification = Nullification::from_nullifies(
+            &fixture.schemes[0],
+            non_empty![@&nullifies],
+            &Sequential,
+        )
+        .unwrap();
 
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let encoded_response = Backfiller::<S, Sha256>::Response(response.clone()).encode();
@@ -3335,15 +3365,20 @@ mod tests {
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).unwrap();
+            Notarization::from_notarizes(&fixture.schemes[0], non_empty![@&notarizes], &Sequential)
+                .unwrap();
 
         let nullifies: Vec<_> = fixture
             .schemes
             .iter()
             .map(|scheme| Nullify::sign::<Sha256>(scheme, round).unwrap())
             .collect();
-        let nullification =
-            Nullification::from_nullifies(&fixture.schemes[0], &nullifies, &Sequential).unwrap();
+        let nullification = Nullification::from_nullifies(
+            &fixture.schemes[0],
+            non_empty![@&nullifies],
+            &Sequential,
+        )
+        .unwrap();
 
         let response = Response::<S, Sha256>::new(1, vec![notarization], vec![nullification]);
         let cfg = fixture.schemes[0].certificate_codec_config();
@@ -3372,6 +3407,15 @@ mod tests {
         response_encode_decode(bls12381_threshold_vrf::fixture::<MinSig, _>);
         response_encode_decode(bls12381_threshold_std::fixture::<MinPk, _>);
         response_encode_decode(bls12381_threshold_std::fixture::<MinSig, _>);
+    }
+
+    #[test]
+    fn empty_response_is_valid() {
+        let mut rng = test_rng();
+        let fixture = ed25519::fixture(&mut rng, NAMESPACE, 5);
+        let response = Response::<ed25519::Scheme, Sha256>::new(1, Vec::new(), Vec::new());
+
+        assert!(response.verify(&mut rng, &fixture.schemes[0], &Sequential));
     }
 
     fn conflicting_notarize_encode_decode<S, F>(fixture: F)
@@ -3562,8 +3606,8 @@ mod tests {
             .collect();
 
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
-                .expect("quorum notarization");
+            Notarization::from_notarizes(&fixture.schemes[0], non_empty![@&notarizes], &Sequential)
+                .unwrap();
         assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
         assert!(!notarization.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
     }
@@ -3600,8 +3644,8 @@ mod tests {
             .collect();
 
         let notarization =
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential)
-                .expect("quorum notarization");
+            Notarization::from_notarizes(&fixture.schemes[0], non_empty![@&notarizes], &Sequential)
+                .unwrap();
         assert!(notarization.verify(&mut rng, &fixture.schemes[0], &Sequential));
 
         assert!(!notarization.verify(&mut rng, &wrong_fixture.schemes[0], &Sequential));
@@ -3626,19 +3670,26 @@ mod tests {
     {
         let mut rng = test_rng();
         let fixture = fixture(&mut rng, NAMESPACE, 5);
-        let quorum_size = quorum(fixture.schemes.len() as u32) as usize;
+        let participant_count =
+            u32::try_from(fixture.schemes.len()).expect("participant count exceeds u32::MAX");
+        let quorum_size = quorum(participant_count);
+        let subquorum = usize::try_from(quorum_size - 1).expect("quorum exceeds usize::MAX");
         assert!(quorum_size > 1, "test requires quorum larger than one");
         let round = Round::new(Epoch::new(0), View::new(10));
         let proposal = Proposal::new(round, View::new(5), sample_digest(5));
         let notarizes: Vec<_> = fixture
             .schemes
             .iter()
-            .take(quorum_size - 1)
+            .take(subquorum)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
 
-        assert!(
-            Notarization::from_notarizes(&fixture.schemes[0], &notarizes, &Sequential).is_none(),
+        assert_eq!(
+            Notarization::from_notarizes(&fixture.schemes[0], non_empty![@&notarizes], &Sequential),
+            Err(AssemblyError::InsufficientAttestations(
+                quorum_size,
+                quorum_size - 1
+            )),
             "insufficient votes should not form a notarization"
         );
     }
@@ -3743,7 +3794,7 @@ mod tests {
             .collect();
 
         let finalization =
-            Finalization::from_finalizes(&fixture.schemes[0], &finalizes, &Sequential)
+            Finalization::from_finalizes(&fixture.schemes[0], non_empty![@&finalizes], &Sequential)
                 .expect("quorum finalization");
         assert!(finalization.verify(&mut rng, &fixture.schemes[0], &Sequential));
         assert!(!finalization.verify(&mut rng, &wrong_fixture.verifier, &Sequential));
@@ -4021,7 +4072,7 @@ mod tests {
         notarize.write(&mut buf);
 
         // Decoding should fail
-        let result = ConflictingNotarize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
+        let result = ConflictingNotarize::<ed25519::Scheme, Sha256>::decode(buf);
         assert!(result.is_err());
     }
 
@@ -4056,7 +4107,7 @@ mod tests {
         finalize.write(&mut buf);
 
         // Decoding should fail
-        let result = ConflictingFinalize::<ed25519::Scheme, Sha256>::decode(Bytes::from(buf));
+        let result = ConflictingFinalize::<ed25519::Scheme, Sha256>::decode(buf);
         assert!(result.is_err());
     }
 

@@ -3,7 +3,11 @@
 use crate::{
     bls12381::{
         dkg::feldman_desmedt::deal,
-        primitives::{group::Share, sharing::Sharing, variant::Variant},
+        primitives::{
+            group::Share,
+            sharing::{Mode, Sharing},
+            variant::Variant,
+        },
     },
     certificate::{Scheme, mocks::Fixture},
     ed25519,
@@ -40,7 +44,7 @@ where
         })
         .collect();
 
-    let (output, shares) = deal::<V, _, M>(rng, Default::default(), participants.clone())
+    let (output, shares) = deal::<V, _, M>(rng, Mode::NonZeroCounter, participants.clone())
         .expect("deal should succeed");
     let polynomial = output.public().clone();
 

@@ -4,21 +4,9 @@
 
 use super::{Config as BaseConfig, Immutable, operation::Operation as BaseOperation};
 use crate::{
-    Context,
-    journal::{
-        authenticated,
-        contiguous::fixed::{self, Config as JournalConfig},
-    },
-    merkle::Family,
-    qmdb::{
-        Error, ROOT_BAGGING,
-        any::{FixedValue, value::FixedEncoding},
-    },
-    translator::Translator,
+    journal::contiguous::fixed::{self, Config as JournalConfig},
+    qmdb::any::value::FixedEncoding,
 };
-use commonware_cryptography::Hasher;
-use commonware_parallel::Strategy;
-use commonware_utils::Array;
 
 /// Type alias for a fixed-size operation.
 pub type Operation<F, K, V> = BaseOperation<F, K, FixedEncoding<V>>;
@@ -30,69 +18,37 @@ pub type Db<F, E, K, V, H, T, S> =
 /// Type alias for the fixed-size compact immutable db.
 pub type CompactDb<F, E, K, V, H, S> = super::CompactDb<F, E, K, FixedEncoding<V>, H, (), S>;
 
-type Journal<F, E, K, V, H, S> =
-    authenticated::Journal<F, E, fixed::Journal<E, Operation<F, K, V>>, H, S>;
-
 /// Configuration for a fixed-size immutable authenticated db.
 pub type Config<T, S> = BaseConfig<T, JournalConfig, S>;
 
 /// Configuration for a fixed-size compact immutable db.
 pub type CompactConfig<S> = super::CompactConfig<(), S>;
 
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S: Strategy>
-    Db<F, E, K, V, H, T, S>
-{
-    /// Returns a [Db] initialized from `cfg`. Any uncommitted log operations will be
-    /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-        let journal: Journal<F, E, K, V, H, S> = Journal::new(
-            context.child("journal"),
-            cfg.merkle_config,
-            cfg.log,
-            Operation::<F, K, V>::is_commit,
-            ROOT_BAGGING,
-        )
-        .await?;
-        Self::init_from_journal(
-            journal,
-            context,
-            cfg.translator,
-            cfg.init_buffer,
-            cfg.init_cache_size,
-        )
-        .await
-    }
-}
-
-impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, S: Strategy>
-    CompactDb<F, E, K, V, H, S>
-{
-    /// Returns a [CompactDb] initialized from `cfg`.
-    pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
-        Self::init_from_merkle(merkle, context.child("witness"), cfg.witness, ()).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
-        merkle::{Location, full::Config as MmrConfig, mmb, mmr},
-        qmdb::immutable::test,
+        merkle::{Family, Location, full::Config as MmrConfig, mmb, mmr},
+        qmdb::{
+            Error,
+            immutable::tests::{self, immutable_tests},
+        },
         translator::TwoCap,
     };
+    use commonware_codec::FixedSize;
     use commonware_cryptography::{Sha256, sha256::Digest};
     use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         BufferPooler, Metrics, Runner as _, Spawner as _, Supervisor as _,
         buffer::paged::CacheRef,
-        deterministic,
+        deterministic::{
+            self, Config as DeterministicConfig, FaultConfig, PartialWriteMode, WriteConfig,
+        },
         mocks::{DelayedSyncContext, PendingSyncs, drive_pending_syncs},
         reschedule,
     };
-    use commonware_utils::{NZU16, NZU64, NZUsize};
+    use commonware_utils::{NZU16, NZU64, NZUsize, probability};
     use core::{future::Future, pin::Pin};
     use futures::FutureExt as _;
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -108,6 +64,7 @@ mod tests {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -116,9 +73,9 @@ mod tests {
                 partition: format!("log-{suffix}"),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
         }
     }
@@ -127,7 +84,7 @@ mod tests {
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     async fn open_compact<F: Family>(
@@ -142,10 +99,11 @@ mod tests {
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
         };
-        CompactDb::init(context, cfg).await.unwrap()
+        CompactDb::init(context, cfg, None).await.unwrap()
     }
 
     /// An immutable db over a delayed-sync storage backend.
@@ -183,6 +141,7 @@ mod tests {
                 pending: pending.clone(),
             },
             cfg,
+            None,
         )
     }
 
@@ -359,39 +318,8 @@ mod tests {
         });
     }
 
-    /// Rewinding drains the in-flight sync before mutating storage.
-    #[test_traced]
-    fn test_fixed_start_sync_rewind_waits() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-rewind", &pending);
-            let mut db = drive_pending_syncs(&pending, open).await.unwrap();
-            db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Location::new(0)).await;
-            db = drive_pending_syncs(&pending, db.commit()).await.unwrap();
-            let committed_root = db.root();
-            let committed_size = db.bounds().end;
-            db = apply_set(db, Sha256::fill(3u8), Sha256::fill(4u8), Location::new(0)).await;
-
-            let handle;
-            (db, handle) = db.start_sync().await.unwrap();
-
-            let db = {
-                let mut rewind = std::pin::pin!(db.rewind(committed_size));
-                assert!(
-                    rewind.as_mut().now_or_never().is_none(),
-                    "rewind proceeded while the started sync was pending"
-                );
-                pending.unblock();
-                rewind.await.unwrap()
-            };
-            handle.await.unwrap();
-            assert_eq!(db.root(), committed_root);
-            db.destroy().await.unwrap();
-        });
-    }
-
     #[test_traced("INFO")]
-    fn test_immutable_fixed_metrics() {
+    fn test_fixed_metrics() {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_db::<mmr::Family>(ctx.child("db")).await;
             let key = Sha256::fill(1u8);
@@ -460,6 +388,26 @@ mod tests {
         Box::pin(open_db::<F>(ctx))
     }
 
+    #[allow(clippy::type_complexity)]
+    fn open_with_max<F: Family>(
+        ctx: deterministic::Context,
+        cap: Option<Location<F>>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let cfg = config("partition", &ctx);
+            Db::init(ctx, cfg, cap).await
+        })
+    }
+
     fn is_send<T: Send>(_: T) {}
 
     #[allow(dead_code)]
@@ -472,14 +420,6 @@ mod tests {
         is_send(db.get_metadata());
         is_send(db.proof(loc, NZU64!(1)));
         is_send(db.sync());
-    }
-
-    #[allow(dead_code)]
-    fn assert_rewind_is_send(
-        db: Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
-        loc: crate::merkle::mmr::Location,
-    ) {
-        is_send(db.rewind(loc));
     }
 
     fn small_sections_config(
@@ -495,7 +435,7 @@ mod tests {
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
         let cfg = small_sections_config("partition", &context);
-        Db::init(context, cfg).await.unwrap()
+        Db::init(context, cfg, None).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
@@ -519,136 +459,86 @@ mod tests {
         Box::pin(open_small_sections_db::<F>(ctx))
     }
 
-    #[test_traced("WARN")]
-    fn test_fixed_empty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_empty(ctx, open::<mmr::Family>).await;
-        });
+    #[allow(clippy::type_complexity)]
+    fn open_small_sections_with_max<F: Family>(
+        ctx: deterministic::Context,
+        cap: Option<Location<F>>,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>,
+                        Error<F>,
+                    >,
+                > + Send,
+        >,
+    > {
+        Box::pin(async move {
+            let cfg = small_sections_config("partition", &ctx);
+            Db::init(ctx, cfg, cap).await
+        })
     }
 
-    #[test_traced("WARN")]
-    fn test_fixed_commit_after_sync_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_commit_after_sync_recovery(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn test_fixed_build_basic() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_build_basic(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_proof_verify() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_proof_verify(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn test_fixed_prune() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_prune(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_prune_after_uncommitted_apply_batch_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_prune_after_uncommitted_apply_batch_recovery(
-                ctx,
-                open::<mmr::Family>,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn test_fixed_batch_chain() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_chain(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_build_and_authenticate() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_build_and_authenticate(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_recovery_from_failed_merkle_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_recovery_from_failed_merkle_sync(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_recovery_from_failed_log_sync() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_recovery_from_failed_log_sync(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_pruning() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_pruning(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_prune_beyond_floor() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_prune_beyond_floor(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_get_read_through() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_get_read_through(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_stacked_get() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_stacked_get(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_stacked_apply() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_stacked_apply(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_speculative_root() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_speculative_root(ctx, open::<mmr::Family>).await;
-        });
+    immutable_tests! {
+        test_fixed_empty => run_empty, open;
+        test_fixed_build_basic => run_build_basic, open;
+        test_fixed_proof_verify => run_proof_verify, open;
+        test_fixed_prune => run_prune, open;
+        test_fixed_batch_chain => run_batch_chain, open;
+        test_fixed_operations_match_applied_log => run_operations_match_applied_log, open;
+        test_fixed_build_and_authenticate => run_build_and_authenticate, open;
+        test_fixed_recovery_from_failed_merkle_sync => run_recovery_from_failed_merkle_sync, open;
+        test_fixed_recovery_from_failed_log_sync => run_recovery_from_failed_log_sync, open;
+        test_fixed_pruning => run_pruning, open;
+        test_fixed_prune_beyond_floor => run_prune_beyond_floor, open;
+        test_fixed_batch_get_read_through => run_batch_get_read_through, open;
+        test_fixed_batch_stacked_get => run_batch_stacked_get, open;
+        test_fixed_batch_stacked_apply => run_batch_stacked_apply, open;
+        test_fixed_batch_speculative_root => run_batch_speculative_root, open;
+        test_fixed_merkleized_batch_get => run_merkleized_batch_get, open;
+        test_fixed_batch_sequential_apply => run_batch_sequential_apply, open;
+        test_fixed_batch_many_sequential => run_batch_many_sequential, open;
+        test_fixed_batch_empty_batch => run_batch_empty_batch, open;
+        test_fixed_batch_chained_merkleized_get => run_batch_chained_merkleized_get, open;
+        test_fixed_batch_large => run_batch_large, open;
+        test_fixed_batch_chained_key_override => run_batch_chained_key_override, open;
+        test_fixed_batch_sequential_key_override => run_batch_sequential_key_override, open_small_sections;
+        test_fixed_batch_metadata => run_batch_metadata, open;
+        test_fixed_stale_batch_rejected => run_stale_batch_rejected, open;
+        test_fixed_stale_batch_chained => run_stale_batch_chained, open;
+        test_fixed_sequential_commit_parent_then_child => run_sequential_commit_parent_then_child, open;
+        test_fixed_stale_batch_child_applied_before_parent => run_stale_batch_child_applied_before_parent, open;
+        test_fixed_child_root_matches_pending_and_committed => run_child_root_matches_pending_and_committed, open;
+        test_fixed_to_batch => run_to_batch, open;
+        test_fixed_bounded_initialization_recovery => run_bounded_initialization_recovery, open_with_max;
+        test_fixed_bounded_initialization_pruned_target_errors =>
+            run_bounded_initialization_pruned_target_errors, open_small_sections_with_max;
+        test_fixed_inactivity_floor_tracking => run_inactivity_floor_tracking, open;
+        test_fixed_floor_monotonicity => run_floor_monotonicity, open;
+        test_fixed_floor_monotonicity_violation => run_floor_monotonicity_violation, open;
+        test_fixed_floor_beyond_size => run_floor_beyond_size, open;
+        test_fixed_chained_ancestor_floor_regression => run_chained_ancestor_floor_regression, open;
+        test_fixed_chained_ancestor_floor_beyond_size => run_chained_ancestor_floor_beyond_size, open;
+        test_fixed_bounded_initialization_restores_floor => run_bounded_initialization_restores_floor, open_with_max;
+        test_fixed_single_commit_live_set => run_single_commit_live_set, open;
+        test_fixed_bounded_initialization_after_reopen_with_floor_change =>
+            run_bounded_initialization_after_reopen_with_floor_change, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_partial_floor_gap =>
+            run_bounded_initialization_after_reopen_partial_floor_gap, open_with_max;
+        test_fixed_commit_after_sync_recovery => run_commit_after_sync_recovery, open;
+        test_fixed_prune_after_uncommitted_apply_batch_recovery => run_prune_after_uncommitted_apply_batch_recovery, open;
+        test_fixed_bounded_initialization_preserves_collision_bucket =>
+            run_bounded_initialization_preserves_collision_bucket, open_with_max;
+        test_fixed_get_many => run_get_many, open;
+        test_fixed_get_many_duplicate_keys => run_get_many_duplicate_keys, open;
+        test_fixed_get_many_unexpected_data => run_get_many_unexpected_data, open;
+        test_fixed_bounded_initialization_after_reopen_repeated_key_gap =>
+            run_bounded_initialization_after_reopen_repeated_key_gap, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_mixed_gap_retained =>
+            run_bounded_initialization_after_reopen_mixed_gap_retained, open_with_max;
+        test_fixed_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
+        test_fixed_bounded_initialization_after_reopen_repeated_key_retained =>
+            run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
     }
 
     #[boxed]
@@ -680,7 +570,7 @@ mod tests {
         assert_eq!(retained.root(), compact_batch.root());
 
         let (db, _) = db.apply_batch(retained).await.unwrap();
-        let (compact, _) = compact.apply_batch(compact_batch).unwrap();
+        let (compact, _) = compact.apply_batch(compact_batch).await.unwrap();
         let db = db.commit().await.unwrap();
         let compact = compact.sync().await.unwrap();
 
@@ -712,617 +602,154 @@ mod tests {
         });
     }
 
-    #[test_traced("INFO")]
-    fn test_fixed_merkleized_batch_get() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_merkleized_batch_get(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_sequential_apply() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_sequential_apply(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_many_sequential() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_many_sequential(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_empty_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_empty_batch(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_chained_merkleized_get() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_chained_merkleized_get(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_large() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_large(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_chained_key_override() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_chained_key_override(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_sequential_key_override() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_sequential_key_override(
-                ctx,
-                open_small_sections::<mmr::Family>,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_metadata() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_metadata(ctx, open::<mmr::Family>).await;
-        });
-    }
-
+    /// Reopen at an earlier commit, apply an uncommitted batch over the discarded suffix, then
+    /// crash before any sync. Recovery must yield one legitimate history and never splice the new
+    /// batch onto the discarded suffix.
     #[test_traced]
-    fn test_fixed_stale_batch_rejected() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_stale_batch_rejected(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_stale_batch_chained() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_stale_batch_chained(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_sequential_commit_parent_then_child() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_sequential_commit_parent_then_child(ctx, open::<mmr::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_stale_batch_child_applied_before_parent() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_stale_batch_child_applied_before_parent(ctx, open::<mmr::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_child_root_matches_pending_and_committed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_child_root_matches_pending_and_committed(ctx, open::<mmr::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_to_batch() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_to_batch(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_recovery(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_preserves_collision_bucket() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_preserves_collision_bucket(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_pruned_target_errors() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_pruned_target_errors(
-                ctx,
-                open_small_sections::<mmr::Family>,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_get_many() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_get_many(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_get_many_unexpected_data() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_get_many_unexpected_data(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    // -- MMB test wrappers --
-
-    #[test_traced("WARN")]
-    fn test_fixed_empty_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_empty(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn test_fixed_build_basic_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_build_basic(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_proof_verify_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_proof_verify(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn test_fixed_prune_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_prune(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("DEBUG")]
-    fn test_fixed_batch_chain_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_chain(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_build_and_authenticate_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_build_and_authenticate(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_recovery_from_failed_merkle_sync_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_recovery_from_failed_merkle_sync(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_recovery_from_failed_log_sync_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_recovery_from_failed_log_sync(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_fixed_pruning_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_pruning(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_prune_beyond_floor_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_prune_beyond_floor(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_get_read_through_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_get_read_through(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_stacked_get_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_stacked_get(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_stacked_apply_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_stacked_apply(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_speculative_root_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_speculative_root(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_merkleized_batch_get_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_merkleized_batch_get(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_sequential_apply_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_sequential_apply(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_many_sequential_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_many_sequential(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_empty_batch_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_empty_batch(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_chained_merkleized_get_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_chained_merkleized_get(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_large_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_large(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_chained_key_override_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_chained_key_override(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_sequential_key_override_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_sequential_key_override(
-                ctx,
-                open_small_sections::<mmb::Family>,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_batch_metadata_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_batch_metadata(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_stale_batch_rejected_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_stale_batch_rejected(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_stale_batch_chained_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_stale_batch_chained(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_sequential_commit_parent_then_child_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_sequential_commit_parent_then_child(ctx, open::<mmb::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_stale_batch_child_applied_before_parent_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_stale_batch_child_applied_before_parent(ctx, open::<mmb::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_child_root_matches_pending_and_committed_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_child_root_matches_pending_and_committed(ctx, open::<mmb::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_to_batch_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_to_batch(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_recovery_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_recovery(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_pruned_target_errors_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_pruned_target_errors(
-                ctx,
-                open_small_sections::<mmb::Family>,
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_inactivity_floor_tracking() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_inactivity_floor_tracking(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_floor_monotonicity() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_floor_monotonicity(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_floor_monotonicity_violation() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_floor_monotonicity_violation(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_floor_beyond_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_floor_beyond_size(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_chained_ancestor_floor_regression() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_chained_ancestor_floor_regression(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_chained_ancestor_floor_beyond_size() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_chained_ancestor_floor_beyond_size(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_restores_floor() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_restores_floor(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_inactivity_floor_tracking_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_inactivity_floor_tracking(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_floor_monotonicity_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_floor_monotonicity(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_floor_monotonicity_violation_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_floor_monotonicity_violation(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_floor_beyond_size_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_floor_beyond_size(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_chained_ancestor_floor_regression_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_chained_ancestor_floor_regression(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_chained_ancestor_floor_beyond_size_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_chained_ancestor_floor_beyond_size(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_restores_floor_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_restores_floor(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_single_commit_live_set() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_single_commit_live_set(ctx, open::<mmr::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_single_commit_live_set_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_single_commit_live_set(ctx, open::<mmb::Family>).await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_after_reopen_with_floor_change() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_after_reopen_with_floor_change(ctx, open::<mmr::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_after_reopen_with_floor_change_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_after_reopen_with_floor_change(ctx, open::<mmb::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_after_reopen_partial_floor_gap() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_after_reopen_partial_floor_gap(ctx, open::<mmr::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_after_reopen_partial_floor_gap_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_after_reopen_partial_floor_gap(ctx, open::<mmb::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_after_reopen_repeated_key_gap() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_after_reopen_repeated_key_gap(ctx, open::<mmb::Family>)
-                .await;
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_fixed_rewind_after_reopen_mixed_gap_retained() {
-        let executor = deterministic::Runner::default();
-        executor.start(|ctx| async move {
-            test::test_immutable_rewind_after_reopen_mixed_gap_retained(ctx, open::<mmb::Family>)
-                .await;
+    fn test_immutable_fixed_bounded_init_then_set_crash_recovers_history() {
+        type TestDb =
+            Db<mmr::Family, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential>;
+        fn key(i: u8) -> Digest {
+            Digest::from([i; 32])
+        }
+
+        fn value(branch: u8, i: u8) -> Digest {
+            let mut bytes = [branch; 32];
+            bytes[31] = i;
+            Digest::from(bytes)
+        }
+
+        // One operation per page makes the initialization truncation page aligned and one blob
+        // keeps both histories' writes overlapping.
+        fn rebranch_config(pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
+            let page_size =
+                NonZeroU16::new(<Operation<mmr::Family, Digest, Digest> as FixedSize>::SIZE as u16)
+                    .unwrap();
+            let mut cfg = config("rebranch", pooler);
+            cfg.merkle_config.items_per_blob = NZU64!(100_000);
+            cfg.log.items_per_blob = NZU64!(100_000);
+            cfg.log.page_cache = CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE);
+            cfg
+        }
+
+        // Keep unsynced writes and drop unsynced resizes at the crash.
+        let runtime = DeterministicConfig::default().with_storage_fault_config(
+            FaultConfig::default().write(WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            }),
+        );
+        let ((root_a, root_b, root_n), checkpoint) = deterministic::Runner::new(runtime)
+            .start_and_recover(|context| async move {
+                let db = TestDb::init(context.child("initial"), rebranch_config(&context), None)
+                    .await
+                    .unwrap();
+
+                // A: set k1..k100 and commit.
+                let mut batch = db.new_batch();
+                for i in 1..=100 {
+                    batch = batch.set(key(i), value(1, i));
+                }
+                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                assert_eq!(*db.bounds().end, 102);
+                let root_a = db.root();
+
+                // B: set k101..k200 and commit.
+                let mut batch = db.new_batch();
+                for i in 101..=200 {
+                    batch = batch.set(key(i), value(2, i));
+                }
+                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                assert_eq!(*db.bounds().end, 203);
+                let root_b = db.root();
+                drop(db);
+
+                // Reopen at A, discarding B.
+                let db = TestDb::init(
+                    context.child("bounded"),
+                    rebranch_config(&context),
+                    Some(Location::new(102)),
+                )
+                .await
+                .unwrap();
+                assert_eq!(*db.bounds().end, 102);
+                assert_eq!(db.root(), root_a);
+
+                // N: set k201..k250 over B's bytes, then crash without committing. A commit would
+                // sync the log and hide a missing initialization sync.
+                let mut batch = db.new_batch();
+                for i in 201..=250 {
+                    batch = batch.set(key(i), value(3, i));
+                }
+                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let root_n = batch.root();
+                let (db, range) = db.apply_batch(batch).await.unwrap();
+                assert_eq!((*range.start, *range.end), (102, 153));
+                drop(db);
+
+                (root_a, root_b, root_n)
+            });
+
+        let ((size, root), checkpoint) =
+            deterministic::Runner::from(checkpoint).start_and_recover(|context| async move {
+                let db = TestDb::init(context.child("reopen"), rebranch_config(&context), None)
+                    .await
+                    .unwrap();
+
+                // Only A, or N applied on A, is a legitimate history. A splice would keep B's tail
+                // and serve B's keys.
+                let size = *db.bounds().end;
+                let root = db.root();
+                assert_ne!(root, root_b);
+                for i in 1..=100 {
+                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(value(1, i)));
+                }
+                for i in 101..=200 {
+                    assert_eq!(db.get(&key(i)).await.unwrap(), None);
+                }
+                match size {
+                    102 => {
+                        assert_eq!(root, root_a);
+                        for i in 201..=250 {
+                            assert_eq!(db.get(&key(i)).await.unwrap(), None);
+                        }
+                    }
+                    153 => {
+                        assert_eq!(root, root_n);
+                        for i in 201..=250 {
+                            assert_eq!(db.get(&key(i)).await.unwrap(), Some(value(3, i)));
+                        }
+                    }
+                    other => panic!("recovered {other} operations from neither history"),
+                }
+
+                // Commit on the recovered history so the next restart must reproduce it.
+                let batch = db
+                    .new_batch()
+                    .set(key(255), value(5, 255))
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.commit().await.unwrap();
+                let size = *db.bounds().end;
+                let root = db.root();
+                drop(db);
+                (size, root)
+            });
+
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let db = TestDb::init(context.child("restart"), rebranch_config(&context), None)
+                .await
+                .unwrap();
+            assert_eq!(*db.bounds().end, size);
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get(&key(255)).await.unwrap(), Some(value(5, 255)));
+            db.destroy().await.unwrap();
         });
     }
 }

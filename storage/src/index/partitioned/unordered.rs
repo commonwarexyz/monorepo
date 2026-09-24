@@ -119,7 +119,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> PartitionRange for RangeInde
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory<T> for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory for Index<T, V, P> {
+    type Translator = T;
+
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }

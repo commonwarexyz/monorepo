@@ -38,7 +38,7 @@ impl Conformance for RationalOptimalBits {
 
             log.extend((expected_items as u64).to_be_bytes());
             log.extend((bits as u64).to_be_bytes());
-            log.extend(hashers.to_be_bytes());
+            log.extend(hashers.get().to_be_bytes());
 
             // Test with_rate constructor produces same results
             let filter = BloomFilter::<Sha256>::with_rate(

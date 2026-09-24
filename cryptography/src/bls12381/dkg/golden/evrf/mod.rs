@@ -10,16 +10,16 @@ use crate::{
     },
 };
 use banderwagon::{F, G, vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{BufMut, Bytes};
 use commonware_codec::{
-    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
-    Write,
+    Buf, Copying, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize,
+    Read, ReadExt, Write,
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
 use commonware_parallel::Strategy;
 use commonware_utils::{
-    Array, Span, TryCollect, TryFromIterator,
+    Array, Span, TryCollect,
     ordered::{Map, Set},
 };
 use core::{
@@ -255,15 +255,13 @@ impl PrivateKey {
             strategy,
         )
         .expect("proving should succeed");
-        let outputs = Map::try_from_iter(
-            receivers
-                .into_iter()
-                .zip(witness.values())
-                .map(|((receiver, _), output)| (receiver, output.clone())),
-        )
-        .expect("receivers was already deduplicated");
-        let commitments = Map::try_from_iter(outputs.keys().iter().cloned().zip(claim.commitments))
-            .expect("receivers was already deduplicated");
+
+        // Witness values and claim commitments follow the receivers' key order.
+        let keys = receivers.into_keys();
+        let outputs = Map::from_parts(keys.clone(), witness.values().to_vec())
+            .expect("witness should have one output per receiver");
+        let commitments = Map::from_parts(keys, claim.commitments)
+            .expect("claim should have one commitment per receiver");
         let pedersen_to_plain = {
             let setup = pedersen_to_plain::Setup {
                 value_generator: *setup.inner().value_generator(),
@@ -311,7 +309,7 @@ impl Read for PrivateKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
-        let x: F = ReadExt::read(&mut raw.as_slice())?;
+        let x: F = ReadExt::read(&mut Copying(raw.as_slice()))?;
         Ok(Self {
             inner: Secret::new(x),
         })
@@ -400,11 +398,11 @@ impl crate::Verifier for PublicKey {
     type Signature = Signature;
 
     fn verify(&self, namespace: &[u8], msg: &[u8], sig: &Signature) -> bool {
-        let k_big: G = match ReadExt::read(&mut &sig.raw[..G::SIZE]) {
+        let k_big: G = match ReadExt::read(&mut Copying(&sig.raw[..G::SIZE])) {
             Ok(p) => p,
             Err(_) => return false,
         };
-        let s: F = match ReadExt::read(&mut &sig.raw[G::SIZE..]) {
+        let s: F = match ReadExt::read(&mut Copying(&sig.raw[G::SIZE..])) {
             Ok(s) => s,
             Err(_) => return false,
         };
@@ -437,7 +435,7 @@ impl Read for PublicKey {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let raw = <[u8; Self::SIZE]>::read(buf)?;
-        let point: G = ReadExt::read(&mut raw.as_slice())?;
+        let point: G = ReadExt::read(&mut Copying(&raw))?;
         Ok(Self { raw, point })
     }
 }
@@ -636,7 +634,7 @@ impl VrfCommitments {
         let outputs: Vec<(PublicKey, Bytes, Self)> = outputs
             .into_iter()
             .filter_map(|(sender, msg, commitments)| {
-                let mut buf: &[u8] = msg.as_ref();
+                let mut buf = msg.clone();
                 let _: Summary = ReadExt::read(&mut buf).ok()?;
                 if commitments.proof.pedersen_to_plain.len() != commitments.commitments.len() {
                     return None;
@@ -764,9 +762,9 @@ mod tests {
 
         let sender_sk = PrivateKey::random(&mut rng);
         let sender_pk = sender_sk.public();
-        let receiver_pks: Vec<PublicKey> = (0..3)
-            .map(|_| PrivateKey::random(&mut rng).public())
-            .collect();
+        let mut receivers: Vec<_> = (0..3).map(|_| PrivateKey::random(&mut rng)).collect();
+        receivers.sort_by_key(PrivateKey::public);
+        let receiver_pks: Vec<_> = receivers.iter().rev().map(PrivateKey::public).collect();
 
         let nonce = Summary::random(&mut rng);
         let msg = Bytes::copy_from_slice(nonce.as_ref());
@@ -778,7 +776,7 @@ mod tests {
 
         let mut prover_t = outer_transcript.fork(b"dealer vrf");
         prover_t.commit(sender_pk.encode());
-        let (_outputs, commitments) = sender_sk.vrf_batch_checked(
+        let (outputs, commitments) = sender_sk.vrf_batch_checked(
             &mut rng,
             &TEST_SETUP,
             &mut prover_t,
@@ -788,6 +786,14 @@ mod tests {
         );
 
         let players: Set<PublicKey> = receiver_pks.iter().cloned().try_collect().unwrap();
+        assert_eq!(outputs.keys(), &players);
+        assert_eq!(commitments.commitments.keys(), &players);
+        for receiver in &receivers {
+            assert_eq!(
+                outputs.get_value(&receiver.public()),
+                Some(&receiver.vrf_recv(&nonce, &sender_pk)),
+            );
+        }
         let result = VrfCommitments::check_batch(
             &mut rng,
             &TEST_SETUP,
@@ -955,7 +961,7 @@ mod tests {
     fn setup_codec_roundtrip() {
         let s = Setup::new(NonZeroU32::new(3).unwrap());
         let bytes = s.encode();
-        let decoded = Setup::read_cfg(&mut bytes.as_ref(), &NonZeroU32::new(3).unwrap()).unwrap();
+        let decoded = Setup::read_cfg(&mut bytes.clone(), &NonZeroU32::new(3).unwrap()).unwrap();
         assert_eq!(decoded.max_players(), s.max_players());
         // Re-encode and compare to make sure the roundtrip is bit-exact.
         assert_eq!(decoded.encode(), bytes);

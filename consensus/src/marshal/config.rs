@@ -94,9 +94,9 @@ where
     /// Maximum number of blocks to repair at once.
     pub max_repair: NonZeroUsize,
 
-    /// Maximum number of blocks dispatched to the application that have not
-    /// yet been acknowledged. Increasing this value allows the application
-    /// to buffer work while marshal continues dispatching, hiding ack latency.
+    /// Maximum number of dispatched blocks awaiting application acknowledgement,
+    /// with up to twice this many finalized blocks retained in memory for subsequent
+    /// dispatch without archive reads.
     pub max_pending_acks: NonZeroUsize,
 
     /// Strategy for parallel operations.
@@ -121,12 +121,13 @@ mod tests {
 
     #[test]
     fn config_compiles_with_distinct_application_and_start_blocks() {
-        type AB = Block<Sha256Digest, Context<Commitment, PublicKey>>;
+        type AB = Block<Sha256Digest, Context<Sha256Digest, PublicKey>>;
+        type TestCommitment = Commitment<AB, ReedSolomon<Sha256>, Sha256>;
         type B = CodedBlock<AB, ReedSolomon<Sha256>, Sha256>;
         type Provider = ConstantProvider<ed25519::Scheme, Epoch>;
 
         fn assert_well_formed<T>() {}
 
-        assert_well_formed::<Config<Provider, FixedEpocher, Sequential, AB, B, Commitment>>();
+        assert_well_formed::<Config<Provider, FixedEpocher, Sequential, AB, B, TestCommitment>>();
     }
 }

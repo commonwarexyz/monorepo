@@ -1,11 +1,13 @@
 use clap::{Arg, Command, value_parser};
 use commonware_bridge::{
-    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, P2P_SUFFIX, application,
+    APPLICATION_NAMESPACE, CONSENSUS_SUFFIX, INDEXER_NAMESPACE, MAX_MESSAGE_SIZE, P2P_SUFFIX,
+    application,
 };
 use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
-        self, Engine, Floor, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme,
+        self, Engine, Floor, ForwardPolicy, SkipPolicy, elector::RoundRobin,
+        scheme::bls12381_threshold::standard::Scheme,
     },
     types::{Epoch, ViewDelta},
 };
@@ -23,7 +25,7 @@ use commonware_p2p::{Manager as _, authenticated};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
-use commonware_stream::encrypted::{Config as StreamConfig, dial};
+use commonware_stream::{Config as StreamConfig, encrypted::Handshake, utils::Timeout};
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -125,7 +127,7 @@ fn main() {
         .expect("Please provide identity");
     let identity = from_hex(identity).expect("Identity not well-formed");
     let identity: Sharing<MinSig> = Sharing::decode_cfg(
-        identity.as_ref(),
+        identity,
         &(NZU32!(validators.len() as u32), ModeVersion::v0()),
     )
     .expect("Identity not well-formed");
@@ -133,7 +135,7 @@ fn main() {
         .get_one::<String>("share")
         .expect("Please provide share");
     let share = from_hex(share).expect("Share not well-formed");
-    let share = group::Share::decode(share.as_ref()).expect("Share not well-formed");
+    let share = group::Share::decode(share).expect("Share not well-formed");
 
     // Configure indexer
     let indexer = matches
@@ -151,32 +153,36 @@ fn main() {
         .get_one::<String>("other-public")
         .expect("Please provide other public");
     let other_public = from_hex(other_public).expect("Other identity not well-formed");
-    let other_public = <MinSig as Variant>::Public::decode(other_public.as_ref())
-        .expect("Other identity not well-formed");
+    let other_public =
+        <MinSig as Variant>::Public::decode(other_public).expect("Other identity not well-formed");
 
     // Initialize context
     let runtime_cfg = tokio::Config::new().with_storage_directory(storage_directory);
     let executor = tokio::Runner::new(runtime_cfg);
 
     // Configure indexer
-    let indexer_cfg = StreamConfig {
-        signing_key: signer.clone(),
-        namespace: INDEXER_NAMESPACE.to_vec(),
-        max_message_size: 1024 * 1024,
-        synchrony_bound: Duration::from_secs(1),
-        max_handshake_age: Duration::from_secs(60),
-        handshake_timeout: Duration::from_secs(5),
-    };
+    let indexer_handshake = StreamConfig::new(
+        Timeout::new(
+            Handshake {
+                signer: signer.clone(),
+                synchrony_bound: Duration::from_secs(1),
+                max_handshake_age: Duration::from_secs(60),
+            },
+            Duration::from_secs(5),
+        ),
+        INDEXER_NAMESPACE,
+        MAX_MESSAGE_SIZE,
+    );
 
     // Configure network
     let p2p_cfg = authenticated::discovery::Config::local(
-        signer,
+        Handshake::new(signer),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        1024 * 1024, // 1MB
+        MAX_MESSAGE_SIZE,
     );
 
     // Start context
@@ -186,7 +192,8 @@ fn main() {
             .dial(indexer_address)
             .await
             .expect("Failed to dial indexer");
-        let indexer = dial(context.child("dialer"), indexer_cfg, indexer, stream, sink)
+        let indexer = indexer_handshake
+            .dial(context.child("dialer"), indexer, stream, sink)
             .await
             .expect("Failed to upgrade connection with indexer");
 
@@ -246,10 +253,13 @@ fn main() {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: ViewDelta::new(10),
-                skip_timeout: Duration::from_secs(11),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(11),
+                    budget: simplex::SkipBudget::Participants,
+                },
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
-                forwarding: simplex::ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             },
         );

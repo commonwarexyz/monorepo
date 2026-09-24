@@ -1,4 +1,4 @@
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufs, ReadOptions};
 use std::num::NonZeroUsize;
 
 /// A reader that buffers content from a [Blob] to optimize the performance
@@ -142,7 +142,12 @@ impl<B: Blob> Read<B> {
         };
         let read_result = self
             .blob
-            .read_at_buf(self.blob_position, bytes_to_read, buf)
+            .read_at_buf(
+                self.blob_position,
+                bytes_to_read,
+                buf,
+                ReadOptions::default(),
+            )
             .await?;
         self.buffer = read_result.coalesce_with_pool(&self.pool).freeze();
         self.buffer_valid_len = self.buffer.len();

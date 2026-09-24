@@ -7,7 +7,7 @@ use common::{
     arbitrary_ciphertext_minpk, arbitrary_ciphertext_minsig, arbitrary_minpk_signature,
     arbitrary_minsig_signature,
 };
-use commonware_codec::ReadExt;
+use commonware_codec::{Encode, ReadExt};
 use commonware_cryptography::bls12381::{
     primitives::{
         group::Private,
@@ -163,7 +163,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinPk>(&signature, &ciphertext);
@@ -191,7 +192,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
             let decrypted = decrypt::<MinSig>(&signature, &ciphertext);
@@ -220,7 +222,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public1,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let wrong_signature = sign_message::<MinPk>(&master_secret2, &namespace, &target);
             let _ = decrypt::<MinPk>(&wrong_signature, &ciphertext);
@@ -243,7 +246,8 @@ fn fuzz(op: FuzzOperation) {
                 master_public1,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
             let wrong_signature = sign_message::<MinSig>(&master_secret2, &namespace, &target);
             let _ = decrypt::<MinSig>(&wrong_signature, &ciphertext);
@@ -267,15 +271,15 @@ fn fuzz(op: FuzzOperation) {
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
-            let mut encoded = Vec::new();
-            commonware_codec::Write::write(&ciphertext, &mut encoded);
+            let mut encoded = ciphertext.encode_mut();
             if tamper_index < encoded.len() {
                 encoded[tamper_index] ^= tamper_value;
             }
 
-            if let Ok(tampered) = Ciphertext::<MinPk>::read(&mut encoded.as_slice()) {
+            if let Ok(tampered) = Ciphertext::<MinPk>::read(&mut encoded) {
                 let signature = sign_message::<MinPk>(&master_secret, &namespace, &target);
                 let _ = decrypt::<MinPk>(&signature, &tampered);
             }
@@ -299,15 +303,15 @@ fn fuzz(op: FuzzOperation) {
                 master_public,
                 (&namespace, &target),
                 &message_block,
-            );
+            )
+            .expect("encryption should succeed");
 
-            let mut encoded = Vec::new();
-            commonware_codec::Write::write(&ciphertext, &mut encoded);
+            let mut encoded = ciphertext.encode_mut();
             if tamper_index < encoded.len() {
                 encoded[tamper_index] ^= tamper_value;
             }
 
-            if let Ok(tampered) = Ciphertext::<MinSig>::read(&mut encoded.as_slice()) {
+            if let Ok(tampered) = Ciphertext::<MinSig>::read(&mut encoded) {
                 let signature = sign_message::<MinSig>(&master_secret, &namespace, &target);
                 let _ = decrypt::<MinSig>(&signature, &tampered);
             }

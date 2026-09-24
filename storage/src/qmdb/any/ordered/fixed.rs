@@ -48,8 +48,14 @@ impl<
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg).await
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        cfg: Config<T, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::any::init(context, cfg, max_size).await
     }
 }
 
@@ -113,11 +119,14 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             cfg: Config<T, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg).await
+            crate::qmdb::any::init(context, cfg, max_size).await
         }
     }
 
@@ -168,8 +177,7 @@ pub(crate) mod test {
         Runner as _, Supervisor as _,
         deterministic::{self, Context},
     };
-    use commonware_utils::{NZU64, NZUsize, TestRng, sequence::FixedBytes};
-    use futures::StreamExt as _;
+    use commonware_utils::{NZU64, NZUsize, TestRng, probability, sequence::FixedBytes};
     use rand::{Rng, seq::IteratorRandom};
     use std::{
         collections::{BTreeMap, HashMap},
@@ -198,20 +206,20 @@ pub(crate) mod test {
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
-        crate::qmdb::any::init(context, cfg).await.unwrap()
+        crate::qmdb::any::init(context, cfg, None).await.unwrap()
     }
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
         let cfg = fixed_db_config("partition", &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -502,7 +510,7 @@ pub(crate) mod test {
             let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
             let db =
                 Db::<mmr::Family, Context, FixedBytes<2>, i32, Sha256, OneCap, Sequential>::init(
-                    context, config,
+                    context, config, None,
                 )
                 .await
                 .unwrap();
@@ -648,7 +656,7 @@ pub(crate) mod test {
         }
 
         let cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
-        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
 
@@ -704,7 +712,7 @@ pub(crate) mod test {
             let ctx = context
                 .child("reopen")
                 .with_attribute("concurrency", concurrency);
-            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            let db = PartDb::<P, Sequential>::init(ctx, cfg, None).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,
@@ -728,7 +736,7 @@ pub(crate) mod test {
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
             let cfg = fixed_db_config_partitioned::<OneCap>("parallel_fresh", &context);
-            let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
+            let db = FreshDb::<Sequential>::init(context.child("create"), cfg, None)
                 .await
                 .unwrap();
             let root = db.root();
@@ -736,7 +744,7 @@ pub(crate) mod test {
 
             let mut cfg = fixed_db_config_partitioned::<OneCap>("parallel_fresh", &context);
             cfg.init_concurrency = NZUsize!(4);
-            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
+            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg, None)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -754,7 +762,7 @@ pub(crate) mod test {
 
             // Populate a db so the log has committed operations to replay.
             let cfg = fixed_db_config_partitioned::<OneCap>("parallel_replay_fail", &context);
-            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -785,12 +793,9 @@ pub(crate) mod test {
                 OneCap,
             );
 
-            // Every read now fails, and the failure necessarily surfaces through the replay
-            // stream: the reopened journal's page cache is fresh (only the buffer pool is shared
-            // across configs, never cached pages), so replay's first item forces a storage read,
-            // and with far fewer ops than the routing batch size no batch reaches a worker, so
-            // workers never read the log themselves.
-            context.storage_fault_config().write().read_rate = Some(1.0);
+            // The reopened journal has a fresh page cache, so replay's first item requires a read.
+            // Failing that read leaves workers idle because no batches have been routed.
+            context.storage_fault_config().write().read_rate = Some(probability!(1.0));
             let result = index
                 .build_snapshot(
                     context.child("build"),
@@ -924,7 +929,7 @@ pub(crate) mod test {
             // A log with live keys, updates, and deletes: the bitmap holds one bit per active
             // key plus the final commit.
             let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv", &context);
-            let db = BitmapDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = BitmapDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -952,7 +957,7 @@ pub(crate) mod test {
             // Delete every remaining key: all worker shares are empty and only the final
             // commit's bit stays set.
             let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv", &context);
-            let db = BitmapDb::<Sequential>::init(context.child("wipe"), cfg)
+            let db = BitmapDb::<Sequential>::init(context.child("wipe"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -1133,6 +1138,7 @@ pub(crate) mod test {
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
+            drop(db);
             let mut db = open_db(context.child("second")).await;
             assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -1170,6 +1176,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
+            drop(db);
             let mut db = open_db(context.child("fifth")).await;
             assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
@@ -1208,6 +1215,7 @@ pub(crate) mod test {
             let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
+            drop(db);
             let mut db = open_db(context.child("second")).await;
             assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
@@ -1243,6 +1251,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
+            drop(db);
             let mut db = open_db(context.child("fifth")).await;
             assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
@@ -1565,6 +1574,7 @@ pub(crate) mod test {
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, OneCap, Sequential>::init(
                 context.child("first"),
                 config,
+                None,
             )
             .await
             .unwrap();
@@ -1576,6 +1586,7 @@ pub(crate) mod test {
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, TwoCap, Sequential>::init(
                 context.child("second"),
                 config,
+                None,
             )
             .await
             .unwrap();
@@ -1592,7 +1603,7 @@ pub(crate) mod test {
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
         let cfg = fixed_db_config("fixed-bytes-partition", &context);
-        FixedDb::init(context, cfg).await.unwrap()
+        FixedDb::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("WARN")]
@@ -1715,134 +1726,6 @@ pub(crate) mod test {
             // Verify C's next_key is still A
             let span_c = db.get_span(&key_c).await.unwrap().unwrap();
             assert_eq!(span_c.1.next_key, key_a);
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_ordered_any_stream_range() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let db = open_fixed_db(context.child("storage")).await;
-
-            let key1 = FixedBytes::from([0x10u8, 0x00, 0x00, 0x05]);
-            let val = Sha256::fill(1u8);
-
-            // Test the single-bucket case.
-            let merkleized = db
-                .new_batch()
-                .write(key1.clone(), Some(val))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
-
-            // Start key is in the DB.
-            {
-                let mut stream = db.stream_range(key1.clone()).await.unwrap().boxed_local();
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
-                assert!(stream.next().await.is_none());
-            }
-
-            // Start key collides & precedes the only key in the db.
-            {
-                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x01]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
-                assert!(stream.next().await.is_none());
-            }
-
-            // Start key collides & follows the only key in the db.
-            {
-                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
-                assert!(stream.next().await.is_none());
-            }
-
-            // Start key precedes the key in the DB without colliding.
-            {
-                let start = FixedBytes::from([0x00u8, 0x00, 0x00, 0x01]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
-                assert!(stream.next().await.is_none());
-            }
-
-            // Start key follows the key in the DB without colliding.
-            {
-                let start = FixedBytes::from([0xFFu8, 0x00, 0x00, 0x11]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
-                assert!(stream.next().await.is_none());
-            }
-
-            // Now test the multiple bucket cases.
-            let key2_1 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x05]);
-            let key2_2 = FixedBytes::from([0x20u8, 0x00, 0x00, 0x11]);
-            let key3 = FixedBytes::from([0x30u8, 0x00, 0x00, 0x05]);
-
-            let merkleized = db
-                .new_batch()
-                .write(key2_1.clone(), Some(val))
-                .write(key2_2.clone(), Some(val))
-                .write(key3.clone(), Some(val))
-                .merkleize(&db, None)
-                .await
-                .unwrap();
-            let (db, _) = db.apply_batch(merkleized).await.unwrap();
-
-            // Start key is in the DB.
-            {
-                let mut stream = db.stream_range(key1.clone()).await.unwrap().boxed_local();
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
-                assert!(stream.next().await.is_none());
-            }
-
-            // Start key is not in DB but collides with an earlier key.
-            {
-                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0xFF]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
-                assert!(stream.next().await.is_none());
-            }
-
-            // Start key is not in the DB but collides with a later key.
-            {
-                let start = FixedBytes::from([0x10u8, 0x00, 0x00, 0x00]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key1);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_1);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
-                assert!(stream.next().await.is_none());
-            }
-
-            // Start key is not in the DB but falls between two colliding keys.
-            {
-                let start = FixedBytes::from([0x20u8, 0x00, 0x00, 0x06]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
-                assert!(stream.next().await.is_none());
-            }
-
-            // Start key is in the DB and collides with an earlier key.
-            {
-                let mut stream = db.stream_range(key2_2.clone()).await.unwrap().boxed_local();
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key2_2);
-                assert_eq!(stream.next().await.unwrap().unwrap().0, key3);
-                assert!(stream.next().await.is_none());
-            }
-            // Start key is > key3. Should yield nothing.
-            {
-                let start = FixedBytes::from([0x40u8, 0x00, 0x00, 0x00]);
-                let mut stream = db.stream_range(start).await.unwrap().boxed_local();
-                assert!(stream.next().await.is_none());
-            }
 
             db.destroy().await.unwrap();
         });

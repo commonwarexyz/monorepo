@@ -4,9 +4,9 @@
 //! proofs (proving a key is currently inactive). Use [crate::qmdb::current::unordered::variable] if
 //! exclusion proofs are not needed.
 //!
-//! See [Db] for the main database type and [super::ExclusionProof] for proving key inactivity.
+//! See [Db] for the main database type and
+//! [ExclusionProof](super::proof::constant::ExclusionProof) for proving key inactivity.
 
-pub use super::db::KeyValueProof;
 use crate::{
     Context,
     index::ordered::Index,
@@ -52,11 +52,15 @@ where
 {
     /// Initializes a [Db] from the given `config`.
     /// The configured [`Strategy`] is used to parallelize merkleization.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+    /// while `None` selects the latest retained state. Initialization fails with
+    /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity floor.
     pub async fn init(
         context: E,
         config: Config<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::current::init(context, config).await
+        crate::qmdb::current::init(context, config, max_size).await
     }
 }
 
@@ -100,11 +104,16 @@ pub mod partitioned {
         Operation<F, K, V>: Read,
     {
         /// Initializes a [Db] from the given `config`.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations,
+        /// while `None` selects the latest retained state. Initialization fails with
+        /// [Error::HistoricalFloorPruned] if the log or bitmap has pruned the commit's inactivity
+        /// floor.
         pub async fn init(
             context: E,
             config: Config<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::current::init(context, config).await
+            crate::qmdb::current::init(context, config, max_size).await
         }
     }
 }
@@ -112,7 +121,8 @@ pub mod partitioned {
 #[cfg(test)]
 mod test {
     use crate::{
-        mmr,
+        merkle::Graftable,
+        mmb, mmr,
         qmdb::current::{ordered::tests as shared, tests::variable_config},
         translator::OneCap,
     };
@@ -121,8 +131,8 @@ mod test {
     use commonware_runtime::deterministic;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
-    type CurrentTest = super::Db<
-        mmr::Family,
+    type CurrentTest<F = mmr::Family> = super::Db<
+        F,
         deterministic::Context,
         Digest,
         Digest,
@@ -132,44 +142,52 @@ mod test {
         commonware_parallel::Sequential,
     >;
 
-    #[allow(dead_code)]
-    fn _assert_stream_range_is_send(db: &CurrentTest, start: Digest) {
-        fn require_send<F: core::future::Future + Send>(_: F) {}
-        require_send(async move {
-            let stream = db.stream_range(start).await.unwrap();
-            futures::pin_mut!(stream);
-            let _ = futures::StreamExt::next(&mut stream).await;
-        });
-    }
-
     /// Return a [Db] database initialized with a variable config.
-    async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
+    async fn open_db<F: Graftable>(
+        context: deterministic::Context,
+        partition_prefix: String,
+    ) -> CurrentTest<F> {
         let cfg = variable_config::<OneCap>(&partition_prefix, &context);
-        CurrentTest::init(context, cfg).await.unwrap()
+        CurrentTest::<F>::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
-        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db);
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_range_proofs() {
-        shared::test_range_proofs(open_db);
+        shared::test_range_proofs(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_key_value_proof() {
-        shared::test_key_value_proof(open_db);
+        shared::test_key_value_proof(open_db::<mmr::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_key_value_proof_mmb() {
+        shared::test_key_value_proof(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_exclusion_proofs_mmb() {
+        shared::test_exclusion_proofs(open_db::<mmb::Family>);
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_current_db_dynamic_inactive_proof_mmb() {
+        shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db::<mmb::Family>);
     }
 
     #[test_traced("WARN")]
     pub fn test_current_db_proving_repeated_updates() {
-        shared::test_proving_repeated_updates(open_db);
+        shared::test_proving_repeated_updates(open_db::<mmr::Family>);
     }
 
     #[test_traced("DEBUG")]
     pub fn test_current_db_exclusion_proofs() {
-        shared::test_exclusion_proofs(open_db);
+        shared::test_exclusion_proofs(open_db::<mmr::Family>);
     }
 }

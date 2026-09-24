@@ -27,8 +27,8 @@
 //! ```
 
 use crate::Hasher;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -67,6 +67,15 @@ impl Crc32 {
     #[inline]
     pub fn checksum(data: &[u8]) -> u32 {
         crc_fast::checksum(ALGORITHM, data) as u32
+    }
+
+    /// Resume a CRC32C stream from a previously finalized checksum.
+    pub fn resume(checksum: u32) -> Self {
+        // CRC32C finalization XORs the running state with all ones. Undo that transform before
+        // resuming the checksum stream.
+        Self {
+            inner: crc_fast::Digest::new_with_init_state(ALGORITHM, u64::from(checksum ^ u32::MAX)),
+        }
     }
 }
 
@@ -190,7 +199,7 @@ impl Random for Digest {
 mod tests {
     use super::*;
     use crate::Hasher;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{Copying, DecodeExt, Encode};
     use crc::{CRC_32_ISCSI, Crc};
 
     /// Reference CRC32C implementation from the [`crc`](https://crates.io/crates/crc) crate.
@@ -373,7 +382,7 @@ mod tests {
         let mut hasher = Crc32::default();
         hasher.update(msg);
         let (hasher, digest) = hasher.finalize();
-        assert!(Digest::decode(digest.as_ref()).is_ok());
+        assert!(Digest::decode(Copying(&digest)).is_ok());
 
         // Verify against reference
         let expected = CRC32C_REF.checksum(msg);
@@ -392,6 +401,55 @@ mod tests {
         // Test multi-part one-shot
         let hash = Crc32::hash(&[b"hello", b" world"]);
         assert_eq!(hash.as_u32(), expected);
+    }
+
+    /// Verify a resumed hasher continues the original stream and that finalize returns
+    /// a hasher reset to the default state, not the resumed state.
+    #[test]
+    fn resumed_hasher_resets_after_finalize() {
+        let prefix = b"durable prefix";
+        let suffix = b"new suffix";
+        let mut hasher = Crc32::resume(Crc32::checksum(prefix));
+        hasher.update(suffix);
+
+        let (mut hasher, digest) = hasher.finalize();
+        assert_eq!(
+            digest.as_u32(),
+            Crc32::hash(&[prefix.as_slice(), suffix.as_slice()]).as_u32()
+        );
+
+        hasher.update(suffix);
+        let (_, digest) = hasher.finalize();
+        assert_eq!(digest.as_u32(), Crc32::checksum(suffix));
+    }
+
+    /// Verify a resumed stream matches the one-shot checksum for every split point.
+    ///
+    /// Suffix lengths sweep 0..=4097, including both empty-prefix and
+    /// empty-suffix edges.
+    #[test]
+    fn resume_split_independence() {
+        let data = sequential_data(4097);
+        let expected = CRC32C_REF.checksum(&data);
+        for split in 0..=data.len() {
+            let mut hasher = Crc32::resume(CRC32C_REF.checksum(&data[..split]));
+            hasher.update(&data[split..]);
+            assert_eq!(hasher.finalize().1.as_u32(), expected);
+        }
+    }
+
+    /// Verify finalizing a resumed hasher without updates returns the resumed checksum,
+    /// including values that never came from hashing data.
+    #[test]
+    fn resume_finalize_round_trip() {
+        for checksum in [
+            0x00000000,
+            0xFFFFFFFF,
+            0xDEADBEEF,
+            Crc32::checksum(b"resume"),
+        ] {
+            assert_eq!(Crc32::resume(checksum).finalize().1.as_u32(), checksum);
+        }
     }
 
     #[test]

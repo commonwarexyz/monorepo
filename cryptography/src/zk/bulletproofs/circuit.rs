@@ -133,8 +133,8 @@
 
 use super::ipa;
 use crate::transcript::Transcript;
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, Read, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
 use commonware_math::{
     algebra::{Additive, CryptoGroup, Field, HashToGroup, Random, Ring, Space, powers},
     synthetic::Synthetic,
@@ -412,11 +412,7 @@ mod zkc {
                 ),
                 Self::Constant(other_constant) => Self::Constant(constant * other_constant),
                 Self::General(items) => {
-                    let mut items = items.clone();
-                    for w in items.values_mut() {
-                        *w = w.clone() * &constant;
-                    }
-                    Self::General(items)
+                    Self::General(items.map_values(|_, w| w.clone() * &constant))
                 }
             };
             Some(out)
@@ -1904,7 +1900,9 @@ pub mod fuzz {
                 ipa::Setup::new(
                     gens[2 * TEST_SETUP_PAIRS],
                     gens[..2 * TEST_SETUP_PAIRS]
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|c| (c[0], c[1])),
                 ),
                 gens[2 * TEST_SETUP_PAIRS + 1],

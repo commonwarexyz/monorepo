@@ -1,8 +1,8 @@
 use crate::stateful::{
     Application, Input, Proposed,
-    db::{BatchContext, DatabaseSet, ManagedDb, Merkleized, Shared, Unmerkleized},
+    db::{BatchContext, DatabaseSet, InitError, ManagedDb, Merkleized, Shared, Unmerkleized},
 };
-use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{ancestry::Ancestry, standard::Standard},
@@ -12,9 +12,15 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Signer as _, ed25519, sha256::Digest as Sha256Digest,
 };
-use commonware_runtime::{Buf, BufMut, Error as RuntimeError, Handle};
+use commonware_runtime::{BufMut, Error as RuntimeError, Handle};
 use commonware_utils::{channel::oneshot, sync::Mutex};
-use std::{convert::Infallible, sync::Arc};
+use std::{
+    convert::Infallible,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 pub(crate) type TestDatabases = Shared<TestDb>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -63,6 +69,7 @@ struct PruneGate {
 pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
+    pub(crate) applied: Arc<AtomicUsize>,
     prune_gate: Arc<Mutex<Option<PruneGate>>>,
 }
 
@@ -88,22 +95,21 @@ impl FlushControl {
 
 #[derive(Default)]
 pub(crate) struct TestDb {
-    finalize: Mutex<Option<Handle<()>>>,
+    sync: Mutex<Option<Handle<()>>>,
     control: Option<FlushControl>,
 }
 
 impl TestDb {
-    pub(crate) fn with_finalize(handle: Handle<()>) -> Self {
+    pub(crate) fn with_sync(handle: Handle<()>) -> Self {
         Self {
-            finalize: Mutex::new(Some(handle)),
+            sync: Mutex::new(Some(handle)),
             control: None,
         }
     }
 
-    /// A database with test-controlled finalize flushes and pruning.
     pub(crate) fn gated(control: FlushControl) -> Self {
         Self {
-            finalize: Mutex::new(None),
+            sync: Mutex::new(None),
             control: Some(control),
         }
     }
@@ -120,7 +126,11 @@ impl<E: Send> ManagedDb<E> for TestDb {
         unreachable!("TestDb is constructed directly in tests")
     }
 
-    async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+    async fn init(
+        _context: E,
+        _config: Self::Config,
+        _expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Self::Error, Self::SyncTarget>> {
         Ok(Self::default())
     }
 
@@ -132,14 +142,21 @@ impl<E: Send> ManagedDb<E> for TestDb {
         true
     }
 
-    async fn finalize(self, _batch: Self::Merkleized) -> Result<(Self, Handle<()>), Self::Error> {
+    async fn apply(self, _batch: Self::Merkleized) -> Result<Self, Self::Error> {
+        if let Some(control) = &self.control {
+            control.applied.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(self)
+    }
+
+    async fn finalize(self) -> Result<(Self, Handle<()>), Self::Error> {
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
             return Ok((self, Handle::from_receiver(released)));
         }
         let handle = self
-            .finalize
+            .sync
             .lock()
             .take()
             .unwrap_or_else(|| Handle::ready(Ok(())));
@@ -160,10 +177,6 @@ impl<E: Send> ManagedDb<E> for TestDb {
 
     fn sync_target(&self) -> Self::SyncTarget {
         0
-    }
-
-    async fn rewind_to_target(self, _target: Self::SyncTarget) -> Result<Self, Self::Error> {
-        Ok(self)
     }
 }
 
@@ -262,8 +275,22 @@ impl CertifiableBlock for TestBlock {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct TestApp;
+#[derive(Clone, Default)]
+pub(crate) struct TestApp {
+    finalization_hooks: Option<Arc<AtomicUsize>>,
+}
+
+impl TestApp {
+    pub(crate) fn observe_finalization() -> (Self, Arc<AtomicUsize>) {
+        let hooks: Arc<AtomicUsize> = Arc::default();
+        (
+            Self {
+                finalization_hooks: Some(hooks.clone()),
+            },
+            hooks,
+        )
+    }
+}
 
 impl<
     E: rand_core::Rng
@@ -278,6 +305,7 @@ impl<
     type Context = SimplexContext<Sha256Digest, ed25519::PublicKey>;
     type Block = TestBlock;
     type Databases = TestDatabases;
+    type Captured = ();
     type Provider = ();
     type Input = ();
 
@@ -313,8 +341,32 @@ impl<
         _context: (E, Self::Context),
         _block: &Self::Block,
         _batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        TestMerkleized
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(TestMerkleized)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+        if let Some(hooks) = &self.finalization_hooks {
+            hooks.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    async fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _captured: Self::Captured,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
+        if let Some(hooks) = &self.finalization_hooks {
+            hooks.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 

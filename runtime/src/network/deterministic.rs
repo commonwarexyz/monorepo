@@ -120,17 +120,41 @@ impl crate::Network for Network {
 
 #[cfg(test)]
 mod tests {
-    use crate::network::{deterministic as DeterministicNetwork, tests};
+    use crate::{
+        Clock, Runner, Spawner,
+        network::{deterministic as DeterministicNetwork, tests},
+    };
     use commonware_macros::test_group;
+    use rstest::rstest;
 
-    #[tokio::test]
-    async fn test_trait() {
-        tests::test_network_trait(DeterministicNetwork::Network::default).await;
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_trait<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            tests::test_network_trait(context, DeterministicNetwork::Network::default).await;
+        });
     }
 
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
     #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        tests::stress_test_network_trait(DeterministicNetwork::Network::default).await;
+    fn test_stress_trait<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            tests::stress_test_network_trait(context, DeterministicNetwork::Network::default).await;
+        });
     }
 }

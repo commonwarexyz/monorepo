@@ -87,7 +87,9 @@
 //! let setup = Setup::new(
 //!     GENERATORS[0].clone(),
 //!     GENERATORS[1..]
-//!         .chunks_exact(2)
+//!         .as_chunks::<2>()
+//!         .0
+//!         .iter()
 //!         .map(|chunk| (chunk[0].clone(), chunk[1].clone())),
 //! );
 //!
@@ -130,8 +132,8 @@
 //! was an invaluable reference when implementing and documenting this module.
 
 use crate::transcript::{Summary, Transcript};
-use bytes::{Buf, BufMut};
-use commonware_codec::{Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
+use bytes::BufMut;
+use commonware_codec::{Buf, Encode, EncodeSize, Error, RangeCfg, Read, ReadExt, Write};
 use commonware_math::{
     algebra::{CryptoGroup, Field, Random, Space, powers},
     synthetic::Synthetic,
@@ -865,7 +867,9 @@ pub mod fuzz {
             Setup::new(
                 generators[0],
                 generators[1..]
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|chunk| (chunk[0], chunk[1])),
             )
         })

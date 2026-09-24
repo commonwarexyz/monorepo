@@ -7,14 +7,11 @@ use crate::{
     Context,
     index::Unordered as UnorderedIndex,
     journal::{
-        Error as JournalError, authenticated,
+        authenticated,
         contiguous::{Contiguous, Mutable},
     },
     merkle::{Family, Location, Proof},
-    qmdb::{
-        Error, batch_chain::Commitment, bitmap::Shared, delete_known_loc, metrics::Metrics,
-        operation::Floored as _, update_known_loc,
-    },
+    qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics},
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
@@ -22,32 +19,23 @@ use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, Spawner};
 use commonware_utils::bitmap;
-use core::num::{NonZeroU64, NonZeroUsize};
-use std::{collections::HashMap, sync::Arc};
+use core::{
+    future::Future,
+    num::{NonZeroU64, NonZeroUsize},
+};
+use std::sync::Arc;
 
 /// One shard's output from the fused [`Db::get_many_map`] path: mapped results for the shard's
 /// keys plus `(global key index, position)` pairs for page-cache misses.
 type ShardReads<T> = (Vec<Option<T>>, Vec<(usize, u64)>);
 
+/// Whether two `(key index, position)` candidates share a position.
+const fn same_position(a: &(usize, u64), b: &(usize, u64)) -> bool {
+    a.1 == b.1
+}
+
 /// Type alias for the authenticated journal used by [Db].
 pub(crate) type AuthenticatedLog<F, E, C, H, S> = authenticated::Journal<F, E, C, H, S>;
-
-/// Snapshot mutation needed to undo one operation while rewinding.
-enum SnapshotUndo<F: Family, K> {
-    Replace {
-        key: K,
-        old_loc: Location<F>,
-        new_loc: Location<F>,
-    },
-    Remove {
-        key: K,
-        old_loc: Location<F>,
-    },
-    Insert {
-        key: K,
-        new_loc: Location<F>,
-    },
-}
 
 /// An "Any" QMDB implementation generic over ordered/unordered keys and variable/fixed values.
 /// Consider using one of the following specialized variants instead, which may be more ergonomic:
@@ -84,9 +72,6 @@ pub struct Db<
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location<F>,
 
-    /// The location of the last commit operation.
-    pub(crate) last_commit_loc: Location<F>,
-
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location in the log containing its most recent update.
     ///
@@ -108,7 +93,7 @@ pub struct Db<
     ///
     /// - `bitmap.len() == log.size()`.
     /// - `bitmap[i] == 0` implies location `i` is inactive (false negatives are forbidden).
-    /// - CommitFloor: only the current `last_commit_loc` carries bit = 1; earlier commits
+    /// - CommitFloor: only the current last commit carries bit = 1; earlier commits
     ///   are 0.
     pub(crate) bitmap: Arc<Shared<N>>,
 
@@ -170,7 +155,8 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
-        match self.log.read(*self.last_commit_loc).await? {
+        // The log always ends with a commit operation.
+        match self.log.read(*self.log.size() - 1).await? {
             Operation::CommitFloor(metadata, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
         }
@@ -183,7 +169,7 @@ where
 
     /// The [`Commitment`] for the database's current state.
     pub(crate) fn commitment(&self) -> Commitment<F, H::Digest> {
-        Commitment::new(self.last_commit_loc + 1, self.root)
+        Commitment::new(self.log.size(), self.root)
     }
 
     /// Return the inactive_peaks count for the given leaf count and inactivity floor.
@@ -201,25 +187,32 @@ where
     }
 
     /// Get the value of `key` in the db, or None if it has no value.
-    pub async fn get(&self, key: &U::Key) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
-        let _timer = self.metrics.get_timer();
-        self.metrics.get_calls.inc();
-        self.metrics.lookups_requested.inc();
-        // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
-        let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        let mut result = None;
-        for loc in locs {
-            let op = self.log.read(*loc).await?;
-            let Operation::Update(data) = op else {
-                panic!("location does not reference update operation. loc={loc}");
-            };
-            if data.key() == key {
-                result = Some(data.value().clone());
-                break;
-            }
-        }
+    // Explicit Send avoids the borrowed-iterator inference limitation (rust-lang/rust#100013).
+    #[allow(clippy::manual_async_fn)]
+    pub fn get(
+        &self,
+        key: &U::Key,
+    ) -> impl Future<Output = Result<Option<U::Value>, crate::qmdb::Error<F>>> + Send {
+        async move {
+            let _timer = self.metrics.get_timer();
+            self.metrics.get_calls.inc();
+            self.metrics.lookups_requested.inc();
 
-        Ok(result)
+            // Translated keys can collide, so read candidates until the full key matches.
+            let mut result = None;
+            for loc in self.snapshot.get(key).copied() {
+                let op = self.log.read(*loc).await?;
+                let Operation::Update(data) = op else {
+                    panic!("location does not reference update operation. loc={loc}");
+                };
+                if data.key() == key {
+                    result = Some(data.into_value());
+                    break;
+                }
+            }
+
+            Ok(result)
+        }
     }
 
     /// Batch read multiple keys.
@@ -229,16 +222,16 @@ where
         &self,
         keys: &[&U::Key],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
-        self.get_many_map(keys, |data, _| data.value().clone())
-            .await
+        self.get_many_map(keys, |data, _| data.into_value()).await
     }
 
-    /// Like [`Self::get_many`] but maps each matched update through `map`, which also
-    /// receives the committed location the update was read from.
+    /// Like [`Self::get_many`] but maps each matched update through `map`, which takes the
+    /// update by value along with the committed location it was read from. A key repeated in
+    /// `keys` receives a clone of its update in every slot but the last.
     pub(crate) async fn get_many_map<T: Send>(
         &self,
         keys: &[&U::Key],
-        map: impl Fn(&U, Location<F>) -> T + Send + Sync,
+        map: impl Fn(U, Location<F>) -> T + Send + Sync,
     ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
@@ -282,11 +275,15 @@ where
         misses.sort_unstable_by_key(|&(_, pos)| pos);
         let positions = Self::dedup_positions(&misses);
         let ops = self.log.read_many(&positions).await?;
+        assert_eq!(
+            ops.len(),
+            positions.len(),
+            "read_many returns one operation per position"
+        );
         Self::match_read_ops(
             keys,
             &misses,
-            &positions,
-            |i| Some(&ops[i]),
+            ops.into_iter().map(Some),
             &map,
             &mut results,
             |_, pos| unreachable!("read_many returns one operation per position, pos={pos}"),
@@ -301,7 +298,7 @@ where
     fn resolve_cached<T: Send>(
         &self,
         keys: &[&U::Key],
-        map: &(impl Fn(&U, Location<F>) -> T + Send + Sync),
+        map: &(impl Fn(U, Location<F>) -> T + Send + Sync),
         base: usize,
     ) -> ShardReads<T> {
         // Probe the in-memory index. Each key may map to multiple locations due to hash
@@ -315,13 +312,17 @@ where
         let positions = Self::dedup_positions(&candidates);
 
         let served = self.log.try_read_many_sync(&positions);
+        assert_eq!(
+            served.len(),
+            positions.len(),
+            "try_read_many_sync returns one slot per position"
+        );
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         let mut misses: Vec<(usize, u64)> = Vec::new();
         Self::match_read_ops(
             keys,
             &candidates,
-            &positions,
-            |i| served[i].as_ref(),
+            served.into_iter(),
             map,
             &mut results,
             |key_idx, pos| misses.push((base + key_idx, pos)),
@@ -332,44 +333,50 @@ where
     /// Collapse position-sorted `(key index, position)` candidates into deduplicated positions.
     fn dedup_positions(candidates: &[(usize, u64)]) -> Vec<u64> {
         let mut positions = Vec::with_capacity(candidates.len());
-        for &(_, pos) in candidates {
-            if positions.last() != Some(&pos) {
-                positions.push(pos);
-            }
-        }
+        positions.extend(candidates.chunk_by(same_position).map(|group| group[0].1));
         positions
     }
 
-    /// Match operations read for deduplicated `positions` back to their position-sorted
-    /// `(key index, position)` candidates, filling each unresolved key slot whose operation
-    /// carries its exact key. `op` returns the operation read for a deduplicated position
-    /// index, or `None` when the page cache could not serve it, which is reported to `on_miss`
-    /// with the candidate's key index and position.
-    fn match_read_ops<'o, T>(
+    /// Match the operations read for the deduplicated positions of position-sorted
+    /// `(key index, position)` candidates back to those candidates, filling each unresolved key
+    /// slot whose operation carries its exact key. `ops` yields one slot per deduplicated
+    /// position, in order: the operation read there, or `None` when the page cache could not
+    /// serve it, which is reported to `on_miss` with each candidate's key index and position.
+    fn match_read_ops<T>(
         keys: &[&U::Key],
         candidates: &[(usize, u64)],
-        positions: &[u64],
-        op: impl Fn(usize) -> Option<&'o Operation<F, U>>,
-        map: &impl Fn(&U, Location<F>) -> T,
+        ops: impl Iterator<Item = Option<Operation<F, U>>>,
+        map: &impl Fn(U, Location<F>) -> T,
         results: &mut [Option<T>],
         mut on_miss: impl FnMut(usize, u64),
-    ) where
-        F: 'o,
-        U: 'o,
-    {
-        let mut op_idx = 0;
-        for &(key_idx, pos) in candidates {
-            while positions[op_idx] < pos {
-                op_idx += 1;
-            }
-            match op(op_idx) {
-                Some(Operation::Update(data)) => {
-                    if results[key_idx].is_none() && data.key() == keys[key_idx] {
-                        results[key_idx] = Some(map(data, Location::new(pos)));
-                    }
+    ) {
+        for (group, op) in candidates.chunk_by(same_position).zip(ops) {
+            let pos = group[0].1;
+            let Some(op) = op else {
+                for &(key_idx, _) in group {
+                    on_miss(key_idx, pos);
                 }
-                Some(_) => panic!("location does not reference update operation. loc={pos}"),
-                None => on_miss(key_idx, pos),
+                continue;
+            };
+            let Operation::Update(data) = op else {
+                panic!("location does not reference update operation. loc={pos}");
+            };
+
+            // The candidates sharing this position match the update only for repeated input
+            // keys. Defer each match so every slot but the last takes a clone and the last
+            // takes the update itself.
+            let loc = Location::new(pos);
+            let mut pending = None;
+            for &(key_idx, _) in group {
+                if results[key_idx].is_some() || data.key() != keys[key_idx] {
+                    continue;
+                }
+                if let Some(prev) = pending.replace(key_idx) {
+                    results[prev] = Some(map(data.clone(), loc));
+                }
+            }
+            if let Some(last) = pending {
+                results[last] = Some(map(data, loc));
             }
         }
     }
@@ -388,7 +395,7 @@ where
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
-            *self.last_commit_loc,
+            bounds.end - 1,
         );
     }
 
@@ -425,19 +432,12 @@ where
 
     /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
     ///
-    /// Journal pruning is section-granular, so the actual pruned boundary may be less than
-    /// the requested `prune_loc`. Returns that actual boundary so callers can keep the bitmap
-    /// aligned with the journal's retained start.
-    ///
     /// # Errors
     ///
     /// - Returns [crate::qmdb::Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` > [`crate::merkle::Family::MAX_LEAVES`].
     #[boxed]
-    pub(crate) async fn prune_log(
-        mut self,
-        prune_loc: Location<F>,
-    ) -> Result<(Self, Location<F>), crate::qmdb::Error<F>> {
+    pub(crate) async fn prune_log(mut self, prune_loc: Location<F>) -> Result<Self, Error<F>> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -445,9 +445,8 @@ where
             ));
         }
 
-        let boundary;
-        (self.log, boundary) = self.log.prune(prune_loc).await?;
-        Ok((self, boundary))
+        (self.log, _) = self.log.prune(prune_loc).await?;
+        Ok(self)
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -468,8 +467,8 @@ where
     pub async fn prune(self, prune_loc: Location<F>) -> Result<Self, crate::qmdb::Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
-        let (mut db, actual_pruned) = self.prune_log(prune_loc).await?;
-        db.prune_bitmap(actual_pruned);
+        let mut db = self.prune_log(prune_loc).await?;
+        db.prune_bitmap(prune_loc);
         db.update_metrics();
         Ok(db)
     }
@@ -527,184 +526,6 @@ where
         self.historical_proof(self.log.size(), loc, max_ops).await
     }
 
-    /// Rewind the database to `size` operations, where `size` is the location of the next append.
-    ///
-    /// This rewinds both the authenticated log and the in-memory snapshot, then restores metadata
-    /// (`last_commit_loc`, `inactivity_floor_loc`, `active_keys`) for the new tip commit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when:
-    /// - `size` is not a valid rewind target
-    /// - the target's required logical range is not fully retained (for example, the target
-    ///   inactivity floor is pruned)
-    /// - `size - 1` is not a commit operation
-    ///
-    /// Any error from this method is fatal for this handle. Rewind may mutate journal state before
-    /// all in-memory structures are rebuilt. Callers must drop this database handle after any `Err`
-    /// from `rewind` and reopen from storage.
-    ///
-    /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
-    /// [`Db::sync`] completes, or until the handle returned by a subsequent [`Db::start_sync`]
-    /// completes.
-    #[tracing::instrument(
-        name = "qmdb.any.db.rewind",
-        level = "info",
-        skip_all,
-        fields(
-            target_size = *size,
-            prev_size = *self.last_commit_loc + 1,
-        ),
-    )]
-    #[boxed]
-    pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
-        let rewind_size = *size;
-        let current_size = *self.last_commit_loc + 1;
-
-        if rewind_size == current_size {
-            return Ok(self);
-        }
-        if rewind_size == 0 || rewind_size > current_size {
-            return Err(Error::Journal(JournalError::InvalidRewind(rewind_size)));
-        }
-
-        // Read everything needed for rewind before mutating storage.
-        let (rewind_floor, undos, active_keys_delta) = {
-            let bounds = self.log.bounds();
-            let rewind_last_loc = Location::new(rewind_size - 1);
-            if rewind_size <= bounds.start {
-                return Err(Error::<F>::Journal(JournalError::ItemPruned(
-                    *rewind_last_loc,
-                )));
-            }
-            let rewind_last_op = self.log.read(*rewind_last_loc).await?;
-            let Some(rewind_floor) = rewind_last_op.has_floor() else {
-                return Err(Error::UnexpectedData(rewind_last_loc));
-            };
-            if *rewind_floor < bounds.start {
-                return Err(Error::<F>::Journal(JournalError::ItemPruned(*rewind_floor)));
-            }
-
-            let mut undos = Vec::with_capacity((current_size - rewind_size) as usize);
-            let mut active_keys_delta = 0isize;
-            let mut prior_state_by_key: HashMap<U::Key, Option<Location<F>>> = HashMap::new();
-
-            // Reconstruct key state once in a single pass from the rewind floor.
-            for loc in *rewind_floor..current_size {
-                let op = self.log.read(loc).await?;
-                let op_loc = Location::new(loc);
-                match op {
-                    Operation::CommitFloor(_, _) => {}
-                    Operation::Update(update) => {
-                        let key = update.into_key();
-                        let previous_loc = prior_state_by_key.get(&key).copied().flatten();
-
-                        if loc >= rewind_size {
-                            if let Some(previous_loc) = previous_loc {
-                                undos.push(SnapshotUndo::Replace {
-                                    key: key.clone(),
-                                    old_loc: op_loc,
-                                    new_loc: previous_loc,
-                                });
-                            } else {
-                                active_keys_delta -= 1;
-                                undos.push(SnapshotUndo::Remove {
-                                    key: key.clone(),
-                                    old_loc: op_loc,
-                                });
-                            }
-                        }
-
-                        prior_state_by_key.insert(key, Some(op_loc));
-                    }
-                    Operation::Delete(key) => {
-                        let previous_loc = prior_state_by_key.get(&key).copied().flatten();
-
-                        if loc >= rewind_size
-                            && let Some(previous_loc) = previous_loc
-                        {
-                            active_keys_delta += 1;
-                            undos.push(SnapshotUndo::Insert {
-                                key: key.clone(),
-                                new_loc: previous_loc,
-                            });
-                        }
-
-                        prior_state_by_key.insert(key, None);
-                    }
-                }
-            }
-
-            // Undo operations must run from newest to oldest removed operation.
-            undos.reverse();
-
-            (rewind_floor, undos, active_keys_delta)
-        };
-
-        // Journal rewind happens before in-memory undo application. This step is not
-        // restart-stable until a later commit/sync.
-        self.log = self.log.rewind(rewind_size).await?;
-
-        // Drop bitmap bits for ops at or above the rewind target. Restored locs below
-        // rewind_size flip back to active in the loop below. `rewind_size >= bitmap.pruned_bits()`
-        // is enforced upstream: directly via the `bounds.start` check above, or via
-        // `current::Db::rewind`'s explicit `pruned_bits` precondition. The debug_assert catches
-        // regressions.
-        {
-            let mut bitmap = self.bitmap.write();
-            assert!(
-                bitmap.pruned_bits() <= rewind_size,
-                "bitmap pruned boundary exceeded journal retained start",
-            );
-            bitmap.truncate(rewind_size);
-
-            for undo in undos {
-                match undo {
-                    SnapshotUndo::Replace {
-                        key,
-                        old_loc,
-                        new_loc,
-                    } => {
-                        if new_loc < rewind_size {
-                            bitmap.set_bit(*new_loc, true);
-                        }
-                        update_known_loc(&mut self.snapshot, &key, old_loc, new_loc);
-                    }
-                    SnapshotUndo::Remove { key, old_loc } => {
-                        delete_known_loc(&mut self.snapshot, &key, old_loc)
-                    }
-                    SnapshotUndo::Insert { key, new_loc } => {
-                        if new_loc < rewind_size {
-                            bitmap.set_bit(*new_loc, true);
-                        }
-                        self.snapshot.insert(&key, new_loc);
-                    }
-                }
-            }
-
-            // The rewound tail's preceding op (validated above) is the new `last_commit_loc`.
-            // Set its bit to 1 to match the CommitFloor convention; previous intermediate
-            // commits in the truncated range stay at 0 from `truncate`. `rewind_size > 0` is
-            // guaranteed by the early-return at the top of this function.
-            bitmap.set_bit(rewind_size - 1, true);
-        }
-
-        self.active_keys = self
-            .active_keys
-            .checked_add_signed(active_keys_delta)
-            .ok_or(Error::DataCorrupted(
-                "active_keys underflow while rewinding",
-            ))?;
-        self.last_commit_loc = Location::new(rewind_size - 1);
-        self.inactivity_floor_loc = rewind_floor;
-        self.root = self
-            .log
-            .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
-        self.update_metrics();
-
-        Ok(self)
-    }
-
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
     /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
@@ -733,14 +554,11 @@ where
         // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
         let log = Arc::new(log);
-        let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
+        let (inactivity_floor_loc, active_keys, bitmap) = {
             let bounds = log.bounds();
-            let last_commit_loc = Location::new(
-                bounds
-                    .end
-                    .checked_sub(1)
-                    .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
-            );
+            if bounds.end == 0 {
+                return Err(Error::HistoricalFloorPruned(Location::new(bounds.end)));
+            }
             let inactivity_floor_loc =
                 crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
                     .await?;
@@ -785,7 +603,7 @@ where
                 }
             }
 
-            (last_commit_loc, inactivity_floor_loc, active_keys, bitmap)
+            (inactivity_floor_loc, active_keys, bitmap)
         };
 
         // The build has returned, so every worker clone of the log is dropped. Reclaim it.
@@ -806,7 +624,6 @@ where
             root,
             inactivity_floor_loc,
             snapshot: index,
-            last_commit_loc,
             active_keys,
             bitmap,
             metrics,
@@ -822,7 +639,7 @@ where
         level = "info",
         skip_all,
         fields(
-            db_size = *self.last_commit_loc + 1,
+            db_size = *self.log.size(),
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
         ),
@@ -849,7 +666,7 @@ where
         level = "info",
         skip_all,
         fields(
-            db_size = *self.last_commit_loc + 1,
+            db_size = *self.log.size(),
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
         ),
@@ -869,7 +686,7 @@ where
         level = "info",
         skip_all,
         fields(
-            db_size = *self.last_commit_loc + 1,
+            db_size = *self.log.size(),
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
         ),

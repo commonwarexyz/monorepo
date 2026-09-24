@@ -108,7 +108,7 @@ mod tests {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, N3f1, NZU16, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact,
-        ordered::Set, sequence::Unit,
+        non_empty, ordered::Set, probability, sequence::Unit,
     };
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -124,7 +124,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
     type TestStateSync = StateSync<mocks::TestScheme, mocks::TestDigest, mocks::TestBlsVariant>;
 
@@ -329,7 +329,6 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    initial: Duration::from_millis(100),
                     timeout: Duration::from_millis(200),
                     fetch_retry_timeout: Duration::from_millis(100),
                     priority_requests: false,
@@ -366,7 +365,7 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
                     epocher: FixedEpocher::new(NZU64!(2)),
-                    start: MarshalStart::Genesis(genesis),
+                    start: MarshalStart::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),
@@ -497,7 +496,7 @@ mod tests {
         context: &deterministic::Context,
         marshal: &mocks::TestMarshalMailbox,
         height: Height,
-    ) -> mocks::TestBlock {
+    ) -> Arc<mocks::TestBlock> {
         for _ in 0..50 {
             if let Some(block) = marshal.get_block(height).await {
                 return block;
@@ -587,7 +586,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect::<Vec<_>>();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+        Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
             .expect("finalization quorum")
     }
 
@@ -732,7 +731,7 @@ mod tests {
                     marshal::Config {
                         provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                         epocher: FixedEpocher::new(NZU64!(2)),
-                        start: MarshalStart::Genesis(genesis),
+                        start: MarshalStart::Genesis(genesis.into()),
                         partition_prefix: partition_prefix.clone(),
                         mailbox_size: NZUsize!(16),
                         view_retention: ViewDelta::new(8),
@@ -951,7 +950,6 @@ mod tests {
                     peer_provider: oracle.manager(),
                     blocker: control.clone(),
                     mailbox_size: NZUsize!(16),
-                    initial: Duration::from_millis(100),
                     timeout: Duration::from_millis(200),
                     fetch_retry_timeout: Duration::from_millis(100),
                     priority_requests: false,
@@ -988,7 +986,7 @@ mod tests {
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
                     epocher: FixedEpocher::new(NZU64!(2)),
-                    start: MarshalStart::Genesis(genesis),
+                    start: MarshalStart::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(16),
                     view_retention: ViewDelta::new(8),

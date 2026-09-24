@@ -74,6 +74,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("runtime error: {0}")]
     Runtime(#[from] commonware_runtime::Error),
+    #[error("corruption: {0}")]
+    Corruption(String),
 }
 
 /// Configuration for [Metadata] storage.
@@ -89,18 +91,140 @@ pub struct Config<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use commonware_formatting::hex;
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        Blob, Metrics as _, Runner, Storage, Supervisor as _, WriteOptions, deterministic,
+        Blob, Metrics as _, ReadOptions, Runner, Storage, Supervisor as _, WriteOptions,
+        deterministic,
         mocks::{
-            DelayedSyncContext, PendingSyncs, WriteFaultContext, WriteFaults, drive_pending_syncs,
-            fail_pending_syncs, release_pending_syncs,
+            DelayedSyncContext, PendingSyncs, RecordingContext, Recordings, WriteFaultContext,
+            WriteFaults, drive_pending_syncs, fail_pending_syncs, release_pending_syncs,
         },
     };
     use commonware_utils::sequence::U64;
     use futures::FutureExt as _;
     use rand::{Rng, RngExt as _};
+
+    fn assert_options(recordings: &Recordings, reads: &[ReadOptions], writes: &[WriteOptions]) {
+        let snapshot = recordings.snapshot();
+        assert_eq!(snapshot.reads.as_slice(), reads);
+        assert_eq!(snapshot.writes.as_slice(), writes);
+        recordings.clear();
+    }
+
+    fn assert_durability(pending: &PendingSyncs, calls: usize, starts: usize, completions: usize) {
+        assert_eq!(pending.calls(), calls);
+        assert_eq!(pending.starts(), starts);
+        assert_eq!(pending.completions(), completions);
+    }
+
+    #[test_traced]
+    fn test_io_options_and_durability() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = PendingSyncs::default();
+            let (recording, recordings) = RecordingContext::new(DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            });
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let key = U64::new(1);
+            let extra_key = U64::new(2);
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(recording.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+            // Seed both mirrors so equal-size updates take the incremental branch.
+            metadata.put(key.clone(), vec![1; 8]);
+            metadata = metadata.sync().await.unwrap();
+            metadata = metadata.sync().await.unwrap();
+            recordings.clear();
+            pending.arm();
+
+            // Non-pipelined incremental writes request cache bypass and retain a trailing sync.
+            metadata.put(key.clone(), vec![2; 8]);
+            metadata = drive_pending_syncs(&pending, metadata.sync())
+                .await
+                .unwrap();
+            assert_options(
+                &recordings,
+                &[],
+                &[
+                    WriteOptions::DONT_CACHE,
+                    WriteOptions::DONT_CACHE,
+                    WriteOptions::DONT_CACHE,
+                ],
+            );
+            assert_durability(&pending, 1, 0, 0);
+
+            // Pipelined incremental writes request cache bypass and retain a started sync.
+            metadata.put(key.clone(), vec![3; 8]);
+            let (next, handle) = metadata.start_sync().await.unwrap();
+            metadata = next;
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            assert_options(
+                &recordings,
+                &[],
+                &[
+                    WriteOptions::DONT_CACHE,
+                    WriteOptions::DONT_CACHE,
+                    WriteOptions::DONT_CACHE,
+                ],
+            );
+            assert_durability(&pending, 2, 1, 1);
+
+            // A growing pipelined rewrite requests cache bypass and retains a started sync.
+            metadata.put(extra_key.clone(), vec![4; 16]);
+            let (next, handle) = metadata.start_sync().await.unwrap();
+            metadata = next;
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
+            assert_durability(&pending, 3, 2, 2);
+
+            // A growing non-pipelined rewrite requests cache bypass and retains durability.
+            metadata = drive_pending_syncs(&pending, metadata.sync())
+                .await
+                .unwrap();
+            assert_options(
+                &recordings,
+                &[],
+                &[WriteOptions::SYNC | WriteOptions::DONT_CACHE],
+            );
+            assert_durability(&pending, 4, 2, 2);
+
+            // A shrinking pipelined rewrite requests cache bypass and retains a started sync.
+            metadata.remove(&extra_key);
+            let (next, handle) = metadata.start_sync().await.unwrap();
+            metadata = next;
+            drive_pending_syncs(&pending, handle).await.unwrap();
+            assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
+            assert_durability(&pending, 5, 3, 3);
+
+            // A shrinking non-pipelined rewrite requests cache bypass and retains a trailing sync.
+            metadata = drive_pending_syncs(&pending, metadata.sync())
+                .await
+                .unwrap();
+            assert_options(&recordings, &[], &[WriteOptions::DONT_CACHE]);
+            assert_durability(&pending, 6, 3, 3);
+
+            // Both populated mirrors request cache bypass when reloaded.
+            drop(metadata);
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(recording.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_options(
+                &recordings,
+                &[ReadOptions::DONT_CACHE, ReadOptions::DONT_CACHE],
+                &[],
+            );
+            metadata.destroy().await.unwrap();
+        });
+    }
 
     #[test_traced]
     fn test_start_sync_pipelined_destroy() {
@@ -655,6 +779,50 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_recovered_mirror_supports_shrinking_rewrite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: ((0..).into(), ()),
+            };
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+            let key = U64::new(42);
+            let hello = b"hello".to_vec();
+            metadata.put(key.clone(), hello.clone());
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(key.clone(), b"world".to_vec());
+            metadata.put(U64::new(43), b"foo".to_vec());
+            metadata.sync().await.unwrap();
+
+            // Corrupt the newer copy so the next initialization must repair it.
+            let (blob, _) = context.open("test", b"left").await.unwrap();
+            blob.write_at(0, b"corrupted".to_vec(), WriteOptions::SYNC)
+                .await
+                .unwrap();
+
+            // The repaired copy must support a shrinking rewrite: a stale tail left behind by
+            // recovery would survive the smaller write and poison the next reopen.
+            let mut metadata =
+                Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(metadata.get(&key).unwrap(), &hello);
+            metadata.clear();
+            metadata.sync().await.unwrap();
+
+            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("third"), cfg)
+                .await
+                .unwrap();
+            assert!(metadata.get(&key).is_none());
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_recover_corrupted_both() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
@@ -696,26 +864,16 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Reopen the metadata store
-            let cfg = Config {
-                partition: "test".into(),
-                codec_config: ((0..).into(), ()),
-            };
-            let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("second"), cfg)
-                .await
-                .unwrap();
-
-            // Get the key (falls back to non-corrupt)
-            let value = metadata.get(&key);
-            assert!(value.is_none());
-
-            // Check metrics
-            let buffer = context.encode();
-            assert!(buffer.contains("second_sync_rewrites_total 0"));
-            assert!(buffer.contains("second_sync_overwrites_total 0"));
-            assert!(buffer.contains("second_keys 0"));
-
-            metadata.destroy().await.unwrap();
+            // Both copies failing validation is impossible under a crash (syncs alternate and
+            // drain), so reopening must fail loudly rather than adopt a fresh store.
+            for child in ["second", "third"] {
+                let cfg = Config {
+                    partition: "test".into(),
+                    codec_config: ((0..).into(), ()),
+                };
+                let result = Metadata::<_, U64, Vec<u8>>::init(context.child(child), cfg).await;
+                assert!(matches!(result, Err(Error::Corruption(_))));
+            }
         });
     }
 
@@ -1617,6 +1775,51 @@ mod tests {
             metadata.retain(|_, _| false);
             assert_eq!(metadata.keys().count(), 0);
 
+            metadata.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_bytes_values_reload() {
+        // Retained byte fields remain independent of later mirror overwrites
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test".into(),
+                codec_config: (..).into(),
+            };
+            let first = U64::new(1);
+            let second = U64::new(2);
+            let mut metadata = Metadata::<_, U64, Bytes>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            metadata.put(first.clone(), Bytes::from(vec![1u8; 8]));
+            metadata.put(second.clone(), Bytes::from(vec![2u8; 8]));
+            metadata = metadata.sync().await.unwrap();
+            drop(metadata);
+
+            // Reload, then overwrite an equal-size value twice to exercise both mirrors
+            let mut metadata =
+                Metadata::<_, U64, Bytes>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(metadata.get(&first), Some(&Bytes::from(vec![1u8; 8])));
+            assert_eq!(metadata.get(&second), Some(&Bytes::from(vec![2u8; 8])));
+            metadata.put(first.clone(), Bytes::from(vec![3u8; 8]));
+            metadata = metadata.sync().await.unwrap();
+            metadata.put(first.clone(), Bytes::from(vec![4u8; 8]));
+            metadata = metadata.sync().await.unwrap();
+
+            // A longer value rewrites the blob
+            metadata.put(second.clone(), Bytes::from(vec![5u8; 16]));
+            metadata = metadata.sync().await.unwrap();
+            drop(metadata);
+
+            let metadata = Metadata::<_, U64, Bytes>::init(context.child("third"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(metadata.get(&first), Some(&Bytes::from(vec![4u8; 8])));
+            assert_eq!(metadata.get(&second), Some(&Bytes::from(vec![5u8; 16])));
             metadata.destroy().await.unwrap();
         });
     }

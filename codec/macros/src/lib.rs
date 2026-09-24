@@ -152,7 +152,7 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
             type Error = #codec::Error;
 
             fn try_from(bytes: &[u8]) -> core::result::Result<Self, Self::Error> {
-                <Self as #codec::Decode>::decode_cfg(bytes, &())
+                <Self as #codec::Decode>::decode_cfg(#codec::Copying(bytes), &())
             }
         }
 

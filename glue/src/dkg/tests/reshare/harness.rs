@@ -30,7 +30,7 @@ use crate::{
 };
 use commonware_broadcast::buffered;
 use commonware_codec::{
-    Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
+    Buf, Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
@@ -43,7 +43,7 @@ use commonware_consensus::{
     },
     simplex::{
         self,
-        config::ForwardingPolicy,
+        config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
         types::{Context, Finalization},
     },
@@ -52,7 +52,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     Digest as _, Digestible, Hasher, Sha256, Signer as _,
     bls12381::{
-        dkg::feldman_desmedt::deal,
+        dkg::feldman_desmedt::{Reveal, deal},
         primitives::{group::Share, sharing::Mode, variant::MinPk},
     },
     certificate::{ConstantProvider, Provider as CertificateProvider, Scoped},
@@ -64,7 +64,7 @@ use commonware_math::algebra::Random;
 use commonware_p2p::{Address, Provider, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
+    BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
     buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
@@ -375,6 +375,7 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = Database<E>;
+    type Captured = ();
     type Provider = ();
     type Input = ReshareInput<(), MinPk, ed25519::PrivateKey, TestDirectory>;
 
@@ -424,14 +425,24 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
         _context: (E, Self::Context),
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-    ) -> <Self::Databases as DatabaseSet<E>>::Merkleized {
-        Self::execute(block.height(), batches).await
+    ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
+        Some(Self::execute(block.height(), batches).await)
+    }
+
+    async fn capture(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _batches: &<Self::Databases as DatabaseSet<E>>::Merkleized,
+        _readers: <Self::Databases as DatabaseSet<E>>::Readers,
+    ) {
     }
 
     async fn finalized(
         &mut self,
         context: (E, Self::Context),
         block: &Self::Block,
+        _captured: Self::Captured,
         _readers: <Self::Databases as DatabaseSet<E>>::Readers,
     ) {
         self.processed
@@ -833,7 +844,6 @@ impl EngineDefinition for ReshareEngine {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(100),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -977,7 +987,7 @@ impl EngineDefinition for ReshareEngine {
                     *self.initial.info.output.public().public(),
                 )),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
-                start: plan.marshal_start(genesis.clone()),
+                start: plan.marshal_start(genesis.clone().into()),
                 partition_prefix: partition_prefix.clone(),
                 mailbox_size: NZUsize!(100),
                 view_retention: ViewDelta::new(10),
@@ -1003,6 +1013,7 @@ impl EngineDefinition for ReshareEngine {
                 metadata_partition: format!("{partition_prefix}-qmdb-mmr-metadata"),
                 items_per_blob: NZU64!(11),
                 write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -1011,9 +1022,10 @@ impl EngineDefinition for ReshareEngine {
                 items_per_blob: NZU64!(7),
                 page_cache: page_cache.clone(),
                 write_buffer: IO_BUFFER_SIZE,
+                replay_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
-            init_cache_size: Some(NZUsize!(1024)),
+            init_cache: Some(NZUsize!(1024)),
             init_buffer: NZUsize!(1 << 21),
             init_concurrency: (),
         };
@@ -1026,7 +1038,6 @@ impl EngineDefinition for ReshareEngine {
                 database: None,
                 mailbox_size: NZUsize!(100),
                 me: Some(public_key.clone()),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 max_serve_ops: NZU64!(16),
@@ -1087,6 +1098,7 @@ impl EngineDefinition for ReshareEngine {
                 fence,
                 namespace: NAMESPACE,
                 sharing_mode: self.sharing_mode,
+                reveal: Reveal::V1,
                 mailbox_size: NZUsize!(100),
                 partition_prefix: format!("{partition_prefix}-reshare"),
                 max_participants: MAX_PARTICIPANTS,
@@ -1159,8 +1171,11 @@ impl EngineDefinition for ReshareEngine {
                     timeout_retry: Duration::from_millis(500),
                     fetch_timeout: Duration::from_secs(2),
                     view_retention: ViewDelta::new(10),
-                    skip_timeout: Duration::from_secs(5),
-                    forwarding: ForwardingPolicy::Disabled,
+                    skip: SkipPolicy::Enabled {
+                        timeout: Duration::from_secs(5),
+                        budget: simplex::SkipBudget::Participants,
+                    },
+                    forward: ForwardPolicy::Disabled,
                     track_historical_votes: false,
                 },
                 gate,
@@ -1322,6 +1337,7 @@ fn archive_config<C>(
 ) -> prunable::Config<TwoCap, C> {
     prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{prefix}-{name}-metadata"),
         key_partition: format!("{prefix}-{name}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{prefix}-{name}-value"),

@@ -4,11 +4,11 @@ use super::{Keyless, operation::Operation};
 use crate::{
     Context,
     journal::{authenticated, contiguous::Mutable},
-    merkle::{Family, Location},
+    merkle::{Family, Location, Proof},
     qmdb::{
         Error,
         any::value::ValueEncoding,
-        batch_chain::{self, Bounds, Commitment},
+        chain::{self, Bounds, Commitment},
     },
 };
 use commonware_codec::EncodeShared;
@@ -46,6 +46,12 @@ where
 
 /// A speculative batch of operations whose root digest has been computed,
 /// in contrast to [`UnmerkleizedBatch`].
+///
+/// # Branch validity
+///
+/// Reads through the chain, constructing child batches, and applying the batch later are
+/// only valid while every batch applied to the DB since this batch was merkleized is an
+/// ancestor of this batch (see [`crate::qmdb::chain`] for more details).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, V: ValueEncoding, S: Strategy>
 where
@@ -58,22 +64,7 @@ where
     pub(super) parent: Option<Weak<Self>>,
 
     /// Position and floor bounds for this batch chain.
-    pub(super) bounds: batch_chain::Bounds<F, D>,
-}
-
-impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, V, S>
-where
-    Operation<F, V>: EncodeShared,
-{
-    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
-    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
-    }
-
-    /// The [`Commitment`] this batch commits to.
-    pub(super) const fn commitment(&self) -> Commitment<F, D> {
-        self.bounds.tip
-    }
+    pub(super) bounds: chain::Bounds<F, D>,
 }
 
 /// Read a single operation from the parent chain at the given location.
@@ -268,9 +259,9 @@ where
         C: Mutable<Item = Operation<F, V>>,
     {
         let live_ancestors: Vec<_> =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
-        let boundary = batch_chain::effective_boundary(
+        let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
@@ -285,8 +276,8 @@ where
         let total_size = self.base.size + ops.len() as u64;
         let inactive_peaks = F::inactive_peaks(total_size, inactivity_floor);
 
-        // Leaf and node hashing dominate merkleization, so run them as one job on the
-        // strategy instead of occupying the calling task (see `Journal::merkleize`).
+        // Leaf and node hashing dominate merkleization, so run them as one job through the
+        // strategy (see `Journal::merkleize`).
         let (journal, root) = db
             .journal
             .merkleize(self.journal_batch, ops, inactive_peaks)
@@ -294,7 +285,7 @@ where
             .expect("inactive_peaks computed from batch size");
 
         // Compute the batch chain bounds.
-        let ancestors = batch_chain::collect_ancestor_bounds(
+        let ancestors = chain::collect_ancestor_bounds(
             live_ancestors,
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
@@ -303,7 +294,7 @@ where
         Arc::new(MerkleizedBatch {
             journal_batch: journal,
             parent: self.parent.as_ref().map(Arc::downgrade),
-            bounds: batch_chain::Bounds {
+            bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
                 tip: Commitment::new(total_size, root),
@@ -318,6 +309,16 @@ impl<F: Family, D: Digest, V: ValueEncoding, S: Strategy> MerkleizedBatch<F, D, 
 where
     Operation<F, V>: EncodeShared,
 {
+    /// Iterate over ancestor batches (parent first, then grandparent, etc.).
+    pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, V, S> {
+        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+    }
+
+    /// The [`Commitment`] this batch commits to.
+    pub(super) const fn commitment(&self) -> Commitment<F, D> {
+        self.bounds.tip
+    }
+
     /// Return the speculative root.
     pub const fn root(&self) -> D {
         self.bounds.tip.root
@@ -326,6 +327,66 @@ where
     /// Return the [`Bounds`] of the batch.
     pub const fn bounds(&self) -> &Bounds<F, D> {
         &self.bounds
+    }
+
+    /// Return the operations this batch appends to the log and the location of the first.
+    pub fn operations(&self) -> (Location<F>, Arc<Vec<Operation<F, V>>>) {
+        (
+            self.bounds.base.size,
+            Arc::clone(self.journal_batch.items()),
+        )
+    }
+
+    /// Inclusion proof for the operations returned by [`Self::operations`], anchored at
+    /// this batch's tip. The pair verifies against [`Self::root`] via
+    /// [`crate::qmdb::verify_proof`]. Together with [`Self::pinned_nodes`] they verify via
+    /// [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor, and [`crate::merkle::Error::Empty`] if the batch
+    /// has no operations (a [`Keyless::to_batch`] snapshot).
+    pub fn proof<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Proof<F, D>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher<Digest = D>,
+    {
+        let inactive_peaks = F::inactive_peaks(self.bounds.tip.size, self.bounds.inactivity_floor);
+        db.journal
+            .speculative_proof(&self.journal_batch, inactive_peaks)
+            .map_err(Into::into)
+    }
+
+    /// The Merkle frontier at the first operation returned by [`Self::operations`]
+    /// ([`Family::nodes_to_pin`]), which lets a consumer holding only this batch's base rebuild
+    /// compact state and replay the operations. The operations, [`Self::proof`], and pinned
+    /// nodes verify against [`Self::root`] via [`crate::qmdb::verify_proof_and_pinned_nodes`].
+    ///
+    /// Nodes of unapplied ancestors are read through the chain, so those ancestors must still be
+    /// alive. Nodes below the chain are read from `db`'s
+    /// [Merkle store][crate::merkle::mem::Mem], which retains them at least until
+    /// this batch's changes are flushed (by a commit or sync after apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::merkle::Error::ElementPruned`] if a required node has been pruned or
+    /// belongs to a dropped unapplied ancestor.
+    pub fn pinned_nodes<E, C, H>(&self, db: &Keyless<F, E, V, C, H, S>) -> Result<Vec<D>, Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher<Digest = D>,
+    {
+        db.journal
+            .speculative_pinned_nodes(&self.journal_batch)
+            .map_err(Into::into)
     }
 
     /// Read a value at `loc`.

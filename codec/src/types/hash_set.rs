@@ -4,12 +4,12 @@
 //! the size of the set must fit within a [u32].
 
 use crate::{
-    RangeCfg,
+    Buf, RangeCfg,
     codec::{BufsMut, EncodeSize, Read, Write},
     error::Error,
     types::read_ordered_set,
 };
-use bytes::{Buf, BufMut};
+use bytes::BufMut;
 use std::{collections::HashSet, hash::Hash};
 
 const HASHSET_TYPE: &str = "HashSet";
@@ -20,7 +20,7 @@ impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
 
         // Sort the items to ensure deterministic encoding
         let mut items: Vec<_> = self.iter().collect();
-        items.sort();
+        items.sort_unstable();
         for item in items {
             item.write(buf);
         }
@@ -31,7 +31,7 @@ impl<K: Ord + Hash + Eq + Write> Write for HashSet<K> {
 
         // Sort the items to ensure deterministic encoding
         let mut items: Vec<_> = self.iter().collect();
-        items.sort();
+        items.sort_unstable();
         for item in items {
             item.write_bufs(buf);
         }
@@ -60,7 +60,7 @@ impl<K: Ord + Hash + Eq + EncodeSize> EncodeSize for HashSet<K> {
     }
 }
 
-impl<K: Read + Clone + Ord + Hash + Eq> Read for HashSet<K> {
+impl<K: Read + Ord + Hash + Eq> Read for HashSet<K> {
     type Cfg = (RangeCfg<usize>, K::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
@@ -81,14 +81,15 @@ mod tests {
     use crate::{
         FixedSize,
         codec::{Decode, Encode},
+        types::tests::TrackingWriteBuf,
     };
     use bytes::{Bytes, BytesMut};
-    use std::fmt::Debug;
+    use std::{collections::BTreeSet, fmt::Debug};
 
     // Generic round trip test function for HashSet
     fn round_trip_hash<K>(set: &HashSet<K>, range_cfg: RangeCfg<usize>, item_cfg: K::Cfg)
     where
-        K: Write + EncodeSize + Read + Clone + Ord + Hash + Eq + Debug + PartialEq,
+        K: Write + EncodeSize + Read + Ord + Hash + Eq + Debug + PartialEq,
         HashSet<K>: Read<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Decode<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Debug
@@ -263,6 +264,32 @@ mod tests {
         });
 
         assert_eq!(set1.encode(), set2.encode());
+    }
+
+    #[test]
+    fn test_hashset_encoding_matches_ordered_set() {
+        // Ordered sets provide the canonical encoding across collection sizes.
+        for len in [0, 1, 20, 128, 1024] {
+            let ordered: BTreeSet<_> = (0..len)
+                .map(|key: u32| Bytes::copy_from_slice(&key.to_le_bytes()))
+                .collect();
+            let expected = ordered.encode();
+
+            // Insertion order must not affect the encoded bytes.
+            for reverse in [false, true] {
+                let mut entries: Vec<_> = ordered.iter().cloned().collect();
+                if reverse {
+                    entries.reverse();
+                }
+                let set: HashSet<_> = entries.into_iter().collect();
+                assert_eq!(set.encode(), expected);
+
+                // Bytes items exercise external chunks alongside inline lengths.
+                let mut buf = TrackingWriteBuf::new();
+                set.write_bufs(&mut buf);
+                assert_eq!(buf.freeze(), expected);
+            }
+        }
     }
 
     #[test]

@@ -131,9 +131,11 @@ mod wire;
 #[cfg(test)]
 mod test {
     use super::{Config, Mailbox, Probe, wire};
-    use bytes::{Buf, BufMut};
+    use bytes::BufMut;
     use commonware_actor::Feedback;
-    use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+    use commonware_codec::{
+        Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write,
+    };
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
         marshal::{
@@ -170,7 +172,7 @@ mod test {
     use commonware_storage::archive::immutable;
     use commonware_utils::{
         Acknowledgement, NZDuration, NZU16, NZU64, NZUsize, NonZeroDuration, TestRng,
-        channel::oneshot, sync::Mutex, test_rng,
+        channel::oneshot, iter::NonEmpty, non_empty, probability, sync::Mutex, test_rng,
     };
     use std::{
         collections::BTreeMap,
@@ -185,7 +187,7 @@ mod test {
     const LINK: Link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
     const PROBE_CHANNEL: u64 = 0;
     const BACKFILL_CHANNEL: u64 = 1;
@@ -362,7 +364,7 @@ mod test {
         fn verify_certificates<'a, R, D, I>(
             &self,
             rng: &mut R,
-            certificates: I,
+            certificates: NonEmpty<I>,
             strategy: &impl ParallelStrategy,
         ) -> bool
         where
@@ -457,17 +459,37 @@ mod test {
             )
         }
 
+        fn optimistic_assemble<'a, R, D, I, J>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            pending: I,
+            verified: J,
+            strategy: &impl ParallelStrategy,
+        ) -> Result<Self::Certificate, Verification<Self>>
+        where
+            R: rand_core::CryptoRng,
+            D: commonware_cryptography::Digest,
+            I: IntoIterator<Item = Attestation<Self>>,
+            I::IntoIter: ExactSizeIterator + Send,
+            J: IntoIterator<Item = &'a Attestation<Self>>,
+            J::IntoIter: Send,
+        {
+            certificate::optimistic_assemble::<Self, _, D, _, _>(
+                self, rng, subject, pending, verified, strategy,
+            )
+        }
+
         fn assemble<I>(
             &self,
-            attestations: I,
+            attestations: NonEmpty<I>,
             strategy: &impl ParallelStrategy,
-        ) -> Option<Self::Certificate>
+        ) -> Result<Self::Certificate, certificate::AssemblyError>
         where
-            I: IntoIterator<Item = Attestation<Self>>,
-            I::IntoIter: Send,
+            I: Iterator<Item = Attestation<Self>> + Send,
         {
             self.inner.assemble(
-                attestations.into_iter().map(Self::unwrap_attestation),
+                non_empty![@attestations.into_iter().map(Self::unwrap_attestation)],
                 strategy,
             )
         }
@@ -605,7 +627,6 @@ mod test {
                         peer_provider: oracle.manager(),
                         blocker: oracle.control(public_key.clone()),
                         mailbox_size: NZUsize!(100),
-                        initial: Duration::from_secs(1),
                         timeout: Duration::from_secs(2),
                         fetch_retry_timeout: Duration::from_millis(100),
                         priority_requests: false,
@@ -632,7 +653,7 @@ mod test {
                 let marshal_config = marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
-                    start: Start::Genesis(genesis.clone()),
+                    start: Start::Genesis(genesis.clone().into()),
                     partition_prefix: partition_prefix.clone(),
                     mailbox_size: NZUsize!(100),
                     view_retention: ViewDelta::new(10),
@@ -777,7 +798,8 @@ mod test {
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
             .collect();
         let finalization =
-            Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential).expect("recover");
+            Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
+                .expect("recover");
         (block, finalization)
     }
 

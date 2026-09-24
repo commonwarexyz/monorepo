@@ -7,8 +7,8 @@
 //!   provide the deep-clone baseline.
 //! - [`allocation`]: end-to-end steady-state `BufferPool` allocation and
 //!   reuse, compared against direct aligned allocation.
-//! - [`reuse`]: global reuse after partial lazy growth with thread-local
-//!   caching disabled.
+//! - [`reuse`]: end-to-end global reuse with thread-local caching disabled,
+//!   plus forced thread-local cache refill and spill cycles.
 //! - [`freelist`]: microbenchmarks of the global freelist that stores free
 //!   pooled buffers shared across threads, compared against `Mutex<Vec<_>>` and
 //!   `ArrayQueue`.

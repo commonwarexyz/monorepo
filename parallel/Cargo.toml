@@ -28,3 +28,4 @@ rayon.workspace = true
 [features]
 default = [ "std" ]
 std = [ "commonware-macros/std", "dep:dashmap", "dep:futures", "dep:rayon" ]
+test-utils = [ "std" ]

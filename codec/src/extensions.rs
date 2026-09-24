@@ -4,8 +4,7 @@
 //! `decode_range()`) that simplify common use cases of the core [Read] and [Decode] traits,
 //! particularly when default configurations (`()`) or [RangeCfg] are involved.
 
-use crate::{Decode, Error, RangeCfg, Read};
-use bytes::Buf;
+use crate::{Buf, Decode, Error, Input, RangeCfg, Read};
 use core::ops::RangeBounds;
 
 /// Extension trait providing ergonomic read method for types requiring no configuration
@@ -57,7 +56,7 @@ impl_is_unit_for_tuple!(A, B, C, D, E, F, G, H, I, J, K, L);
 /// `.decode_cfg(buf, &X::default())`.
 pub trait DecodeExt<X: IsUnit>: Decode<Cfg = X> {
     /// Decodes a value using the default `()` config.
-    fn decode(buf: impl Buf) -> Result<Self, Error> {
+    fn decode(buf: impl Input) -> Result<Self, Error> {
         Self::decode_cfg(buf, &X::default())
     }
 }
@@ -91,7 +90,7 @@ pub trait DecodeRangeExt<X: IsUnit>: Decode<Cfg = (RangeCfg<usize>, X)> {
     /// Decodes a value using only a range configuration.
     ///
     /// The inner configuration type `X` must be [IsUnit] and `X::default()` is used for it.
-    fn decode_range(buf: impl Buf, range: impl RangeBounds<usize>) -> Result<Self, Error> {
+    fn decode_range(buf: impl Input, range: impl RangeBounds<usize>) -> Result<Self, Error> {
         Self::decode_cfg(buf, &(RangeCfg::new(range), X::default()))
     }
 }

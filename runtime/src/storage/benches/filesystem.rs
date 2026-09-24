@@ -21,7 +21,7 @@ use std::{fs::OpenOptions, os::fd::AsRawFd};
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
 pub const fn backend_name() -> &'static str {
-    if cfg!(feature = "iouring-storage") {
+    if cfg!(all(target_os = "linux", feature = "iouring")) {
         "iouring"
     } else {
         "tokio"
@@ -177,15 +177,14 @@ pub fn random_write_payload(rng: &mut impl Rng, io_size: usize, shape: WriteShap
             const CHUNKS: usize = 4;
             let base = io_size / CHUNKS;
             let remainder = io_size % CHUNKS;
-            let chunks = (0..CHUNKS)
+            (0..CHUNKS)
                 .map(|idx| {
                     let len = base + usize::from(idx < remainder);
                     let mut chunk = vec![0u8; len];
                     rng.fill_bytes(&mut chunk);
                     IoBuf::from(chunk)
                 })
-                .collect::<Vec<_>>();
-            IoBufs::from(chunks)
+                .collect()
         }
     }
 }

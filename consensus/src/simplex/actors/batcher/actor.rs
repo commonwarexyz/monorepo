@@ -1,10 +1,10 @@
-use super::{Config, Mailbox, Message, Round, VerifiedVotes};
+use super::{Config, Mailbox, Message, Round, verifier::Batch};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
         Lookahead, Plan, Viewport,
         actors::voter,
-        config::ForwardingPolicy,
+        config::{ForwardPolicy, SkipPolicy},
         metrics::{Inbound, Peer, TimeoutReason},
         scheme::Scheme,
         types::{Activity, Certificate, Proposal, Vote},
@@ -26,14 +26,14 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{N3f1, futures::Pool, ordered::Quorum};
+use commonware_utils::{N3f1, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tracing::{Span, debug, info_span, trace};
+use tracing::{Instrument as _, Span, debug, info_span, trace};
 
 /// Tracks the current view, its leader, and whether the voter has already been
 /// sent the leader-nullify hint for it.
@@ -45,42 +45,6 @@ struct Current {
     view: View,
     leader: Option<Participant>,
     leader_nullify_hinted: bool,
-}
-
-/// Moves each dirty view into one dispatch pass, prioritizing the current view.
-fn prepare_dispatch(
-    dirty_views: &mut BTreeSet<View>,
-    current: View,
-    dispatch_views: &mut Vec<View>,
-) {
-    dispatch_views.clear();
-    if dirty_views.remove(&current) {
-        dispatch_views.push(current);
-    }
-    dispatch_views.extend(dirty_views.iter().copied());
-    dirty_views.clear();
-}
-
-/// A completed crypto job from the actor's dispatch pool.
-pub(super) enum Done<S: Scheme<D>, D: Digest> {
-    /// A verification batch completed: its verified votes must be
-    /// reintegrated into the view's round (see [Round::finish_verify]) and
-    /// invalid signers blocked.
-    Verified {
-        view: View,
-        batch: usize,
-        timer: histogram::Timer,
-        votes: VerifiedVotes<S, D>,
-        invalid: Vec<Participant>,
-    },
-    /// A certificate was recovered from a verified quorum and must be
-    /// recorded on the view's round (see [Round::record_certificate]) and
-    /// forwarded to the voter.
-    Recovered {
-        view: View,
-        timer: histogram::Timer,
-        certificate: Certificate<S, D>,
-    },
 }
 
 pub struct Actor<E, S, B, D, Re, Rl, T>
@@ -104,8 +68,8 @@ where
     strategy: T,
 
     view_retention: ViewDelta,
-    skip_timeout: Duration,
-    forwarding: ForwardingPolicy,
+    skip: SkipPolicy,
+    forward: ForwardPolicy,
     epoch: Epoch,
     lookahead: Lookahead,
     floor: View,
@@ -123,12 +87,12 @@ where
     mailbox_receiver: mailbox::Receiver<Message<S, D>>,
 
     added: Counter,
-    verified: Counter,
+    processed: Counter,
     inbound_messages: CounterFamily<Inbound>,
     latest_vote: GaugeFamily<Peer<S::PublicKey>>,
     batch_size: Histogram,
-    verify_latency: histogram::Timed,
-    recover_latency: histogram::Timed,
+    construct_latency: histogram::Timed,
+    construct_fallback: Counter,
 }
 
 impl<E, S, B, D, Re, Rl, T> Actor<E, S, B, D, Re, Rl, T>
@@ -145,7 +109,8 @@ where
         let scheme = Arc::new(cfg.scheme);
         let participants = scheme.participants();
         let added = context.counter("added", "number of messages added to the verifier");
-        let verified = context.counter("verified", "number of messages verified");
+        let processed =
+            context.counter("processed", "number of messages processed by the verifier");
         let inbound_messages = context.family("inbound_messages", "number of inbound messages");
         let latest_vote: GaugeFamily<Peer<S::PublicKey>> =
             context.family("latest_vote", "view of latest vote received per peer");
@@ -154,18 +119,17 @@ where
         }
         let batch_size = context.histogram(
             "batch_size",
-            "number of messages in a signature verification batch",
+            "number of pending messages processed per batch",
             [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0],
         );
-        let verify_latency = context.histogram(
-            "verify_latency",
-            "latency of signature verification",
+        let construct_latency = context.histogram(
+            "construct_latency",
+            "latency of vote verification and certificate assembly",
             Buckets::CRYPTOGRAPHY,
         );
-        let recover_latency = context.histogram(
-            "recover_latency",
-            "certificate recover latency",
-            Buckets::CRYPTOGRAPHY,
+        let construct_fallback = context.counter(
+            "construct_fallback",
+            "number of optimistic assembly attempts returning attestation verification results",
         );
         let (sender, receiver) = mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let mut required_active = participants.quorum::<N3f1>() as usize;
@@ -190,8 +154,8 @@ where
                 strategy: cfg.strategy,
 
                 view_retention: cfg.view_retention,
-                skip_timeout: cfg.skip_timeout,
-                forwarding: cfg.forwarding,
+                skip: cfg.skip,
+                forward: cfg.forward,
                 epoch: cfg.epoch,
                 lookahead: cfg.lookahead,
                 floor: cfg.floor,
@@ -199,12 +163,12 @@ where
                 mailbox_receiver: receiver,
 
                 added,
-                verified,
+                processed,
                 inbound_messages,
                 latest_vote,
                 batch_size,
-                verify_latency: histogram::Timed::new(verify_latency),
-                recover_latency: histogram::Timed::new(recover_latency),
+                construct_latency: histogram::Timed::new(construct_latency),
+                construct_fallback,
             },
             Mailbox::new(sender),
         )
@@ -236,14 +200,14 @@ where
 
     /// Returns true if the participant has sent a recent message, or if fewer
     /// than a quorum of participants have (fail-open).
-    fn is_active(&self, participant: Participant) -> bool {
+    fn is_active(&self, participant: Participant, skip_timeout: Duration) -> bool {
         // Track activity with wall-clock time rather than raw view deltas. Stable-leader terms can
         // skip many view numbers at once, so we only fast-timeout when a quorum has been active
         // within `skip_timeout`, and the selected leader has not.
         let min_time = self
             .context
             .current()
-            .checked_sub(self.skip_timeout)
+            .checked_sub(skip_timeout)
             .unwrap_or(SystemTime::UNIX_EPOCH);
         let recent =
             |activity: &Option<SystemTime>| activity.is_some_and(|activity| activity >= min_time);
@@ -287,10 +251,10 @@ where
         proposal: &Proposal<D>,
         next_leader: Participant,
     ) -> Vec<Participant> {
-        match self.forwarding {
-            ForwardingPolicy::Disabled => Vec::new(),
-            ForwardingPolicy::SilentVoters => round.missing_voters(proposal),
-            ForwardingPolicy::SilentLeader => round
+        match self.forward {
+            ForwardPolicy::Disabled => Vec::new(),
+            ForwardPolicy::SilentVoters => round.missing_voters(proposal),
+            ForwardPolicy::SilentLeader => round
                 .is_missing_voter(proposal, next_leader)
                 .then_some(next_leader)
                 .into_iter()
@@ -351,126 +315,54 @@ where
         }
     }
 
-    /// Dispatches any ready crypto work for `view` into `pool` without
-    /// blocking the event loop: one verification batch per vote kind (each
-    /// kind independently tracks an in-flight batch) plus recovery of every
-    /// certificate with a verified quorum.
-    ///
-    /// Results arrive through the pool's completion branch, which reintegrates
-    /// them and marks the view dirty so this dispatch runs again (e.g. to
-    /// recover a certificate from a quorum a batch just completed).
-    ///
-    /// Returns true when the strategy's execution capacity is full. The caller
-    /// must retain the view for a later pass because more work may be ready.
-    pub(super) fn dispatch_view(
-        &mut self,
-        pool: &mut Pool<Done<S, D>>,
-        view: View,
-        round: &mut Round<S, B, D, Re>,
-    ) -> bool {
-        let capacity = self.strategy.manual().parallelism();
-
-        // Begin a verification batch for every vote kind with work worth
-        // verifying.
-        while pool.len() < capacity
-            && let Some((batch, job)) = round.begin_verify(self.context.as_mut(), &self.strategy)
-        {
-            let timer = self.verify_latency.timer(self.context.as_ref());
-            pool.push(async move {
-                let (votes, invalid) = job.await;
-                Done::Verified {
-                    view,
-                    batch,
-                    timer,
-                    votes,
-                    invalid,
-                }
-            });
-        }
-
-        // Begin recovery of every certificate with a verified quorum.
-        while pool.len() < capacity
-            && let Some(job) = round.begin_construct_certificate(&self.strategy)
-        {
-            let timer = self.recover_latency.timer(self.context.as_ref());
-            pool.push(async move {
-                Done::Recovered {
-                    view,
-                    timer,
-                    certificate: job.await,
-                }
-            });
-        }
-
-        pool.len() == capacity
-    }
-
-    /// Reintegrates a completed crypto job from the dispatch pool.
-    ///
-    /// A verification batch's votes return to the view's round. A recovered
-    /// certificate is recorded on the round and forwarded to the voter. A
-    /// view pruned while its job was in flight drops the votes but still
-    /// forwards the certificate: the voter prunes independently.
-    ///
-    /// Returns the view to revisit when the completion may have made new
-    /// work ready: a batch may have completed a quorum, or more votes may
-    /// have buffered while it was in flight.
-    pub(super) fn handle_done(
+    /// Attempts to construct certificates from ready votes for `view` and forwards
+    /// them to the voter.
+    async fn process_view(
         &mut self,
         voter: &mut voter::Mailbox<S, D>,
-        work: &mut BTreeMap<View, Round<S, B, D, Re>>,
-        done: Done<S, D>,
-    ) -> Option<View> {
-        match done {
-            Done::Verified {
-                view,
-                batch,
-                timer,
-                votes,
+        view: View,
+        round: &mut Round<S, B, D, Re>,
+    ) {
+        loop {
+            let timer = self.construct_latency.timer(self.context.as_ref());
+            let Some(Batch {
+                processed,
                 invalid,
-            } => {
-                timer.observe(self.context.as_ref());
-                self.verified.inc_by(batch as u64);
-                self.batch_size.observe(batch as f64);
-
-                for signer in invalid {
-                    if let Some(signer) = self.scheme.participants().key(signer) {
-                        commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
-                    }
-                }
-
-                // The round may have been pruned while the batch was in flight.
-                // The monotonic retention floor also gates vote admission, so a
-                // pruned view cannot be recreated and its votes are no longer needed.
-                let round = work.get_mut(&view)?;
-                let _guard = round.span().entered();
-                trace!(%view, batch, "batch verified votes");
-                round.finish_verify(votes);
-
-                // Revisit the view: the batch may have completed a
-                // quorum (certificate recovery) or more votes may have
-                // buffered while it was in flight (another batch).
-                Some(view)
-            }
-            Done::Recovered {
-                view,
-                timer,
                 certificate,
-            } => {
-                timer.observe(self.context.as_ref());
-                let kind = certificate.kind();
+                fallback,
+            }) = round
+                .try_construct(self.context.as_mut(), &self.strategy)
+                .await
+            else {
+                trace!(%view, "no verifier ready");
+                break;
+            };
 
-                // Record the certificate on its round (completing the
-                // certified phase and applying the retention policy)
-                // unless the round was pruned while recovery was in
-                // flight. Recording may unlock already-buffered votes.
-                let recorded = work.get_mut(&view).is_some_and(|round| {
-                    let _guard = round.span().entered();
-                    debug!(%view, %kind, "constructed certificate, forwarding to voter");
-                    round.record_certificate(&certificate)
-                });
+            // Record completed work even when no certificate was produced.
+            timer.observe(self.context.as_ref());
+            if fallback {
+                self.construct_fallback.inc();
+            }
+
+            // Block invalid signers even when the remaining votes produced a certificate.
+            for participant in invalid {
+                if let Some(signer) = self.scheme.participants().key(participant) {
+                    commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+                }
+            }
+
+            // Forward the certificate already recorded by the round.
+            if let Some(certificate) = certificate {
+                let kind = certificate.kind();
+                debug!(%view, %kind, "recovered certificate, forwarding to voter");
                 voter.recovered(certificate);
-                recorded.then_some(view)
+            }
+
+            // Count processed pending votes, including rejected inputs.
+            if processed != 0 {
+                trace!(%view, batch = processed, "processed votes");
+                self.processed.inc_by(processed as u64);
+                self.batch_size.observe(processed as f64);
             }
         }
     }
@@ -508,17 +400,14 @@ where
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
 
-        // Views whose rounds may have become actionable. Views that cannot be
-        // dispatched at capacity remain queued for a later completion.
-        let mut dirty_views: BTreeSet<View> = BTreeSet::new();
-        let mut dispatch_views: Vec<View> = Vec::new();
-        // In-flight crypto (verification batches and certificate recoveries).
-        // Dispatching instead of awaiting keeps the event loop free to ingest
-        // votes while the strategy's workers verify, so multiple batches (and
-        // views) make progress concurrently.
-        let mut crypto_pool: Pool<Done<S, D>> = Pool::default();
+        // Views whose rounds may have become actionable. Capacity is reused
+        // across select-loop iterations.
+        let mut dirty_views: Vec<View> = Vec::new();
         select_loop! {
             self.context,
+            on_start => {
+                dirty_views.clear();
+            },
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
             },
@@ -563,7 +452,7 @@ where
                         // span so all of its work shares one trace
                         let round = self.round_for_view(&current, &mut work, current.view);
                         round.set_span(span);
-                        dirty_views.insert(current.view);
+                        dirty_views.push(current.view);
 
                         // Revisit rounds in the admission window now that the
                         // current view advanced: rounds already visited are
@@ -572,31 +461,36 @@ where
                         if current.view < limit {
                             for (&view, round) in work.range_mut(current.view.next()..=limit) {
                                 self.stamp_leader(&current, view, round);
-                                dirty_views.insert(view);
+                                dirty_views.push(view);
                             }
                         }
 
-                        // If the leader nullified this view or has not been active
-                        // recently, tell the voter to reduce the leader timeout to now.
+                        // When skipping is enabled, tell the voter to expire its timeout
+                        // when the leader nullified this view or has not been active recently.
                         //
                         // Activity is a best-effort, wall-clock signal: leader messages
                         // still queued inbound are not yet recorded, so a spurious
                         // fast-timeout here is possible and tolerated. That is safe and
                         // bounded: safety is unaffected, and nodes that already observed
                         // the leader's activity will not time out.
-                        let timeout_reason = match Self::leader_nullified(&current, &work) {
-                            // Leader already buffered a nullify for this now-current view
-                            // (allowed because we accept votes at or below `current`, at
-                            // `current+1`, or at the next term start)
-                            true => Some(TimeoutReason::LeaderNullify),
-                            false => match am_leader {
-                                // If we are the leader, we should not timeout
-                                true => None,
-                                // If we are not the leader and the leader isn't
-                                // active, we should timeout.
-                                false => (!self.is_active(leader))
-                                    .then_some(TimeoutReason::Inactivity)
-                            },
+                        let timeout_reason = match self.skip {
+                            SkipPolicy::Disabled => None,
+                            SkipPolicy::Enabled { timeout, .. } => {
+                                match Self::leader_nullified(&current, &work) {
+                                    // Leader already buffered a nullify for this now-current view
+                                    // (allowed because we accept votes at or below `current`, at
+                                    // `current+1`, or at the next term start)
+                                    true => Some(TimeoutReason::LeaderNullify),
+                                    false => match am_leader {
+                                        // If we are the leader, we should not timeout
+                                        true => None,
+                                        // If we are not the leader and the leader isn't
+                                        // active, we should timeout.
+                                        false => (!self.is_active(leader, timeout))
+                                            .then_some(TimeoutReason::Inactivity),
+                                    },
+                                }
+                            }
                         };
                         if let Some(timeout_reason) = timeout_reason {
                             current.leader_nullify_hinted =
@@ -606,7 +500,7 @@ where
 
                         // Forward the proposal, if enabled and we have something to forward
                         if let Some((proposal, round)) = forwardable_proposal
-                            .filter(|_| self.forwarding.is_enabled())
+                            .filter(|_| self.forward.is_enabled())
                             .and_then(|proposal| {
                                 work.get(&proposal.view()).map(|round| (proposal, round))
                             })
@@ -635,15 +529,8 @@ where
                         let _guard = process.entered();
                         round.accept_vote(message, true);
                         self.added.inc();
-                        dirty_views.insert(view);
+                        dirty_views.push(view);
                     }
-                }
-            },
-            // Handle completed crypto work (verification batches and
-            // certificate recoveries)
-            done = crypto_pool.next_completed() => {
-                if let Some(view) = self.handle_done(&mut voter, &mut work, done) {
-                    dirty_views.insert(view);
                 }
             },
             // Handle certificates from the network
@@ -707,7 +594,7 @@ where
                 // certificate may have unlocked already-buffered votes.
                 let round = self.round_for_view(&current, &mut work, view);
                 if round.record_certificate(&message) {
-                    dirty_views.insert(view);
+                    dirty_views.push(view);
                 }
                 voter.recovered(message);
             },
@@ -754,10 +641,12 @@ where
                         .get_or_create_by(&sender)
                         .try_set_max(view.get());
 
-                    // If the current leader explicitly nullifies the current view, signal
-                    // the voter so it can fast-path timeout without waiting for its local
-                    // timer. We check after adding because duplicate votes are rejected.
-                    if Self::leader_nullified(&current, &work) {
+                    // When skipping is enabled, a nullify from the current leader expires
+                    // the voter's timeout. We check after adding because duplicate votes are
+                    // rejected.
+                    if matches!(self.skip, SkipPolicy::Enabled { .. })
+                        && Self::leader_nullified(&current, &work)
+                    {
                         current.leader_nullify_hinted = true;
                         let round = Rnd::new(self.epoch, current.view);
                         let _guard = work
@@ -767,7 +656,7 @@ where
                             .entered();
                         voter.timeout(round, TimeoutReason::LeaderNullify);
                     }
-                    dirty_views.insert(view);
+                    dirty_views.push(view);
                 }
             },
             on_end => {
@@ -777,10 +666,7 @@ where
 
                 let me = self.scheme.me();
 
-                // Process each currently dirty view once. Saturated views are
-                // reinserted for a later pass.
-                prepare_dispatch(&mut dirty_views, current.view, &mut dispatch_views);
-                for view in dispatch_views.drain(..) {
+                for view in dirty_views.drain(..) {
                     // Skip verification and construction for views at or below
                     // finalized. We still admit votes there (see
                     // [Viewport::retains]) to notify the reporter of all votes
@@ -811,9 +697,9 @@ where
                     }
 
                     let span = round.span();
-                    if span.in_scope(|| self.dispatch_view(&mut crypto_pool, view, round)) {
-                        dirty_views.insert(view);
-                    }
+                    self.process_view(&mut voter, view, round)
+                        .instrument(span)
+                        .await;
                 }
 
                 // Drop any rounds that are no longer retained
@@ -826,22 +712,5 @@ where
                 }
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BTreeSet, View, prepare_dispatch};
-
-    #[test]
-    fn dispatch_pass_prioritizes_current_without_reprocessing() {
-        let current = View::new(3);
-        let mut dirty = BTreeSet::from([View::new(1), current, View::new(4)]);
-        let mut dispatch = vec![View::new(9)];
-
-        prepare_dispatch(&mut dirty, current, &mut dispatch);
-
-        assert_eq!(dispatch, [current, View::new(1), View::new(4)]);
-        assert!(dirty.is_empty());
     }
 }

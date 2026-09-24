@@ -56,6 +56,9 @@ commonware_macros::stability_scope!(ALPHA {
     #[cfg(any(test, feature = "fuzz"))]
     pub mod fuzz;
 
+    pub mod keccak256;
+    pub use crate::keccak256::{CoreKeccak256, Keccak256};
+
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
@@ -64,12 +67,16 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
+    #[cfg(not(feature = "std"))]
+    use alloc::{sync::Arc, vec::Vec};
     use commonware_codec::{Encode, ReadExt};
     use commonware_math::algebra::Random;
     use commonware_parallel::Strategy;
     use commonware_utils::Array;
     use rand_chacha::ChaCha20Rng;
     use rand_core::{CryptoRng, SeedableRng as _};
+    #[cfg(feature = "std")]
+    use std::{sync::Arc, vec::Vec};
 
     pub mod secret;
     pub use crate::secret::Secret;
@@ -191,7 +198,7 @@ commonware_macros::stability_scope!(BETA {
 
         /// Verify all items added to the batch.
         ///
-        /// Returns `true` if all items are valid, `false` otherwise.
+        /// Returns `false` if no items were added or any item is invalid.
         ///
         /// # Why Randomness?
         ///
@@ -227,6 +234,14 @@ commonware_macros::stability_scope!(BETA {
         /// If many objects with [Digest]s are related (map to some higher-level
         /// group [Digest]), you should also implement [Committable].
         fn digest(&self) -> Self::Digest;
+    }
+
+    impl<T: Digestible> Digestible for Arc<T> {
+        type Digest = T::Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.as_ref().digest()
+        }
     }
 
     /// An object that can produce a commitment of itself.
@@ -279,6 +294,18 @@ commonware_macros::stability_scope!(BETA {
         /// Must be equivalent to hashing each message with [`Hasher::hash`].
         fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> (Self::Digest, Self::Digest);
 
+        /// Hash multiple independent byte slices.
+        ///
+        /// Returns one digest per input in the same order. Inputs may be empty,
+        /// differ in length, or overlap. Output position `i` is equivalent to
+        /// `Self::hash(&[messages[i].as_ref()])`.
+        fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
+            messages
+                .iter()
+                .map(|message| Self::hash(&[message.as_ref()]))
+                .collect()
+        }
+
         /// Append `bytes` to the hasher's running state.
         fn update(&mut self, bytes: &[u8]) -> &mut Self;
 
@@ -297,11 +324,11 @@ mod tests {
     fn test_validate<C: PrivateKey>() {
         let private_key = C::random(test_rng());
         let public_key = private_key.public_key();
-        assert!(C::PublicKey::decode(public_key.as_ref()).is_ok());
+        assert!(C::PublicKey::decode(commonware_codec::Copying(public_key.as_ref())).is_ok());
     }
 
     fn test_validate_invalid_public_key<C: Signer>() {
-        let result = C::PublicKey::decode(vec![0; 1024].as_ref());
+        let result = C::PublicKey::decode(vec![0; 1024]);
         assert!(result.is_err());
     }
 
@@ -562,27 +589,32 @@ mod tests {
         let mut hasher = H::default();
         hasher.update(b"hello world");
         let (hasher, digest) = hasher.finalize();
-        assert!(H::Digest::decode(digest.as_ref()).is_ok());
+        assert!(H::Digest::decode(commonware_codec::Copying(digest.as_ref())).is_ok());
         assert_eq!(digest.as_ref().len(), H::Digest::SIZE);
 
         // Reuse the reset hasher returned by finalize
         let mut hasher = hasher;
         hasher.update(b"hello world");
         let (hasher, digest_again) = hasher.finalize();
-        assert!(H::Digest::decode(digest_again.as_ref()).is_ok());
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_again.as_ref())).is_ok());
         assert_eq!(digest, digest_again);
 
         // Hash via the one-shot API
         let digest_oneshot = H::hash(&[b"hello world"]);
-        assert!(H::Digest::decode(digest_oneshot.as_ref()).is_ok());
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_oneshot.as_ref())).is_ok());
         assert_eq!(digest, digest_oneshot);
 
         // Hash different data
         let mut hasher = hasher;
         hasher.update(b"hello mars");
         let (_, digest_mars) = hasher.finalize();
-        assert!(H::Digest::decode(digest_mars.as_ref()).is_ok());
+        assert!(H::Digest::decode(commonware_codec::Copying(digest_mars.as_ref())).is_ok());
         assert_ne!(digest, digest_mars);
+    }
+
+    #[test]
+    fn test_keccak256_hasher_multiple_runs() {
+        test_hasher_multiple_runs::<Keccak256>();
     }
 
     #[test]

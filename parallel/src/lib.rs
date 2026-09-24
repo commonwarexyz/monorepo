@@ -9,6 +9,9 @@
 //! The core abstraction is the [`Strategy`] trait, which provides several operations:
 //!
 //! **Core Operations:**
+//! - [`run`](Strategy::run): Chooses between serial and parallel operation bodies
+//! - [`run_batches`](Strategy::run_batches): Runs a whole-input algorithm or supplies batches
+//!   for the caller to prepare and execute
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
 //! - [`try_fold`](Strategy::try_fold): Like `fold`, but stops applying the fold operation after
 //!   failures
@@ -68,11 +71,10 @@
 
 commonware_macros::stability_scope!(BETA {
     use cfg_if::cfg_if;
-    use core::{cmp::Ordering, fmt, num::NonZeroUsize};
+    use core::{cmp::Ordering, convert::Infallible, fmt, num::NonZeroUsize, ops::Range};
 
     cfg_if! {
         if #[cfg(any(feature = "std", test))] {
-            use core::convert::Infallible;
             use futures::{
                 channel::oneshot,
                 future::{self, Either},
@@ -85,6 +87,7 @@ commonware_macros::stability_scope!(BETA {
             use std::{
                 panic::{self, AssertUnwindSafe, Location},
                 sync::Arc,
+                time::Instant,
             };
 
             mod policy;
@@ -96,8 +99,9 @@ commonware_macros::stability_scope!(BETA {
 
     /// A strategy wrapper for manually partitioned work.
     ///
-    /// This disables adaptive serial-vs-parallel policy decisions for operations that callers have
-    /// already split into partitions.
+    /// Built via [`Strategy::manual`], this disables adaptive policy decisions (including spawn
+    /// placement) for operations that callers have already split into partitions, and carries
+    /// the parallelism used to plan those partitions.
     #[derive(Clone, Debug)]
     pub struct Manual<S> {
         strategy: S,
@@ -105,17 +109,64 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl<S> Manual<S> {
-        /// Creates a strategy wrapper for manually partitioned work.
-        pub const fn new(strategy: S, parallelism: NonZeroUsize) -> Self {
-            Self {
-                strategy,
-                parallelism: parallelism.get(),
-            }
-        }
-
         /// Returns the parallelism to use for manually partitioned work.
         pub const fn parallelism(&self) -> usize {
             self.parallelism
+        }
+    }
+
+    /// Batches supplied for one invocation of [`Strategy::run_batches`].
+    ///
+    /// Consume this value to prepare and execute the batches. Preparation can borrow input
+    /// slices or split mutable output buffers into disjoint slices for each batch.
+    ///
+    /// Batches cannot outlive the operation that receives them:
+    ///
+    /// ```compile_fail
+    /// use commonware_parallel::{Sequential, Strategy};
+    /// use core::num::NonZeroUsize;
+    ///
+    /// let batches = Sequential.run_batches(8, NonZeroUsize::MIN, 1, |batches| batches);
+    /// ```
+    #[derive(Debug)]
+    pub struct Batches<'scope, S: Strategy> {
+        strategy: &'scope S,
+        ranges: Vec<Range<usize>>,
+    }
+
+    impl<S: Strategy> Batches<'_, S> {
+        /// Prepare and map batches, collecting results in batch order.
+        ///
+        /// `prepare` is called once with ordered, nonempty ranges that cover the operation's
+        /// input extent without overlap. It must produce one item per range in the same order.
+        /// The mapping operation may execute those items in any order.
+        pub fn map_collect_vec<I, P, F, R>(self, prepare: P, map_op: F) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            P: FnOnce(Vec<Range<usize>>) -> I,
+            F: Fn(I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            self.strategy.map_collect_vec(prepare(self.ranges), map_op)
+        }
+
+        /// Like [`map_collect_vec`](Self::map_collect_vec), but for fallible mapping.
+        ///
+        /// After an error, remaining items may be skipped. If multiple items fail, any of
+        /// their errors may be returned. Successful results preserve batch order.
+        pub fn try_map_collect_vec<I, P, F, R, E>(
+            self,
+            prepare: P,
+            map_op: F,
+        ) -> Result<Vec<R>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            P: FnOnce(Vec<Range<usize>>) -> I,
+            F: Fn(I::Item) -> Result<R, E> + Send + Sync,
+            R: Send,
+            E: Send,
+        {
+            self.strategy.try_map_collect_vec(prepare(self.ranges), map_op)
         }
     }
 
@@ -130,16 +181,27 @@ commonware_macros::stability_scope!(BETA {
         where
             Self: Sized;
 
-        /// Submit one CPU-bound job to this strategy.
+        /// Submit one CPU-bound job to this strategy, running it inline on the calling task when
+        /// it is measured cheaper than the round trip of offloading it to the pool.
         ///
-        /// The returned future resolves when the submitted job completes, but blocking on external
+        /// `len` groups calls at a call site into size classes for those measurements, so similar
+        /// `len` must mean comparable cost. An inline job runs to completion before `spawn`
+        /// returns, and jobs whose measured cost exceeds a small time budget offload. To force a
+        /// hand-off on a multi-worker pool, submit through [`manual`](Self::manual).
+        ///
+        /// The returned future resolves when the job completes. Blocking on external
         /// synchronization or I/O inside the job can occupy execution capacity until it returns.
         /// When the polling thread itself belongs to the strategy's execution resources (e.g. a
         /// runtime whose executor thread is registered as a pool worker), the job (and other
         /// pending work) may be executed inline on that thread rather than waited on.
         ///
         /// If the job panics, the panic is propagated to the caller; it never aborts the process.
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        #[track_caller]
+        fn spawn<F, T>(
+            &self,
+            len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static;
@@ -164,6 +226,74 @@ commonware_macros::stability_scope!(BETA {
             E: Send,
             SEQ: FnOnce() -> Result<R, E> + Send,
             PAR: FnOnce() -> Result<R, E> + Send;
+
+        /// Run an operation on its whole input or on strategy-provided batches.
+        ///
+        /// `run` is called once with `None` for the whole-input algorithm or `Some` for batches
+        /// covering `0..len`, each at least `minimum_batch_len` long. The strategy may choose
+        /// whole-input execution even when batching is possible. Empty extents and extents
+        /// that cannot form two such batches always use the whole-input algorithm.
+        ///
+        /// `multiplier` estimates work per input unit. Complete the operation, including
+        /// preparation and result assembly, inside `run`. Both execution paths must produce
+        /// equivalent results. The default implementation uses the whole-input algorithm.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Sequential, Strategy};
+        /// use core::num::NonZeroUsize;
+        ///
+        /// let values = [1u64, 2, 3, 4];
+        /// let total = Sequential.run_batches(values.len(), NonZeroUsize::MIN, 1, |batches| {
+        ///     match batches {
+        ///         None => values.iter().sum::<u64>(),
+        ///         Some(batches) => batches.map_collect_vec(
+        ///             |ranges| ranges.into_iter().map(|range| &values[range]).collect::<Vec<_>>(),
+        ///             |batch| batch.iter().sum::<u64>(),
+        ///         ).into_iter().sum(),
+        ///     }
+        /// });
+        /// assert_eq!(total, 10);
+        /// ```
+        #[track_caller]
+        fn run_batches<R, F>(
+            &self,
+            len: usize,
+            minimum_batch_len: NonZeroUsize,
+            multiplier: usize,
+            run: F,
+        ) -> R
+        where
+            R: Send,
+            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> R + Send,
+        {
+            match self.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
+                Ok::<_, Infallible>(run(batches))
+            }) {
+                Ok(result) => result,
+                Err(e) => match e {},
+            }
+        }
+
+        /// Like [`run_batches`](Self::run_batches), but for fallible work.
+        ///
+        /// Adaptive strategies record elapsed time only when the complete operation succeeds.
+        #[track_caller]
+        fn try_run_batches<R, E, F>(
+            &self,
+            _len: usize,
+            _minimum_batch_len: NonZeroUsize,
+            _multiplier: usize,
+            run: F,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+        {
+            run(None)
+        }
 
         /// Reduces a collection to a single value with per-partition initialization.
         ///
@@ -614,13 +744,18 @@ commonware_macros::stability_scope!(BETA {
             }
         }
 
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        #[track_caller]
+        fn spawn<F, T>(
+            &self,
+            len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
             let s = self.clone();
-            self.strategy.spawn(|_| f(s))
+            self.strategy.spawn(len, |_| f(s))
         }
 
         #[track_caller]
@@ -642,6 +777,27 @@ commonware_macros::stability_scope!(BETA {
             PAR: FnOnce() -> Result<R, E> + Send,
         {
             self.strategy.try_run(len, serial, parallel)
+        }
+
+        #[track_caller]
+        fn try_run_batches<R, E, F>(
+            &self,
+            len: usize,
+            minimum_batch_len: NonZeroUsize,
+            multiplier: usize,
+            run: F,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+        {
+            self.strategy.try_run_batches(len, minimum_batch_len, multiplier, |batches| {
+                run(batches.map(|batches| Batches {
+                    strategy: self,
+                    ranges: batches.ranges,
+                }))
+            })
         }
 
         #[track_caller]
@@ -794,10 +950,17 @@ commonware_macros::stability_scope!(BETA {
 
     impl Strategy for Sequential {
         fn manual(&self) -> Manual<Self> {
-            Manual::new(Self, NonZeroUsize::new(1).unwrap())
+            Manual {
+                strategy: Self,
+                parallelism: 1,
+            }
         }
 
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        fn spawn<F, T>(
+            &self,
+            _len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
@@ -895,6 +1058,9 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     /// planning parallelism so small inputs can avoid rayon scheduling overhead without disabling
     /// parallel execution for larger inputs.
     ///
+    /// Nested calls at the same callsite share estimates across parent paths, so use distinct
+    /// callsites (propagating `#[track_caller]` through helpers as needed) to tune them separately.
+    ///
     /// # Thread Pool Ownership
     ///
     /// `Rayon` holds an [`Arc<ThreadPool>`], so it can be cheaply cloned and shared
@@ -973,7 +1139,7 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             &self,
             len: usize,
             multiplier: usize,
-            run: impl FnOnce(policy::Execution) -> R,
+            run: impl FnOnce(policy::RunExecution) -> R,
         ) -> R {
             match self.try_execute(len, multiplier, |execution| {
                 Ok::<_, Infallible>(run(execution))
@@ -988,13 +1154,13 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             &self,
             len: usize,
             multiplier: usize,
-            run: impl FnOnce(policy::Execution) -> Result<R, E>,
+            run: impl FnOnce(policy::RunExecution) -> Result<R, E>,
         ) -> Result<R, E> {
             let Some(policy) = &self.policy else {
                 let execution = if self.parallelism <= 1 {
-                    policy::Execution::Serial
+                    policy::RunExecution::Serial
                 } else {
-                    policy::Execution::Parallel
+                    policy::RunExecution::Parallel
                 };
                 return run(execution);
             };
@@ -1016,47 +1182,120 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             }
         }
 
-        fn spawn<F, T>(&self, f: F) -> impl core::future::Future<Output = T> + Send + 'static
+        #[track_caller]
+        fn spawn<F, T>(
+            &self,
+            len: usize,
+            f: F,
+        ) -> impl core::future::Future<Output = T> + Send + 'static
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
         {
-            if self.thread_pool.current_num_threads() <= 1 {
-                return Either::Left(future::ready(f(self.clone())));
-            }
+            let threads = self.thread_pool.current_num_threads();
+            let caller = Location::caller();
 
-            let (tx, mut rx) = oneshot::channel();
-            let s = self.clone();
-            let pool = self.thread_pool.clone();
-            self.thread_pool.spawn(move || {
-                // Catch the panic so a panicking job propagates to the awaiting task rather than
-                // aborting the process (rayon aborts on an uncaught panic in a spawned job).
-                let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
-                let _ = tx.send(result);
-            });
-            Either::Right(async move {
-                // When the polling thread is itself a member of the pool, waiting on the channel
-                // could park the only worker able to run the job. Execute pending pool work inline
-                // until the job completes or another worker takes over. `yield_now` returns `None`
-                // when this thread is not a pool member, so external callers fall through to the
-                // channel immediately.
-                loop {
-                    if let Ok(Some(result)) = rx.try_recv() {
-                        return match result {
-                            Ok(value) => value,
-                            Err(payload) => panic::resume_unwind(payload),
+            // A single-worker pool cannot overlap a hand-off, so the job always runs inline,
+            // untimed. A manual strategy has no policy and keeps spawn's unconditional
+            // hand-off. Otherwise the policy weighs the measured job cost against the offload
+            // round trip.
+            let ((execution, measure), policy) = if threads <= 1 {
+                ((policy::SpawnExecution::Inline, false), None)
+            } else {
+                self.policy.as_ref().map_or(
+                    ((policy::SpawnExecution::Offload, false), None),
+                    |policy| (policy.choose_spawn(caller, len, threads), Some(policy)),
+                )
+            };
+
+            match execution {
+                policy::SpawnExecution::Inline => {
+                    // Inline: run on the calling task and hand back a ready future.
+                    let start = measure.then(Instant::now);
+                    let result = f(self.clone());
+                    if let (Some(start), Some(policy)) = (start, policy) {
+                        policy.record_spawn_inline(caller, len, threads, start.elapsed());
+                    }
+                    Either::Left(future::ready(result))
+                }
+                policy::SpawnExecution::Offload => {
+                    // Offload: hand the job to the pool. The worker records the job wall (so
+                    // job estimates survive a dropped future), and the awaiting future records
+                    // the round-trip overhead when it observes the result.
+                    let spawn_start = measure.then(Instant::now);
+                    let (tx, mut rx) = oneshot::channel();
+                    let s = self.clone();
+                    let pool = self.thread_pool.clone();
+                    let recorder = if measure {
+                        policy.cloned().map(|policy| (policy, caller, len, threads))
+                    } else {
+                        None
+                    };
+                    let worker_recorder = recorder.clone();
+                    self.thread_pool.spawn(move || {
+                        let job_start = worker_recorder.is_some().then(Instant::now);
+
+                        // Catch the panic so a panicking job propagates to the awaiting task
+                        // rather than aborting the process (rayon aborts on an uncaught panic in
+                        // a spawned job).
+                        let result = panic::catch_unwind(AssertUnwindSafe(|| f(s)));
+                        let job = job_start.map(|start| start.elapsed());
+                        let ok = result.is_ok();
+                        let _ = tx.send((result, job));
+
+                        // Record successful runs only, matching the inline arm: a panicked job's
+                        // wall time says nothing about the job size. Recording after the send
+                        // keeps the bookkeeping off the caller's wake path.
+                        if ok
+                            && let (Some((policy, caller, len, threads)), Some(job)) =
+                                (worker_recorder, job)
+                        {
+                            policy.record_spawn_job(caller, len, threads, job);
+                        }
+                    });
+                    Either::Right(async move {
+                        // When the polling thread is itself a member of the pool, waiting on the
+                        // channel could park the only worker able to run the job. Execute pending
+                        // pool work inline until the job completes or another worker takes over.
+                        // `yield_now` returns `None` when this thread is not a pool member, so
+                        // external callers fall through to the channel immediately.
+                        let (result, job) = loop {
+                            if let Ok(Some(payload)) = rx.try_recv() {
+                                break payload;
+                            }
+                            if !matches!(pool.yield_now(), Some(Yield::Executed)) {
+                                break rx.await.unwrap_or_else(|_| {
+                                    panic!("strategy job dropped before completion")
+                                });
+                            }
                         };
-                    }
-                    if !matches!(pool.yield_now(), Some(Yield::Executed)) {
-                        break;
-                    }
+                        match result {
+                            Ok(value) => {
+                                // The round trip is everything around the job itself: hand-off
+                                // setup, queueing, worker wake, result send, task wake, and this
+                                // poll. A late poll inflates the sample with overlap slack, which
+                                // only ever biases toward inline, and the policy's budget caps
+                                // what that bias can buy.
+                                if let (
+                                    Some((policy, caller, len, threads)),
+                                    Some(job),
+                                    Some(start),
+                                ) = (recorder, job, spawn_start)
+                                {
+                                    policy.record_spawn_overhead(
+                                        caller,
+                                        len,
+                                        threads,
+                                        start.elapsed().saturating_sub(job),
+                                    );
+                                }
+                                value
+                            }
+                            Err(payload) => panic::resume_unwind(payload),
+                        }
+                    })
                 }
-                match rx.await {
-                    Ok(Ok(value)) => value,
-                    Ok(Err(payload)) => panic::resume_unwind(payload),
-                    Err(_) => panic!("strategy job dropped before completion"),
-                }
-            })
+            }
         }
 
         #[track_caller]
@@ -1067,8 +1306,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             PAR: FnOnce() -> R + Send,
         {
             self.execute(len, 1, |execution| match execution {
-                policy::Execution::Serial => serial(),
-                policy::Execution::Parallel => parallel(),
+                policy::RunExecution::Serial => serial(),
+                policy::RunExecution::Parallel => parallel(),
             })
         }
 
@@ -1081,8 +1320,45 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             PAR: FnOnce() -> Result<R, E> + Send,
         {
             self.try_execute(len, 1, |execution| match execution {
-                policy::Execution::Serial => serial(),
-                policy::Execution::Parallel => parallel(),
+                policy::RunExecution::Serial => serial(),
+                policy::RunExecution::Parallel => parallel(),
+            })
+        }
+
+        #[track_caller]
+        fn try_run_batches<R, E, F>(
+            &self,
+            len: usize,
+            minimum_batch_len: NonZeroUsize,
+            multiplier: usize,
+            run: F,
+        ) -> Result<R, E>
+        where
+            R: Send,
+            E: Send,
+            F: for<'scope> FnOnce(Option<Batches<'scope, Self>>) -> Result<R, E> + Send,
+        {
+            let count = self.parallelism.min(len / minimum_batch_len.get());
+            if count < 2 {
+                return run(None);
+            }
+            self.try_execute(len, multiplier, |execution| match execution {
+                policy::RunExecution::Serial => run(None),
+                policy::RunExecution::Parallel => {
+                    let per_batch = len / count;
+                    let extra = len % count;
+                    let ranges = (0..count)
+                        .map(|batch| {
+                            let start = batch * per_batch + batch.min(extra);
+                            start..start + per_batch + usize::from(batch < extra)
+                        })
+                        .collect();
+                    let manual = self.manual();
+                    run(Some(Batches {
+                        strategy: &manual.strategy,
+                        ranges,
+                    }))
+                }
             })
         }
 
@@ -1106,10 +1382,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => {
+                policy::RunExecution::Serial => {
                     Sequential.fold_init(items, init, identity, fold_op, reduce_op)
                 }
-                policy::Execution::Parallel => self.thread_pool.install(|| {
+                policy::RunExecution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
                         .fold(
@@ -1134,8 +1410,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.map_collect_vec(items, map_op),
-                policy::Execution::Parallel => self
+                policy::RunExecution::Serial => Sequential.map_collect_vec(items, map_op),
+                policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map(map_op).collect()),
             })
@@ -1151,8 +1427,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.try_execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.try_map_collect_vec(items, map_op),
-                policy::Execution::Parallel => self
+                policy::RunExecution::Serial => Sequential.try_map_collect_vec(items, map_op),
+                policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map(map_op).collect()),
             })
@@ -1169,8 +1445,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::Execution::Parallel => self
+                policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map_init(init, map_op).collect()),
             })
@@ -1193,8 +1469,8 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.execute(items.len(), multiplier, |execution| match execution {
-                policy::Execution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
-                policy::Execution::Parallel => self
+                policy::RunExecution::Serial => Sequential.map_init_collect_vec(items, init, map_op),
+                policy::RunExecution::Parallel => self
                     .thread_pool
                     .install(|| items.into_par_iter().map_init(init, map_op).collect()),
             })
@@ -1218,10 +1494,10 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
         {
             let items: Vec<I::Item> = iter.into_iter().collect();
             self.try_execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => {
+                policy::RunExecution::Serial => {
                     Sequential.try_fold(items, identity, fold_op, reduce_op)
                 }
-                policy::Execution::Parallel => self.thread_pool.install(|| {
+                policy::RunExecution::Parallel => self.thread_pool.install(|| {
                     items
                         .into_par_iter()
                         .try_fold(&identity, &fold_op)
@@ -1247,13 +1523,16 @@ commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
             self.execute(items.len(), 1, |execution| match execution {
-                policy::Execution::Serial => Sequential.sort_by(items, compare),
-                policy::Execution::Parallel => {
+                policy::RunExecution::Serial => Sequential.sort_by(items, compare),
+                policy::RunExecution::Parallel => {
                     self.thread_pool.install(|| items.par_sort_by(compare))
                 }
             });
         }
     }
+});
+commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "test-utils", test)) {
+    pub mod mocks;
 });
 
 #[cfg(test)]
@@ -1263,17 +1542,300 @@ mod test {
     use futures::FutureExt;
     use proptest::prelude::*;
     use rayon::ThreadPoolBuilder;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        rc::Rc,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
     }
 
+    /// Call `spawn` with this helper so the policy entry is keyed by the helper's call
+    /// site (both `track_caller` locations resolve to the same line).
+    #[track_caller]
+    fn spawn_flagged(
+        strategy: &Rayon,
+        panics: bool,
+    ) -> (
+        &'static std::panic::Location<'static>,
+        impl core::future::Future<Output = usize> + Send + 'static,
+    ) {
+        (
+            std::panic::Location::caller(),
+            strategy.spawn(64, move |_| {
+                if panics {
+                    panic!("job panic");
+                }
+                7
+            }),
+        )
+    }
+
+    fn spawn_recorded(strategy: &Rayon, loc: &'static std::panic::Location<'static>) -> bool {
+        let parallelism = strategy.manual().parallelism();
+        strategy
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.spawn_recorded(loc, 64, parallelism))
+    }
+
+    /// A panicking offloaded job must not update the spawn policy: its wall time says
+    /// nothing about the job size and would train the policy toward inlining.
+    #[test]
+    fn spawn_panic_records_nothing() {
+        let strategy = parallel_strategy();
+
+        let (loc, job) = spawn_flagged(&strategy, true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            futures::executor::block_on(job)
+        }));
+        assert!(result.is_err());
+        assert!(!spawn_recorded(&strategy, loc));
+
+        let (loc, job) = spawn_flagged(&strategy, false);
+        assert_eq!(futures::executor::block_on(job), 7);
+        assert!(spawn_recorded(&strategy, loc));
+    }
+
+    /// Spawn honors an inline decision after cheap job and hand-off samples are recorded.
+    /// Caller tracking keys the recorded samples and spawn to the same policy entry.
+    #[test]
+    #[track_caller]
+    fn spawn_inlines_a_sub_overhead_job() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+        let caller = std::panic::Location::caller();
+        let threads = strategy.thread_pool.current_num_threads();
+
+        for _ in 0..2 {
+            assert_eq!(
+                policy.choose_spawn(caller, 64, threads),
+                (crate::policy::SpawnExecution::Offload, true)
+            );
+            policy.record_spawn_job(caller, 64, threads, std::time::Duration::from_micros(2));
+            policy.record_spawn_overhead(caller, 64, threads, std::time::Duration::from_micros(50));
+        }
+
+        assert_eq!(
+            futures::executor::block_on(strategy.spawn(64, |_| std::thread::current().id())),
+            std::thread::current().id()
+        );
+    }
+
+    /// A job measured over the inline budget keeps offloading: the calling task is never blocked
+    /// on a big job even when the hand-off looks expensive.
+    #[test]
+    fn spawn_keeps_offloading_big_jobs() {
+        let strategy = parallel_strategy();
+
+        for _ in 0..20 {
+            let on_pool = futures::executor::block_on(strategy.spawn(64, |_| {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                rayon::current_thread_index().is_some()
+            }));
+            assert!(
+                on_pool,
+                "a job over the inline budget ran on the calling task"
+            );
+        }
+    }
+
     fn policy_len(strategy: &Rayon) -> usize {
         strategy.policy.as_ref().map_or(0, |policy| policy.len())
+    }
+
+    #[test]
+    fn run_batches_preserves_whole_input_without_splitting() {
+        fn check(strategy: &impl Strategy, len: usize, minimum: NonZeroUsize) {
+            let owned = Box::new(len);
+            let calls = AtomicUsize::new(0);
+            let result = strategy.run_batches(len, minimum, usize::MAX, |batches| {
+                calls.fetch_add(1, Ordering::Relaxed);
+                assert!(batches.is_none());
+                *owned
+            });
+            assert_eq!(result, len);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+
+        let one_worker = Rayon::new(NonZeroUsize::MIN).unwrap();
+        let parallel = parallel_strategy();
+        let minimum = NonZeroUsize::new(8).unwrap();
+        for len in [0, 1, 7, 8, 15] {
+            check(&Sequential, len, minimum);
+            check(&one_worker, len, minimum);
+            check(&parallel, len, minimum);
+            check(&parallel.manual(), len, minimum);
+        }
+        check(&Sequential, usize::MAX, NonZeroUsize::MIN);
+        check(&one_worker, usize::MAX, NonZeroUsize::MIN);
+        check(&parallel, usize::MAX, NonZeroUsize::MAX);
+        assert_eq!(policy_len(&one_worker), 0);
+        assert_eq!(policy_len(&parallel), 0);
+    }
+
+    #[test]
+    fn run_batches_supplies_ordered_balanced_ranges() {
+        let strategy = Rayon::new(NonZeroUsize::MIN)
+            .unwrap()
+            .with_parallelism(NonZeroUsize::new(8).unwrap())
+            .manual();
+        for (len, minimum) in [
+            (2, 1),
+            (7, 1),
+            (8, 1),
+            (9, 1),
+            (17, 1),
+            (15, 7),
+            (16, 8),
+            (17, 8),
+            (usize::MAX, 1),
+            (usize::MAX, usize::MAX / 2),
+        ] {
+            let ranges = strategy.run_batches(
+                len,
+                NonZeroUsize::new(minimum).unwrap(),
+                usize::MAX,
+                |batches| {
+                    batches
+                        .unwrap()
+                        .map_collect_vec(|ranges| ranges, |range| range)
+                },
+            );
+            assert_eq!(ranges.len(), 8.min(len / minimum));
+            assert_eq!(ranges.first().unwrap().start, 0);
+            assert_eq!(ranges.last().unwrap().end, len);
+            assert!(ranges.windows(2).all(|pair| pair[0].end == pair[1].start));
+            assert!(ranges.iter().all(|range| range.len() >= minimum));
+            let shortest = ranges.iter().map(|range| range.len()).min().unwrap();
+            let longest = ranges.iter().map(|range| range.len()).max().unwrap();
+            assert!(longest - shortest <= 1);
+        }
+        assert_eq!(policy_len(&strategy.strategy), 0);
+    }
+
+    #[test]
+    fn run_batches_prepares_borrowed_outputs_once() {
+        let strategy = parallel_strategy().manual();
+        let input: Vec<_> = (0..17).map(|value| value * 3).collect();
+        let mut output = vec![0; input.len()];
+        let preparations = AtomicUsize::new(0);
+        let ranges = strategy.run_batches(input.len(), NonZeroUsize::MIN, 1, |batches| {
+            let owned = Rc::new(42);
+            batches.unwrap().map_collect_vec(
+                |ranges| {
+                    assert_eq!(*owned, 42);
+                    drop(owned);
+                    preparations.fetch_add(1, Ordering::Relaxed);
+                    let mut remaining = output.as_mut_slice();
+                    ranges
+                        .into_iter()
+                        .map(|range| {
+                            let (head, tail) =
+                                std::mem::take(&mut remaining).split_at_mut(range.len());
+                            remaining = tail;
+                            (range, head)
+                        })
+                        .collect::<Vec<_>>()
+                },
+                |(range, out)| {
+                    assert!(rayon::current_thread_index().is_some());
+                    out.copy_from_slice(&input[range.clone()]);
+                    range
+                },
+            )
+        });
+        assert_eq!(preparations.load(Ordering::Relaxed), 1);
+        assert_eq!(output, input);
+        assert_eq!(ranges.first().unwrap().start, 0);
+        assert_eq!(ranges.last().unwrap().end, input.len());
+    }
+
+    #[track_caller]
+    fn run_batches_flagged(
+        strategy: &Rayon,
+        fail_mapping: bool,
+        fail_assembly: bool,
+    ) -> (&'static std::panic::Location<'static>, Result<usize, ()>) {
+        (
+            std::panic::Location::caller(),
+            strategy.try_run_batches(16, NonZeroUsize::MIN, usize::MAX, |batches| {
+                let total = match batches {
+                    None if fail_mapping => return Err(()),
+                    None => 16,
+                    Some(batches) => batches
+                        .try_map_collect_vec(
+                            |ranges| ranges,
+                            |range| {
+                                if fail_mapping {
+                                    Err(())
+                                } else {
+                                    Ok(range.len())
+                                }
+                            },
+                        )?
+                        .into_iter()
+                        .sum(),
+                };
+                if fail_assembly { Err(()) } else { Ok(total) }
+            }),
+        )
+    }
+
+    #[test]
+    fn run_batches_records_only_complete_success() {
+        let strategy = parallel_strategy();
+        let policy = strategy.policy.as_ref().unwrap();
+
+        let (mapping_loc, mapping) = run_batches_flagged(&strategy, true, false);
+        assert_eq!(mapping, Err(()));
+        assert_eq!(
+            policy.get_entry(mapping_loc, 16, usize::MAX, 4),
+            Some((None, None))
+        );
+
+        let (assembly_loc, assembly) = run_batches_flagged(&strategy, false, true);
+        assert_eq!(assembly, Err(()));
+        assert_eq!(
+            policy.get_entry(assembly_loc, 16, usize::MAX, 4),
+            Some((None, None))
+        );
+
+        let (success_loc, result) = run_batches_flagged(&strategy, false, false);
+        assert_eq!(result, Ok(16));
+        let (_, parallel) = policy.get_entry(success_loc, 16, usize::MAX, 4).unwrap();
+        assert!(parallel.is_some());
+        assert_eq!(policy_len(&strategy), 3);
+    }
+
+    #[test]
+    fn run_batches_keeps_one_policy_decision_and_manual_execution() {
+        let strategy = parallel_strategy();
+        let run = |strategy: &Rayon| {
+            strategy.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+                batches
+                    .unwrap()
+                    .map_collect_vec(|ranges| ranges, |range| range.len())
+            })
+        };
+        assert_eq!(run(&strategy).into_iter().sum::<usize>(), 16);
+        assert_eq!(policy_len(&strategy), 1);
+
+        let manual = strategy.manual();
+        for _ in 0..3 {
+            let on_pool = manual.run_batches(16, NonZeroUsize::MIN, 1, |batches| {
+                batches
+                    .unwrap()
+                    .map_collect_vec(|ranges| ranges, |_| rayon::current_thread_index().is_some())
+            });
+            assert!(on_pool.into_iter().all(|on_pool| on_pool));
+        }
+        assert_eq!(policy_len(&strategy), 1);
+        assert_eq!(policy_len(&manual.strategy), 0);
     }
 
     fn map_from_same_callsite(strategy: &Rayon, len: usize) {
@@ -1325,7 +1887,7 @@ mod test {
         let strategy = Rayon::with_pool(Arc::new(pool));
 
         let result = strategy
-            .spawn(|strategy| strategy.map_collect_vec(0..2, |i| i + 1))
+            .spawn(2, |strategy| strategy.map_collect_vec(0..2, |i| i + 1))
             .now_or_never()
             .expect("spawn should complete on first poll via the yield loop");
         assert_eq!(result, vec![1, 2]);
@@ -1435,6 +1997,21 @@ mod test {
         assert_eq!(policy_len(&strategy), 2);
     }
 
+    /// `manual()` forces the hand-off on a multi-worker pool: the job runs on the pool no matter
+    /// what the adaptive policy would have decided for this call site.
+    #[test]
+    fn manual_spawn_always_hands_off() {
+        let strategy = parallel_strategy();
+        let manual = strategy.manual();
+
+        for _ in 0..10 {
+            let on_pool = futures::executor::block_on(
+                manual.spawn(1, |_| rayon::current_thread_index().is_some()),
+            );
+            assert!(on_pool, "manual spawn ran on the calling task");
+        }
+    }
+
     #[test]
     fn manual_strategy_does_not_use_adaptive_policy() {
         let strategy = parallel_strategy();
@@ -1456,13 +2033,13 @@ mod test {
     fn adaptive_policy_keys_default_methods_by_external_callsite() {
         let strategy = parallel_strategy();
 
-        // `fold` uses the trait's default body (no `Rayon` override), so this also guards that
-        // `#[track_caller]` still attributes the policy key to the caller's line rather than the
-        // default method body: two calls from distinct callsites must yield two distinct entries.
+        // Default methods must attribute policy keys to their external callers.
         let _: i32 = strategy.fold(0..16, || 0, |acc, x| acc + x, |a, b| a + b);
         let _: i32 = strategy.fold(0..16, || 0, |acc, x| acc + x, |a, b| a + b);
+        strategy.run_batches(16, NonZeroUsize::MIN, 1, |_| ());
+        strategy.run_batches(16, NonZeroUsize::MIN, 1, |_| ());
 
-        assert_eq!(policy_len(&strategy), 2);
+        assert_eq!(policy_len(&strategy), 4);
     }
 
     #[test]
@@ -1489,7 +2066,7 @@ mod test {
 
     #[test]
     fn sequential_spawn_runs_job() {
-        let result = futures::executor::block_on(Sequential.spawn(|_| 7));
+        let result = futures::executor::block_on(Sequential.spawn(1, |_| 7));
 
         assert_eq!(result, 7);
     }
@@ -1498,12 +2075,14 @@ mod test {
     fn rayon_spawn_runs_job_on_pool() {
         let strategy = parallel_strategy();
 
-        let result = futures::executor::block_on(strategy.spawn(|_| {
+        let result = futures::executor::block_on(strategy.spawn(1, |_| {
             assert!(rayon::current_thread_index().is_some());
             7
         }));
 
         assert_eq!(result, 7);
+
+        // Spawn trains only the spawn-side policy: no run entries are created.
         assert_eq!(policy_len(&strategy), 0);
     }
 
@@ -1519,7 +2098,7 @@ mod test {
 
         assert_eq!(strategy.manual().parallelism(), 4);
 
-        let result = strategy.spawn(|_| 7).now_or_never();
+        let result = strategy.spawn(1, |_| 7).now_or_never();
 
         assert_eq!(result, Some(7));
         assert_eq!(policy_len(&strategy), 0);
@@ -1531,13 +2110,13 @@ mod test {
         // A panic on a pool worker must surface at the await point, not abort the process.
         let strategy = parallel_strategy();
 
-        let _: () = futures::executor::block_on(strategy.spawn(|_| panic!("boom")));
+        let _: () = futures::executor::block_on(strategy.spawn(1, |_| panic!("boom")));
     }
 
     #[test]
     #[should_panic(expected = "boom")]
     fn sequential_spawn_propagates_job_panic() {
-        let _: () = futures::executor::block_on(Sequential.spawn(|_| panic!("boom")));
+        let _: () = futures::executor::block_on(Sequential.spawn(1, |_| panic!("boom")));
     }
 
     proptest! {

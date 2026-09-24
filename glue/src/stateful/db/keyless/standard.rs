@@ -7,8 +7,8 @@
 //! can read through to applied state.
 
 use crate::stateful::db::{
-    BatchContext, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb, SyncEngineConfig,
-    Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
+    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -272,8 +272,19 @@ where
     type Config = fixed::Config<S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -299,9 +310,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -314,18 +329,6 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -357,8 +360,19 @@ where
     type Config = variable::Config<<variable::Operation<F, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
 
-    async fn init(context: E, config: Self::Config) -> Result<Self, Error<F>> {
-        <Self>::init(context, config).await
+    async fn init(
+        context: E,
+        config: Self::Config,
+        expected: Option<Self::SyncTarget>,
+    ) -> Result<Self, InitError<Error<F>, Self::SyncTarget>> {
+        let db = <Self>::init(
+            context,
+            config,
+            expected.as_ref().map(|target| target.range.end()),
+        )
+        .await
+        .map_err(InitError::Database)?;
+        validate_initialization(db, expected)
     }
 
     fn initial_sync_target() -> Self::SyncTarget {
@@ -384,9 +398,13 @@ where
             && *target.range.end() == batch.bounds().tip.size
     }
 
-    async fn finalize(self, batch: Self::Merkleized) -> Result<(Self, Handle<()>), Error<F>> {
+    async fn apply(self, batch: Self::Merkleized) -> Result<Self, Error<F>> {
         let (db, _) = self.apply_batch(batch.inner).await?;
-        db.start_sync().await
+        Ok(db)
+    }
+
+    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
+        self.start_sync().await
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -399,18 +417,6 @@ where
             self.root(),
             non_empty_range!(self.sync_boundary(), bounds.end),
         )
-    }
-
-    async fn rewind_to_target(self, target: Self::SyncTarget) -> Result<Self, Error<F>> {
-        let db = self.rewind(target.range.end()).await?;
-        let db = db.sync().await?;
-
-        let rewound_target = db.sync_target();
-        assert_eq!(
-            rewound_target, target,
-            "rewound database target mismatch after rewind",
-        );
-        Ok(db)
     }
 }
 
@@ -514,6 +520,7 @@ mod tests {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: page_cache.clone(),
             },
@@ -522,6 +529,7 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 page_cache,
                 write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
             },
         }
     }
@@ -543,10 +551,12 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_finalize_commits_fixed_keyless_batches() {
+    fn managed_db_apply_and_finalize_persists_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db
@@ -561,11 +571,12 @@ mod tests {
 
             {
                 let (slot, database) = db.write().await;
-                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database, merkleized)
+                let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
                     .await
                     .unwrap();
+                let (database, sync) = <FixedDb as ManagedDb<_>>::finalize(database).await.unwrap();
                 slot.put(database);
-                sync.await.expect("finalize flush failed");
+                sync.await.expect("database sync failed");
             }
 
             let guard = db.read().await;
@@ -586,7 +597,9 @@ mod tests {
     fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
-            let db = FixedDb::init(context.child("db"), config).await.unwrap();
+            let db = FixedDb::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let db = Shared::new("test", db);
 
             let batch = db

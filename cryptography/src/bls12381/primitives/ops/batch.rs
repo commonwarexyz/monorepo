@@ -20,6 +20,7 @@ use super::{
 use alloc::{vec, vec::Vec};
 use commonware_math::algebra::Space;
 use commonware_parallel::Strategy;
+use commonware_utils::iter::NonEmpty;
 use rand_core::CryptoRng;
 
 /// Segment tree for batch verification bisection.
@@ -196,30 +197,28 @@ fn bisect<V: Variant>(
 /// This function assumes a group check was already performed on each public key
 /// and signature. Duplicate public keys are safe because random scalar weights
 /// ensure each (public key, signature) pair is verified independently.
-pub fn verify_same_message<R, V>(
+pub fn verify_same_message<R, V, I>(
     rng: &mut R,
     namespace: &[u8],
     message: &[u8],
-    entries: &[(V::Public, V::Signature)],
+    entries: NonEmpty<I>,
     par: &impl Strategy,
 ) -> Vec<usize>
 where
     R: CryptoRng,
     V: Variant,
+    I: Iterator<Item = (V::Public, V::Signature)>,
 {
-    if entries.is_empty() {
-        return Vec::new();
-    }
-
+    // Every entry signs the same message, so hash it once for the shared pairing input.
     let hm = hash_with_namespace::<V>(V::MESSAGE, namespace, message);
 
+    // Extract pks and sigs for MSM.
+    let (pks, sigs) = entries.into_iter().collect::<(Vec<_>, Vec<_>)>();
+
     // Generate 128-bit random scalars (sufficient for batch verification security)
-    let scalars: Vec<SmallScalar> = (0..entries.len())
+    let scalars: Vec<SmallScalar> = (0..pks.len())
         .map(|_| SmallScalar::random(&mut *rng))
         .collect();
-
-    // Extract pks and sigs for MSM
-    let (pks, sigs) = entries.iter().cloned().collect::<(Vec<_>, Vec<_>)>();
 
     // Compute MSMs for pk and sig in parallel using 128-bit scalars.
     let (sum_pk, sum_sig) = par.join(
@@ -254,19 +253,15 @@ where
 pub fn verify_same_signer<'a, R, V, I>(
     rng: &mut R,
     public: &V::Public,
-    entries: I,
+    entries: NonEmpty<I>,
     strategy: &impl Strategy,
 ) -> Result<(), Error>
 where
     R: CryptoRng,
     V: Variant,
-    I: IntoIterator<Item = &'a (&'a [u8], &'a [u8], V::Signature)>,
+    I: Iterator<Item = (&'a [u8], &'a [u8], V::Signature)>,
 {
     let entries: Vec<_> = entries.into_iter().collect();
-
-    if entries.is_empty() {
-        return Ok(());
-    }
 
     // Generate 128-bit random scalars (sufficient for batch verification security)
     let scalars: Vec<SmallScalar> = (0..entries.len())
@@ -299,9 +294,9 @@ mod tests {
         *,
     };
     use crate::bls12381::primitives::variant::{MinPk, MinSig};
-    use commonware_math::algebra::{CryptoGroup, Random};
+    use commonware_math::algebra::{Additive, CryptoGroup, Random};
     use commonware_parallel::{Rayon, Sequential};
-    use commonware_utils::{NZUsize, test_rng};
+    use commonware_utils::{NZUsize, non_empty, test_rng};
 
     fn verify_same_signer_correct<V: Variant>() {
         let mut rng = test_rng();
@@ -317,18 +312,77 @@ mod tests {
             .map(|(ns, msg)| (*ns, *msg, sign_message::<V>(&private, ns, msg)))
             .collect();
 
-        verify_same_signer::<_, V, _>(&mut rng, &public, &entries, &Sequential)
-            .expect("valid signatures should be accepted");
+        verify_same_signer::<_, V, _>(
+            &mut rng,
+            &public,
+            non_empty![@entries.iter().copied()],
+            &Sequential,
+        )
+        .expect("valid signatures should be accepted");
 
         let strategy = Rayon::new(NZUsize!(4)).unwrap();
-        verify_same_signer::<_, V, _>(&mut rng, &public, &entries, &strategy)
-            .expect("valid signatures should be accepted with parallel strategy");
+        verify_same_signer::<_, V, _>(
+            &mut rng,
+            &public,
+            non_empty![@entries.iter().copied()],
+            &strategy,
+        )
+        .expect("valid signatures should be accepted with parallel strategy");
     }
 
     #[test]
     fn test_verify_same_signer_correct() {
         verify_same_signer_correct::<MinPk>();
         verify_same_signer_correct::<MinSig>();
+    }
+
+    fn verify_same_signer_rejects_identity_signature<V: Variant>() {
+        let mut rng = test_rng();
+        let (_, public) = keypair::<_, V>(&mut rng);
+        let namespace: &[u8] = b"test";
+        let message: &[u8] = b"message";
+        let entries = [(namespace, message, V::Signature::zero())];
+
+        assert!(matches!(
+            verify_same_signer::<_, V, _>(
+                &mut rng,
+                &public,
+                non_empty![@entries.iter().copied()],
+                &Sequential,
+            ),
+            Err(Error::InvalidSignature)
+        ));
+    }
+
+    #[test]
+    fn test_verify_same_signer_rejects_identity_signature() {
+        verify_same_signer_rejects_identity_signature::<MinPk>();
+        verify_same_signer_rejects_identity_signature::<MinSig>();
+    }
+
+    fn verify_same_message_detects_identity_signature<V: Variant>() {
+        let mut rng = test_rng();
+        let (_, public) = keypair::<_, V>(&mut rng);
+        let namespace = b"test";
+        let message = b"message";
+        let entries = [(public, V::Signature::zero())];
+
+        assert_eq!(
+            verify_same_message::<_, V, _>(
+                &mut rng,
+                namespace,
+                message,
+                non_empty![@entries.iter().copied()],
+                &Sequential,
+            ),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn test_verify_same_message_detects_identity_signature() {
+        verify_same_message_detects_identity_signature::<MinPk>();
+        verify_same_message_detects_identity_signature::<MinSig>();
     }
 
     fn verify_same_signer_wrong_signature<V: Variant>() {
@@ -348,7 +402,12 @@ mod tests {
         let random_scalar = Scalar::random(&mut rng);
         entries[1].2 += &(V::Signature::generator() * &random_scalar);
 
-        let result = verify_same_signer::<_, V, _>(&mut rng, &public, &entries, &Sequential);
+        let result = verify_same_signer::<_, V, _>(
+            &mut rng,
+            &public,
+            non_empty![@entries.iter().copied()],
+            &Sequential,
+        );
         assert!(result.is_err(), "corrupted signature should be rejected");
     }
 
@@ -388,8 +447,11 @@ mod tests {
         );
 
         // But aggregates are identical (the attack)
-        let forged_agg = aggregate::combine_signatures::<V, _>(&[forged_sig1, forged_sig2]);
-        let valid_agg = aggregate::combine_signatures::<V, _>(&[sig1, sig2]);
+        let forged_signatures = [forged_sig1, forged_sig2];
+        let valid_signatures = [sig1, sig2];
+        let forged_agg =
+            aggregate::combine_signatures::<V, _>(non_empty![@forged_signatures.iter()]);
+        let valid_agg = aggregate::combine_signatures::<V, _>(non_empty![@valid_signatures.iter()]);
         assert_eq!(forged_agg, valid_agg, "aggregates should be equal");
 
         // Naive aggregate verification accepts forged signatures
@@ -404,7 +466,12 @@ mod tests {
             (namespace, msg1, forged_sig1),
             (namespace, msg2, forged_sig2),
         ];
-        let result = verify_same_signer::<_, V, _>(&mut rng, &public, &forged_entries, &Sequential);
+        let result = verify_same_signer::<_, V, _>(
+            &mut rng,
+            &public,
+            non_empty![@forged_entries.iter().copied()],
+            &Sequential,
+        );
         assert!(
             result.is_err(),
             "batch verification should reject forged signatures"
@@ -413,8 +480,13 @@ mod tests {
         // Batch verification accepts valid signatures
         let valid_entries: Vec<(&[u8], &[u8], _)> =
             vec![(namespace, msg1, sig1), (namespace, msg2, sig2)];
-        verify_same_signer::<_, V, _>(&mut rng, &public, &valid_entries, &Sequential)
-            .expect("batch verification should accept valid signatures");
+        verify_same_signer::<_, V, _>(
+            &mut rng,
+            &public,
+            non_empty![@valid_entries.iter().copied()],
+            &Sequential,
+        )
+        .expect("batch verification should accept valid signatures");
     }
 
     #[test]

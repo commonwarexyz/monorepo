@@ -142,6 +142,7 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const CHURN_BATCHES: u64 = 4;
 
 struct Args {
@@ -346,6 +347,7 @@ fn main() {
             metadata_partition: "constantinople-merkle-metadata".into(),
             items_per_blob: ITEMS_PER_BLOB,
             write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(threads),
             page_cache: pc.clone(),
         };
@@ -354,6 +356,7 @@ fn main() {
             items_per_blob: ITEMS_PER_BLOB,
             page_cache: pc,
             write_buffer: WRITE_BUFFER,
+            replay_buffer: REPLAY_BUFFER,
         };
         match db_kind.as_str() {
             "current::unordered::fixed::mmb" => {
@@ -362,11 +365,11 @@ fn main() {
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = CurrentDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(
                     db,
                     args,
@@ -380,11 +383,13 @@ fn main() {
                     journal_config,
                     grafted_metadata_partition: "constantinople-grafted-metadata".into(),
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = CurrentOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = CurrentOrderedDb::init(ctx.child("db"), cfg, None)
+                    .await
+                    .unwrap();
                 run_pipeline!(
                     db,
                     args,
@@ -397,11 +402,13 @@ fn main() {
                     merkle_config,
                     journal_config,
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyOrderedDb::init(ctx.child("db"), cfg, None)
+                    .await
+                    .unwrap();
                 run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
             }
             "any::unordered::variable::mmb" => {
@@ -414,13 +421,14 @@ fn main() {
                         codec_config: ((), ()),
                         page_cache: pc_var,
                         write_buffer: WRITE_BUFFER,
+                        replay_buffer: REPLAY_BUFFER,
                     },
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyVarDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyVarDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
             }
             _ => {
@@ -428,11 +436,11 @@ fn main() {
                     merkle_config,
                     journal_config,
                     translator: EightCap,
-                    init_cache_size: Some(NZUsize!(1 << 18)),
+                    init_cache: Some(NZUsize!(1 << 18)),
                     init_buffer: NZUsize!(1 << 21),
                     init_concurrency: (),
                 };
-                let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
+                let db = AnyDb::init(ctx.child("db"), cfg, None).await.unwrap();
                 run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)
             }
         }

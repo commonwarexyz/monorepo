@@ -16,7 +16,7 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     Monitor, Viewable,
     simplex::{
-        Engine, Floor, ForwardingPolicy, config,
+        Engine, Floor, ForwardPolicy, SkipBudget, SkipPolicy, config,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
     },
@@ -36,7 +36,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock, IoBuf, Runner, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
 };
-use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver};
+use commonware_utils::{FuzzRng, NZU16, NZU32, NZUsize, channel::mpsc::Receiver, probability};
 use futures::future::join_all;
 pub use simplex::{
     SimplexBls12381MinPk, SimplexBls12381MinSig, SimplexBls12381MultisigMinPk,
@@ -100,7 +100,7 @@ async fn setup_degraded_network<E: Clock>(
     let degraded = Link {
         latency: Duration::from_millis(50),
         jitter: Duration::from_millis(50),
-        success_rate: 0.6,
+        success_rate: probability!(0.6),
     };
     for (peer_idx, peer) in participants.iter().enumerate() {
         if peer_idx == victim_idx {
@@ -269,7 +269,7 @@ async fn setup_network<P: simplex::Simplex>(
     let link = Link {
         latency: Duration::from_millis(10),
         jitter: Duration::from_millis(1),
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
     link_peers(
         &mut oracle,
@@ -431,12 +431,15 @@ where
         timeout_retry: Duration::from_secs(10),
         fetch_timeout: Duration::from_secs(1),
         view_retention: Delta::new(10),
-        skip_timeout: Duration::from_secs(11),
+        skip: SkipPolicy::Enabled {
+            timeout: Duration::from_secs(11),
+            budget: SkipBudget::Participants,
+        },
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
-        forwarding: ForwardingPolicy::Disabled,
+        forward: ForwardPolicy::Disabled,
         track_historical_votes: false,
     };
     let engine = Engine::new(context.child("engine"), engine_cfg);
@@ -447,9 +450,8 @@ where
 
 fn run<P: simplex::Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
-
     executor.start(|mut context| async move {
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
@@ -528,9 +530,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
 
 fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
-    let cfg = deterministic::Config::new().with_rng(Box::new(rng));
+    let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
-
     executor.start(|mut context| async move {
         let (mut oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
@@ -542,7 +543,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
             Action::Update(Link {
                 latency: Duration::from_millis(500),
                 jitter: Duration::from_millis(500),
-                success_rate: 1.0,
+                success_rate: probability!(1.0),
             }),
             input.partition.filter(),
         )
@@ -581,10 +582,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
                 move |origin: SplitOrigin, recipients: &Recipients<_>, message: &IoBuf| {
-                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                        &mut message.as_ref(),
-                        &codec,
-                    ) else {
+                    let Ok(msg) =
+                        Certificate::<P::Scheme, Sha256Digest>::decode_cfg(message.clone(), &codec)
+                    else {
                         return Some(recipients.clone());
                     };
                     let (primary, secondary) =
@@ -608,10 +608,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 let codec = schemes[idx].certificate_codec_config();
                 let participants = participants.clone();
                 move |(sender, message): &(_, IoBuf)| {
-                    let Ok(msg) = Certificate::<P::Scheme, Sha256Digest>::decode_cfg(
-                        &mut message.as_ref(),
-                        &codec,
-                    ) else {
+                    let Ok(msg) =
+                        Certificate::<P::Scheme, Sha256Digest>::decode_cfg(message.clone(), &codec)
+                    else {
                         return SplitTarget::None;
                     };
                     twins::view_route(msg.view(), term_length, sender, participants.as_ref())
@@ -678,12 +677,15 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 view_retention: Delta::new(10),
-                skip_timeout: Duration::from_secs(11),
+                skip: SkipPolicy::Enabled {
+                    timeout: Duration::from_secs(11),
+                    budget: SkipBudget::Participants,
+                },
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
-                forwarding: ForwardingPolicy::Disabled,
+                forward: ForwardPolicy::Disabled,
                 track_historical_votes: false,
             };
             let engine = Engine::new(primary_context.child("engine"), engine_cfg);

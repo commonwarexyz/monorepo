@@ -70,6 +70,62 @@ pub fn test_rng() -> TestRng {
     TestRng::new(0)
 }
 
+/// A bounded deterministic RNG that returns a caller-supplied sequence of `u64` samples.
+///
+/// Each `u32` consumes one sample and returns its low 32 bits. Byte fills encode samples in
+/// little-endian order and discard unused bytes from the final sample.
+///
+/// Sampling beyond the supplied sequence panics.
+#[stability(ALPHA)]
+#[derive(Debug)]
+pub struct ScriptedRng {
+    samples: std::vec::IntoIter<u64>,
+}
+
+#[stability(ALPHA)]
+impl ScriptedRng {
+    /// Creates a bounded RNG from the provided samples.
+    pub fn new(samples: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            samples: samples.into_iter().collect::<Vec<_>>().into_iter(),
+        }
+    }
+}
+
+#[stability(ALPHA)]
+impl TryRng for ScriptedRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        Ok(self.try_next_u64()? as u32)
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        Ok(self
+            .samples
+            .next()
+            .expect("scripted RNG consumed more samples than expected"))
+    }
+
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        rand::rand_core::utils::fill_bytes_via_next_word(dest, || self.try_next_u64())
+    }
+}
+
+/// Boxes the rng for runtimes that take a dynamic rng (e.g. the deterministic runtime's
+/// `Config::with_rng`).
+#[stability(ALPHA)]
+impl From<ScriptedRng> for Box<dyn CryptoRng + Send + 'static> {
+    fn from(rng: ScriptedRng) -> Self {
+        Box::new(rng)
+    }
+}
+
+// SAFETY: ScriptedRng is not cryptographically secure. It implements CryptoRng only because test
+// runtimes require CryptoRng-bounded RNGs. This type must never be used outside tests.
+#[stability(ALPHA)]
+impl TryCryptoRng for ScriptedRng {}
+
 /// Applies a SplitMix64-style finalizer to a deterministic input word.
 ///
 /// This is useful for cheaply decorrelating derived deterministic seeds while
@@ -145,6 +201,48 @@ pub struct FuzzRng {
     ctr: u64,
     cache: [u8; BLOCK_BYTES],
     cache_pos: usize,
+}
+
+/// Fuzzer-provided entropy backing a [FuzzRng].
+///
+/// Its `Arbitrary` implementation consumes the input's remaining bytes, so declare it as
+/// the LAST field of a fuzz input struct. Every [FuzzRng] converted from the same entropy
+/// yields an identical stream.
+#[stability(ALPHA)]
+#[derive(Clone, Debug)]
+pub struct Entropy(Vec<u8>);
+
+#[cfg(feature = "arbitrary")]
+#[stability(ALPHA)]
+impl<'a> arbitrary::Arbitrary<'a> for Entropy {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Self(u.bytes(u.len())?.to_vec()))
+    }
+}
+
+#[stability(ALPHA)]
+impl From<Entropy> for FuzzRng {
+    fn from(entropy: Entropy) -> Self {
+        Self::new(entropy.0)
+    }
+}
+
+/// Boxes the rng for runtimes that take a dynamic rng (e.g. the deterministic runtime's
+/// `Config::with_rng`).
+#[stability(ALPHA)]
+impl From<Entropy> for Box<dyn CryptoRng + Send + 'static> {
+    fn from(entropy: Entropy) -> Self {
+        Box::new(FuzzRng::from(entropy))
+    }
+}
+
+/// Boxes the rng for runtimes that take a dynamic rng (e.g. the deterministic runtime's
+/// `Config::with_rng`).
+#[stability(ALPHA)]
+impl From<FuzzRng> for Box<dyn CryptoRng + Send + 'static> {
+    fn from(rng: FuzzRng) -> Self {
+        Box::new(rng)
+    }
 }
 
 #[stability(ALPHA)]
@@ -243,6 +341,22 @@ impl TryCryptoRng for FuzzRng {}
 mod tests {
     use super::*;
     use rand::Rng;
+
+    #[test]
+    fn test_scripted_rng_output_forms() {
+        let mut rng = ScriptedRng::new([
+            0x0123_4567_89ab_cdef,
+            0xfedc_ba98_7654_3210,
+            0x0807_0605_0403_0201,
+        ]);
+
+        assert_eq!(rng.try_next_u64().unwrap(), 0x0123_4567_89ab_cdef);
+        assert_eq!(rng.try_next_u32().unwrap(), 0x7654_3210);
+
+        let mut bytes = [0; 5];
+        rng.try_fill_bytes(&mut bytes).unwrap();
+        assert_eq!(bytes, [1, 2, 3, 4, 5]);
+    }
 
     #[test]
     fn test_empty_bytes_not_constant() {

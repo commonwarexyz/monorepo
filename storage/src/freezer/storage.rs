@@ -5,10 +5,12 @@ use crate::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
 };
-use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    Buf, CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
+};
 use commonware_cryptography::{Crc32, Hasher, crc32};
 use commonware_runtime::{
-    Blob, Buf, BufMut, BufferPooler, IoBuf, WriteOptions, buffer,
+    Blob, BufMut, BufferPooler, IoBuf, ReadOptions, WriteOptions, buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
 };
@@ -450,9 +452,11 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     /// Read entries from the table blob.
     async fn read_table(blob: &E::Blob, table_index: u32) -> Result<(Entry, Entry), Error> {
         let offset = Self::table_offset(table_index);
-        let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
+        let read_buf = blob
+            .read_at(offset, Entry::FULL_SIZE, ReadOptions::default())
+            .await?;
 
-        Self::parse_entries(read_buf)
+        Self::parse_entries(read_buf.freeze())
     }
 
     /// Recover a single table entry and update tracking.
@@ -669,17 +673,21 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
             index_page_cache: config.key_page_cache.clone(),
             index_write_buffer: config.key_write_buffer,
             value_write_buffer: config.value_write_buffer,
+            replay_buffer: config.table_replay_buffer,
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
-        let oversized: Oversized<E, Record<K>, V> = Oversized::init(
-            context.child("oversized"),
-            oversized_cfg,
-            checkpoint
-                .filter(|checkpoint| !checkpoint.is_empty())
-                .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size)),
-        )
-        .await?;
+        let oversized_context = context.child("oversized");
+        let oversized: Oversized<E, Record<K>, V> = match checkpoint
+            .filter(|checkpoint| !checkpoint.is_empty())
+            .map(|checkpoint| (checkpoint.section, checkpoint.oversized_size))
+        {
+            Some(checkpoint) => {
+                Oversized::init_with_checkpoint(oversized_context, oversized_cfg, checkpoint)
+                    .await?
+            }
+            None => Oversized::init(oversized_context, oversized_cfg).await?,
+        };
 
         // Open table blob
         let (table, table_len) = context
@@ -699,8 +707,13 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Resize table if needed
+                // Resize the table if needed. Growing is never valid: the checkpoint publishes
+                // only after the table sync completes, so a shorter table cannot back the
+                // checkpointed entries, and zero-extending would fabricate empty heads.
                 let expected_table_len = Self::table_offset(checkpoint.table_size);
+                if table_len < expected_table_len {
+                    return Err(Error::CheckpointMismatch);
+                }
                 let mut modified = if table_len != expected_table_len {
                     table.resize(expected_table_len).await?;
                     true
@@ -815,7 +828,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
     }
 
     /// See [Freezer::put].
-    async fn put(mut self: Box<Self>, key: K, value: V) -> Result<(Box<Self>, Cursor), Error> {
+    async fn put(mut self: Box<Self>, key: K, value: &V) -> Result<(Box<Self>, Cursor), Error> {
         self.puts.inc();
 
         // Update the section if needed
@@ -838,7 +851,7 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         let (position, value_offset, value_size);
         (self.oversized, position, value_offset, value_size) = self
             .oversized
-            .append(self.current_section, key_entry, &value)
+            .append(self.current_section, key_entry, value)
             .await?;
 
         // Update the number of items added to the entry.
@@ -1013,7 +1026,11 @@ impl<E: Context, K: Array, V: CodecShared> Inner<E, K, V> {
         // Read the entire chunk
         let chunk_bytes = chunk_size as usize * Entry::FULL_SIZE;
         let read_offset = Self::table_offset(current_index);
-        let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
+        let mut read_buf = self
+            .table
+            .read_at(read_offset, chunk_bytes, ReadOptions::default())
+            .await?
+            .freeze();
 
         // Process each entry in the chunk
         let mut writes = self.context.storage_buffer_pool().alloc(chunk_bytes);
@@ -1164,7 +1181,7 @@ impl<E: Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Put a key-value pair into the [Freezer].
     /// If the key already exists, the value is updated.
-    pub async fn put(mut self, key: K, value: V) -> Result<(Self, Cursor), Error> {
+    pub async fn put(mut self, key: K, value: &V) -> Result<(Self, Cursor), Error> {
         let cursor;
         (self.0, cursor) = self.0.put(key, value).await?;
         Ok((self, cursor))
@@ -1247,7 +1264,7 @@ mod conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::DecodeExt;
+    use commonware_codec::Copying;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         Runner, Storage, Supervisor as _, WriteOptions, buffer::paged::CacheRef, deterministic,
@@ -1263,7 +1280,7 @@ mod tests {
         let key = key.as_bytes();
         assert!(key.len() <= buf.len());
         buf[..key.len()].copy_from_slice(key);
-        FixedBytes::decode(buf.as_ref()).unwrap()
+        FixedBytes::new(buf)
     }
 
     fn test_key_at_index(table_size: u32, table_index: u32) -> FixedBytes<64> {
@@ -1290,7 +1307,7 @@ mod tests {
     #[allow(dead_code)]
     fn assert_freezer_futures_are_send(freezer: TestFreezer, key: U64) {
         is_send(freezer.get(Identifier::Key(&key)));
-        is_send(freezer.put(key, 0u64));
+        is_send(freezer.put(key, &0u64));
     }
 
     #[allow(dead_code)]
@@ -1325,12 +1342,16 @@ mod tests {
 
             // Insert only 2 keys to different entries. With table_size=4, entries 2 and 3
             // should remain empty.
-            let (freezer, _) = freezer.put(test_key("key0"), 0).await.unwrap();
-            let (freezer, _) = freezer.put(test_key("key2"), 1).await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key0"), &0).await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key2"), &1).await.unwrap();
             freezer.close().await.unwrap();
 
             let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
-            let table_data = blob.read_at(0, size as usize).await.unwrap().coalesce();
+            let table_data = blob
+                .read_at(0, size as usize, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
 
             // Verify resize happened (table doubled from 4 to 8)
             let num_entries = size as usize / Entry::FULL_SIZE;
@@ -1343,7 +1364,7 @@ mod tests {
                 let offset = entry_idx * Entry::FULL_SIZE;
                 let buf = &table_data.as_ref()[offset..offset + Entry::FULL_SIZE];
                 let (slot0, slot1) =
-                    Inner::<Context, FixedBytes<64>, i32>::parse_entries(buf).unwrap();
+                    Inner::<Context, FixedBytes<64>, i32>::parse_entries(Copying(buf)).unwrap();
                 if slot0.is_empty() && slot1.is_empty() {
                     both_empty_count += 1;
                 }
@@ -1382,7 +1403,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), &42).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
@@ -1390,7 +1411,10 @@ mod tests {
             // Corrupt the CRC in both slots of the table entry
             {
                 let (blob, _) = context.open(&cfg.table_partition, b"table").await.unwrap();
-                let entry_data = blob.read_at(0, Entry::FULL_SIZE).await.unwrap();
+                let entry_data = blob
+                    .read_at(0, Entry::FULL_SIZE, ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut corrupted = entry_data.coalesce();
                 // Corrupt CRC of first slot (last 4 bytes of first slot)
                 corrupted.as_mut()[Entry::SIZE - 4] ^= 0xFF;
@@ -1445,7 +1469,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
 
                 assert_eq!(freezer.resizing(), Some(1));
@@ -1491,7 +1515,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             }
@@ -1543,7 +1567,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let checkpoint = freezer.close().await.unwrap();
                 assert_eq!(checkpoint.table_size, 2);
             }
@@ -1587,7 +1611,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let (freezer, checkpoint) = freezer.sync().await.unwrap();
 
                 assert_eq!(checkpoint.table_size, 4);
@@ -1636,7 +1660,7 @@ mod tests {
                 let (freezer, stale_checkpoint) = freezer.sync().await.unwrap();
                 assert_eq!(stale_checkpoint.table_size, 2);
 
-                let (freezer, _) = freezer.put(key.clone(), 42).await.unwrap();
+                let (freezer, _) = freezer.put(key.clone(), &42).await.unwrap();
                 let (freezer, checkpoint) = freezer.sync().await.unwrap();
                 assert_eq!(checkpoint.table_size, 4);
                 assert_eq!(freezer.resizing(), None);
@@ -1693,6 +1717,63 @@ mod tests {
         });
     }
 
+    /// A durable checkpoint's table fsync completed at the checkpointed size, so a shorter
+    /// (but non-empty) table is corruption. Initialization must reject it rather than grow the
+    /// table with fabricated empty entries, and retries must fail identically.
+    #[test_traced]
+    fn non_empty_checkpoint_against_short_table_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            let short_len = Entry::FULL_SIZE as u64;
+            let (table, _) = context
+                .open(&cfg.table_partition, TABLE_BLOB_NAME)
+                .await
+                .unwrap();
+            table.resize(short_len).await.unwrap();
+            table.sync().await.unwrap();
+            drop(table);
+
+            let checkpoint = Checkpoint {
+                epoch: 1,
+                section: 0,
+                oversized_size: 0,
+                table_size: 2,
+            };
+            for child in ["first", "retry"] {
+                let result = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child(child),
+                    cfg.clone(),
+                    Some(checkpoint),
+                )
+                .await;
+                assert!(matches!(result, Err(Error::CheckpointMismatch)));
+            }
+
+            // The rejection must not resize the table.
+            let (_, size) = context
+                .open(&cfg.table_partition, TABLE_BLOB_NAME)
+                .await
+                .unwrap();
+            assert_eq!(size, short_len);
+        });
+    }
+
     #[test_traced]
     fn corrupted_committed_value_surfaces_at_read() {
         let executor = deterministic::Runner::default();
@@ -1722,8 +1803,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
-                let (freezer, _) = freezer.put(test_key("key1"), 43).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), &42).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), &43).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };
@@ -1735,7 +1816,10 @@ mod tests {
                     .open(&cfg.value_partition, &checkpoint.section.to_be_bytes())
                     .await
                     .unwrap();
-                let byte = blob.read_at(len - 1, 1).await.unwrap();
+                let byte = blob
+                    .read_at(len - 1, 1, ReadOptions::default())
+                    .await
+                    .unwrap();
                 let mut corrupted = byte.coalesce();
                 corrupted.as_mut()[0] ^= 0xFF;
                 blob.write_at(len - 1, corrupted, WriteOptions::SYNC)
@@ -1769,7 +1853,7 @@ mod tests {
             );
 
             // The freezer remains usable
-            let (freezer, _) = freezer.put(test_key("key2"), 44).await.unwrap();
+            let (freezer, _) = freezer.put(test_key("key2"), &44).await.unwrap();
             let (freezer, _) = freezer.sync().await.unwrap();
             assert_eq!(
                 freezer
@@ -1811,8 +1895,8 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let (freezer, _) = freezer.put(test_key("key0"), 42).await.unwrap();
-                let (freezer, _) = freezer.put(test_key("key1"), 43).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key0"), &42).await.unwrap();
+                let (freezer, _) = freezer.put(test_key("key1"), &43).await.unwrap();
                 let (freezer, _) = freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
             };

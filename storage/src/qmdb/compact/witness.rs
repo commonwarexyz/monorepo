@@ -1,22 +1,25 @@
 //! Shared machinery for the compact-db witness journal.
 //!
 //! The witness journal is the single durable source of truth for a compact database. Each
-//! [`Witness`] is a complete snapshot of one published commit: the encoded commit operation, the
-//! committed size, and the pinned nodes one operation below it. The commit's inclusion proof is
-//! not stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open
-//! and rewind, the in-memory Merkle is rebuilt by appending the commit operation to the pinned nodes,
-//! and a structurally invalid entry fails with [`Error::DataCorrupted`].
+//! [`Witness`] is a complete snapshot of one applied state. It contains the encoded commit,
+//! committed size, and pinned nodes one operation below it. The commit's inclusion proof is not
+//! stored. It is derived from the pinned nodes and the operation when an entry is loaded. On open,
+//! the in-memory Merkle is rebuilt by appending the commit operation to the pinned nodes, and a
+//! structurally invalid entry fails with [`Error::DataCorrupted`].
 //!
-//! Entries are strictly increasing in committed size, so a size uniquely identifies
-//! a rewind or prune target. An appended entry becomes durable when the journal `commit` or
+//! Entries are strictly increasing in committed size, so a size uniquely identifies an
+//! initialization or prune target. An appended entry becomes durable when the journal `commit` or
 //! `sync` completes. For [`Store::start_sync`] it becomes durable when the returned handle
-//! completes. Before that point, the entry is not guaranteed durable and recovery may fall back
-//! to the previous commit. [`Store::prune`] bounds how far back [`Store::rewind`] can reach.
-//! The tip entry is never pruned.
+//! completes. Before that point, the entry is not guaranteed durable and recovery may fall back to
+//! the previous commit. [`Store::prune`] bounds how far back bounded initialization can reach. The
+//! tip entry is never pruned.
 
 use crate::{
     Context, SyncCompletion,
-    journal::contiguous::{Contiguous, variable},
+    journal::{
+        authenticated::{Backing as _, BackingRecovery as _},
+        contiguous::{Contiguous, variable},
+    },
     merkle::{self, Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{
         self, Error,
@@ -24,7 +27,8 @@ use crate::{
         sync::{CompactTarget, Request, Response},
     },
 };
-use commonware_codec::{Decode as _, EncodeSize, Read, Write};
+use bytes::Bytes;
+use commonware_codec::{Buf, Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Error as RError, Handle};
@@ -32,11 +36,11 @@ use commonware_utils::sync::RwLock;
 use futures::FutureExt as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The state at a published commit as persisted by the witness journal.
+/// An applied state persisted by the witness journal.
 #[derive(Clone)]
 pub(crate) struct Witness<F: Family, D: Digest> {
     /// The encoded last commit operation at `size - 1`.
-    pub(crate) op_bytes: Vec<u8>,
+    pub(crate) op_bytes: Bytes,
     /// The committed database size.
     pub(crate) size: Location<F>,
     /// Pinned nodes at the commit operation, in the order returned by
@@ -61,8 +65,8 @@ impl<F: Family, D: Digest> Write for Witness<F, D> {
 impl<F: Family, D: Digest> Read for Witness<F, D> {
     type Cfg = ();
 
-    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let op_bytes = Vec::<u8>::read_cfg(buf, &((..).into(), ()))?;
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let op_bytes = Bytes::read_cfg(buf, &(..).into())?;
         let size = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
         Ok(Self {
@@ -80,7 +84,7 @@ where
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            op_bytes: u.arbitrary()?,
+            op_bytes: u.arbitrary::<Vec<u8>>()?.into(),
             size: Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?),
             pinned_nodes: u.arbitrary()?,
         })
@@ -134,9 +138,12 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
 
     /// Whether the cached witness came from compact sync and has not been written to the
     /// journal yet. While set, the journal still holds the partition's previous contents; the
-    /// first persist replaces them with the cached witness and clears this flag. Mutations are
-    /// serialized by ownership of the store, so `Relaxed` suffices.
+    /// first application to the journal replaces them with the cached witness and clears this
+    /// flag. Mutations are serialized by ownership of the store, so `Relaxed` suffices.
     import_pending: AtomicBool,
+
+    /// Whether witnesses were appended after the latest durability operation started.
+    uncommitted: bool,
 
     /// The sync pipelined by the last [`Self::start_sync`], cleared by the next full
     /// journal sync.
@@ -150,14 +157,15 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             journal,
             tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(false),
+            uncommitted: false,
             pending_sync: None,
         }
     }
 
-    /// Create a store from a validated compact-sync import that has not been persisted yet. The
-    /// journal is untouched until the first persist replaces its contents with `witness`. A
-    /// crash during that replacement leaves a journal that fails to reopen; re-syncing
-    /// recovers it.
+    /// Create a store from a validated compact-sync import that has not been applied to the
+    /// witness journal yet. The journal is untouched until the first application replaces its
+    /// contents with `witness`. A crash during that replacement leaves a journal that fails to
+    /// reopen; re-syncing recovers it.
     pub(crate) const fn from_import(
         journal: Journal<E, F, D>,
         witness: VerifiedWitness<F, D>,
@@ -166,6 +174,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             journal,
             tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(true),
+            uncommitted: false,
             pending_sync: None,
         }
     }
@@ -181,6 +190,16 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// below it. Anything else is refused with the same errors a pruned operation log
     /// reports.
     #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.sync.serve",
+        level = "info",
+        skip_all,
+        fields(
+            size = *request.size(),
+            start = *request.start(),
+            max_ops = request.max_ops().get(),
+        ),
+    )]
     pub(crate) fn compact_state<Op: Read>(
         &self,
         cfg: &Op::Cfg,
@@ -210,7 +229,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             pinned_nodes,
             ..
         } = entry;
-        let op = Op::decode_cfg(op_bytes.as_ref(), cfg)
+        let op = Op::decode_cfg(op_bytes, cfg)
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
         // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
         // pinned nodes for this request.
@@ -232,13 +251,43 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         *self.tip_witness.write() = witness;
     }
 
+    /// Apply the current compact state to the witness journal.
+    pub(crate) async fn apply<H, S>(
+        mut self,
+        merkle: &compact::Merkle<F, D, S>,
+        inactivity_floor_loc: Location<F>,
+        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Self, Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        // Stage before pruning because a new witness's commit proof needs the unpruned Merkle.
+        let verified;
+        (self, verified) = self
+            .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
+            .await?;
+        let Some(verified) = verified else {
+            return Ok(self);
+        };
+
+        // Append before pruning and clearing import state so every successful apply has a matching
+        // journal entry.
+        (self.journal, _) = self.journal.append(&verified.witness).await?;
+
+        // Publish the applied tip while retaining that it lies outside the durable prefix.
+        self.import_pending.store(false, Ordering::Relaxed);
+        self.uncommitted = true;
+        merkle.prune_to_frontier();
+        self.replace(verified);
+        Ok(self)
+    }
+
     /// Persist the current compact state as a new witness journal entry, committing the journal
     /// so the entry survives a crash. Journal recovery may be required on reopen.
     ///
-    /// First waits for any sync pipelined by [`Self::start_sync`], surfacing its failure. If the
-    /// cached witness already matches the Merkle, nothing more is needed. Otherwise appends a
-    /// witness built from the unpruned Merkle, prunes the Merkle to its frontier, and refreshes
-    /// the cache.
+    /// First waits for any sync pipelined by [`Self::start_sync`], surfacing its failure, then
+    /// commits every applied witness.
     pub(crate) async fn commit<H, S>(
         self,
         merkle: &compact::Merkle<F, D, S>,
@@ -262,10 +311,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Persist the current compact state as a new witness journal entry, syncing the journal and
     /// all of its metadata to minimize recovery work on reopen.
     ///
-    /// If the cached witness already matches the Merkle, this only settles any sync pipelined
-    /// by [`Self::start_sync`], running a full journal sync when one is outstanding. Otherwise
-    /// appends a witness built from the unpruned Merkle, prunes the Merkle to its frontier, and
-    /// refreshes the cache.
+    /// This also settles any sync pipelined by [`Self::start_sync`].
     pub(crate) async fn sync<H, S>(
         self,
         merkle: &compact::Merkle<F, D, S>,
@@ -285,13 +331,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         .await
     }
 
-    /// Shared body of [`Self::commit`] and [`Self::sync`]: stage what must be persisted, append
-    /// it, make it durable per `durability`, and install it as the cached tip.
-    ///
-    /// A pending import is cleared only after the entry is durable, so an interrupted journal
-    /// replacement is retried by the next persist. [`Self::start_sync`] clears it at append
-    /// instead. A crash before its handle completes leaves a journal that fails to reopen and
-    /// is recovered by re-syncing.
+    /// Apply the current state and persist the journal according to `durability`.
     async fn persist<H, S>(
         mut self,
         merkle: &compact::Merkle<F, D, S>,
@@ -303,34 +343,26 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
-        let verified;
-        (self, verified) = self
-            .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
+        // Compact-sync imports enter with a cached witness that is absent from the journal.
+        // Apply the current state before making the requested durability guarantee.
+        self = self
+            .apply::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
-        let Some(verified) = verified else {
-            // `commit` already waited for the pipelined sync. `sync` delegates that drain to the
-            // full journal sync, which is still required because the pipelined sync made only a
-            // best-effort attempt to persist all metadata.
-            if matches!(durability, Durability::Sync) && self.pending_sync.is_some() {
-                self.journal = self.journal.sync().await?;
-                self.pending_sync = None;
-            }
-            return Ok(self);
-        };
-        (self.journal, _) = self.journal.append(&verified.witness).await?;
 
-        // A commit leaves `pending_sync` set so the next full sync still persists all metadata.
-        self.journal = match durability {
-            Durability::Commit => self.journal.commit().await?,
+        // Full sync includes recovery metadata even when every witness is already committed.
+        match durability {
+            Durability::Commit if self.uncommitted => {
+                self.journal = self.journal.commit().await?;
+                self.uncommitted = false;
+            }
             Durability::Sync => {
                 let journal = self.journal.sync().await?;
                 self.pending_sync = None;
-                journal
+                self.uncommitted = false;
+                self.journal = journal;
             }
-        };
-        self.import_pending.store(false, Ordering::Relaxed);
-        merkle.prune_to_frontier();
-        self.replace(verified);
+            Durability::Commit => {}
+        }
         Ok(self)
     }
 
@@ -358,27 +390,18 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Ok((self, Handle::ready(Err(err))));
         }
 
-        // Decide whether the journal needs a new witness before starting this sync. During import,
-        // staging verifies the cached witness before clearing the journal it will replace.
-        let verified;
-        (self, verified) = self
-            .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
+        // Apply before starting the journal sync so the returned handle covers the current tip.
+        // A later apply remains uncommitted and requires a successor durability operation.
+        self = self
+            .apply::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
             .await?;
-
-        if let Some(verified) = verified {
-            // Publish the witness to the cache only after it has been appended. The cache may
-            // then match the Merkle before the append is durable, which `pending_sync` tracks.
-            (self.journal, _) = self.journal.append(&verified.witness).await?;
-            self.import_pending.store(false, Ordering::Relaxed);
-            merkle.prune_to_frontier();
-            self.replace(verified);
-        }
 
         // Share one completion between the caller and the store. Retaining a clone keeps a
         // dropped handle's failure observable by the next durability operation.
         let handle;
         (self.journal, handle) = self.journal.start_sync().await?;
         let completion: SyncCompletion = handle.boxed().shared();
+        self.uncommitted = false;
         self.pending_sync = Some(completion.clone());
         Ok((self, Handle::from_future(completion)))
     }
@@ -430,43 +453,11 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok((self, Some(verified)))
     }
 
-    /// Rewind the journal so the entry committing exactly `target` leaves becomes the tip, then
-    /// rebuild and re-verify the Merkle and cache from it. Returns the decoded commit operation
-    /// of the restored tip.
-    ///
-    /// Rewinding to a pruned size, or one no entry commits, returns
-    /// [`merkle::Error::RewindBeyondHistory`]. The target entry is derived before the journal
-    /// is truncated, so a corrupt entry fails the rewind with the journal intact. The rewind is
-    /// made durable before returning.
-    pub(crate) async fn rewind<H, S, Op>(
-        mut self,
-        merkle: &compact::Merkle<F, D, S>,
-        target: Location<F>,
-        commit_codec_config: &Op::Cfg,
-    ) -> Result<(Self, Op), Error<F>>
-    where
-        H: Hasher<Digest = D>,
-        S: Strategy,
-        Op: Read + Floored<F>,
-    {
-        self.check_import_persisted()?;
-
-        let (pos, entry) = self
-            .position_of(target)
-            .await?
-            .ok_or(Error::Merkle(merkle::Error::RewindBeyondHistory))?;
-        let (witness, op) = rebuild::<F, D, H, S, Op>(entry, merkle, commit_codec_config)?;
-        self.journal = self.journal.rewind(pos + 1).await?.sync().await?;
-        self.pending_sync = None;
-        self.replace(witness);
-        Ok((self, op))
-    }
-
     /// Drop all entries committing fewer than `pruning_boundary` leaves, bounding how far back
-    /// [`Self::rewind`] can reach. The tip entry always survives. Some entries
+    /// bounded initialization can reach. The tip entry always survives. Some entries
     /// below the boundary may survive.
     pub(crate) async fn prune(mut self, pruning_boundary: Location<F>) -> Result<Self, Error<F>> {
-        self.check_import_persisted()?;
+        self.check_import_applied()?;
 
         let bounds = self.journal.bounds();
         if bounds.is_empty() {
@@ -479,35 +470,17 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         (self.journal, _) = self.journal.prune(pos).await?;
         self.journal = self.journal.sync().await?;
         self.pending_sync = None;
+        self.uncommitted = false;
         Ok(self)
     }
 
-    /// Whether a compact-sync import is not yet durable.
-    pub(crate) fn import_pending(&self) -> bool {
-        self.import_pending.load(Ordering::Relaxed)
-    }
-
-    /// Reject operations on a journal whose contents an unpersisted compact-sync import is
+    /// Reject operations on a journal whose contents an unapplied compact-sync import is
     /// about to replace.
-    fn check_import_persisted(&self) -> Result<(), Error<F>> {
+    fn check_import_applied(&self) -> Result<(), Error<F>> {
         if self.import_pending.load(Ordering::Relaxed) {
-            return Err(Error::DataCorrupted("compact-sync import not persisted"));
+            return Err(Error::DataCorrupted("compact-sync import not applied"));
         }
         Ok(())
-    }
-
-    /// Find the journal position and entry committing exactly `target` leaves, or `None` if
-    /// no retained entry does.
-    async fn position_of(
-        &self,
-        target: Location<F>,
-    ) -> Result<Option<(u64, Witness<F, D>)>, Error<F>> {
-        let pos = Self::first_at_or_above(&self.journal, target).await?;
-        if pos >= self.journal.bounds().end {
-            return Ok(None);
-        }
-        let entry = self.journal.read(pos).await?;
-        Ok((entry.size == target).then_some((pos, entry)))
     }
 
     /// Binary search for the first retained position whose entry commits at least `size`
@@ -533,8 +506,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
     /// Clear the journal so the imported witness becomes its only entry.
     ///
-    /// Clears to a nonzero size: if a crash interrupts the import, reopen sees a non-empty
-    /// journal with an unreadable tip and fails, instead of mistaking it for a fresh db.
+    /// An interrupted import leaves an empty journal at a nonzero position. Reopening rejects
+    /// the missing tip instead of treating the journal as a fresh database.
     async fn clear_for_import(mut self) -> Result<Self, Error<F>> {
         let size = self.journal.size();
         self.journal = self.journal.clear_to_size(size.max(1)).await?;
@@ -555,7 +528,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 pub(crate) fn build_witness<F, H, S>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     inactivity_floor_loc: Location<F>,
-    last_commit_op_bytes: Vec<u8>,
+    last_commit_op_bytes: impl Into<Bytes>,
 ) -> Result<VerifiedWitness<F, H::Digest>, Error<F>>
 where
     F: Family,
@@ -574,7 +547,7 @@ where
         let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
         Ok(VerifiedWitness {
             witness: Witness {
-                op_bytes: last_commit_op_bytes,
+                op_bytes: last_commit_op_bytes.into(),
                 size,
                 pinned_nodes,
             },
@@ -645,7 +618,7 @@ where
     // Decode the commit op to get the inactivity floor, which determines the inactive peak
     // boundary used for root computation.
     let last_commit_loc = size - 1;
-    let last_commit_op = Op::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
+    let last_commit_op = Op::decode_cfg(witness.op_bytes.clone(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let inactivity_floor_loc = last_commit_op
         .has_floor()
@@ -669,10 +642,12 @@ where
 /// last-commit operation.
 ///
 /// A new db starts with one committed operation, the initial commit: it is inserted into the
-/// compact Merkle and persisted as the first witness entry, so reopen and rewind never see an
-/// empty journal. An existing db reloads and re-verifies its tip witness.
+/// compact Merkle and persisted as the first witness entry, so initialization never sees an empty
+/// journal. An existing db reloads and re-verifies its tip witness.
 pub(crate) async fn init<E, F, H, S, Op>(
-    mut journal: Journal<E, F, H::Digest>,
+    context: E,
+    config: variable::Config<()>,
+    max_size: Option<Location<F>>,
     merkle: &mut compact::Merkle<F, H::Digest, S>,
     commit_codec_config: &Op::Cfg,
     initial_commit_op_bytes: Vec<u8>,
@@ -684,11 +659,50 @@ where
     S: Strategy,
     Op: Read + Floored<F>,
 {
-    if journal.size() == 0 {
-        journal = bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
-            .await?;
+    crate::qmdb::validate_initialization_bound(max_size)?;
+
+    // Keep recovery unpublished until the target witness has been selected and verified.
+    let pending = Journal::<E, F, H::Digest>::recover(context, config, None).await?;
+    let bounds = pending.bounds();
+
+    // Only an empty journal at position zero represents fresh storage. A nonzero empty range is an
+    // interrupted import whose missing witness must remain fatal.
+    if bounds.is_empty() {
+        if bounds.start != 0 {
+            return Err(Error::DataCorrupted("witness journal has no tip"));
+        }
+        let journal = pending.finish(0).await?;
+        let journal =
+            bootstrap_initial_commit::<E, F, H, S>(journal, merkle, initial_commit_op_bytes)
+                .await?;
+        let (witness, op) =
+            load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
+        return Ok((Store::new(journal, witness), op));
     }
-    let (witness, op) = load_tip::<E, F, H, S, Op>(&journal, merkle, commit_codec_config).await?;
+
+    // Witness positions count commits, while witness sizes count database operations. Search the
+    // monotonic sizes for the latest witness within the requested operation bound.
+    let mut end = bounds.end;
+    if let Some(cap) = max_size {
+        let mut start = bounds.start;
+        while start < end {
+            let mid = start + (end - start) / 2;
+            let entry = pending.read(mid).await?;
+            if entry.size <= cap {
+                start = mid + 1;
+            } else {
+                end = mid;
+            }
+        }
+        if end == bounds.start {
+            return Err(Error::HistoricalFloorPruned(cap));
+        }
+    }
+
+    // Verify the selected witness before discarding any newer entry.
+    let entry = pending.read(end - 1).await?;
+    let (witness, op) = rebuild::<F, H::Digest, H, S, Op>(entry, merkle, commit_codec_config)?;
+    let journal = pending.finish(end).await?;
     Ok((Store::new(journal, witness), op))
 }
 
@@ -753,7 +767,7 @@ pub(crate) mod tests {
             }
         }
         f(&mut entries[0]);
-        let mut journal = journal.rewind(pos).await.unwrap();
+        let mut journal = journal.test_truncate(pos).await.unwrap();
         for entry in &entries {
             (journal, _) = journal.append(entry).await.unwrap();
         }
@@ -769,7 +783,7 @@ pub(crate) mod tests {
     {
         let size = journal.size();
         let entry = journal.read(size - 1).await.unwrap();
-        (entry.op_bytes, entry.size, entry.pinned_nodes)
+        (entry.op_bytes.to_vec(), entry.size, entry.pinned_nodes)
     }
 
     /// Append a witness entry without syncing it.
@@ -786,7 +800,7 @@ pub(crate) mod tests {
     {
         let (journal, _) = journal
             .append(&Witness {
-                op_bytes,
+                op_bytes: op_bytes.into(),
                 size,
                 pinned_nodes,
             })
@@ -808,10 +822,10 @@ pub(crate) mod tests {
         D: Digest,
     {
         let entries = journal.size();
-        let journal = journal.rewind(entries - 1).await.unwrap();
+        let journal = journal.test_truncate(entries - 1).await.unwrap();
         let (journal, _) = journal
             .append(&Witness {
-                op_bytes,
+                op_bytes: op_bytes.into(),
                 size,
                 pinned_nodes,
             })

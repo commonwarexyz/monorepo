@@ -1,8 +1,8 @@
 use commonware_cryptography::{
     Signer as _,
     bls12381::{
-        dkg::feldman_desmedt::{Dealer, Info, Logs, Player, Verdict, deal},
-        primitives::variant::MinSig,
+        dkg::feldman_desmedt::{Dealer, Info, Logs, Player, Reveal, deal},
+        primitives::{sharing::Mode, variant::MinSig},
     },
     ed25519::{Batch, PrivateKey, PublicKey},
 };
@@ -36,7 +36,8 @@ impl Bench {
 
         let (output, shares) = if reshare {
             let (o, s) =
-                deal::<V, PublicKey, N3f1>(&mut rng, Default::default(), dealers.clone()).unwrap();
+                deal::<V, PublicKey, N3f1>(&mut rng, Mode::NonZeroCounter, dealers.clone())
+                    .unwrap();
             (Some(o), Some(s))
         } else {
             (None, None)
@@ -46,7 +47,8 @@ impl Bench {
             b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DKG_BENCH",
             0,
             output,
-            Default::default(),
+            Mode::NonZeroCounter,
+            Reveal::V1,
             dealers,
             players,
         )
@@ -81,10 +83,11 @@ impl Bench {
             .unwrap();
             for (target_pk, priv_msg) in priv_msgs {
                 // The only missing player should be ourselves.
-                if let Some(player) = player_states.get_mut(&target_pk)
-                    && let Verdict::Valid(ack) =
-                        player.dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
-                {
+                if let Some(player) = player_states.get_mut(&target_pk) {
+                    let ack = player
+                        .dealer_message::<N3f1>(pk.clone(), pub_msg.clone(), priv_msg)
+                        .expect("dealer message must be valid")
+                        .expect("dealer message must be new");
                     dealer.receive_player_ack(target_pk.clone(), ack).unwrap();
                 }
             }

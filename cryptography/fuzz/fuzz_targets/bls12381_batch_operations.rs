@@ -48,14 +48,14 @@ impl<'a> Arbitrary<'a> for FuzzOperation {
 
 struct FuzzState {
     batch: Batch,
-    expected_result: bool,
+    expected_result: Option<bool>,
 }
 
 impl FuzzState {
     fn new() -> Self {
         Self {
             batch: Batch::new(0),
-            expected_result: true,
+            expected_result: None,
         }
     }
 }
@@ -77,6 +77,7 @@ fn fuzz(state: &mut FuzzState, op: FuzzOperation) {
                 .batch
                 .add(namespace.as_slice(), &message, &public_key, &signature);
             assert!(added, "Valid signature should be added to batch");
+            state.expected_result = Some(state.expected_result.unwrap_or(true));
         }
 
         FuzzOperation::AddInvalid {
@@ -100,7 +101,7 @@ fn fuzz(state: &mut FuzzState, op: FuzzOperation) {
                     &signature,
                 );
                 if added {
-                    state.expected_result = false;
+                    state.expected_result = Some(false);
                 }
             }
         }
@@ -124,5 +125,9 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let result = state.batch.verify(&mut rng, &Sequential);
-    assert_eq!(result, state.expected_result, "Batch verification failed");
+    assert_eq!(
+        result,
+        state.expected_result.unwrap_or(false),
+        "Batch verification failed"
+    );
 });

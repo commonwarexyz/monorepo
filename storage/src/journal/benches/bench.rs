@@ -10,23 +10,32 @@ use rand::Rng;
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 mod fixed_append;
+mod fixed_append_buffered;
 mod fixed_read_random;
 mod fixed_read_sequential;
 mod fixed_replay;
+mod variable_prepare_append;
+mod variable_read_compressed;
 mod variable_read_random;
 mod variable_replay;
 
 criterion_main!(
     fixed_append::benches,
+    fixed_append_buffered::benches,
     fixed_read_random::benches,
     fixed_read_sequential::benches,
     fixed_replay::benches,
+    variable_prepare_append::benches,
+    variable_read_compressed::benches,
     variable_read_random::benches,
     variable_replay::benches,
 );
 
 /// The size of the write buffer used by the journal.
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
+
+/// The size of the buffer used to replay the journal.
+const REPLAY_BUFFER: NonZeroUsize = NZUsize!(1_024 * 1024); // 1MB
 
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
@@ -52,6 +61,7 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
         partition: partition_name.into(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
+        replay_buffer: REPLAY_BUFFER,
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
@@ -94,6 +104,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         codec_config: (),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
+        replay_buffer: REPLAY_BUFFER,
     };
     VariableJournal::init(context, journal_config)
         .await

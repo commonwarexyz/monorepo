@@ -1,9 +1,8 @@
 use crate::{
     Application, Block, Epochable,
     marshal::{
-        application::validation::{
-            has_contiguous_height, is_block_in_expected_epoch, is_valid_reproposal_at_verify,
-        },
+        ancestry::has_contiguous_height,
+        application::validation::{is_block_in_expected_epoch, is_valid_reproposal_at_verify},
         core::Mailbox,
         standard::Standard,
     },
@@ -91,7 +90,8 @@ where
 
     // Re-proposals are signaled by `digest == context.parent.1`.
     // They skip normal parent/height checks because:
-    // 1. The block was already verified when originally proposed.
+    // 1. Consensus settles the block's validity when certifying the view that
+    //    first carried it, before it certifies the re-proposal.
     // 2. Parent-child checks would fail by construction when parent == block.
     if digest == context.parent.1 {
         if !is_valid_reproposal_at_verify(epocher, block.height(), context.epoch()) {
@@ -235,8 +235,8 @@ where
 mod tests {
     use super::*;
     use crate::types::Height;
-    use bytes::{Buf, BufMut};
-    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use bytes::BufMut;
+    use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write};
     use commonware_cryptography::{Digestible, Hasher, Sha256, sha256::Digest as Sha256Digest};
 
     #[derive(Clone, Debug, PartialEq, Eq)]

@@ -11,10 +11,10 @@
 //!
 //! # Compression
 //!
-//! [Archive] supports compressing data before storing it on disk. This can be enabled by setting
-//! the `compression` field in the `Config` struct to a valid `zstd` compression level. This setting
-//! can be changed between initializations of [Archive], however, it must remain populated if any
-//! data was written with compression enabled.
+//! [Archive] supports optional zstd compression of freezer values through
+//! [Config::freezer_value_compression]. Keep the choice between `None` and `Some(_)` fixed for the
+//! life of the archive. Only the compression level may change between initializations when
+//! compression is enabled.
 //!
 //! # Durability and Recovery
 //!
@@ -68,7 +68,7 @@
 //!     let mut archive = Archive::init(context, cfg).await.unwrap();
 //!
 //!     // Put a key
-//!     archive = archive.put(1, Sha256::hash(&[b"data"]), 10).await.unwrap();
+//!     archive = archive.put(1, Sha256::hash(&[b"data"]), &10).await.unwrap();
 //!
 //!     // Sync the archive
 //!     archive.sync().await.unwrap();
@@ -82,7 +82,8 @@ pub use storage::Archive;
 /// Configuration for [Archive] storage.
 #[derive(Clone)]
 pub struct Config<C> {
-    /// The partition to use for the archive's metadata.
+    /// The partition to use for the archive's commit records: the freezer checkpoint and
+    /// ordinal bitmaps that recovery uses to keep both stores consistent.
     pub metadata_partition: String,
 
     /// The partition to use for the archive's freezer table.
@@ -188,8 +189,8 @@ mod tests {
             // Add some data
             let key1 = Sha256::hash(&[b"key1"]);
             let key2 = Sha256::hash(&[b"key2"]);
-            archive = archive.put(1, key1, 2000).await.unwrap();
-            archive = archive.put(2, key2, 2001).await.unwrap();
+            archive = archive.put(1, key1, &2000).await.unwrap();
+            archive = archive.put(2, key2, &2001).await.unwrap();
 
             // Sync archive to save the checkpoint
             let archive = archive.sync().await.unwrap();
@@ -256,7 +257,7 @@ mod tests {
 
             // Write data after restart to confirm archive is functional
             let key = Sha256::hash(&[b"after-restart"]);
-            let archive = archive.put_sync(0, key, 42).await.unwrap();
+            let archive = archive.put_sync(0, key, &42).await.unwrap();
             drop(archive);
 
             // Third init to verify persistence

@@ -1,5 +1,5 @@
 use commonware_cryptography::bls12381::primitives::{ops, variant::MinSig};
-use commonware_utils::test_rng;
+use commonware_utils::{non_empty, test_rng};
 use criterion::{BatchSize, Criterion, criterion_group};
 use rand::RngExt as _;
 use std::hint::black_box;
@@ -26,7 +26,9 @@ fn bench_combine_signatures(c: &mut Criterion) {
                     signatures
                 },
                 |signatures| {
-                    black_box(ops::aggregate::combine_signatures::<MinSig, _>(&signatures));
+                    black_box(ops::aggregate::combine_signatures::<MinSig, _>(
+                        non_empty![@signatures.iter()],
+                    ));
                 },
                 BatchSize::SmallInput,
             );

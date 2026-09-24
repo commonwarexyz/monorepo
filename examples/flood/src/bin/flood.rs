@@ -16,7 +16,8 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
-use commonware_utils::{TryCollect, ordered::Set, union};
+use commonware_stream::encrypted::Handshake;
+use commonware_utils::{TryCollect, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
     collections::HashMap,
@@ -51,7 +52,7 @@ fn main() {
         .into_iter()
         .map(|host| {
             let key = from_hex(&host.name).expect("Could not parse host key");
-            let key = PublicKey::decode(key.as_ref()).expect("Peer key is invalid");
+            let key = PublicKey::decode(key).expect("Peer key is invalid");
             (key, host.ip)
         })
         .collect();
@@ -65,8 +66,8 @@ fn main() {
     // Parse config
     info!(peers = peers.len(), "loaded peers");
     let key = from_hex(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::decode(key.as_ref()).expect("Private key is invalid");
-    let public_key = key.public_key();
+    let signer = PrivateKey::decode(key).expect("Private key is invalid");
+    let public_key = signer.public_key();
 
     // Initialize runtime
     let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
@@ -82,7 +83,7 @@ fn main() {
             Some(tokio::tracing::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring.private),
                 name: public_key.to_string(),
-                rate: 1.0,
+                rate: probability!(1.0),
             })
         } else {
             None
@@ -119,7 +120,7 @@ fn main() {
         let mut bootstrappers = Vec::new();
         for bootstrapper in &config.bootstrappers {
             let key = from_hex(bootstrapper).expect("Could not parse bootstrapper key");
-            let key = PublicKey::decode(key.as_ref()).expect("Bootstrapper key is invalid");
+            let key = PublicKey::decode(key).expect("Bootstrapper key is invalid");
             let ip = peers.get(&key).expect("Could not find bootstrapper in IPs");
             let bootstrapper_socket = format!("{}:{}", ip, config.port);
             let bootstrapper_socket = SocketAddr::from_str(&bootstrapper_socket)
@@ -130,7 +131,7 @@ fn main() {
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
-            key.clone(),
+            Handshake::new(signer.clone()),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),

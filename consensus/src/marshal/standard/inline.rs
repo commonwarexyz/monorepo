@@ -72,10 +72,7 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::TracedAsyncMutex,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span};
@@ -122,7 +119,8 @@ where
 /// - Parent digest matches consensus context's expected parent
 /// - Child height is exactly parent height plus one
 ///
-/// This is sufficient because the parent must have already been accepted by consensus.
+/// This is sufficient because the parent was either notarized by consensus or verified locally
+/// before this participant voted for it, so its own linkage was already checked.
 ///
 /// # Certifiability
 ///
@@ -137,7 +135,7 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
-    context: Arc<TracedAsyncMutex<E>>,
+    context: Arc<E>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
@@ -208,7 +206,7 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
-            context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
+            context: Arc::new(context),
             application,
             marshal,
             epocher,
@@ -262,8 +260,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("propose")
             .with_attribute("round", consensus_context.round);
         let span = info_span!(
@@ -425,15 +421,16 @@ where
         context: Context<Self::Digest, S::PublicKey>,
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
-        // Register the certification gate synchronously so `certify` always finds it, even
-        // while the block subscription / durable sync is still in flight. Inline verification
-        // verdicts are scoped to the proposal context, while certification receives only a
-        // notarized `(round, digest)`, so this gate records durability rather than validity.
-        // Unlike deferred, inline blocks do not embed their context, so no local check can
-        // rule out an honest notarization forming under a different header for this key. A
-        // notarization also implies f+1 honest validators already ran application
-        // verification, so durability is the only local fact certification still needs.
         let round = context.round;
+
+        // Verification needs the full block but waits only for local delivery. Certification starts
+        // recovery only when the block is not buffered. If a buffered block is evicted before
+        // verification registers its wait, verification is left with neither the block nor an
+        // active fetch. Register the wait before publishing the gate so it receives the buffered
+        // block or is waiting when recovery delivers it.
+        let block_request = self
+            .marshal
+            .subscribe_by_digest(digest, DigestFallback::Wait);
         let (durable_tx, durable_rx) = oneshot::channel();
         self.gates.insert(round, digest, durable_rx);
 
@@ -445,8 +442,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
             .context
-            .lock()
-            .await
             .child("inline_verify")
             .with_attribute("round", round);
         let span = info_span!(
@@ -472,7 +467,6 @@ where
                     )
                 });
 
-                let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
                 let Some(block) =
                     await_block_subscription(&mut tx, block_request, &digest, "verification").await
                 else {
@@ -484,7 +478,8 @@ where
                 //   not a valid boundary re-proposal.
                 // - Re-proposals are detected when `digest == context.parent.1`.
                 // - Re-proposals skip normal parent/height checks because:
-                //   1) the block was already verified when originally proposed
+                //   1) consensus settles their validity when certifying the view that
+                //      first carried the block
                 //   2) parent-child checks would fail by construction when parent == block
                 let Some(decision) =
                     precheck_epoch_and_reproposal(&epocher, &marshal, &context, digest, block)
@@ -616,8 +611,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("inline_certify")
             .with_attribute("round", round);
         context.spawn(move |_| {

@@ -12,14 +12,12 @@
 //! recoverable.
 
 use super::Error;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use futures::{Stream, StreamExt as _, stream};
 use std::{future::Future, num::NonZeroUsize, ops::Range};
-use tracing::warn;
 
 mod blobs;
 mod checkpoint;
-mod durability;
 pub mod fixed;
 mod metrics;
 pub mod variable;
@@ -158,6 +156,8 @@ where
 ///
 /// Maintains a monotonically increasing position counter where each appended item receives a unique
 /// position starting from 0.
+///
+/// Returned items may retain shared backing allocations larger than their byte fields.
 pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item: Send;
@@ -189,16 +189,43 @@ pub trait Contiguous: Send + Sync {
     /// async read paths are the sole error authority for declined positions.
     fn try_read_many_sync(&self, positions: &[u64]) -> Vec<Option<Self::Item>>;
 
+    /// Return a stream of the items in `range`, in position order. `range` must fall within
+    /// `bounds()`. An empty range within `bounds()` yields an empty stream.
+    ///
+    /// `buffer` controls the replay byte budget for each chunk. Every backing blob read from
+    /// sealed history uses `read_options`. Backing reads from the live writable tip instead use
+    /// [ReadOptions::DONT_CACHE] on page-cache misses because the cache retains the fetched pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [Error::ItemPruned] if `range.start` precedes `bounds().start`, or
+    /// [Error::ItemOutOfRange] if `range.end` exceeds `bounds().end` or the range is inverted
+    /// (`start > end`).
+    fn replay_range(
+        &self,
+        range: Range<u64>,
+        buffer: NonZeroUsize,
+        read_options: ReadOptions,
+    ) -> impl Future<
+        Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
+    > + Send;
+
     /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     ///
-    /// `buffer` controls the replay byte budget for each chunk.
+    /// See [`replay_range`](Self::replay_range) for the `buffer` and `read_options` contract.
     fn replay(
         &self,
         start_pos: u64,
         buffer: NonZeroUsize,
+        read_options: ReadOptions,
     ) -> impl Future<
         Output = Result<impl Stream<Item = Result<(u64, Self::Item), Error>> + Send, Error>,
-    > + Send;
+    > + Send {
+        async move {
+            self.replay_range(start_pos..self.bounds().end, buffer, read_options)
+                .await
+        }
+    }
 }
 
 /// Items to append via [`Mutable::append_many`].
@@ -229,7 +256,7 @@ impl<T> Many<'_, T> {
     }
 }
 
-/// A [Contiguous] journal that supports appending, rewinding, and pruning.
+/// A [Contiguous] journal that supports appending and prefix pruning.
 pub trait Mutable: Contiguous + Sized {
     /// Append a new item to the journal, returning its position.
     ///
@@ -276,37 +303,14 @@ pub trait Mutable: Contiguous + Sized {
         min_position: u64,
     ) -> impl std::future::Future<Output = Result<(Self, bool), Error>> + Send;
 
-    /// Rewind the journal to the given size, discarding items from the end.
-    ///
-    /// After rewinding to size N, the journal will contain exactly N items (positions 0 to N-1),
-    /// and the next append will receive position N.
-    ///
-    /// # Behavior
-    ///
-    /// - If `size > bounds.end`, returns [Error::InvalidRewind]
-    /// - If `size == bounds.end`, this is a no-op
-    /// - If `size < bounds.start`, returns [Error::ItemPruned] (can't rewind to pruned data)
-    /// - This operation is not atomic, but implementations guarantee the journal is left in a
-    ///   recoverable state if a crash occurs during rewinding
-    ///
-    /// # Warnings
-    ///
-    /// - This operation is not guaranteed to survive restarts until the next commit or sync
-    ///   completes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [Error::InvalidRewind] if `size` is beyond the current size, or [Error::ItemPruned]
-    /// if it precedes the pruning boundary. Returns an error if the underlying storage operation
-    /// fails.
-    fn rewind(self, size: u64) -> impl std::future::Future<Output = Result<Self, Error>> + Send;
-
     /// Begin durably persisting the current state of the journal.
     ///
     /// Awaiting the returned [Handle] provides the same durability guarantee as [Self::commit]
     /// for the state present when the call begins (later appends need their own sync). Also
     /// tries to advance the recovery watermark to the previous proven durable size, bounding
-    /// startup recovery. Use [Self::sync] to guarantee no recovery is needed.
+    /// startup recovery. Use [Self::sync] to guarantee no recovery is needed. Dropping the
+    /// handle does not cancel the sync or lose its failure, which resurfaces at latest on the
+    /// next [Self::sync].
     fn start_sync(
         self,
     ) -> impl std::future::Future<Output = Result<(Self, Handle<()>), Error>> + Send;
@@ -333,57 +337,4 @@ pub trait Mutable: Contiguous + Sized {
     /// reopening the same storage may observe partially removed state. Use a reset operation
     /// provided by the concrete type when the journal must remain recoverable.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
-
-    /// Rewinds the journal to the last item matching `predicate`, returning the resulting
-    /// size. If no item matches, the journal is rewound to the pruning boundary, discarding
-    /// all unpruned items.
-    ///
-    /// # Warnings
-    ///
-    /// - This operation is not guaranteed to survive restarts until the next commit or sync
-    ///   completes.
-    fn rewind_to<P>(
-        mut self,
-        predicate: P,
-    ) -> impl std::future::Future<Output = Result<(Self, u64), Error>> + Send
-    where
-        P: FnMut(&Self::Item) -> bool + Send,
-    {
-        async move {
-            let rewind_size = scan_rewind_size(&self, predicate).await?;
-            if rewind_size != self.bounds().end {
-                self = self.rewind(rewind_size).await?;
-            }
-
-            Ok((self, rewind_size))
-        }
-    }
-}
-
-/// Scan backwards from the end of `journal` to the last item matching `predicate`, returning
-/// the size the journal must rewind to (and warning if that drops any items).
-async fn scan_rewind_size<C, P>(journal: &C, mut predicate: P) -> Result<u64, Error>
-where
-    C: Contiguous,
-    P: FnMut(&C::Item) -> bool + Send,
-{
-    let bounds = journal.bounds();
-    let mut rewind_size = bounds.end;
-    while rewind_size > bounds.start {
-        let item = journal.read(rewind_size - 1).await?;
-        if predicate(&item) {
-            break;
-        }
-        rewind_size -= 1;
-    }
-
-    if rewind_size != bounds.end {
-        let rewound_items = bounds.end - rewind_size;
-        warn!(
-            journal_size = bounds.end,
-            rewound_items, "rewinding journal items"
-        );
-    }
-
-    Ok(rewind_size)
 }

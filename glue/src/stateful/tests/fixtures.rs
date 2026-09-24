@@ -28,6 +28,7 @@ use commonware_storage::{
 use commonware_utils::{
     NZU16, NZU64, NZUsize,
     acknowledgement::{Acknowledgement as _, Exact},
+    non_empty,
     sync::Mutex,
     vec::NonEmptyVec,
 };
@@ -135,8 +136,12 @@ pub(crate) fn finalization(
         .iter()
         .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
         .collect::<Vec<_>>();
-    Finalization::from_finalizes(&fixture.verifier, &finalizes, &Sequential)
-        .expect("recover finalization")
+    Finalization::from_finalizes(
+        &fixture.verifier,
+        non_empty![@finalizes.iter()],
+        &Sequential,
+    )
+    .expect("recover finalization")
 }
 
 fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
@@ -164,6 +169,7 @@ fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()
 fn prunable_archive_config(page_cache: CacheRef, partition: &str) -> prunable::Config<TwoCap, ()> {
     prunable::Config {
         translator: TwoCap,
+        metadata_partition: format!("{partition}-metadata"),
         key_partition: format!("{partition}-key"),
         key_page_cache: page_cache,
         value_partition: format!("{partition}-value"),
@@ -186,14 +192,15 @@ pub(crate) struct MarshalFixture {
 }
 
 impl MarshalFixture {
-    /// Aborts a started fixture so its durable storage can be reopened.
-    pub(crate) fn abort(self) {
+    /// Aborts a started fixture and waits for it to release its durable storage.
+    pub(crate) async fn abort(self) {
         let guards = self
             .guards
             .downcast::<(handler::Handler<Sha256Digest>, Handle<()>)>()
             .unwrap_or_else(|_| panic!("marshal fixture was not started"));
         let (_, handle) = *guards;
         handle.abort();
+        let _ = handle.await;
     }
 }
 
@@ -324,7 +331,11 @@ pub(crate) async fn prunable_marshal_fixture(
     .expect("failed to initialize blocks archive");
     if let Some(block) = options.block {
         finalized_blocks = finalized_blocks
-            .put(block.height().get(), block.digest(), block.clone())
+            .put(
+                block.height().get(),
+                block.digest(),
+                &Arc::new(block.clone()),
+            )
             .await
             .expect("failed to seed finalized block")
             .sync()
@@ -365,7 +376,11 @@ async fn marshal_fixture_inner(
     .expect("failed to initialize blocks archive");
     if let Some(block) = options.block {
         finalized_blocks = finalized_blocks
-            .put(block.height().get(), block.digest(), block.clone())
+            .put(
+                block.height().get(),
+                block.digest(),
+                &Arc::new(block.clone()),
+            )
             .await
             .expect("failed to seed finalized block")
             .sync()
@@ -374,7 +389,7 @@ async fn marshal_fixture_inner(
     }
     if let Some((block, finalization)) = options.seed.take() {
         finalizations_by_height = finalizations_by_height
-            .put(block.height().get(), block.digest(), finalization)
+            .put(block.height().get(), block.digest(), &finalization)
             .await
             .expect("failed to seed finalization")
             .sync()
@@ -409,7 +424,7 @@ where
             Commitment = Sha256Digest,
             Scheme = TestScheme,
         >,
-    FB: marshal::store::Blocks<Block = TestBlock>,
+    FB: marshal::store::Blocks<Block = Arc<TestBlock>>,
 {
     let provider = ConstantProvider::new(scheme);
     let (actor, mailbox, floor) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
@@ -420,7 +435,7 @@ where
             provider,
             epocher: FixedEpocher::new(NZU64!(u64::MAX)),
             start: options.floor.map_or_else(
-                || marshal::Start::Genesis(TestBlock::new(0, 0)),
+                || marshal::Start::Genesis(TestBlock::new(0, 0).into()),
                 marshal::Start::Floor,
             ),
             partition_prefix: format!("{prefix}-marshal"),

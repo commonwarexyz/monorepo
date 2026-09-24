@@ -16,40 +16,43 @@
 //!
 //! # Storage-page alignment
 //!
-//! Physical page `p` begins at blob offset `p * physical_page_size`, and a newly created blob
-//! begins its data on a 4096-byte boundary. Choosing a logical page size such that the physical
-//! page size is a power of two (see [page_size]) therefore makes every physical page either fit
-//! within a single 4096-byte storage page or start on a 4096-byte boundary and span whole
-//! storage pages. Blobs created before the aligned layout begin their data at offset 8 and never
-//! align, regardless of the page size chosen.
+//! Physical page `p` begins at blob offset `p * physical_page_size`, and a blob created with
+//! the default layout ([crate::DEFAULT_BLOB_LAYOUT]) begins its data on a 4096-byte boundary.
+//! Choosing a logical page size such that the physical page size is a power of two (see
+//! [page_size]) therefore makes every physical page either fit within a single 4096-byte
+//! storage page or start on a 4096-byte boundary and span whole storage pages. Blobs with the
+//! unaligned [crate::BlobLayout::V0] layout begin their data at offset 8 and never align,
+//! regardless of the page size chosen.
 //!
 //! Alignment is a performance property, not a correctness requirement: any page size works, but
-//! physical pages that straddle storage-page boundaries amplify cold random reads, so
-//! [CacheRef::new] logs a warning when configured with one.
+//! physical pages that straddle storage-page boundaries amplify cold random reads.
 //!
 //! Two checksums are stored so that re-writing a partial page cannot destroy the valid checksum
-//! for its previously committed contents. Each rewrite covers the whole physical page: the new
-//! checksum lands in the alternate slot, while the committed prefix and its protected checksum
-//! are resubmitted byte-identically, leaving their durable bytes unchanged even if the write
-//! tears. A checksum over a page is computed over the first [0,len) bytes in the page, with all
-//! other bytes in the page ignored. Ordinary partial-page payload writes 0-pad the range
-//! [len, page_size), but recovery does not depend on bytes outside [0,len). A checksum with
-//! length 0 is never considered valid. If both checksums are valid for the page, the one with the
-//! larger `len` is considered authoritative. Partial-page shrink first makes the shorter checksum
-//! durable in the alternate slot, then invalidates the old longer checksum.
+//! for its last durable contents. Each rewrite covers the whole physical page: the new checksum
+//! lands in the slot not protecting the durable contents, while the durable prefix and its
+//! protected checksum are resubmitted byte-identically, leaving their durable bytes unchanged
+//! even if the write tears. A checksum over a page is computed over the first [0,len) bytes in
+//! the page, with all other bytes in the page ignored. Ordinary partial-page payload writes
+//! 0-pad the range [len, page_size), but recovery does not depend on bytes outside [0,len). A
+//! checksum with length 0 is never considered valid. If both checksums are valid for the page,
+//! the one with the larger `len` is considered authoritative. Partial-page shrink first makes
+//! the shorter checksum durable in the alternate slot, then invalidates the old longer checksum.
 //!
 //! A _full_ page is one whose crc stores a len equal to the logical page size. Otherwise the page
 //! is called _partial_. All pages in a blob are full except for the very last page, which can be
-//! full or partial. A partial page's committed prefix remains recoverable while it is rewritten.
+//! full or partial. A partial page's durable prefix remains recoverable while it is rewritten.
 
-use crate::{Blob, Buf, BufMut, Error, IoBuf};
-use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
+use crate::{Blob, BufMut, Error, IoBuf, ReadOptions};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::{Storage, WriteOptions};
+use commonware_codec::{Buf, Copying, EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write};
 use commonware_cryptography::{Crc32, crc32};
 use std::num::NonZeroU16;
 
 mod cache;
 mod read;
 mod sealed;
+mod tip;
 mod view;
 mod writer;
 
@@ -57,17 +60,18 @@ pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;
 use tracing::{debug, error};
-pub use writer::Writer;
+pub use writer::{Append, Recovering, Recovery, Writer};
 
-// A checksum record contains two slots. Each slot stores one u16 length and one CRC.
-const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
+/// Size in bytes of the checksum record appended to each logical page.
+pub const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 
 /// The storage-page granularity physical pages should align to (see the module docs).
 pub(crate) const STORAGE_PAGE_SIZE: u64 = 4096;
-// The alignment reasoning above assumes newly created blobs place their data on a
-// storage-page boundary.
+
+// The alignment reasoning above assumes blobs created with the default layout place their
+// data on a storage-page boundary.
 const _: () = assert!(
-    crate::storage::Layout::V1
+    crate::DEFAULT_BLOB_LAYOUT
         .data_offset()
         .is_multiple_of(STORAGE_PAGE_SIZE)
 );
@@ -115,6 +119,79 @@ pub(crate) fn validate_page_for_tests(page: &[u8]) -> bool {
     Checksum::validate_page(page).is_some()
 }
 
+/// Select a physical page's authoritative checksum slot, falling back to the other slot if a
+/// write tore, and return the CRC-validated logical length (or `None` when neither slot
+/// verifies).
+///
+/// `page` is one raw physical page: `logical_page_size` bytes followed by the checksum record.
+/// This deliberately re-derives the slot arbitration instead of calling the production
+/// validator so fuzz oracles built on it do not trust the reader they are checking.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn page_len(page: &[u8], logical_page_size: usize) -> Option<usize> {
+    let footer = page.get(logical_page_size..)?;
+    if footer.len() != CHECKSUM_SIZE as usize {
+        return None;
+    }
+    let slots = [
+        (
+            u16::from_be_bytes(footer[0..2].try_into().unwrap()) as usize,
+            u32::from_be_bytes(footer[2..6].try_into().unwrap()),
+        ),
+        (
+            u16::from_be_bytes(footer[6..8].try_into().unwrap()) as usize,
+            u32::from_be_bytes(footer[8..12].try_into().unwrap()),
+        ),
+    ];
+    let authoritative = usize::from(slots[1].0 > slots[0].0);
+    for slot in [authoritative, authoritative ^ 1] {
+        let (len, checksum) = slots[slot];
+        if len > 0 && len <= logical_page_size && Crc32::checksum(&page[..len]) == checksum {
+            return Some(len);
+        }
+    }
+    None
+}
+
+/// Flip one byte inside physical page `page` of the blob at `name`, leaving every other page
+/// valid. Models a torn interior page: a crash during an in-flight fsync can lose an interior
+/// page while later pages persist. Physical pages are the logical page plus the checksum record.
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn corrupt_page(
+    storage: &impl Storage,
+    partition: &str,
+    name: &[u8],
+    page: u64,
+    logical_page_size: u64,
+) {
+    // Every valid checksum slot covers byte zero, including a shorter fallback slot.
+    let physical_page_size = logical_page_size + CHECKSUM_SIZE;
+    let offset = page * physical_page_size;
+    let (blob, size) = storage.open(partition, name).await.unwrap();
+
+    // A complete physical page must follow the target: a trailing truncated physical page
+    // can never validate, so a target followed only by one would be the last validatable
+    // page.
+    assert!(
+        offset
+            .checked_add(physical_page_size * 2)
+            .is_some_and(|end| end <= size),
+        "corruption target must be an interior page"
+    );
+    let byte = blob
+        .read_at(offset, 1, ReadOptions::default())
+        .await
+        .unwrap()
+        .coalesce();
+    blob.write_at(
+        offset,
+        vec![byte.as_ref()[0] ^ 0xFF],
+        WriteOptions::default(),
+    )
+    .await
+    .unwrap();
+    blob.sync().await.unwrap();
+}
+
 /// Ensure every requested range lies within the blob's size.
 ///
 /// # Panics
@@ -153,48 +230,6 @@ fn validate_read_ranges(
     Ok(())
 }
 
-/// Partition a batch of variable-length range reads into bytes copied from the in-memory tail
-/// and ranges that need cache/blob reads.
-///
-/// `buf` holds one slot per range, back to back (validated by [validate_read_ranges]). `tail`
-/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] this is the
-/// tip buffer, for [Sealed] the partial last page. Ranges entirely within `tail` are copied into
-/// place. Ranges fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
-/// pairs for the caller to read from the page cache or blob. `split_at_mut` yields disjoint
-/// per-range slots, so returned slices never alias.
-fn split_read_ranges<'a>(
-    mut buf: &'a mut [u8],
-    ranges: impl ExactSizeIterator<Item = (u64, usize)>,
-    tail_offset: u64,
-    tail: &[u8],
-) -> Vec<(&'a mut [u8], u64)> {
-    let mut cache_ranges = Vec::with_capacity(ranges.len());
-    for (offset, len) in ranges {
-        let (slot, rest) = buf.split_at_mut(len);
-        buf = rest;
-        if len == 0 {
-            continue;
-        }
-        let end = offset + len as u64;
-        if end <= tail_offset {
-            // Entirely below the tail bytes, so this needs a cache/blob read.
-            cache_ranges.push((slot, offset));
-        } else if offset >= tail_offset {
-            // Entirely within the tail bytes.
-            let src = (offset - tail_offset) as usize;
-            slot.copy_from_slice(&tail[src..src + len]);
-        } else {
-            // Straddles the boundary: copy the suffix from the tail bytes, record the prefix
-            // for a cache/blob read.
-            let prefix_len = (tail_offset - offset) as usize;
-            let (prefix, suffix) = slot.split_at_mut(prefix_len);
-            suffix.copy_from_slice(&tail[..len - prefix_len]);
-            cache_ranges.push((prefix, offset));
-        }
-    }
-    cache_ranges
-}
-
 /// Read the designated page from the underlying blob and return its logical bytes as a vector if it
 /// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
 /// check the length of the returned vector to determine if the page was partial vs full.
@@ -202,8 +237,10 @@ async fn get_page_from_blob(
     blob: &impl Blob,
     page_num: u64,
     page_size: u64,
+    read_options: ReadOptions,
 ) -> Result<IoBuf, Error> {
-    let (page, _) = get_page_with_checksum_from_blob(blob, page_num, page_size).await?;
+    let (page, _) =
+        get_page_with_checksum_from_blob(blob, page_num, page_size, read_options).await?;
     Ok(page)
 }
 
@@ -212,6 +249,7 @@ async fn get_page_with_checksum_from_blob(
     blob: &impl Blob,
     page_num: u64,
     page_size: u64,
+    read_options: ReadOptions,
 ) -> Result<(IoBuf, ActiveChecksum), Error> {
     let physical_page_size = page_size
         .checked_add(CHECKSUM_SIZE)
@@ -221,7 +259,11 @@ async fn get_page_with_checksum_from_blob(
         .ok_or(Error::OffsetOverflow)?;
 
     let page = blob
-        .read_at(physical_page_start, physical_page_size as usize)
+        .read_at(
+            physical_page_start,
+            physical_page_size as usize,
+            read_options,
+        )
         .await?
         .coalesce();
 
@@ -319,7 +361,7 @@ impl Checksum {
         // Decode the CRC record from the page footer. The size guard above guarantees all of its
         // bytes are present, and every bit pattern decodes, so the read cannot fail.
         let crc_start_idx = (physical_page_size - CHECKSUM_SIZE) as usize;
-        let mut crc_bytes = &buf[crc_start_idx..];
+        let mut crc_bytes = Copying(&buf[crc_start_idx..]);
         let crc_record = Self::read(&mut crc_bytes).expect("CRC record read should not fail");
 
         // Prefer the authoritative slot: when both slots are valid, it covers the most recently
@@ -395,9 +437,10 @@ impl Checksum {
     /// Encode just a slot's leading `len` field (the first [`CHECKSUM_SLOT_LEN_SIZE`] bytes of
     /// [`Self::slot_bytes`]).
     ///
-    /// Because `len` decides which slot is authoritative, rewriting only this field flips a slot's
-    /// authority without disturbing its already-durable CRC: writing a non-zero `len` commits a
-    /// previously staged slot, while writing 0 retires one.
+    /// Because `len` decides which slot is authoritative, rewriting only this field commits a
+    /// previously staged slot without disturbing its already-durable CRC. Retiring a slot must
+    /// instead zero it entirely with [`Self::slot_bytes`]: a zero length with a durable CRC left
+    /// behind could be reassembled into the retired checksum by a later torn rewrite.
     fn slot_len_bytes(len: u16) -> [u8; CHECKSUM_SLOT_LEN_SIZE] {
         let mut bytes = [0; CHECKSUM_SLOT_LEN_SIZE];
         let mut buf = bytes.as_mut_slice();
@@ -448,6 +491,15 @@ impl arbitrary::Arbitrary<'_> for Checksum {
 mod tests {
     use super::*;
     use rstest::rstest;
+
+    #[test]
+    #[should_panic(expected = "corruption target must be an interior page")]
+    fn test_corrupt_page_rejects_short_blob() {
+        use crate::Runner as _;
+        crate::deterministic::Runner::default().start(|context| async move {
+            corrupt_page(&context, "short-blob", b"blob", 0, 64).await;
+        });
+    }
 
     enum ValidationExpectation {
         Ok,
@@ -519,7 +571,7 @@ mod tests {
         };
 
         let bytes = record.to_bytes();
-        let restored = Checksum::read(&mut &bytes[..]).unwrap();
+        let restored = Checksum::read(&mut Copying(&bytes)).unwrap();
 
         assert_eq!(restored.len1, 0x1234);
         assert_eq!(restored.crc1, 0xAABBCCDD);

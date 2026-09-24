@@ -19,6 +19,18 @@ pub const MAX_POLL_ATTEMPTS: usize = 30;
 /// Interval between retries
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Maximum attempts the AWS SDK makes per EC2 or S3 request.
+///
+/// With [SDK_INITIAL_BACKOFF] doubling up to [SDK_MAX_BACKOFF], this retries throttled or failing
+/// requests for over two hours.
+pub const MAX_SDK_ATTEMPTS: u32 = 256;
+
+/// Backoff before the first AWS SDK retry (doubles on each subsequent retry)
+pub const SDK_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Upper bound on the backoff between AWS SDK retries
+pub const SDK_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
 /// Protocol for deployer ingress
 pub const DEPLOYER_PROTOCOL: &str = "tcp";
 

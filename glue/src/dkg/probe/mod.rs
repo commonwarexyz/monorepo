@@ -267,8 +267,8 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, ordered::Set,
-        sequence::Unit,
+        N3f1, NZDuration, NZU16, NZU32, NZU64, NZUsize, TestRng, channel::oneshot, non_empty,
+        ordered::Set, probability, sequence::Unit,
     };
     use std::{num::NonZeroU64, time::Duration};
 
@@ -279,7 +279,7 @@ mod tests {
     const LINK: Link = Link {
         latency: Duration::from_millis(1),
         jitter: Duration::ZERO,
-        success_rate: 1.0,
+        success_rate: probability!(1.0),
     };
 
     struct Harness {
@@ -578,7 +578,6 @@ mod tests {
                 peer_provider: oracle.manager(),
                 blocker: oracle.control(public_key.clone()),
                 mailbox_size: NZUsize!(16),
-                initial: Duration::from_secs(1),
                 timeout: Duration::from_secs(2),
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
@@ -617,7 +616,7 @@ mod tests {
             marshal::Config {
                 provider: mocks::TestProvider::new(schemes[index].clone()),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
-                start: Start::Genesis(mocks::genesis_block(public_key)),
+                start: Start::Genesis(mocks::genesis_block(public_key).into()),
                 partition_prefix,
                 mailbox_size: NZUsize!(16),
                 view_retention: ViewDelta::new(8),
@@ -767,7 +766,7 @@ mod tests {
             .iter()
             .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
             .collect::<Vec<_>>();
-        Finalization::from_finalizes(&schemes[0], &finalizes, &Sequential)
+        Finalization::from_finalizes(&schemes[0], non_empty![@finalizes.iter()], &Sequential)
             .expect("finalization quorum")
     }
 
@@ -1033,7 +1032,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone(),
+                    block: harness.boundary.clone().into(),
                 }
                 .encode()
                 .to_vec(),
@@ -1100,7 +1099,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone(),
+                    block: harness.boundary.clone().into(),
                 }
                 .encode()
                 .to_vec(),
@@ -1171,7 +1170,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: wrong_block,
+                    block: wrong_block.into(),
                 }
                 .encode()
                 .to_vec(),
@@ -1191,7 +1190,7 @@ mod tests {
                 Recipients::One(harness.participants[1].clone()),
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
                     epoch: Epoch::new(1),
-                    block: harness.boundary.clone(),
+                    block: harness.boundary.clone().into(),
                 }
                 .encode()
                 .to_vec(),
@@ -1265,10 +1264,9 @@ mod tests {
                 wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BoundaryResponse(
                     terminal_finalization,
                 )
-                .encode()
-                .to_vec();
+                .encode();
             let decoded = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
-                message.as_slice(),
+                message.clone(),
                 &harness.schemes[2].certificate_codec_config(),
             )
             .expect("terminal response decoded")

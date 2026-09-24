@@ -9,11 +9,11 @@ use commonware_formatting::{from_hex, hex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{fs, net::SocketAddr, path::Path};
 
-/// Per-node config stored in `node.json`: signing key and listen/dial addresses.
+/// Per-node config stored in `node.json`: signer and listen/dial addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     #[serde(with = "hex_private_key")]
-    pub signing_key: PrivateKey,
+    pub signer: PrivateKey,
     pub listen: SocketAddr,
     pub dial: SocketAddr,
 }
@@ -24,19 +24,19 @@ impl NodeConfig {
         read_json(&node_dir.join("node.json"))
     }
 
-    /// Public key of the node's signing key.
+    /// Public key of the node's signer.
     pub fn public_key(&self) -> PublicKey {
-        self.signing_key.public_key()
+        self.signer.public_key()
     }
 
     /// Node config with listen and dial both on localhost at `port`.
     #[cfg(test)]
-    pub const fn localhost(signing_key: PrivateKey, port: u16) -> Self {
+    pub const fn localhost(signer: PrivateKey, port: u16) -> Self {
         use std::net::{IpAddr, Ipv4Addr};
 
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
         Self {
-            signing_key,
+            signer,
             listen: addr,
             dial: addr,
         }
@@ -115,7 +115,7 @@ mod hex_private_key {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PrivateKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        PrivateKey::decode(bytes.as_slice()).map_err(D::Error::custom)
+        PrivateKey::decode(bytes).map_err(D::Error::custom)
     }
 }
 
@@ -130,7 +130,7 @@ mod hex_public_key {
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PublicKey, D::Error> {
         let raw = String::deserialize(deserializer)?;
         let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-        PublicKey::decode(bytes.as_slice()).map_err(D::Error::custom)
+        PublicKey::decode(bytes).map_err(D::Error::custom)
     }
 }
 
@@ -154,7 +154,7 @@ mod hex_public_keys {
             .into_iter()
             .map(|raw| {
                 let bytes = from_hex(&raw).ok_or_else(|| D::Error::custom("invalid hex"))?;
-                PublicKey::decode(bytes.as_slice()).map_err(D::Error::custom)
+                PublicKey::decode(bytes).map_err(D::Error::custom)
             })
             .collect()
     }

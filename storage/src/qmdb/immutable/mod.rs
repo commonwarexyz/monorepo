@@ -80,8 +80,8 @@ use crate::{
     },
     merkle::{Family, Location, Proof, full::Config as MerkleConfig},
     qmdb::{
-        Error, any::ValueEncoding, batch_chain, build_snapshot_from_log, metrics::Metrics,
-        operation::Key, single_operation_root,
+        Error, any::ValueEncoding, chain, metrics::Metrics, operation::Key, single_operation_root,
+        sync::source,
     },
     translator::Translator,
 };
@@ -90,8 +90,9 @@ use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_runtime::Handle;
+use commonware_runtime::{Handle, ReadOptions};
 use core::num::{NonZeroU64, NonZeroUsize};
+use futures::{StreamExt, pin_mut};
 use std::{ops::Range, sync::Arc};
 use tracing::warn;
 
@@ -107,6 +108,42 @@ pub use compact::{
     UnmerkleizedBatch as CompactUnmerkleizedBatch,
 };
 pub use operation::Operation;
+
+/// Build the snapshot by replaying the log from `inactivity_floor_loc`, inserting the location of
+/// every retained [Operation::Set] and keeping prior locations of the same key. Assumes the log
+/// is not pruned beyond the inactivity floor.
+///
+/// Repeats of a full key all land in the snapshot, matching a snapshot maintained live, so reads
+/// of a repeated key keep returning one of its written values however the snapshot was built.
+///
+/// `init_buffer` sizes the replay read buffer (in bytes).
+async fn build_snapshot<F, K, V, C, T>(
+    inactivity_floor_loc: Location<F>,
+    log: &C,
+    snapshot: &mut Index<T, Location<F>>,
+    init_buffer: NonZeroUsize,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    C: Contiguous<Item = Operation<F, K, V>>,
+    T: Translator,
+{
+    // Init reads every operation once, so the replayed pages are not kept in the OS page cache:
+    // the init cache, not the OS cache, decides which probes hit.
+    let stream = log
+        .replay(*inactivity_floor_loc, init_buffer, ReadOptions::DONT_CACHE)
+        .await?;
+    pin_mut!(stream);
+    while let Some(result) = stream.next().await {
+        let (loc, op) = result?;
+        if let Operation::Set(key, _) = op {
+            snapshot.insert(&key, Location::new(loc));
+        }
+    }
+    Ok(())
+}
 
 /// Compute the authenticated root of a newly initialized database without opening storage.
 ///
@@ -133,10 +170,6 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
-
-    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
-    /// collisions without re-reading the log; `None` disables it.
-    pub init_cache_size: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
@@ -175,9 +208,6 @@ pub struct Immutable<
     ///
     /// Only references operations of type [Operation::Set].
     pub(crate) snapshot: Index<T, Location<F>>,
-
-    /// The location of the last commit operation.
-    pub(crate) last_commit_loc: Location<F>,
 
     /// The inactivity floor declared by the last committed batch.
     /// Operations before this location are considered inactive by the application.
@@ -220,18 +250,28 @@ where
     T: Translator,
     S: Strategy,
 {
-    /// Initialize from a pre-constructed authenticated journal.
-    ///
-    /// Seeds an initial commit if the journal is empty, builds the in-memory snapshot,
-    /// and returns the initialized database.
+    /// Initialize from the latest retained commit, discarding uncommitted operations.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
     #[boxed]
-    pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H, S>,
+    pub async fn init(
         context: E,
-        translator: T,
-        init_buffer: NonZeroUsize,
-        cache_size: Option<NonZeroUsize>,
-    ) -> Result<Self, Error<F>> {
+        cfg: Config<T, C::Config, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>>
+    where
+        C: authenticated::Backing<E>,
+    {
+        // Snapshot reconstruction replays from the selected commit's inactivity floor, so that
+        // floor must remain in the retained operation prefix.
+        let mut journal = crate::qmdb::init_journal::<F, E, C, H, S>(
+            context.child("journal"),
+            cfg.merkle_config,
+            cfg.log,
+            max_size,
+            true,
+        )
+        .await?;
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
             (journal, _) = journal
@@ -240,7 +280,7 @@ where
             journal = journal.sync().await?;
         }
 
-        let mut snapshot = Index::new(context.child("snapshot"), translator);
+        let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
 
         let (last_commit_loc, inactivity_floor_loc) = {
             let bounds = journal.journal.bounds();
@@ -252,18 +292,15 @@ where
             let inactivity_floor_loc = last_op
                 .has_floor()
                 .expect("last operation should be a commit with floor");
-            if inactivity_floor_loc > last_commit_loc {
-                return Err(Error::DataCorrupted("inactivity floor exceeds last commit"));
-            }
 
-            // Replay the log from the inactivity floor to build the snapshot.
-            build_snapshot_from_log::<F, _, _, _>(
+            // Replay the log from the inactivity floor to build the snapshot. Every retained
+            // location is inserted, mirroring the live apply path, so a repeated key keeps
+            // serving one of its written values across restarts and bounded initializations.
+            build_snapshot(
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
-                init_buffer,
-                cache_size,
-                |_, _| {},
+                cfg.init_buffer,
             )
             .await?;
 
@@ -277,7 +314,6 @@ where
             journal,
             root,
             snapshot,
-            last_commit_loc,
             inactivity_floor_loc,
             metrics,
         };
@@ -308,7 +344,7 @@ where
             bounds.end,
             bounds.start,
             *self.inactivity_floor_loc,
-            *self.last_commit_loc,
+            bounds.end - 1,
         );
     }
 
@@ -372,27 +408,34 @@ where
 
         candidates.sort_unstable_by_key(|&(_, pos)| pos);
 
-        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
-        for &(_, pos) in &candidates {
-            if positions.last() != Some(&pos) {
-                positions.push(pos);
-            }
-        }
+        let same_pos = |a: &(usize, u64), b: &(usize, u64)| a.1 == b.1;
+        let positions: Vec<u64> = candidates
+            .chunk_by(same_pos)
+            .map(|group| group[0].1)
+            .collect();
 
         let ops = self.journal.read_many(&positions).await?;
+        assert_eq!(
+            ops.len(),
+            positions.len(),
+            "read_many returns one operation per position"
+        );
 
-        for &(key_idx, pos) in &candidates {
-            if results[key_idx].is_some() {
-                continue;
-            }
-            let op_idx = positions
-                .binary_search(&pos)
-                .expect("position was deduped from candidates");
-            let Operation::Set(k, v) = &ops[op_idx] else {
-                return Err(Error::UnexpectedData(Location::new(pos)));
+        for (op, group) in ops.into_iter().zip(candidates.chunk_by(same_pos)) {
+            let Operation::Set(k, v) = op else {
+                return Err(Error::UnexpectedData(Location::new(group[0].1)));
             };
-            if k == keys[key_idx] {
-                results[key_idx] = Some(v.clone());
+            let mut pending = None;
+            for &(key_idx, _) in group {
+                if results[key_idx].is_some() || k != *keys[key_idx] {
+                    continue;
+                }
+                if let Some(prev) = pending.replace(key_idx) {
+                    results[prev] = Some(v.clone());
+                }
+            }
+            if let Some(last) = pending {
+                results[last] = Some(v);
             }
         }
 
@@ -420,7 +463,8 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
-        let last_commit_loc = self.last_commit_loc;
+        // The journal always ends with a commit operation.
+        let last_commit_loc = self.size() - 1;
         let Operation::Commit(metadata, _floor) =
             self.journal.journal.read(*last_commit_loc).await?
         else {
@@ -520,105 +564,6 @@ where
         Ok(self)
     }
 
-    /// Rewind the database to `size` operations, where `size` is the location of the next append.
-    ///
-    /// This rewinds both the operations journal and its Merkle structure to the historical
-    /// state at `size`, and removes rewound set operations from the in-memory snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when:
-    /// - `size` is not a valid rewind target
-    /// - the target's required logical range is not fully retained (for immutable, this means the
-    ///   oldest retained location is already beyond the rewind boundary)
-    /// - `size - 1` is not a commit operation
-    ///
-    /// Any error from this method is fatal for this handle. Rewind may mutate journal state
-    /// before this method finishes rebuilding in-memory rewind state. Callers must drop this
-    /// database handle after any `Err` from `rewind` and reopen from storage.
-    ///
-    /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
-    /// [`Immutable::sync`] completes, or until the handle returned by a subsequent
-    /// [`Immutable::start_sync`] completes.
-    #[tracing::instrument(name = "qmdb.immutable.db.rewind", level = "info", skip_all)]
-    #[boxed]
-    pub async fn rewind(mut self, size: Location<F>) -> Result<Self, Error<F>> {
-        let rewind_size = *size;
-        let current_size = *self.last_commit_loc + 1;
-        if rewind_size == current_size {
-            return Ok(self);
-        }
-        if rewind_size == 0 || rewind_size > current_size {
-            return Err(Error::Journal(crate::journal::Error::InvalidRewind(
-                rewind_size,
-            )));
-        }
-
-        let (rewind_last_loc, rewind_floor, rewound_keys) = {
-            let bounds = self.journal.bounds();
-            let rewind_last_loc = Location::new(rewind_size - 1);
-            if rewind_size <= bounds.start {
-                return Err(Error::Journal(crate::journal::Error::ItemPruned(
-                    *rewind_last_loc,
-                )));
-            }
-            let rewind_last_op = self.journal.read(*rewind_last_loc).await?;
-            let Operation::Commit(_, rewind_floor) = &rewind_last_op else {
-                return Err(Error::UnexpectedData(rewind_last_loc));
-            };
-            let rewind_floor = *rewind_floor;
-            if *rewind_floor < bounds.start {
-                return Err(Error::Journal(crate::journal::Error::ItemPruned(
-                    *rewind_floor,
-                )));
-            }
-
-            let mut rewound_keys = Vec::new();
-            for loc in rewind_size..current_size {
-                if let Operation::Set(key, _) = self.journal.read(loc).await? {
-                    rewound_keys.push(key);
-                }
-            }
-
-            (rewind_last_loc, rewind_floor, rewound_keys)
-        };
-
-        let old_floor = self.inactivity_floor_loc;
-
-        // Journal rewind happens before in-memory snapshot updates. If a later step fails, this
-        // handle may be internally diverged and must be dropped by the caller.
-        self.journal = self.journal.rewind(rewind_size).await?;
-
-        // Remove keys that were set in the range [rewind_size, current_size) from the snapshot.
-        let rewind_loc = Location::<F>::new(rewind_size);
-        for key in &rewound_keys {
-            // Filter by location to make sure we don't also prune keys that happen to collide.
-            self.snapshot.retain(key, |loc| *loc < rewind_loc);
-        }
-
-        // If the rewind target has a lower floor than the current snapshot was
-        // built from, insert keys from the gap [rewind_floor, old_floor) that
-        // were excluded by the higher-floor reconstruction. A key written more
-        // than once may end up with multiple snapshot entries, and reads of it
-        // may return any of its written values.
-        if rewind_floor < old_floor {
-            let gap_end = core::cmp::min(*old_floor, rewind_size);
-            for loc in *rewind_floor..gap_end {
-                if let Operation::Set(key, _) = self.journal.journal.read(loc).await? {
-                    self.snapshot.insert(&key, Location::new(loc));
-                }
-            }
-        }
-
-        self.last_commit_loc = rewind_last_loc;
-        self.inactivity_floor_loc = rewind_floor;
-        let inactive_peaks = F::inactive_peaks(size, rewind_floor);
-        self.root = self.journal.root(inactive_peaks)?;
-        self.update_metrics();
-
-        Ok(self)
-    }
-
     /// Return the canonical QMDB root of the db.
     pub const fn root(&self) -> H::Digest {
         self.root
@@ -682,9 +627,9 @@ where
         Ok(self.journal.destroy().await?)
     }
 
-    /// The [`Commitment`](batch_chain::Commitment) for the database's current state.
-    pub(crate) fn commitment(&self) -> batch_chain::Commitment<F, H::Digest> {
-        batch_chain::Commitment::new(self.last_commit_loc + 1, self.root)
+    /// The [`Commitment`](chain::Commitment) for the database's current state.
+    pub(crate) fn commitment(&self) -> chain::Commitment<F, H::Digest> {
+        chain::Commitment::new(self.size(), self.root)
     }
 
     /// Create a new speculative batch of operations with this database as its parent.
@@ -711,13 +656,13 @@ where
     ///
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
-    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for
+    /// different fork returns [`Error::StaleBatch`] (see [`crate::qmdb::chain`] for
     /// more details).
     ///
     /// # Errors
     ///
     /// - [`Error::StaleBatch`] if the batch is detected as stale (see
-    ///   [`crate::qmdb::batch_chain`] for more details).
+    ///   [`crate::qmdb::chain`] for more details).
     /// - [`Error::FloorRegressed`] if any commit in the chain (the tip or any
     ///   unapplied ancestor) declares an inactivity floor below the previous
     ///   commit's floor (or, for the oldest unapplied commit, below the
@@ -733,9 +678,9 @@ where
     ///
     /// Returns the range of locations written.
     ///
-    /// This publishes the batch to the in-memory database state and appends it to the journal,
-    /// but does not durably commit it. Call [`Immutable::commit`] or [`Immutable::sync`], or await
-    /// the handle returned by [`Immutable::start_sync`], to guarantee durability.
+    /// This publishes the batch to the in-memory database state and appends it to the journal.
+    /// Call [`Immutable::commit`] or [`Immutable::sync`], or await the handle returned by
+    /// [`Immutable::start_sync`], to make the applied state durable.
     #[tracing::instrument(name = "qmdb.immutable.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         mut self,
@@ -744,7 +689,7 @@ where
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         self.validate_batch(&batch)?;
-        let db_size = self.last_commit_loc + 1;
+        let db_size = self.size();
 
         // Apply journal.
         self.journal = self.journal.apply_batch(&batch.journal_batch).await?;
@@ -794,7 +739,6 @@ where
         }
 
         // Update state.
-        self.last_commit_loc = batch.bounds.tip.size - 1;
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root();
         let range = db_size..batch.bounds.tip.size;
@@ -813,7 +757,7 @@ where
     K: Key,
     V: ValueEncoding,
     C: Mutable<Item = Operation<F, K, V>>,
-    C::Item: EncodeShared,
+    Operation<F, K, V>: EncodeShared,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -823,26 +767,17 @@ where
     type Op = Operation<F, K, V>;
     type Error = Error<F>;
 
-    async fn serve(
-        &self,
-        request: crate::qmdb::sync::Request<F>,
-    ) -> Result<
-        (
-            crate::qmdb::sync::Response<F, Self::Op, Self::Digest>,
-            crate::qmdb::sync::FeedbackTx,
-        ),
-        Self::Error,
-    > {
+    async fn serve(&self, request: crate::qmdb::sync::Request<F>) -> source::Result<Self> {
         self.journal.serve(request).await
     }
 }
 
 #[cfg(test)]
-pub(super) mod test {
+pub(super) mod tests {
     use super::*;
     use crate::{
         merkle::{Family, Location},
-        qmdb::verify_proof,
+        qmdb::{verify_proof, verify_proof_and_pinned_nodes},
         translator::TwoCap,
     };
     use commonware_codec::EncodeShared;
@@ -853,6 +788,32 @@ pub(super) mod test {
     use std::ops::Range;
 
     const ITEMS_PER_SECTION: u64 = 5;
+
+    /// Emits the named test against `mmr::Family` and `mmb::Family`.
+    macro_rules! immutable_tests {
+        ($($name:ident => $scenario:ident, $open:ident;)*) => {
+            $(
+                #[test_traced]
+                fn $name() {
+                    deterministic::Runner::default().start(|ctx| async move {
+                        tests::$scenario(ctx, $open::<mmr::Family>).await;
+                    });
+                }
+            )*
+            paste::paste! {
+                $(
+                    #[test_traced]
+                    fn [<$name _mmb>]() {
+                        deterministic::Runner::default().start(|ctx| async move {
+                            tests::$scenario(ctx, $open::<mmb::Family>).await;
+                        });
+                    }
+                )*
+            }
+        };
+    }
+
+    pub(super) use immutable_tests;
 
     type TestDb<F, V, C> = Immutable<
         F,
@@ -866,7 +827,7 @@ pub(super) mod test {
     >;
 
     #[boxed]
-    pub(crate) async fn test_immutable_empty<F: Family, V, C>(
+    pub(crate) async fn run_empty<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -911,7 +872,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_commit_after_sync_recovery<F: Family, V, C>(
+    pub(crate) async fn run_commit_after_sync_recovery<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -947,7 +908,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_build_basic<F: Family, V, C>(
+    pub(crate) async fn run_build_basic<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1021,7 +982,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_proof_verify<F: Family, V, C>(
+    pub(crate) async fn run_proof_verify<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1056,7 +1017,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_prune<F: Family, V, C>(
+    pub(crate) async fn run_prune<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1105,11 +1066,7 @@ pub(super) mod test {
     /// prune is not a durability boundary, recovery may return either the durable baseline or the
     /// buffered state, but never a mixture whose floor references pruned operations.
     #[boxed]
-    pub(crate) async fn test_immutable_prune_after_uncommitted_apply_batch_recovery<
-        F: Family,
-        V,
-        C,
-    >(
+    pub(crate) async fn run_prune_after_uncommitted_apply_batch_recovery<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1163,8 +1120,150 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// `operations()` must cover exactly the batch's own applied range and match the
+    /// operations a post-apply `historical_proof` recovers from the log, for a db-based
+    /// batch and for a chained batch applied after its ancestor.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_chain<F: Family, V, C>(
+    pub(crate) async fn run_operations_match_applied_log<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared + PartialEq + core::fmt::Debug,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let seed = db
+            .new_batch()
+            .set(Sha256::fill(1u8), Sha256::fill(11u8))
+            .set(Sha256::fill(2u8), Sha256::fill(12u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (seed_start, seed_ops) = seed.operations();
+        let seed_root = seed.root();
+        let seed_proof = seed.proof(&db).unwrap();
+        let seed_pins = seed.pinned_nodes(&db).unwrap();
+        let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+        assert_eq!(seed_start, seed_range.start);
+        assert_eq!(*seed_start + seed_ops.len() as u64, *seed_range.end);
+
+        // A chained batch's operations are its own suffix only.
+        let parent = db
+            .new_batch()
+            .set(Sha256::fill(3u8), Sha256::fill(13u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let child = parent
+            .new_batch::<Sha256>()
+            .set(Sha256::fill(4u8), Sha256::fill(14u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (parent_start, parent_ops) = parent.operations();
+        let (child_start, child_ops) = child.operations();
+        let (parent_root, child_root) = (parent.root(), child.root());
+        let (parent_pins, child_pins) = (
+            parent.pinned_nodes(&db).unwrap(),
+            child.pinned_nodes(&db).unwrap(),
+        );
+        let (parent_proof, child_proof) = (parent.proof(&db).unwrap(), child.proof(&db).unwrap());
+        let (db, parent_range) = db.apply_batch(parent).await.unwrap();
+        let (db, child_range) = db.apply_batch(child).await.unwrap();
+        assert_eq!(parent_start, parent_range.start);
+        assert_eq!(*parent_start + parent_ops.len() as u64, *parent_range.end);
+        assert_eq!(child_start, child_range.start);
+        assert_eq!(*child_start + child_ops.len() as u64, *child_range.end);
+
+        // A write-free batch still captures its commit-only suffix.
+        let empty = db
+            .new_batch()
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (empty_start, empty_ops) = empty.operations();
+        let (empty_root, empty_proof) = (empty.root(), empty.proof(&db).unwrap());
+        let empty_pins = empty.pinned_nodes(&db).unwrap();
+        let (db, empty_range) = db.apply_batch(empty).await.unwrap();
+        assert_eq!(empty_start, empty_range.start);
+        assert_eq!(*empty_start + empty_ops.len() as u64, *empty_range.end);
+
+        // Every captured delta and proof must match what the log recovers for its
+        // range, and verify against the batch's own root with and without the pins.
+        for (start, ops, proof, pins, root) in [
+            (seed_start, seed_ops, seed_proof, seed_pins, seed_root),
+            (
+                parent_start,
+                parent_ops,
+                parent_proof,
+                parent_pins,
+                parent_root,
+            ),
+            (child_start, child_ops, child_proof, child_pins, child_root),
+            (empty_start, empty_ops, empty_proof, empty_pins, empty_root),
+        ] {
+            let len = core::num::NonZeroU64::new(ops.len() as u64).unwrap();
+            let end = Location::new(*start + ops.len() as u64);
+            let (log_proof, log_ops) = db.historical_proof(end, start, len).await.unwrap();
+            assert_eq!(log_ops, *ops);
+            assert_eq!(log_proof, proof);
+            assert!(verify_proof::<Sha256, _, _>(&proof, start, &ops, &root));
+            assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+                &proof, start, &ops, &pins, &root
+            ));
+        }
+
+        // Flushing the applied batch prunes the store to its peaks. The late batch's base is
+        // mid-mountain, so its artifacts are refused rather than returned unverifiable.
+        let late = db
+            .new_batch()
+            .set(Sha256::fill(5u8), Sha256::fill(15u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (db, _) = db.apply_batch(Arc::clone(&late)).await.unwrap();
+        let db = db.commit().await.unwrap();
+        assert!(matches!(
+            late.proof(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+        assert!(matches!(
+            late.pinned_nodes(&db),
+            Err(crate::qmdb::Error::Merkle(
+                crate::merkle::Error::ElementPruned(_)
+            ))
+        ));
+
+        // A batch built on the flushed store reads every node below it from the pinned peaks.
+        let flushed = db
+            .new_batch()
+            .set(Sha256::fill(6u8), Sha256::fill(16u8))
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (flushed_start, flushed_ops) = flushed.operations();
+        let flushed_root = flushed.root();
+        let flushed_proof = flushed.proof(&db).unwrap();
+        let flushed_pins = flushed.pinned_nodes(&db).unwrap();
+        assert!(verify_proof_and_pinned_nodes::<Sha256, _, _>(
+            &flushed_proof,
+            flushed_start,
+            &flushed_ops,
+            &flushed_pins,
+            &flushed_root
+        ));
+        let (db, flushed_range) = db.apply_batch(flushed).await.unwrap();
+        assert_eq!(flushed_start, flushed_range.start);
+        assert_eq!(
+            *flushed_start + flushed_ops.len() as u64,
+            *flushed_range.end
+        );
+
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_batch_chain<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1217,7 +1316,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_build_and_authenticate<F: Family, V, C>(
+    pub(crate) async fn run_build_and_authenticate<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1271,7 +1370,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_recovery_from_failed_merkle_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_failed_merkle_sync<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1326,7 +1425,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_recovery_from_failed_log_sync<F: Family, V, C>(
+    pub(crate) async fn run_recovery_from_failed_log_sync<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1364,7 +1463,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_pruning<F: Family, V, C>(
+    pub(crate) async fn run_pruning<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1471,7 +1570,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_prune_beyond_floor<F: Family, V, C>(
+    pub(crate) async fn run_prune_beyond_floor<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1510,7 +1609,7 @@ pub(super) mod test {
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
 
         // op_count is 4 (initial_commit, k1, k2, commit), last_commit is at location 3
-        assert_eq!(*db.last_commit_loc, 3);
+        assert_eq!(*db.size() - 1, 3);
 
         // Second batch with floor=5 (the new commit location).
         let merkleized = db
@@ -1568,17 +1667,19 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_recovery<F: Family, V, C>(
+    pub(crate) async fn run_bounded_initialization_recovery<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         let key1 = Sha256::hash(&[&1u64.to_be_bytes()]);
         let key2 = Sha256::hash(&[&2u64.to_be_bytes()]);
@@ -1595,7 +1696,7 @@ pub(super) mod test {
             commit_sets(db, [(key1, value1), (key2, value2)], Some(metadata_a)).await;
         let size_before = db.bounds().end;
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.size() - 1;
         assert_eq!(size_before, first_range.end);
 
         let metadata_b = Sha256::fill(55u8);
@@ -1607,10 +1708,13 @@ pub(super) mod test {
         assert_eq!(db.get(&key3).await.unwrap(), Some(value3));
         assert_eq!(db.get(&key4).await.unwrap(), Some(value4));
 
-        let db = db.rewind(size_before).await.unwrap();
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(size_before))
+            .await
+            .unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.size() - 1, last_commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
@@ -1618,10 +1722,10 @@ pub(super) mod test {
         assert_eq!(db.get(&key4).await.unwrap(), None);
 
         db.commit().await.unwrap();
-        let db = open_db(context.child("reopen")).await;
+        let db = open_db(context.child("reopen"), None).await.unwrap();
         assert_eq!(db.root(), root_before);
         assert_eq!(db.bounds().end, size_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.size() - 1, last_commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
@@ -1631,21 +1735,22 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Regression: a key Set before the rewind boundary that translator-collides with a key in the
-    /// rewound suffix must survive rewind. Earlier the snapshot remove pruned the entire translated
-    /// bucket and dropped the retained key.
+    /// A key retained by the initialization bound must survive even when it translator-collides
+    /// with a key in the discarded suffix.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_preserves_collision_bucket<F: Family, V, C>(
+    pub(crate) async fn run_bounded_initialization_preserves_collision_bucket<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("db")).await;
+        let db = open_db(context.child("db"), None).await.unwrap();
 
         // Two keys sharing the first two bytes collide under TwoCap.
         let mut k1_bytes = [0u8; 32];
@@ -1667,7 +1772,10 @@ pub(super) mod test {
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
 
-        let db = db.rewind(size_after_first).await.unwrap();
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(size_after_first))
+            .await
+            .unwrap();
 
         // The retained key must still be readable; pre-fix this returned None because the
         // translator bucket was wiped by the suffix-key remove.
@@ -1678,18 +1786,22 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_pruned_target_errors<F: Family, V, C>(
+    pub(crate) async fn run_bounded_initialization_pruned_target_errors<F: Family, V, C>(
         context: deterministic::Context,
         open_small_sections_db: impl Fn(
             deterministic::Context,
-        )
-            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>,
+        >,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_small_sections_db(context.child("db")).await;
+        let db = open_small_sections_db(context.child("db"), None)
+            .await
+            .unwrap();
 
         let (mut db, first_range) = commit_sets(
             db,
@@ -1703,7 +1815,7 @@ pub(super) mod test {
             round += 1;
             assert!(
                 round <= 64,
-                "failed to prune enough history for rewind test"
+                "failed to prune enough history for the bounded initialization test"
             );
 
             // Floor must be >= last_commit_loc for prune to succeed.
@@ -1722,7 +1834,7 @@ pub(super) mod test {
                 floor,
             )
             .await;
-            let last_commit = db.last_commit_loc;
+            let last_commit = db.size() - 1;
             db = db.prune(last_commit).await.unwrap();
 
             if db.bounds().start > first_range.start {
@@ -1731,30 +1843,38 @@ pub(super) mod test {
         }
 
         let oldest_retained = db.bounds().start;
-        let Err(boundary_err) = db.rewind(oldest_retained).await else {
-            panic!("expected rewind to fail");
+        _ = db.sync().await.unwrap();
+        let Err(boundary_err) =
+            open_small_sections_db(context.child("cap_error"), Some(oldest_retained)).await
+        else {
+            panic!("expected bounded initialization to fail");
         };
         assert!(
             matches!(
                 boundary_err,
                 Error::Journal(crate::journal::Error::ItemPruned(_))
             ),
-            "unexpected rewind error at retained boundary: {boundary_err:?}"
+            "unexpected bounded initialization error at retained boundary: {boundary_err:?}"
         );
 
-        let db = open_small_sections_db(context.child("db")).await;
-        let Err(err) = db.rewind(first_range.start).await else {
-            panic!("expected rewind to fail");
+        let db = open_small_sections_db(context.child("db"), None)
+            .await
+            .unwrap();
+        _ = db.sync().await.unwrap();
+        let Err(err) =
+            open_small_sections_db(context.child("cap_error"), Some(first_range.start)).await
+        else {
+            panic!("expected bounded initialization to fail");
         };
         assert!(
             matches!(err, Error::Journal(crate::journal::Error::ItemPruned(_))),
-            "unexpected rewind error: {err:?}"
+            "unexpected bounded initialization error: {err:?}"
         );
     }
 
     /// batch.get() reads pending mutations and falls through to base DB.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_get_read_through<F: Family, V, C>(
+    pub(crate) async fn run_batch_get_read_through<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1795,7 +1915,7 @@ pub(super) mod test {
 
     /// Child batch reads parent diff and adds its own mutations.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_stacked_get<F: Family, V, C>(
+    pub(crate) async fn run_batch_stacked_get<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1832,7 +1952,7 @@ pub(super) mod test {
 
     /// Two-level stacked batch apply works end-to-end.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_stacked_apply<F: Family, V, C>(
+    pub(crate) async fn run_batch_stacked_apply<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1883,7 +2003,7 @@ pub(super) mod test {
 
     /// MerkleizedBatch::root() matches db.root() after apply_batch().
     #[boxed]
-    pub(crate) async fn test_immutable_batch_speculative_root<F: Family, V, C>(
+    pub(crate) async fn run_batch_speculative_root<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1921,7 +2041,7 @@ pub(super) mod test {
 
     /// MerkleizedBatch::get() reads from diff and base DB.
     #[boxed]
-    pub(crate) async fn test_immutable_merkleized_batch_get<F: Family, V, C>(
+    pub(crate) async fn run_merkleized_batch_get<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -1967,7 +2087,7 @@ pub(super) mod test {
 
     /// Independent sequential batches applied one at a time.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_sequential_apply<F: Family, V, C>(
+    pub(crate) async fn run_batch_sequential_apply<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2011,7 +2131,7 @@ pub(super) mod test {
 
     /// Many sequential batches accumulate correctly.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_many_sequential<F: Family, V, C>(
+    pub(crate) async fn run_batch_many_sequential<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2065,7 +2185,7 @@ pub(super) mod test {
 
     /// Empty batch (zero mutations) produces correct speculative root.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_empty_batch<F: Family, V, C>(
+    pub(crate) async fn run_batch_empty_batch<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2104,7 +2224,7 @@ pub(super) mod test {
 
     /// MerkleizedBatch::get() works on a chained child's merkleized batch.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_chained_merkleized_get<F: Family, V, C>(
+    pub(crate) async fn run_batch_chained_merkleized_get<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2160,7 +2280,7 @@ pub(super) mod test {
 
     /// Large single batch, verifying all values and proof.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_large<F: Family, V, C>(
+    pub(crate) async fn run_batch_large<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2208,7 +2328,7 @@ pub(super) mod test {
 
     /// Child batch overrides same key set by parent.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_chained_key_override<F: Family, V, C>(
+    pub(crate) async fn run_batch_chained_key_override<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2259,7 +2379,7 @@ pub(super) mod test {
     /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
     /// so pruning is per-item.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_sequential_key_override<F: Family, V, C>(
+    pub(crate) async fn run_batch_sequential_key_override<F: Family, V, C>(
         context: deterministic::Context,
         open_db_small_sections: impl Fn(
             deterministic::Context,
@@ -2335,7 +2455,7 @@ pub(super) mod test {
 
     /// Metadata propagates through merkleize and clears with None.
     #[boxed]
-    pub(crate) async fn test_immutable_batch_metadata<F: Family, V, C>(
+    pub(crate) async fn run_batch_metadata<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2367,7 +2487,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_stale_batch_rejected<F: Family, V, C>(
+    pub(crate) async fn run_stale_batch_rejected<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2419,7 +2539,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_stale_batch_chained<F: Family, V, C>(
+    pub(crate) async fn run_stale_batch_chained<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2482,7 +2602,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_partial_ancestor_commit<F: Family, V, C>(
+    pub(crate) async fn run_partial_ancestor_commit<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2533,7 +2653,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_delayed_merkleize_after_ancestor_apply<F: Family, V, C>(
+    pub(crate) async fn run_delayed_merkleize_after_ancestor_apply<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2578,7 +2698,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_sequential_commit_parent_then_child<F: Family, V, C>(
+    pub(crate) async fn run_sequential_commit_parent_then_child<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2621,7 +2741,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_child_root_matches_pending_and_committed<F: Family, V, C>(
+    pub(crate) async fn run_child_root_matches_pending_and_committed<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2665,7 +2785,7 @@ pub(super) mod test {
     }
 
     #[boxed]
-    pub(crate) async fn test_immutable_stale_batch_child_applied_before_parent<F: Family, V, C>(
+    pub(crate) async fn run_stale_batch_child_applied_before_parent<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2705,7 +2825,7 @@ pub(super) mod test {
     /// to_batch() creates an owned snapshot whose root matches the committed DB.
     /// A child batch chained from it can be applied.
     #[boxed]
-    pub(crate) async fn test_immutable_to_batch<F: Family, V, C>(
+    pub(crate) async fn run_to_batch<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2750,7 +2870,7 @@ pub(super) mod test {
     /// Regression: applying a batch after its ancestor Arc is dropped (without
     /// committing) must still apply the ancestor's snapshot diffs.
     #[boxed]
-    pub(crate) async fn test_immutable_apply_after_ancestor_dropped<F: Family, V, C>(
+    pub(crate) async fn run_apply_after_ancestor_dropped<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2804,7 +2924,7 @@ pub(super) mod test {
     /// Verify the inactivity floor is zero for a fresh empty database and is
     /// correctly set after applying batches with specific floor values.
     #[boxed]
-    pub(crate) async fn test_immutable_inactivity_floor_tracking<F: Family, V, C>(
+    pub(crate) async fn run_inactivity_floor_tracking<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2853,7 +2973,7 @@ pub(super) mod test {
     /// Verify that applying a batch with a floor equal to the current floor succeeds,
     /// and that a higher floor also succeeds.
     #[boxed]
-    pub(crate) async fn test_immutable_floor_monotonicity<F: Family, V, C>(
+    pub(crate) async fn run_floor_monotonicity<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2902,19 +3022,21 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Verify that the inactivity floor is correctly restored after a rewind.
+    /// Verify that the inactivity floor is correctly restored after a recovery.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_restores_floor<F: Family, V, C>(
+    pub(crate) async fn run_bounded_initialization_restores_floor<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("test")).await;
+        let db = open_db(context.child("test"), None).await.unwrap();
 
         // Apply first batch with floor=2.
         let k1 = Sha256::fill(1u8);
@@ -2941,8 +3063,11 @@ pub(super) mod test {
         let db = db.commit().await.unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(4));
 
-        // Rewind to the first batch.
-        let db = db.rewind(first_size).await.unwrap();
+        // Reopen at the first batch.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.inactivity_floor_loc(), Location::new(2));
 
         db.destroy().await.unwrap();
@@ -2951,7 +3076,7 @@ pub(super) mod test {
     /// Verify that applying a batch with a floor lower than the current floor
     /// returns an error.
     #[boxed]
-    pub(crate) async fn test_immutable_floor_monotonicity_violation<F: Family, V, C>(
+    pub(crate) async fn run_floor_monotonicity_violation<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -2989,7 +3114,7 @@ pub(super) mod test {
     /// Verify that applying a batch with a floor beyond the total operation
     /// count returns an error.
     #[boxed]
-    pub(crate) async fn test_immutable_floor_beyond_size<F: Family, V, C>(
+    pub(crate) async fn run_floor_beyond_size<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3048,7 +3173,7 @@ pub(super) mod test {
     /// commit's floor at or above the previous commit's floor) from the simpler "every
     /// commit's floor at or above the live floor" rule.
     #[boxed]
-    pub(crate) async fn test_immutable_chained_ancestor_floor_regression<F: Family, V, C>(
+    pub(crate) async fn run_chained_ancestor_floor_regression<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3083,7 +3208,7 @@ pub(super) mod test {
             .await;
 
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.size() - 1;
         let floor_before = db.inactivity_floor_loc();
 
         let Err(err) = db.apply_batch(c).await else {
@@ -3098,18 +3223,18 @@ pub(super) mod test {
         // Reopen the partition and verify the rejected chain persisted nothing.
         let db = open_db(context.child("test")).await;
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.size() - 1, last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
     }
 
     /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
-    /// rejected, identifying the ancestor's commit_loc (not the tip's). This is the more
-    /// dangerous variant: monotonicity can still be satisfied while the floor poisons future
-    /// `historical_proof` and rewind.
+    /// rejected, identifying the ancestor's commit_loc (not the tip's). This is the more dangerous
+    /// variant. Monotonicity can still be satisfied while the floor poisons future
+    /// `historical_proof` and recovery.
     #[boxed]
-    pub(crate) async fn test_immutable_chained_ancestor_floor_beyond_size<F: Family, V, C>(
+    pub(crate) async fn run_chained_ancestor_floor_beyond_size<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3135,7 +3260,7 @@ pub(super) mod test {
             .await;
 
         let root_before = db.root();
-        let last_commit_before = db.last_commit_loc;
+        let last_commit_before = db.size() - 1;
         let floor_before = db.inactivity_floor_loc();
 
         let Err(err) = db.apply_batch(b).await else {
@@ -3151,30 +3276,28 @@ pub(super) mod test {
         // Reopen the partition and verify the rejected chain persisted nothing.
         let db = open_db(context.child("test")).await;
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.last_commit_loc, last_commit_before);
+        assert_eq!(db.size() - 1, last_commit_before);
         assert_eq!(db.inactivity_floor_loc(), floor_before);
 
         db.destroy().await.unwrap();
     }
 
-    /// Regression test for rewind-after-reopen with floor change.
-    ///
-    /// After reopening a database (which rebuilds the snapshot from the latest
-    /// floor), rewinding to an earlier commit with a lower floor must restore
-    /// all keys that were live at the rewind target -- not just the ones that
-    /// happened to be in the rebuilt snapshot.
+    /// Reopening at an earlier commit restores every key live at that commit, even after an
+    /// ordinary reopen rebuilds the snapshot from the latest floor.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_after_reopen_with_floor_change<F: Family, V, C>(
+    pub(crate) async fn run_bounded_initialization_after_reopen_with_floor_change<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let k1 = Sha256::fill(1u8);
         let k2 = Sha256::fill(2u8);
@@ -3200,15 +3323,18 @@ pub(super) mod test {
         db.sync().await.unwrap();
 
         // Reopen: snapshot rebuilt from floor=first_size, batch A keys excluded.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
 
         // Verify batch A keys are NOT in the reopened snapshot (expected).
         assert!(db.get(&k1).await.unwrap().is_none());
 
-        // Rewind to commit A.
-        let db = db.rewind(first_size).await.unwrap();
+        // Reopen at commit A.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
 
-        // All batch A keys must be accessible after rewind.
+        // All batch A keys must be accessible after recovery.
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
@@ -3221,21 +3347,22 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Regression test: rewind-after-reopen where the rewind target is NOT the
-    /// immediate predecessor. This ensures the snapshot gap fill only covers
-    /// [rewind_floor, old_floor) and does not re-insert keys already present.
+    /// Opening an earlier commit rebuilds the snapshot from that commit's floor, even when
+    /// the database was previously opened at a later floor.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_after_reopen_partial_floor_gap<F: Family, V, C>(
+    pub(crate) async fn run_bounded_initialization_after_reopen_partial_floor_gap<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let k1 = Sha256::fill(1u8);
         let v1 = Sha256::fill(11u8);
@@ -3259,21 +3386,25 @@ pub(super) mod test {
         db.sync().await.unwrap();
 
         // Reopen: snapshot rebuilt from floor=second_size. Only k3 is in snapshot.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert!(db.get(&k1).await.unwrap().is_none());
         assert!(db.get(&k2).await.unwrap().is_none());
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
-        // Rewind to commit B (not A). The gap fill should add keys from
-        // [first_size, second_size) -- which includes k2 but not k1.
-        // k3 is in the suffix and gets removed. k2 from the gap gets inserted.
-        let db = db.rewind(second_size).await.unwrap();
+        // Commit B's snapshot contains k2. Its floor excludes k1, and its end excludes k3.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(second_size))
+            .await
+            .unwrap();
         assert!(db.get(&k1).await.unwrap().is_none()); // below B's floor
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
         assert!(db.get(&k3).await.unwrap().is_none()); // in suffix, removed
 
-        // Now rewind further to commit A.
-        let db = db.rewind(first_size).await.unwrap();
+        // Open commit A and rebuild its snapshot from floor zero.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
         assert!(db.get(&k2).await.unwrap().is_none()); // above first_size, truncated
         assert_eq!(db.root(), first_root);
@@ -3282,20 +3413,22 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
-    /// Rewind-after-reopen with a repeated key in the floor gap. The gap fill
-    /// must restore the key, and reads may return any of its written values.
+    /// Opening an earlier commit restores a repeated key excluded by the latest floor.
+    /// Either value written within the selected history may be returned.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_after_reopen_repeated_key_gap<F: Family, V, C>(
+    pub(crate) async fn run_bounded_initialization_after_reopen_repeated_key_gap<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let key = Sha256::fill(7u8);
         let v1 = Sha256::fill(17u8);
@@ -3318,38 +3451,48 @@ pub(super) mod test {
         db.sync().await.unwrap();
 
         // Reopen: snapshot rebuilt from floor=second_size, key excluded.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert!(db.get(&key).await.unwrap().is_none());
         assert_eq!(db.get(&k3).await.unwrap(), Some(v3));
 
-        // Rewind to commit B: gap fill re-inserts both Set(key,...) entries.
-        let db = db.rewind(second_size).await.unwrap();
-        let rewound = db.get(&key).await.unwrap().unwrap();
-        assert!(rewound == v1 || rewound == v2);
+        // Commit B retains both writes to the key, so either value may be returned.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(second_size))
+            .await
+            .unwrap();
+        let recovered = db.get(&key).await.unwrap().unwrap();
+        assert!(recovered == v1 || recovered == v2);
 
-        // Rewind further to commit A: the v2 entry is dropped and get() must
-        // serve v1, proving the gap fill restored the v1 location.
-        let db = db.rewind(first_size).await.unwrap();
+        // Open commit A. Only v1 is retained, so reads must return it.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
     }
 
-    /// After restart, the snapshot can contain only the newer write for a
-    /// repeated key. Rewind restores the older write's snapshot entry, and
-    /// reads may return any of the written values.
+    /// Opening an earlier commit rebuilds its snapshot from the selected floor, restoring
+    /// repeated-key writes that a later floor excluded.
     #[boxed]
-    pub(crate) async fn test_immutable_rewind_after_reopen_mixed_gap_retained<F: Family, V, C>(
+    pub(crate) async fn run_bounded_initialization_after_reopen_mixed_gap_retained<
+        F: Family,
+        V,
+        C,
+    >(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
-        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let db = open_db(context.child("first")).await;
+        let db = open_db(context.child("first"), None).await.unwrap();
 
         let key = Sha256::fill(7u8);
         let v1 = Sha256::fill(17u8);
@@ -3374,18 +3517,110 @@ pub(super) mod test {
 
         // Reopen: snapshot rebuilt from floor=first_size. The v2 write for key
         // is retained; the v1 write is excluded.
-        let db = open_db(context.child("second")).await;
+        let db = open_db(context.child("second"), None).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v2));
 
-        // Rewind to commit B: gap fill re-inserts the v1 write alongside the
-        // retained v2 entry, and get() serves one of the two.
-        let db = db.rewind(second_size).await.unwrap();
-        let rewound = db.get(&key).await.unwrap().unwrap();
-        assert!(rewound == v1 || rewound == v2);
+        // Open commit B. Replay from its floor includes both v1 and v2.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(second_size))
+            .await
+            .unwrap();
+        let recovered = db.get(&key).await.unwrap().unwrap();
+        assert!(recovered == v1 || recovered == v2);
 
-        // Rewind further to commit A: the v2 entry is dropped and get() must
-        // serve v1, proving the gap fill restored the v1 location.
-        let db = db.rewind(first_size).await.unwrap();
+        // Open commit A. Only v1 is retained, so reads must return it.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// Opening before a repeated key's newer write retains the older value.
+    #[boxed]
+    pub(crate) async fn run_bounded_initialization_repeated_key<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("first"), None).await.unwrap();
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        let (db, _) = commit_sets(db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
+
+        // Commit B: Set(key, v2) with floor=0. Either written value may be served.
+        let (db, _) = commit_sets(db, [(key, v2)], None).await;
+        let live = db.get(&key).await.unwrap().unwrap();
+        assert!(live == v1 || live == v2);
+
+        // Reopen at commit A. The v2 location is dropped and the retained v1 location keeps serving
+        // the key.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v1));
+
+        db.destroy().await.unwrap();
+    }
+
+    /// After an ordinary reopen, opening at an earlier bound still preserves a repeated key's
+    /// retained value.
+    #[boxed]
+    pub(crate) async fn run_bounded_initialization_after_reopen_repeated_key_retained<
+        F: Family,
+        V,
+        C,
+    >(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+            Option<Location<F>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<TestDb<F, V, C>, Error<F>>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("first"), None).await.unwrap();
+
+        let key = Sha256::fill(7u8);
+        let v1 = Sha256::fill(17u8);
+        let v2 = Sha256::fill(18u8);
+
+        // Commit A: Set(key, v1) with floor=0.
+        let (db, _) = commit_sets(db, [(key, v1)], None).await;
+        let first_size = db.bounds().end;
+
+        // Commit B: Set(key, v2) with floor=0, then persist for the reopen.
+        let (db, _) = commit_sets(db, [(key, v2)], None).await;
+        db.sync().await.unwrap();
+
+        // Reopen: replay visits both writes and keeps only the newer location.
+        let db = open_db(context.child("second"), None).await.unwrap();
+        assert_eq!(db.get(&key).await.unwrap(), Some(v2));
+
+        // Reopen at commit A with an unchanged floor. The newer location is dropped, and the older
+        // write, still retained in the restored journal, must keep the key readable.
+        _ = db.sync().await.unwrap();
+        let db = open_db(context.child("cap"), Some(first_size))
+            .await
+            .unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         db.destroy().await.unwrap();
@@ -3401,7 +3636,7 @@ pub(super) mod test {
     ///   in-memory snapshot is empty (all Sets were below the floor).
     /// - A follow-on batch applies cleanly on top from the floor-at-max state.
     #[boxed]
-    pub(crate) async fn test_immutable_single_commit_live_set<F: Family, V, C>(
+    pub(crate) async fn run_single_commit_live_set<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3432,7 +3667,7 @@ pub(super) mod test {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         let root_after_commit = db.root();
 
@@ -3454,7 +3689,7 @@ pub(super) mod test {
         assert_eq!(bounds.end, commit_loc + 1);
 
         // State preserved across the prune; root unchanged; commit metadata still readable.
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata));
@@ -3468,11 +3703,10 @@ pub(super) mod test {
         assert!(matches!(err, Error::PruneBeyondMinRequired(p, f)
                 if *p == *commit_loc + 1 && *f == *commit_loc));
 
-        // Reopen. `init_from_journal` rebuilds the snapshot by replaying from
-        // the floor (= commit_loc). The only op at/above the floor is the commit, which
-        // contributes no keys — so the rebuilt snapshot is empty.
+        // Reopening rebuilds the snapshot from the inactivity floor. Only the commit
+        // remains at or above that floor, so the rebuilt snapshot contains no keys.
         let db = open_db(context.child("reopened")).await;
-        assert_eq!(db.last_commit_loc, commit_loc);
+        assert_eq!(db.size() - 1, commit_loc);
         assert_eq!(db.inactivity_floor_loc(), commit_loc);
         assert_eq!(db.root(), root_after_commit);
         // The commit op at `commit_loc` is the anchor that survived pruning — its metadata
@@ -3497,7 +3731,7 @@ pub(super) mod test {
             .await;
         let (db, _) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
-        assert_eq!(db.last_commit_loc, next_commit_loc);
+        assert_eq!(db.size() - 1, next_commit_loc);
         assert_eq!(db.inactivity_floor_loc(), next_commit_loc);
 
         // New key readable; keys from the pre-prune batch remain excluded.
@@ -3513,7 +3747,7 @@ pub(super) mod test {
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns results
     /// that match individual `get` calls.
     #[boxed]
-    pub(crate) async fn test_immutable_get_many<F: Family, V, C>(
+    pub(crate) async fn run_get_many<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3575,9 +3809,40 @@ pub(super) mod test {
         db.destroy().await.unwrap();
     }
 
+    /// `get_many` fills every slot of a repeated key.
+    #[boxed]
+    pub(crate) async fn run_get_many_duplicate_keys<F: Family, V, C>(
+        context: deterministic::Context,
+        open_db: impl Fn(
+            deterministic::Context,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+    ) where
+        V: ValueEncoding<Value = Digest>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
+        C::Item: EncodeShared,
+    {
+        let db = open_db(context.child("db")).await;
+
+        let key = Sha256::fill(1u8);
+        let value = Sha256::fill(11u8);
+        let k_missing = Sha256::fill(99u8);
+        let merkleized = db
+            .new_batch()
+            .set(key, value)
+            .merkleize(&db, None, db.inactivity_floor_loc())
+            .await;
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let db = db.commit().await.unwrap();
+
+        let results = db.get_many(&[&key, &k_missing, &key, &key]).await.unwrap();
+        assert_eq!(results, vec![Some(value), None, Some(value), Some(value)]);
+
+        db.destroy().await.unwrap();
+    }
+
     /// `get_many` reports unexpected data when the snapshot points at a non-`Set` operation.
     #[boxed]
-    pub(crate) async fn test_immutable_get_many_unexpected_data<F: Family, V, C>(
+    pub(crate) async fn run_get_many_unexpected_data<F: Family, V, C>(
         context: deterministic::Context,
         open_db: impl Fn(
             deterministic::Context,
@@ -3600,7 +3865,7 @@ pub(super) mod test {
         let mut db = db.commit().await.unwrap();
 
         let bad_key = Sha256::fill(99u8);
-        let bad_loc = db.last_commit_loc;
+        let bad_loc = db.size() - 1;
         db.snapshot.insert(&bad_key, bad_loc);
 
         let err = db.get(&bad_key).await.unwrap_err();

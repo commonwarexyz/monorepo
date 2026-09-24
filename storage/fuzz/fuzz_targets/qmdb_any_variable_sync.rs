@@ -147,6 +147,7 @@ fn test_config(
             metadata_partition: format!("{test_name}-meta"),
             items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: page_cache.clone(),
         },
@@ -154,12 +155,13 @@ fn test_config(
             partition: format!("{test_name}-log"),
             items_per_section: NZU64!(3),
             write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
             compression: None,
             codec_config: ((), ((0..=100000).into(), ())),
             page_cache,
         },
         translator: TwoCap,
-        init_cache_size: Some(NZUsize!(3)),
+        init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -174,6 +176,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
             context.child("storage"),
             cfg,
+            None,
         )
         .await
         .expect("Failed to init source db");
@@ -344,6 +347,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     let db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("Failed to init source db");
