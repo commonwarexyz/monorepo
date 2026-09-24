@@ -83,11 +83,12 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
     Error,
     frame::{
-        FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame, read_frame_at,
+        FrameInfo, UncompressedFrame, decode_item, decode_length_prefix,
+        encode_compressed_frame_into, find_frame, read_frame_at,
     },
 };
 use bytes::Bytes;
-use commonware_codec::{Codec, CodecShared, Copying, varint::MAX_U32_VARINT_SIZE};
+use commonware_codec::{Codec, CodecShared, Copying, Encode as _, varint::MAX_U32_VARINT_SIZE};
 use commonware_runtime::{
     Blob, Buf, Error as RError, Handle, IoBuf, Metrics, ReadOptions, Storage,
     buffer::paged::{CacheRef, Recovery as PagedRecovery, Replay as BlobReplay},
@@ -189,37 +190,33 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         read_frame_at(blob, offset, cfg, compressed).await
     }
 
-    /// Encode an item.
-    ///
-    /// Returns `(buf, item_len)` where `item_len` is the length of the encoded (and
-    /// possibly compressed) payload, excluding the size prefix.
-    fn encode_item(compression: Option<u8>, item: &V) -> Result<(Vec<u8>, u32), Error> {
-        let mut buf = Vec::new();
-        let item_len = encode_frame_into(compression, item, &mut buf)?;
-        Ok((buf, item_len))
-    }
-
     /// See [Journal::append].
     async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
-        let (buf, item_len) = Self::encode_item(self.compression, item)?;
-        self.append_raw(section, IoBuf::from(buf))
-            .await
-            .map(|offset| (offset, item_len))
-    }
-
-    /// Append pre-encoded bytes to the given section, returning the byte offset
-    /// where the data was written.
-    ///
-    /// The buffer must be in the on-disk format produced by [Self::encode_item].
-    async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
         assert!(
             !self.unrecovered.contains(&section),
             "section {section} must be replayed before append"
         );
-        let blob = self.manager.get_or_create(section).await?;
-        let offset = blob.append_owned(buf).await?;
+
+        // Size and validate the frame before creating the section so a rejected item leaves no
+        // empty section.
+        let (offset, item_len) = if let Some(level) = self.compression {
+            // Buffer compressed output to determine its length before appending the frame.
+            let mut buf = Vec::new();
+            let item_len = encode_compressed_frame_into(level, item, &mut buf)?;
+            let blob = self.manager.get_or_create(section).await?;
+            (blob.append_owned(IoBuf::from(buf)).await?, item_len)
+        } else {
+            // Encode directly into the write buffer when the frame fits.
+            let frame = UncompressedFrame::new(item)?;
+            let blob = self.manager.get_or_create(section).await?;
+            let offset = match blob.try_append_value(&frame) {
+                Some(offset) => offset,
+                None => blob.append_owned(frame.encode_mut().into()).await?,
+            };
+            (offset, frame.item_len)
+        };
         trace!(blob = section, offset, "appended item");
-        Ok(offset)
+        Ok((offset, item_len))
     }
 
     /// See [Journal::get].
@@ -955,6 +952,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::frame::encode_frame_into;
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -965,6 +963,14 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZUsize, probability};
     use std::num::NonZeroU16;
+
+    impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
+        /// Append raw bytes, which need not form a valid frame, to `section`.
+        async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
+            let blob = self.manager.get_or_create(section).await?;
+            Ok(blob.append_owned(buf).await?)
+        }
+    }
 
     impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
@@ -1070,11 +1076,7 @@ mod tests {
                         let partition = format!("torn-cap-{source_section}-{cap}-{pages}");
                         let mut page = Vec::new();
                         for value in 0..8u64 {
-                            page.extend_from_slice(
-                                &Inner::<deterministic::Context, u64>::encode_item(None, &value)
-                                    .unwrap()
-                                    .0,
-                            );
+                            encode_frame_into(None, &value, &mut page).unwrap();
                         }
                         assert_eq!(page.len(), 72);
                         super::super::manager::tests::seed_torn_suffix(
@@ -3732,6 +3734,67 @@ mod tests {
                 assert_eq!(*item, exact_data, "Replay read mismatch");
             }
 
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_uncompressed_frames_fill_write_buffer() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: ((..).into(), ()),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(2048),
+            };
+            let direct = vec![7u8; 126];
+            let fallback = vec![9u8; 127];
+            assert_eq!(direct.encode_size(), 127);
+            assert_eq!(fallback.encode_size(), 128);
+
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Sixteen 128-byte frames exactly fill the write buffer, so the next 130-byte frame
+            // must take the owned fallback.
+            for i in 0..16 {
+                let offset;
+                let item_len;
+                (journal, offset, item_len) = journal.append(1, &direct).await.unwrap();
+                assert_eq!(offset, i * 128);
+                assert_eq!(item_len, 127);
+            }
+            let fallback_offset;
+            let fallback_len;
+            (journal, fallback_offset, fallback_len) = journal.append(1, &fallback).await.unwrap();
+            assert_eq!(fallback_offset, 2048);
+            assert_eq!(fallback_len, 128);
+
+            // Reopen the section to verify both append paths on disk.
+            journal = journal.sync(1).await.unwrap();
+            drop(journal);
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.get(1, fallback_offset).await.unwrap(), fallback);
+
+            // Replay returns the direct frames followed by the fallback frame.
+            let mut replay = journal
+                .replay(0, 0, NZUsize!(1024), ReadOptions::default())
+                .await
+                .unwrap();
+            for i in 0..16 {
+                let (section, offset, item_len, item) = replay.next().await.unwrap().unwrap();
+                assert_eq!((section, offset, item_len), (1, i * 128, 127));
+                assert_eq!(item, direct);
+            }
+            let (section, offset, item_len, item) = replay.next().await.unwrap().unwrap();
+            assert_eq!((section, offset, item_len), (1, 2048, 128));
+            assert_eq!(item, fallback);
+            assert!(replay.next().await.is_none());
+            journal = replay.finish().unwrap();
             journal.destroy().await.unwrap();
         });
     }

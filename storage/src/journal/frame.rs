@@ -4,8 +4,9 @@
 //! zstd-compressed) encoded item.
 
 use super::Error;
+use bytes::BufMut;
 use commonware_codec::{
-    Buf, Codec, EncodeSize, ReadExt as _, Write as _,
+    Buf, Codec, EncodeSize, ReadExt as _, Write,
     varint::{MAX_U32_VARINT_SIZE, UInt},
 };
 use commonware_runtime::{Blob, Buf as _, IoBufMut, IoBufs, buffer::paged::Writer};
@@ -237,7 +238,7 @@ pub(super) fn compress_into(level: u8, data: &[u8], buf: &mut Vec<u8>) -> Result
 /// Existing contents of `buf` are preserved; this allows callers to accumulate
 /// multiple encoded items into a single buffer.
 ///
-/// Returns the payload length, excluding the size prefix.
+/// Returns the payload length, excluding the length prefix.
 pub(super) fn encode_frame_into<V: Codec>(
     compression: Option<u8>,
     item: &V,
@@ -250,27 +251,16 @@ pub(super) fn encode_frame_into<V: Codec>(
     }
 
     // Uncompressed: pre-allocate exact size to avoid copying.
-    let item_len = item.encode_size();
-    let item_len_u32: u32 = match item_len.try_into() {
-        Ok(len) => len,
-        Err(_) => return Err(Error::ItemTooLarge(item_len)),
-    };
-    let size_len = UInt(item_len_u32).encode_size();
-    let entry_len = size_len
-        .checked_add(item_len)
-        .ok_or(Error::OffsetOverflow)?;
-
-    buf.reserve(entry_len);
-    UInt(item_len_u32).write(buf);
-    item.write(buf);
-
-    Ok(item_len_u32)
+    let frame = UncompressedFrame::new(item)?;
+    buf.reserve(frame.frame_len);
+    frame.write(buf);
+    Ok(frame.item_len)
 }
 
 /// Compressed case of [encode_frame_into], kept out of line so the uncompressed path saves
 /// fewer registers and uses a smaller stack frame.
 #[inline(never)]
-fn encode_compressed_frame_into<V: Codec>(
+pub(super) fn encode_compressed_frame_into<V: Codec>(
     compression: u8,
     item: &V,
     buf: &mut Vec<u8>,
@@ -300,14 +290,54 @@ fn encode_compressed_frame_into<V: Codec>(
     Ok(item_len)
 }
 
+/// An uncompressed item with its length prefix, sized and validated before encoding.
+pub(super) struct UncompressedFrame<'a, V> {
+    item: &'a V,
+    /// Encoded item length, excluding the length prefix.
+    pub(super) item_len: u32,
+    /// Encoded frame length, including the length prefix.
+    frame_len: usize,
+}
+
+impl<'a, V: EncodeSize> UncompressedFrame<'a, V> {
+    /// Size `item` once and reject it if its frame cannot be represented.
+    pub(super) fn new(item: &'a V) -> Result<Self, Error> {
+        let len = item.encode_size();
+        let item_len = u32::try_from(len).map_err(|_| Error::ItemTooLarge(len))?;
+        let frame_len = UInt(item_len)
+            .encode_size()
+            .checked_add(len)
+            .ok_or(Error::OffsetOverflow)?;
+        Ok(Self {
+            item,
+            item_len,
+            frame_len,
+        })
+    }
+}
+
+impl<V> EncodeSize for UncompressedFrame<'_, V> {
+    fn encode_size(&self) -> usize {
+        self.frame_len
+    }
+}
+
+impl<V: Write> Write for UncompressedFrame<'_, V> {
+    fn write(&self, buf: &mut impl BufMut) {
+        UInt(self.item_len).write(buf);
+        self.item.write(buf);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utils::codec::View;
-    use bytes::{BufMut, Bytes};
-    use commonware_codec::{Copying, Encode, Read, Write};
+    use bytes::Bytes;
+    use commonware_codec::{Copying, Encode, Read};
     use commonware_utils::test_rng;
     use rand::{Rng as _, RngExt as _};
+    use std::cell::Cell;
     use zstd::bulk::compress;
 
     /// Frame a single item and return the raw frame bytes.
@@ -441,6 +471,47 @@ mod tests {
         assert_eq!(second_end as usize, buf.len());
         let second: u64 = decode_item(Copying(&buf[first_frame_len + 1..]), &(), false).unwrap();
         assert_eq!(second, 2);
+    }
+
+    #[test]
+    fn test_uncompressed_frame_sizes_item_once() {
+        struct Counted<'a> {
+            bytes: &'a [u8],
+            size_calls: Cell<usize>,
+        }
+
+        impl EncodeSize for Counted<'_> {
+            fn encode_size(&self) -> usize {
+                self.size_calls.set(self.size_calls.get() + 1);
+                self.bytes.len()
+            }
+        }
+
+        impl Write for Counted<'_> {
+            fn write(&self, buf: &mut impl BufMut) {
+                buf.put_slice(self.bytes);
+            }
+        }
+
+        // Cover empty payloads and both sides of the transitions to two and three prefix bytes.
+        for len in [0, 127, 128, 16_383, 16_384] {
+            let bytes = vec![7; len];
+            let item = Counted {
+                bytes: &bytes,
+                size_calls: Cell::new(0),
+            };
+            let frame = UncompressedFrame::new(&item).unwrap();
+            assert_eq!(frame.item_len as usize, len);
+            assert_eq!(frame.encode_size(), UInt(len as u32).encode_size() + len);
+
+            let mut encoded = Vec::new();
+            frame.write(&mut encoded);
+            let mut expected = Vec::new();
+            UInt(len as u32).write(&mut expected);
+            expected.extend_from_slice(&bytes);
+            assert_eq!(encoded, expected);
+            assert_eq!(item.size_calls.get(), 1);
+        }
     }
 
     #[test]
