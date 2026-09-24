@@ -63,6 +63,25 @@ impl<P: PublicKey, M: Digestible> Default for Pending<P, M> {
     }
 }
 
+impl<P: PublicKey, M: Digestible> Pending<P, M> {
+    /// Puts a message the mailbox rejected back at the front of the queue.
+    ///
+    /// A rejected broadcast gets its recipients back in the side map, so later broadcasts of the
+    /// same message keep coalescing into it.
+    fn requeue_front(&mut self, rejected: Message<P, M>) {
+        match rejected {
+            Message::Broadcast {
+                recipients,
+                message,
+            } => {
+                self.broadcasts.insert(message.digest(), recipients);
+                self.queue.push_front(PendingEntry::Broadcast(message));
+            }
+            message => self.queue.push_front(PendingEntry::Message(message)),
+        }
+    }
+}
+
 impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
     fn is_empty(&self) -> bool {
         self.queue.is_empty()
@@ -92,20 +111,10 @@ impl<P: PublicKey, M: Digestible> Overflow<Message<P, M>> for Pending<P, M> {
                 }
             };
 
-            let Some(message) = push(message) else {
-                continue;
-            };
-            match message {
-                Message::Broadcast {
-                    recipients,
-                    message,
-                } => {
-                    self.broadcasts.insert(message.digest(), recipients);
-                    self.queue.push_front(PendingEntry::Broadcast(message));
-                }
-                message => self.queue.push_front(PendingEntry::Message(message)),
+            if let Some(rejected) = push(message) {
+                self.requeue_front(rejected);
+                break;
             }
-            break;
         }
     }
 }
@@ -125,7 +134,7 @@ impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
         {
             let digest = message.digest();
             if let Some(queued) = overflow.broadcasts.get_mut(&digest) {
-                *queued |= recipients;
+                queued.union_with(recipients);
                 return;
             }
             overflow.broadcasts.insert(digest, recipients);
