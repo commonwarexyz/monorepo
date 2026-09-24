@@ -206,47 +206,58 @@ pub(super) fn encode_frame_into<V: Codec>(
     buf: &mut Vec<u8>,
 ) -> Result<u32, Error> {
     if let Some(compression) = compression {
-        // Compressed: encode, then compress directly after room for the longest possible prefix
-        let encoded = item.encode();
-        let start = buf.len();
-        let max_len = compress_bound(encoded.len());
-        let max_size_len = UInt(u32::try_from(max_len).unwrap_or(u32::MAX)).encode_size();
-        let max_entry_len = max_size_len
-            .checked_add(max_len)
-            .ok_or(Error::OffsetOverflow)?;
-        buf.reserve(max_entry_len);
-        buf.resize(start + max_size_len, 0);
-        let item_len = compress_into(compression, &encoded, buf)
-            .and_then(|len| u32::try_from(len).map_err(|_| Error::ItemTooLarge(len)))
-            .inspect_err(|_| buf.truncate(start))?;
-
-        // Shift the payload down if its size needs a shorter prefix
-        let size_len = UInt(item_len).encode_size();
-        if size_len < max_size_len {
-            buf.copy_within(start + max_size_len.., start + size_len);
-            buf.truncate(start + size_len + Widen::widen(item_len));
-        }
-        UInt(item_len).write(&mut &mut buf[start..start + size_len]);
-
-        Ok(item_len)
-    } else {
-        // Uncompressed: pre-allocate exact size to avoid copying
-        let item_len = item.encode_size();
-        let item_len_u32: u32 = match item_len.try_into() {
-            Ok(len) => len,
-            Err(_) => return Err(Error::ItemTooLarge(item_len)),
-        };
-        let size_len = UInt(item_len_u32).encode_size();
-        let entry_len = size_len
-            .checked_add(item_len)
-            .ok_or(Error::OffsetOverflow)?;
-
-        buf.reserve(entry_len);
-        UInt(item_len_u32).write(buf);
-        item.write(buf);
-
-        Ok(item_len_u32)
+        return encode_compressed_frame_into(compression, item, buf);
     }
+
+    // Uncompressed: pre-allocate exact size to avoid copying.
+    let item_len = item.encode_size();
+    let item_len_u32: u32 = match item_len.try_into() {
+        Ok(len) => len,
+        Err(_) => return Err(Error::ItemTooLarge(item_len)),
+    };
+    let size_len = UInt(item_len_u32).encode_size();
+    let entry_len = size_len
+        .checked_add(item_len)
+        .ok_or(Error::OffsetOverflow)?;
+
+    buf.reserve(entry_len);
+    UInt(item_len_u32).write(buf);
+    item.write(buf);
+
+    Ok(item_len_u32)
+}
+
+/// Compressed case of [encode_frame_into], kept out of line so the uncompressed path saves
+/// fewer registers and uses a smaller stack frame.
+#[inline(never)]
+fn encode_compressed_frame_into<V: Codec>(
+    compression: u8,
+    item: &V,
+    buf: &mut Vec<u8>,
+) -> Result<u32, Error> {
+    // Reserve the maximum prefix width so compression writes directly into the output buffer.
+    let encoded = item.encode();
+    let start = buf.len();
+    let max_len = compress_bound(encoded.len());
+    let max_size_len = UInt(u32::try_from(max_len).unwrap_or(u32::MAX)).encode_size();
+    let max_entry_len = max_size_len
+        .checked_add(max_len)
+        .ok_or(Error::OffsetOverflow)?;
+    buf.reserve(max_entry_len);
+    buf.resize(start + max_size_len, 0);
+    let item_len = compress_into(compression, &encoded, buf)
+        .and_then(|len| u32::try_from(len).map_err(|_| Error::ItemTooLarge(len)))
+        .inspect_err(|_| buf.truncate(start))?;
+
+    // Shift the payload down if its size needs a shorter prefix.
+    let size_len = UInt(item_len).encode_size();
+    if size_len < max_size_len {
+        buf.copy_within(start + max_size_len.., start + size_len);
+        buf.truncate(start + size_len + Widen::widen(item_len));
+    }
+    UInt(item_len).write(&mut &mut buf[start..start + size_len]);
+
+    Ok(item_len)
 }
 
 #[cfg(test)]
