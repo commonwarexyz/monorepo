@@ -56,7 +56,8 @@ pub struct Round<S: Scheme, D: Digest> {
     leader: Option<Leader<S::PublicKey>>,
 
     proposal: ProposalSlot<D>,
-    // Deadlines armed when entering a view.
+    // Deadlines armed when entering a view. Only set_deadlines writes them;
+    // next_timeout selects the active one from the round phase.
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
     stall_deadline: Option<SystemTime>,
@@ -401,7 +402,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         self.proposal.record_verified(proposal);
         self.proposed_at = Some(now);
-        self.leader_deadline = None;
         true
     }
 
@@ -418,7 +418,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             // If we receive a certificate for some proposal, we ignore our verification.
             return false;
         }
-        self.leader_deadline = None;
         true
     }
 
@@ -430,10 +429,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return false;
         }
         match self.proposal.update_vote(&proposal) {
-            Some(ProposalChange::New) => {
-                self.leader_deadline = None;
-                true
-            }
+            Some(ProposalChange::New) => true,
             Some(ProposalChange::Unchanged | ProposalChange::Equivocated { .. }) | None => false,
         }
     }
@@ -501,13 +497,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
         let retry = replace(&mut self.broadcast_nullify, true);
-        self.leader_deadline = None;
-        self.certification_deadline = None;
         self.retry_deadline = None;
-        // The latch governed the first timeout, which has now fired; clear it
-        // so no stale (deadline, reason) outlives the transition (re-latching
-        // is blocked by `broadcast_nullify` in `latch_timeout`).
-        self.latched_timeout = None;
         Some(retry)
     }
 
@@ -563,7 +553,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         match self.proposal.update_certificate(&proposal) {
             ProposalChange::New => {
                 debug!(?proposal, "setting proposal from certificate");
-                self.leader_deadline = None;
                 None
             }
             ProposalChange::Unchanged => None,
