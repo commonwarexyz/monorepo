@@ -808,8 +808,9 @@ impl<
             .retain(|height, _| *height >= activity_threshold);
 
         // Add tip to journal
-        self = self.record(&Activity::Tip(tip)).await.sync(tip).await;
-        self.reporter.report(Activity::Tip(tip));
+        let activity = Activity::Tip(tip);
+        self = self.record(&activity).await.sync(tip).await;
+        self.reporter.report(activity);
 
         // Prune journal with buffer
         let section = self.get_journal_section(activity_threshold);
@@ -937,13 +938,13 @@ impl<
         // to handle the case where we restart and some heights have no acks yet
         let next = self.next();
         for height in Height::range(self.tip, next) {
-            // If we already have the height in confirmed or pending, skip
-            if self.confirmed.contains_key(&height) {
-                continue;
-            }
+            // If we already have the height in pending or confirmed, skip
             let Entry::Vacant(slot) = self.pending.entry(height) else {
                 continue;
             };
+            if self.confirmed.contains_key(&height) {
+                continue;
+            }
 
             // Add missing height to pending
             slot.insert(Pending::Unverified(BTreeMap::new()));

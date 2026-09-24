@@ -367,7 +367,7 @@ where
         self.waiter = None;
     }
 
-    /// Adds a key to the front of the pending queue.
+    /// Adds a key to the pending queue, ahead of all retries.
     ///
     /// Panics if the key is already pending.
     pub fn add_ready(&mut self, key: Key) {
@@ -1108,7 +1108,7 @@ mod tests {
             assert!(fetcher.active.contains(&100));
             assert_eq!(fetcher.key_to_id.get(&MockKey(10)), Some(&100));
 
-            // The requested peer's response removes it from every map
+            // The requested peer's response removes it from request tracking
             let (key, _) = fetcher.pop_response(100, &peer).expect("matching response");
             assert_eq!(key, MockKey(10));
             assert_eq!(fetcher.len_active(), 0);
