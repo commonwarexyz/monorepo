@@ -6,8 +6,9 @@
 //! so the batch API can read through to applied state.
 
 use crate::stateful::db::{
-    BatchContext, InitError, ManagedDb, Merkleized as MerkleizedTrait, Shared, StateSyncDb,
-    SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db, validate_initialization,
+    BatchContext, InitError, LogSnapshot, ManagedDb, Merkleized as MerkleizedTrait, Shared,
+    StateSyncDb, SyncEngineConfig, Unmerkleized as UnmerkleizedTrait, sync_standard_db,
+    validate_initialization,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -55,7 +56,7 @@ where
     batch: UnmerkleizedBatch<F, H, K, V, S>,
     db: ImmutableDbHandle<F, E, K, V, C, H, T, S>,
     metadata: Option<V::Value>,
-    inactivity_floor: Option<Location<F>>,
+    inactivity_floor: Location<F>,
 }
 
 impl<F, E, K, V, C, H, T, S> Deref for ImmutableUnmerkleized<F, E, K, V, C, H, T, S>
@@ -97,10 +98,8 @@ where
     }
 
     /// Set the inactivity floor to include within the next [`merkleize`](UnmerkleizedTrait::merkleize) call.
-    ///
-    /// If unset, [`merkleize`](UnmerkleizedTrait::merkleize) will use the [`Default`] of [`Location`].
     pub const fn with_inactivity_floor(mut self, floor: Location<F>) -> Self {
-        self.inactivity_floor = Some(floor);
+        self.inactivity_floor = floor;
         self
     }
 
@@ -228,11 +227,7 @@ where
         let db = self.db.read().await;
         let merkleized = self
             .batch
-            .merkleize(
-                &db,
-                self.metadata,
-                self.inactivity_floor.unwrap_or_default(),
-            )
+            .merkleize(&db, self.metadata, self.inactivity_floor)
             .await?;
         Ok(ImmutableMerkleized {
             inner: merkleized,
@@ -265,7 +260,7 @@ where
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: self.inner.bounds().inactivity_floor,
         }
     }
 }
@@ -303,6 +298,7 @@ where
     type Error = Error<F>;
     type Config = fixed::Config<T, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = LogSnapshot<F, E, FixedJournal<E, fixed::Operation<F, K, V>>, H>;
 
     async fn init(
         context: E,
@@ -332,7 +328,7 @@ where
             batch: database.new_batch(),
             db: shared,
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: database.inactivity_floor_loc(),
         }
     }
 
@@ -347,8 +343,18 @@ where
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
@@ -398,6 +404,7 @@ where
     type Error = Error<F>;
     type Config = variable::Config<T, <variable::Operation<F, K, V> as CodecRead>::Cfg, S>;
     type SyncTarget = AnySyncTarget<F, H::Digest>;
+    type Snapshot = LogSnapshot<F, E, VariableJournal<E, variable::Operation<F, K, V>>, H>;
 
     async fn init(
         context: E,
@@ -427,7 +434,7 @@ where
             batch: database.new_batch(),
             db: shared,
             metadata: None,
-            inactivity_floor: None,
+            inactivity_floor: database.inactivity_floor_loc(),
         }
     }
 
@@ -442,8 +449,18 @@ where
         Ok(db)
     }
 
-    async fn finalize(self) -> Result<(Self, Handle<()>), Error<F>> {
-        self.start_sync().await
+    async fn finalize(self) -> Result<(Self, Self::Snapshot, Handle<()>), Error<F>> {
+        // Capture before starting the sync: no barrier is outstanding at a durability
+        // boundary, so the capture's flush does not wait, and the snapshot still
+        // includes every applied batch.
+        let (db, snapshot) = self.snapshot().await?;
+        let (db, handle) = db.start_sync().await?;
+        Ok((db, Arc::new(snapshot), handle))
+    }
+
+    async fn snapshot(self) -> Result<(Self, Self::Snapshot), Error<F>> {
+        let (db, snapshot) = self.snapshot().await?;
+        Ok((db, Arc::new(snapshot)))
     }
 
     async fn prune(self, target: &Self::SyncTarget) -> Result<Self, Error<F>> {
