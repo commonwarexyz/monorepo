@@ -850,8 +850,12 @@ mod tests {
         participants: Vec<ed25519::PublicKey>,
         finalize_after: Duration,
         finalizations: u64,
+        /// Delay after each ordinary finalization. Zero emits a burst.
         period: Duration,
+        /// Scripted (validator, view and height, digest byte) reports emitted by
+        /// the first node before ordinary finalizations.
         script: Vec<(ed25519::PublicKey, u64, u8)>,
+        /// Participant indices recorded in delayed initialization order, when enabled.
         starts: Option<Arc<Mutex<Vec<usize>>>>,
     }
 
@@ -861,7 +865,10 @@ mod tests {
         pk: ed25519::PublicKey,
         finalize_after: Duration,
         finalizations: u64,
+        /// Delay after each ordinary finalization. Zero emits a burst.
         period: Duration,
+        /// Ordered (validator, view and height, digest byte) reports emitted before
+        /// ordinary finalizations.
         script: Vec<(ed25519::PublicKey, u64, u8)>,
     }
 
@@ -921,6 +928,8 @@ mod tests {
             &self,
             ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
         ) -> impl Future<Output = (Self::Engine, Self::State)> + Send {
+            // Only the first node receives the script, preserving its report
+            // order without interleaving from other scripted senders.
             let finalize_after = self.finalize_after;
             let finalizations = self.finalizations;
             let period = self.period;
@@ -929,6 +938,8 @@ mod tests {
             } else {
                 vec![]
             };
+
+            // Record delayed initialization order at the point each node starts.
             if ctx.delayed
                 && let Some(starts) = &self.starts
             {
@@ -958,9 +969,13 @@ mod tests {
             let period = engine.period;
             let script = engine.script;
             engine.context.spawn(move |ctx| async move {
+                // The initial delay lets scheduled actions run before reports arrive.
                 if finalize_after > Duration::ZERO {
                     ctx.sleep(finalize_after).await;
                 }
+
+                // Synchronous sends queue the full script before the plan can
+                // process earlier progress, preserving a trailing conflict.
                 for (pk, view, digest) in script {
                     monitor
                         .send(FinalizationUpdate {
@@ -971,6 +986,9 @@ mod tests {
                         })
                         .expect("report must enter monitor queue");
                 }
+
+                // Emit ordinary progress at the configured pace. A nonzero period
+                // keeps the reporter active while the plan checks completion.
                 for view in 1..=finalizations {
                     let _ = monitor.send(FinalizationUpdate {
                         pk: pk.clone(),
@@ -1105,6 +1123,8 @@ mod tests {
         }
     }
 
+    // Polling succeeds once so a second exit check during report draining
+    // would fail to complete the simulation.
     impl ExitCondition<ed25519::PublicKey, ()> for SingleUseProperty {
         fn name(&self) -> &str {
             "single_use_condition"
@@ -1126,6 +1146,8 @@ mod tests {
 
     #[test]
     fn completion_commits_before_draining() {
+        // Check both an empty monitor and a queued report batch: completion
+        // must retain the first successful exit decision while draining reports.
         for finalizations in [0, 3] {
             let result = PlanBuilder::new(FinalizingEngine::new(1, Duration::ZERO, finalizations))
                 .exit_condition(SingleUseProperty::default())
@@ -1137,9 +1159,12 @@ mod tests {
         }
     }
 
+    /// A delayed property check that can overlap with report production.
     #[derive(Clone)]
     struct SlowCheck {
+        /// Deterministic clock used to suspend the check.
         context: Arc<deterministic::Context>,
+        /// Number of checks completed or in progress.
         calls: Arc<AtomicUsize>,
     }
 
@@ -1152,6 +1177,8 @@ mod tests {
             _states: &'a [&'a ()],
         ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
             Box::pin(async move {
+                // The check can overlap report production while intake is open.
+                // Post-run checks use the same finite delay after intake closes.
                 self.calls.fetch_add(1, Ordering::Relaxed);
                 self.context.sleep(Duration::from_millis(5)).await;
                 Ok(())
@@ -1177,6 +1204,8 @@ mod tests {
     #[case::post_run_property(false)]
     fn completion_does_not_require_a_quiet_reporter(#[case] per_finalization: bool) {
         deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
+            // Emit reports every millisecond while the plan runs. Checks take
+            // five milliseconds in either property mode and must finish.
             let mut engine = FinalizingEngine::new(1, Duration::ZERO, u64::MAX);
             engine.period = Duration::from_millis(1);
             let calls = Arc::new(AtomicUsize::new(0));
@@ -1191,10 +1220,16 @@ mod tests {
                 builder.property(property)
             }
             .build();
+
+            // Completion closes the report intake and processes the accepted
+            // backlog without waiting for the reporter to become idle.
             let result = plan
                 .run_inner(context)
                 .await
                 .expect("finite checks must complete despite continuous finalizations");
+
+            // Per-finalization checks cover every accepted tip, including tips
+            // queued during a check. A post-run property runs exactly once.
             let checked = calls.load(Ordering::Relaxed);
             if per_finalization {
                 assert!(
@@ -1210,10 +1245,14 @@ mod tests {
 
     #[test]
     fn queued_fork_must_fail_simulation() {
+        // Reports from both validators meet the exit condition before the final
+        // report conflicts with an earlier digest at the same height.
         let mut engine = FinalizingEngine::new(2, Duration::ZERO, 0);
         let a = engine.participants[0].clone();
         let b = engine.participants[1].clone();
         engine.script = vec![(b.clone(), 2, 2), (a, 3, 3), (b, 3, 4)];
+
+        // Every accepted report must be checked before the simulation succeeds.
         let error = PlanBuilder::new(engine)
             .required_finalizations(2)
             .timeout(Duration::from_secs(2))
@@ -1225,8 +1264,12 @@ mod tests {
 
     #[test]
     fn multi_delayed_start_is_deterministic() {
+        // Repeat the same seeded run and capture both delayed initialization
+        // order and the runtime audit state for comparison.
         let mut observed = HashSet::new();
         for _ in 0..24 {
+            // Two participants start after the active nodes reach view one.
+            // Each run uses the same report timing and seed.
             let starts = Arc::new(Mutex::new(vec![]));
             let mut engine = FinalizingEngine::new(4, Duration::from_millis(100), 2);
             let delayed = engine.participants[..2].to_vec();
@@ -1241,11 +1284,15 @@ mod tests {
                 })
                 .run()
                 .unwrap();
+
+            // Both delayed nodes must start, and each run contributes the same
+            // start order and audit state to the result set.
             assert!(result[0].delayed_started);
             let order = starts.lock().clone();
             assert_eq!(order.len(), 2);
             observed.insert((order, result[0].state.clone()));
         }
+
         assert_eq!(
             observed.len(),
             1,

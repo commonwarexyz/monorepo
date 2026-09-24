@@ -836,6 +836,9 @@ fn simulator_rejects_conflicting_tips_at_same_height_across_rounds(
     #[case] first_view: u64,
     #[case] second_view: u64,
 ) {
+    // Route both tips through one monitor queue and tracker. Distinct validators
+    // in increasing rounds and one validator replaying an older round both
+    // disagree at height seven: the first digest succeeds, the second fails.
     let (monitor, mut updates) = mpsc::unbounded_channel();
     let mut tracker = ProgressTracker::default();
     for (seed, view, digest) in [(1, first_view, 1), (second_seed, second_view, 2)] {
@@ -857,6 +860,8 @@ fn simulator_rejects_conflicting_tips_at_same_height_across_rounds(
 
 #[test]
 fn simulator_monitor_retains_conflict_after_burst() {
+    // Keep both reporters connected to one queue while the tracker waits to
+    // consume updates, so a burst cannot hide a later conflicting tip.
     let (monitor, mut updates) = mpsc::unbounded_channel();
     let mut first = MonitorReporter::new(
         PrivateKey::from_seed(1).public_key(),
@@ -868,6 +873,9 @@ fn simulator_monitor_retains_conflict_after_burst() {
         monitor,
         MarshalApplication::default(),
     );
+
+    // Queue a burst of distinct heights from the first reporter, then
+    // submit a different digest at the first height from the second reporter.
     for view in 1..=1024 {
         first.report(Update::Tip(
             Round::new(Epoch::zero(), View::new(view)),
@@ -880,6 +888,9 @@ fn simulator_monitor_retains_conflict_after_burst() {
         Height::new(1),
         Sha256Digest::from([2; 32]),
     ));
+
+    // Draining the queue must eventually expose the conflict, even after the
+    // earlier burst has been accepted by the tracker.
     let mut tracker = ProgressTracker::default();
     let mut conflict = false;
     while let Ok(update) = updates.try_recv() {

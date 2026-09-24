@@ -74,6 +74,7 @@ pub(super) fn archive_config<C>(
 /// can share the same state type and property implementations.
 #[derive(Clone)]
 pub(crate) struct MockValidatorState<V: Variant> {
+    /// Validator whose progress and state-sync observations are reported.
     pub(super) public_key: ed25519::PublicKey,
     pub(super) marshal: marshal::core::Mailbox<MockScheme<ed25519::PublicKey>, V>,
     pub(super) state_sync_entries: u64,

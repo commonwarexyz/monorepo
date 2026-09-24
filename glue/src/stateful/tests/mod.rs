@@ -236,6 +236,7 @@ fn state_sync_recovery_rejects_uncrashed_seed_multi_db() {
     );
 }
 
+/// Recovery evidence from one seed must not satisfy another seed's property checks.
 fn run_state_sync_recovery_rejects_uncrashed_seed<D>(engine: D)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -245,6 +246,8 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    // Establish recovery evidence in one run, including an actual crash and restart.
+    // Reusing the engine definition below must not carry these observations forward.
     let late_joiner = engine.participants()[0].clone();
     state_sync_crash_plan(engine.clone())
         .seeds([0])
@@ -256,6 +259,8 @@ where
             assert_eq!(result.scheduled_actions, 2);
         });
 
+    // This seed lets the delayed validator sync without a crash. Its recovery check
+    // must fail even though the preceding seed observed two state-sync entries.
     let result = state_sync_plan(engine)
         .seeds([1])
         .property(CrashDuringStateSyncRecovery::new(late_joiner))
@@ -763,6 +768,8 @@ where
     LateJoinerStateSyncHandoff: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    // Each seed must exercise the scheduled crash and restart as well as satisfy
+    // recovery and agreement. A crash scheduled before startup would not count.
     state_sync_crash_plan(engine)
         .seeds(0..5)
         .property(LateJoinerStateSyncHandoff)
@@ -776,6 +783,7 @@ where
         });
 }
 
+/// Interrupt the delayed validator's initial sync and require recovery after restart.
 fn state_sync_crash_plan<D>(engine: D) -> PlanBuilder<D>
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -783,14 +791,15 @@ where
     CrashDuringStateSyncRecovery: Property<ed25519::PublicKey, D::State>,
     ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
 {
+    // Delay one validator until peers have history to sync. With slow state sync,
+    // 6.25 seconds falls after its startup and before sync completes across the
+    // campaign seeds. Restart with the same partitions to exercise durable recovery.
     let late_joiner = engine.participants()[0].clone();
     PlanBuilder::new(engine)
         .crash(Crash::DelayRound {
             participants: vec![late_joiner.clone()],
             round: Round::new(Epoch::zero(), View::new(80)),
         })
-        // Crash the late joiner while it is still catching up through startup
-        // state sync, then restart it without clearing any partitions.
         .crash(Crash::Schedule(
             Schedule::new()
                 .at(

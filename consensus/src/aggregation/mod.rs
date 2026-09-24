@@ -416,10 +416,13 @@ mod tests {
 
     test_for_all_fixtures!(slow all_online);
 
+    /// Signals when an isolated engine has verified its two-height pending window.
     #[derive(Clone)]
     struct ObservedProvider<S: CertificateScheme + Clone> {
         inner: mocks::Provider<S>,
+        /// Scheme lookups since startup, shared across provider clones.
         lookups: Arc<AtomicUsize>,
+        /// Notifies the test at the second verified digest's signing attempt.
         verified: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     }
 
@@ -432,8 +435,9 @@ mod tests {
         }
 
         fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
-            // Before peers start, the engine looks up the scheme once at startup and
-            // once for each verified digest. The third lookup precedes epoch rotation.
+            // With peers stopped, one lookup initializes the engine and the next two
+            // attempt to sign its verified digests. Signal at the second digest so
+            // epoch rotation cannot precede verification of the pending window.
             if self.lookups.fetch_add(1, Ordering::SeqCst) == 2
                 && let Some(sender) = self.verified.lock().take()
             {
@@ -446,6 +450,8 @@ mod tests {
     #[test_traced("INFO")]
     fn test_admitted_signer_certifies_pending_heights() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // Rotate one member of a four-validator committee. The fifth participant
+            // starts outside the committee and joins in the next epoch.
             let mut rng = test_rng();
             let fixture = ed25519::fixture(&mut rng, TEST_NAMESPACE, 5);
             let epoch = Epoch::new(111);
@@ -456,6 +462,9 @@ mod tests {
                 fixture.participants[1..].to_vec().try_into().unwrap();
             let (oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
+
+            // Start the joining validator first and keep one current member offline.
+            // All three running validators must contribute their acks to reach quorum.
             let admitted = mocks::Monitor::new(epoch);
             let (verified_sender, verified) = oneshot::channel();
             let mut verified_sender = Some(verified_sender);
@@ -493,6 +502,9 @@ mod tests {
                 if index == 4 {
                     admitted_reporter = Some(mailbox.clone());
                 }
+
+                // Fill a two-height window before admission so progress requires
+                // signing both existing digests under the new committee.
                 let engine = Engine::new(
                     context.child("engine"),
                     Config {
@@ -520,6 +532,9 @@ mod tests {
                     },
                 );
                 engine.start(registrations.remove(participant).unwrap());
+
+                // Wait for both digests to be verified without signing authority
+                // before changing epochs or starting peers that could send acks.
                 if index == 4 {
                     select! {
                         result = verified.take().unwrap() => assert!(result.is_ok(), "digests were not verified"),
@@ -529,6 +544,8 @@ mod tests {
                 }
             }
 
+            // Both pending heights must certify at the joining validator, requiring
+            // it to count its own newly signed acks as well as those from its peers.
             let mut mailbox = admitted_reporter.unwrap();
             for height in [Height::zero(), Height::new(1)] {
                 select! {

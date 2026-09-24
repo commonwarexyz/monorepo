@@ -308,7 +308,8 @@ pub(crate) struct SingleDbEngine {
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
 
-// Plans clone definitions for each run; a team keeps its definition across restarts.
+// Each run owns fresh sync observations. A team retains the same definition across
+// restarts so recovery evidence stays within that run.
 impl Clone for SingleDbEngine {
     fn clone(&self) -> Self {
         Self {

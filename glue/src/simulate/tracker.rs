@@ -136,6 +136,7 @@ mod tests {
 
     #[test]
     fn conflicting_same_round_from_same_validator_is_rejected() {
+        // Establish the digest for a round before the validator reports a conflict.
         let pk = ed25519::PrivateKey::from_seed(7).public_key();
         let mut tracker = ProgressTracker::default();
 
@@ -148,6 +149,7 @@ mod tests {
             })
             .expect("first update should be accepted");
 
+        // Use a different height so rejection depends on round agreement alone.
         let err = tracker
             .observe(FinalizationUpdate {
                 pk,
@@ -164,6 +166,7 @@ mod tests {
 
     #[test]
     fn stale_replay_is_checked_without_regressing_progress() {
+        // Advance one validator beyond the round that will be replayed.
         let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
         let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
         let mut tracker = ProgressTracker::default();
@@ -177,6 +180,7 @@ mod tests {
             })
             .expect("high-watermark update should be accepted");
 
+        // A replay adds agreement evidence without lowering the validator's progress.
         tracker
             .observe(FinalizationUpdate {
                 pk: pk1,
@@ -187,6 +191,7 @@ mod tests {
             .expect("stale replay should be accepted");
         assert_eq!(tracker.min_view(), 5);
 
+        // Another validator must agree with the replay even though its round is stale.
         let err = tracker
             .observe(FinalizationUpdate {
                 pk: pk2,
@@ -200,6 +205,7 @@ mod tests {
 
     #[test]
     fn same_view_in_different_epochs_is_not_a_fork() {
+        // Record a finalization before the epoch changes.
         let pk1 = ed25519::PrivateKey::from_seed(1).public_key();
         let pk2 = ed25519::PrivateKey::from_seed(2).public_key();
         let mut tracker = ProgressTracker::default();
@@ -213,6 +219,8 @@ mod tests {
             })
             .expect("epoch zero finalization should be accepted");
 
+        // View numbers may repeat across epochs. A different application height
+        // keeps these finalizations independent under both agreement checks.
         tracker
             .observe(FinalizationUpdate {
                 pk: pk2,
