@@ -779,4 +779,35 @@ mod tests {
         let effects = state.handle_certified(View::new(5), false);
         assert!(effects.is_empty());
     }
+
+    #[test]
+    fn finalization_at_certified_floor_serves_without_refetch() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> = State::new(TermLength::new(NZU32!(5)));
+        let mut outstanding = BTreeSet::new();
+
+        let nullification_v14 = build_nullification(&schemes, &verifier, EPOCH, View::new(14));
+        let effects = state.handle(Certificate::Nullification(nullification_v14));
+        apply_effects(&mut outstanding, &effects);
+
+        // Certifying the mid-term notarization at view 3 raises the floor and
+        // requests the term tail.
+        let notarization_v3 = build_notarization(&schemes, &verifier, EPOCH, View::new(3));
+        let effects = state.handle(Certificate::Notarization(notarization_v3));
+        apply_effects(&mut outstanding, &effects);
+        let effects = state.handle_certified(View::new(3), true);
+        apply_effects(&mut outstanding, &effects);
+        assert_eq!(outstanding_views(&outstanding), vec![4, 6, 11]);
+
+        // A finalization at the floor view requests nothing new and is served
+        // for every view at or below it.
+        let finalization_v3 = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
+        let effects = state.handle(Certificate::Finalization(finalization_v3.clone()));
+        assert!(effects.is_empty());
+        for view in 1..=3 {
+            assert!(
+                matches!(state.get(View::new(view)), Some(Certificate::Finalization(f)) if f == &finalization_v3)
+            );
+        }
+    }
 }

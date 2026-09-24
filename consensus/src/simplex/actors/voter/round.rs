@@ -56,12 +56,15 @@ pub struct Round<S: Scheme, D: Digest> {
     leader: Option<Leader<S::PublicKey>>,
 
     proposal: ProposalSlot<D>,
-    // Deadlines armed when entering a view. Only set_deadlines writes them;
-    // next_timeout selects the active one from the round phase.
+
+    // Deadlines armed by set_deadlines when entering a view.
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
     stall_deadline: Option<SystemTime>,
+
+    // Nullify retry, scheduled by next_timeout and reset by construct_nullify.
     retry_deadline: Option<SystemTime>,
+
     // First explicit timeout latched for this round (see latch_timeout).
     // Unlike retry_deadline, this is first-wins and never moves.
     latched_timeout: Option<(SystemTime, TimeoutReason)>,
