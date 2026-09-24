@@ -396,7 +396,6 @@ impl<V: Write> Write for UncompressedFrame<'_, V> {
 mod tests {
     use super::*;
     use crate::utils::codec::View;
-    use bytes::Bytes;
     use commonware_codec::{Copying, Encode, Error as CodecError, Read};
     use commonware_utils::test_rng;
     use rand::{Rng as _, RngExt as _};
