@@ -16,8 +16,8 @@
 //! Before user code starts, Linux flushes the storage filesystem. Other
 //! platforms synchronize the storage directory, then each existing partition
 //! before its first scan or open. These directory flushes make inherited
-//! partition and blob removals durable before recovery observes their absence.
-//! Creation and removal synchronize subsequent directory changes.
+//! partition and blob removals durable before a scan or open observes their
+//! absence. Creation and removal synchronize subsequent directory changes.
 //!
 //! Other platforms also flush existing blobs individually on their first open.
 //! Directory synchronization covers names. This separate flush covers file

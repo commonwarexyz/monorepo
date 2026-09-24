@@ -1343,6 +1343,10 @@ mod tests {
             entered = entering => entered.unwrap(),
             _ = &mut reopen => panic!("reopen returned before the failed write was made durable"),
         }
+        assert!(
+            (&mut reopen).now_or_never().is_none(),
+            "reopen returned before the failed write was made durable"
+        );
         release.send(()).unwrap();
         let (blob, size) = reopen.await.unwrap();
         assert!(size >= 1);
