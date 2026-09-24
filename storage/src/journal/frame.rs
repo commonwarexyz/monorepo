@@ -205,6 +205,8 @@ pub(super) fn encode_frame_into<V: Codec>(
     item: &V,
     buf: &mut Vec<u8>,
 ) -> Result<u32, Error> {
+    // Compressed: delegate to an out-of-line encoder so the uncompressed path below saves fewer
+    // registers and uses a smaller stack frame.
     if let Some(compression) = compression {
         return encode_compressed_frame_into(compression, item, buf);
     }
