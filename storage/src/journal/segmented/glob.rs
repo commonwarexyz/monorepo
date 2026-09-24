@@ -49,7 +49,10 @@ pub struct Config<C> {
     /// The partition to use for storing blobs.
     pub partition: String,
 
-    /// Optional compression level (using `zstd`) to apply to data before storing.
+    /// Optional zstd compression level for stored values.
+    ///
+    /// Keep the choice between `None` and `Some(_)` fixed while stored values are retained.
+    /// Only the compression level may change between initializations when compression is enabled.
     pub compression: Option<u8>,
 
     /// The codec configuration to use for encoding and decoding items.
