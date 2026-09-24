@@ -323,7 +323,11 @@ where
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
         );
-        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)?;
+        chain::validate_batch_applicable(
+            db.commitment(),
+            boundary,
+            ancestors.iter().map(|ancestor| ancestor.state),
+        )?;
 
         let mut ops: Vec<Operation<F, K, V>> = Vec::with_capacity(self.mutations.len() + 1);
         for (key, value) in self.mutations {

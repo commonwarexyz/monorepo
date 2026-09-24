@@ -280,7 +280,11 @@ where
                 state: batch.commitment(),
             });
         }
-        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)?;
+        chain::validate_batch_applicable(
+            db.commitment(),
+            boundary,
+            ancestors.iter().map(|ancestor| ancestor.state),
+        )?;
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.

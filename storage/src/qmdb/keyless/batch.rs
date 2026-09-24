@@ -280,7 +280,11 @@ where
             |batch| batch.bounds.inactivity_floor,
             |batch| batch.commitment(),
         );
-        chain::validate_batch_applicable(db.commitment(), boundary, &ancestors)?;
+        chain::validate_batch_applicable(
+            db.commitment(),
+            boundary,
+            ancestors.iter().map(|ancestor| ancestor.state),
+        )?;
 
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);

@@ -390,14 +390,11 @@ fn validate_ancestor_chain<F: Family, D: Digest, U: update::Update, S: Strategy>
     db_state: Commitment<F, D>,
     ancestors: &[AncestorBatch<F, D, U, S>],
 ) -> Result<(), crate::qmdb::Error<F>> {
-    let bounds: Vec<_> = ancestors
-        .iter()
-        .map(|ancestor| chain::AncestorBounds {
-            floor: ancestor.bounds.inactivity_floor,
-            state: ancestor.commitment(),
-        })
-        .collect();
-    chain::validate_batch_applicable(current, db_state, &bounds)
+    chain::validate_batch_applicable(
+        current,
+        db_state,
+        ancestors.iter().map(|ancestor| ancestor.commitment()),
+    )
 }
 
 /// Batch-infrastructure state used during merkleization.
