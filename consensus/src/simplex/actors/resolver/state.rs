@@ -799,10 +799,15 @@ mod tests {
         apply_effects(&mut outstanding, &effects);
         assert_eq!(outstanding_views(&outstanding), vec![4, 6, 11]);
 
-        // A finalization at the floor view requests nothing new and is served
-        // for every view at or below it.
+        // A finalization at the floor view requests nothing new.
         let finalization_v3 = build_finalization(&schemes, &verifier, EPOCH, View::new(3));
         let effects = state.handle(Certificate::Finalization(finalization_v3.clone()));
+        assert!(effects.is_empty());
+
+        // A stale lower finalization is ignored, so the floor-view finalization
+        // is served for every view at or below it.
+        let finalization_v2 = build_finalization(&schemes, &verifier, EPOCH, View::new(2));
+        let effects = state.handle(Certificate::Finalization(finalization_v2));
         assert!(effects.is_empty());
         for view in 1..=3 {
             assert!(
