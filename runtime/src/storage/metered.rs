@@ -164,6 +164,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         if options.contains(WriteOptions::SYNC) {
             self.metrics.storage_syncs.inc();
         }
+        // The span is built here, not with `#[tracing::instrument]`, because `bytes` is known only
+        // after converting `bufs`, and `Span::current().record` would write into the caller's span
+        // when this span is disabled.
         self.inner
             .write_at(offset, bufs, options)
             .instrument(tracing::debug_span!(
