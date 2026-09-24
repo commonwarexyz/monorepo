@@ -144,6 +144,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         buffered::Config {
             public_key: local.clone(),
             mailbox_size: MAILBOX_SIZE,
+            ingress_size: MAILBOX_SIZE,
             deque_size: 16,
             priority: false,
             codec_config: (),

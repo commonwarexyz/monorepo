@@ -7513,6 +7513,7 @@ mod tests {
             let broadcast_config = buffered::Config {
                 public_key: me.clone(),
                 mailbox_size: NZUsize!(100),
+                ingress_size: NZUsize!(100),
                 deque_size: 10,
                 priority: false,
                 codec_config: (),
