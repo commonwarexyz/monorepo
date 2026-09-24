@@ -2054,21 +2054,17 @@ mod tests {
         states
     }
 
-    /// Leave the data blob of the witness at `position` with a partial trailing page, as a crash
-    /// mid-write would. Paged tail recovery repairs (resizes and syncs) such a tail when the blob
-    /// is opened.
+    /// Leave witness data blob `blob` with a partial trailing page, as a crash mid-write would.
+    /// Paged tail recovery repairs (resizes and syncs) such a tail when the blob is opened.
     async fn tear_witness_data(
         context: &deterministic::Context,
         witness_cfg: &JournalConfig<()>,
-        position: u64,
+        blob: u64,
     ) {
         let partition = format!("{}_data", witness_cfg.partition);
-        let (blob, len) = context
-            .open(&partition, &position.to_be_bytes())
-            .await
-            .unwrap();
-        blob.resize(len - 1).await.unwrap();
-        blob.sync().await.unwrap();
+        let (handle, len) = context.open(&partition, &blob.to_be_bytes()).await.unwrap();
+        handle.resize(len - 1).await.unwrap();
+        handle.sync().await.unwrap();
     }
 
     /// Bounded init through a delayed-sync backend, returning the db and the durability calls
@@ -2104,12 +2100,30 @@ mod tests {
             let control_cfg =
                 sectioned_witness_config("immutable-skip-discarded-control", &context);
             let torn_cfg = sectioned_witness_config("immutable-skip-discarded-torn", &context);
-            let states =
-                seed_witness_sections(context.child("control"), control_cfg.clone(), 2).await;
-            assert_eq!(
-                states,
-                seed_witness_sections(context.child("torn"), torn_cfg.clone(), 2).await
-            );
+            let mut states = Vec::new();
+            for (label, witness_cfg) in [("control", &control_cfg), ("torn", &torn_cfg)] {
+                let context = context.child(label);
+                states.push(
+                    seed_witness_sections(context.child("seed"), witness_cfg.clone(), 1).await[0],
+                );
+
+                // Commit without syncing so the witness at position 2 lies above the recovery
+                // watermark, where a torn tail is a crash shape rather than corruption.
+                let cfg = Config {
+                    strategy: Sequential,
+                    witness: witness_cfg.clone(),
+                    commit_codec_config: (),
+                };
+                let db: TestDb<mmr::Family> =
+                    Db::init(context.child("extend"), cfg, None).await.unwrap();
+                let batch = db
+                    .new_batch()
+                    .merkleize(&db, Some(Sha256::fill(2)), db.inactivity_floor_loc())
+                    .await;
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                drop(db.commit().await.unwrap());
+            }
+            assert_eq!(states[0], states[1]);
             let (size, root) = states[0];
 
             // The witness at position 1 has size `size`, so the bound discards position 2 and
@@ -2250,8 +2264,8 @@ mod tests {
             }
             drop(db);
 
-            // From the tip down: a view ending at the bound with a smaller witness, an empty view
-            // at the bound, and a bound below the retained start all widen and select by size.
+            // From the tip down: a view ending at the bound with a smaller witness widens, and a
+            // bound at or below the retained start opens unbounded. Each selects by size.
             for (size, root) in states.into_iter().rev() {
                 let db = open_bounded::<mmr::Family>(
                     context.child("bounded").with_attribute("cap", *size),

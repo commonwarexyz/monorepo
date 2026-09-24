@@ -168,7 +168,7 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     pub(crate) journal: Journal<E, D>,
 
     /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
-    /// boundary used to generate them. Pruning writes both when the boundary moves; sync
+    /// boundary used to generate them. Pruning writes both when the boundary moves. Sync
     /// initialization replaces them with the selected boundary and its pins.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
@@ -3856,7 +3856,7 @@ mod tests {
             // tail below `end_pos` is a crash shape rather than corruption.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
-                inner: context.child("delayed"),
+                inner: context.child("seed_delayed"),
                 pending: pending.clone(),
             };
             let merkle = drive_pending_syncs(
@@ -3898,7 +3898,7 @@ mod tests {
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
-                inner: context.child("delayed"),
+                inner: context.child("sync_delayed"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(
@@ -3966,7 +3966,7 @@ mod tests {
             let items_per_blob = cfg.items_per_blob.get();
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
-                inner: context.child("delayed"),
+                inner: context.child("seed_delayed"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(
@@ -4042,7 +4042,7 @@ mod tests {
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
-                inner: context.child("delayed"),
+                inner: context.child("sync_delayed"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(
@@ -4141,7 +4141,7 @@ mod tests {
             // tail is a crash shape rather than corruption.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
-                inner: context.child("delayed"),
+                inner: context.child("seed_delayed"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(
@@ -4197,7 +4197,7 @@ mod tests {
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
-                inner: context.child("delayed"),
+                inner: context.child("sync_delayed"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(

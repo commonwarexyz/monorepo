@@ -1220,7 +1220,8 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     }
 
     /// Possible stored positions based on the checkpoint and blob names, without opening data
-    /// blobs. Its end is the newest data blob's capacity; inspection determines the actual end.
+    /// blobs. Its end follows the newest data blob's last possible position. Inspection determines
+    /// the actual end.
     /// A staged clear makes the journal empty at its target. Bounded recovery rejects an
     /// acknowledged offsets prefix with no corresponding data blobs.
     #[commonware_macros::stability(ALPHA)]

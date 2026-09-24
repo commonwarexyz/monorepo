@@ -2931,7 +2931,9 @@ mod tests {
             oversized = oversized.sync_all().await.expect("failed to sync");
             drop(oversized);
 
-            // Section 3's torn tail would be repaired and synced if recovery opened it.
+            // Restore owns no bytes in sections 2 and 3. The valid final page hides section 2's
+            // interior hole from paged tail recovery, while section 3's torn tail would be
+            // repaired and synced if recovery opened it.
             corrupt_page(
                 &context,
                 &cfg.index_partition,
@@ -2942,8 +2944,12 @@ mod tests {
             .await;
             tear_index_tail(&context, &cfg, 3).await;
 
-            // The value buffer does no I/O on open, so a live exclusive handle detects a
-            // discarded value section that restore mistakenly opens.
+            // Live exclusive handles detect a discarded section that restore mistakenly opens.
+            // The value buffer does no I/O on open, so only a handle observes that section.
+            let (discarded_index, _) = context
+                .open(&cfg.index_partition, &2u64.to_be_bytes())
+                .await
+                .unwrap();
             let (discarded_value, _) = context
                 .open(&cfg.value_partition, &2u64.to_be_bytes())
                 .await
@@ -2965,6 +2971,7 @@ mod tests {
             // Restore syncs both retained sections. Repairing the torn discarded index
             // section would add another sync.
             assert_eq!(pending.calls(), 2);
+            drop(discarded_index);
             drop(discarded_value);
             let retained = vec![1u64.to_be_bytes().to_vec()];
             assert_eq!(delayed.scan(&cfg.index_partition).await.unwrap(), retained);
@@ -3113,8 +3120,10 @@ mod tests {
         });
     }
 
-    #[test_traced]
-    fn test_oversized_tracked_bounded_open_removes_marker_before_closed_sections() {
+    /// Bounded tracked opens never open sections above the cap and remove them only after the
+    /// marker update is durable. A marker retained at or below the cap selects floor recovery.
+    /// Markers only above the cap leave no floor, so inferred recovery must bound both journals.
+    fn tracked_bounded_open_removes_marker_before_closed_sections_inner(markers: &'static [u64]) {
         deterministic::Runner::default().start(|context| async move {
             let cfg = entry_cfg(&context);
             let mut journal: Oversized<_, TestEntry, TestValue> =
@@ -3139,8 +3148,9 @@ mod tests {
             )
             .await
             .unwrap();
-            metadata.put(SectionKey::new(1), 1);
-            metadata.put(SectionKey::new(2), 1);
+            for &section in markers {
+                metadata.put(SectionKey::new(section), 1);
+            }
             drop(metadata.sync().await.unwrap());
             tear_index_tail(&context, &cfg, 2).await;
 
@@ -3171,7 +3181,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(pending.calls(), 1, "only the lowered marker needs a sync");
+            assert_eq!(pending.calls(), 1, "only the marker update needs a sync");
             assert_eq!(
                 drive_pending_syncs(&pending, replay.next())
                     .await
@@ -3214,13 +3224,23 @@ mod tests {
                 1
             );
             assert!(drive_pending_syncs(&pending, replay.next()).await.is_none());
-            drive_pending_syncs(&pending, replay.finish_tracked())
+            let journal = drive_pending_syncs(&pending, replay.finish_tracked())
                 .await
-                .unwrap()
-                .destroy()
+                .unwrap();
+            drive_pending_syncs(&pending, journal.destroy())
                 .await
                 .unwrap();
         });
+    }
+
+    #[test_traced]
+    fn test_oversized_tracked_bounded_open_removes_marker_before_closed_sections() {
+        tracked_bounded_open_removes_marker_before_closed_sections_inner(&[1, 2]);
+    }
+
+    #[test_traced]
+    fn test_oversized_tracked_bounded_open_without_retained_marker_leaves_sections_unopened() {
+        tracked_bounded_open_removes_marker_before_closed_sections_inner(&[2]);
     }
 
     #[test_traced]

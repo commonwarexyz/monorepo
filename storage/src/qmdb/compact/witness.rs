@@ -706,9 +706,15 @@ where
     Ok((Store::new(journal, witness), op))
 }
 
-/// Witness position `p` has size at least `p + 1` for an append-only journal. A compact-sync
-/// import can put a smaller size at the journal end, so probe its retained start and bounded tip
-/// before trusting the cap. Recovery remains unpublished until selection verifies the witness.
+/// Recover the witness journal bounded at `max_size` when that view can settle selection, and
+/// unbounded otherwise.
+///
+/// Witness position `p` has size at least `p + 1` in an append-only journal, so positions below
+/// the cap hold every witness no larger than the cap. A compact-sync import can put a smaller size
+/// at the journal end, so a retained start at or above the cap, or a bounded view that ends at
+/// the cap with a smaller tip, widens recovery. Widening after a bounded attempt rebuilds every
+/// derived offset above the cap, including offsets the watermark had acknowledged. Recovery
+/// remains unpublished until selection verifies the witness.
 async fn recover<E, F, D>(
     context: E,
     config: variable::Config<()>,
@@ -725,14 +731,13 @@ where
     if variable::Recovery::<E, Witness<F, D>>::span(&context, &config)
         .await?
         .start
-        > *cap
+        >= *cap
     {
         return Ok(Journal::<E, F, D>::recover(context, config, None).await?);
     }
     let bounded = Journal::<E, F, D>::recover(context, config, Some(*cap)).await?;
     let bounds = bounded.bounds();
-    if bounds.end < *cap || (!bounds.is_empty() && bounded.read(bounds.end - 1).await?.size >= cap)
-    {
+    if bounds.end < *cap || bounded.read(bounds.end - 1).await?.size >= cap {
         return Ok(bounded);
     }
     Ok(bounded.unbounded().await?)
