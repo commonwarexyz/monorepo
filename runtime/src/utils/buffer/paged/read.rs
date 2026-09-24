@@ -298,7 +298,6 @@ impl bytes::Buf for ReplayBuf {
         self.remaining
     }
 
-    // Expose the fast path to decoders so fixed-size field copies can be specialized.
     #[inline(always)]
     fn try_copy_to_slice(&mut self, mut dst: &mut [u8]) -> Result<(), TryGetError> {
         if dst.len() > self.remaining {
