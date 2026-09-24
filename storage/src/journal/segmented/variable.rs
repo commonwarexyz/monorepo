@@ -83,8 +83,8 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
     Error,
     frame::{
-        FrameInfo, UncompressedFrame, decode_item, decode_length_prefix, encode_frame_into,
-        find_frame, read_frame_at,
+        FrameInfo, UncompressedFrame, decode_item, decode_length_prefix,
+        encode_compressed_frame_into, find_frame, read_frame_at,
     },
 };
 use bytes::Bytes;
@@ -190,28 +190,25 @@ impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         read_frame_at(blob, offset, cfg, compressed).await
     }
 
-    /// Returns the writer for `section`, creating it if absent.
-    async fn append_writer(&mut self, section: u64) -> Result<&mut PagedRecovery<E::Blob>, Error> {
+    /// See [Journal::append].
+    async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
         assert!(
             !self.unrecovered.contains(&section),
             "section {section} must be replayed before append"
         );
-        self.manager.get_or_create(section).await
-    }
 
-    /// See [Journal::append].
-    async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
-        // Frames are sized and validated before the section is created.
-        let (offset, item_len) = if self.compression.is_some() {
+        // Size and validate the frame before creating the section so a rejected item leaves no
+        // empty section.
+        let (offset, item_len) = if let Some(level) = self.compression {
             // Buffer compressed output to determine its length before appending the frame.
             let mut buf = Vec::new();
-            let item_len = encode_frame_into(self.compression, item, &mut buf)?;
-            let blob = self.append_writer(section).await?;
+            let item_len = encode_compressed_frame_into(level, item, &mut buf)?;
+            let blob = self.manager.get_or_create(section).await?;
             (blob.append_owned(IoBuf::from(buf)).await?, item_len)
         } else {
             // Encode directly into the write buffer when the frame fits.
             let frame = UncompressedFrame::new(item)?;
-            let blob = self.append_writer(section).await?;
+            let blob = self.manager.get_or_create(section).await?;
             let offset = match blob.try_append_value(&frame) {
                 Some(offset) => offset,
                 None => blob.append_owned(frame.encode_mut().into()).await?,
@@ -955,6 +952,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::frame::encode_frame_into;
     use commonware_codec::{EncodeSize, Write as _, varint::UInt};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -969,7 +967,7 @@ mod tests {
     impl<E: Storage + Metrics, V: CodecShared> Inner<E, V> {
         /// Append raw bytes, which need not form a valid frame, to `section`.
         async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
-            let blob = self.append_writer(section).await?;
+            let blob = self.manager.get_or_create(section).await?;
             Ok(blob.append_owned(buf).await?)
         }
     }
@@ -1078,7 +1076,7 @@ mod tests {
                         let partition = format!("torn-cap-{source_section}-{cap}-{pages}");
                         let mut page = Vec::new();
                         for value in 0..8u64 {
-                            UncompressedFrame::new(&value).unwrap().write(&mut page);
+                            encode_frame_into(None, &value, &mut page).unwrap();
                         }
                         assert_eq!(page.len(), 72);
                         super::super::manager::tests::seed_torn_suffix(
@@ -3774,15 +3772,15 @@ mod tests {
             assert_eq!(fallback_offset, 2048);
             assert_eq!(fallback_len, 128);
 
-            // Reopen and replay the section to verify both append paths on disk.
+            // Reopen the section to verify both append paths on disk.
             journal = journal.sync(1).await.unwrap();
             drop(journal);
-
             let mut journal = Journal::<_, Vec<u8>>::init(context.child("second"), cfg)
                 .await
                 .unwrap();
             assert_eq!(journal.get(1, fallback_offset).await.unwrap(), fallback);
 
+            // Replay returns the direct frames followed by the fallback frame.
             let mut replay = journal
                 .replay(0, 0, NZUsize!(1024), ReadOptions::default())
                 .await

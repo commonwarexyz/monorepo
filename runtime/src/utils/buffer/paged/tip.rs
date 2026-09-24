@@ -117,7 +117,8 @@ impl Buffer {
     pub(super) fn try_append_value<T: EncodeSize + Write>(&mut self, value: &T) -> Option<u64> {
         // Enforce the logical flush threshold independently of the tail's backing capacity.
         let size = value.encode_size();
-        if size > self.capacity.checked_sub(self.len)? {
+        let end = self.len.checked_add(size)?;
+        if end > self.capacity {
             return None;
         }
 
@@ -146,7 +147,7 @@ impl Buffer {
             assert_eq!(dst.remaining_mut(), 0, "encoded size must match EncodeSize");
             self.retire_tail(next);
         }
-        self.len += size;
+        self.len = end;
         Some(offset)
     }
 

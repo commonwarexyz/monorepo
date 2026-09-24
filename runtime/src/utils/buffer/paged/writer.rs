@@ -710,8 +710,7 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     ///
     /// # Panics
     ///
-    /// Panics if the encoder writes a different number of bytes than
-    /// [`EncodeSize::encode_size`].
+    /// Panics if the encoder writes a different number of bytes than [`EncodeSize::encode_size`].
     pub fn try_append_value<T: EncodeSize + Write>(&mut self, value: &T) -> Option<u64> {
         self.buffer.try_append_value(value)
     }
@@ -1474,9 +1473,12 @@ mod tests {
             assert_eq!(writer.try_append_value(&value), Some(0));
             let tail = writer.buffer.parts().1.as_ptr() as usize;
             assert_eq!(value.destination.get(), tail);
-            value.size = 22;
+            value.size = 5;
             assert_eq!(writer.try_append_value(&value), Some(3));
             assert_eq!(value.destination.get(), tail + 3);
+            value.size = 17;
+            assert_eq!(writer.try_append_value(&value), Some(8));
+            assert_eq!(value.destination.get(), tail + 8);
             assert_eq!(
                 writer.buffer.parts().0.chunk_at(0).unwrap().as_ptr() as usize,
                 tail
@@ -1494,8 +1496,8 @@ mod tests {
             }
             value.size = 0;
             assert_eq!(writer.try_append_value(&value), Some(64));
-            assert_eq!(value.size_calls.get(), 7);
-            assert_eq!(value.writes.get(), 5);
+            assert_eq!(value.size_calls.get(), 8);
+            assert_eq!(value.writes.get(), 6);
             assert_eq!(writer.size(), 64);
 
             // Reopen the blob to verify that directly encoded bytes persist.

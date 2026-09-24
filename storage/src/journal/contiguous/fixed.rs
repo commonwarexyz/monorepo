@@ -656,8 +656,8 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             Entry::Vacant(entry) => entry.insert(self.partition.open_recovery(blob).await?),
         };
 
-        // Encode directly when the tip has room. The owned fallback handles flushing and
-        // items larger than the buffer.
+        // Encode directly into the write buffer when the item fits. The owned fallback handles
+        // flushing and items larger than the buffer.
         if writer.try_append_value(item).is_none() {
             writer.append_owned(item.encode_mut().into()).await?;
         }
@@ -2449,8 +2449,8 @@ mod tests {
     #[test]
     fn test_recovery_rebuilds_pending_gap() {
         deterministic::Runner::default().start(|context| async move {
-            // Two pages hold two digests. The third exceeds the write buffer and takes the owned
-            // fallback during recovery.
+            // The two-page write buffer holds two digests, so the third digest in each blob takes
+            // the owned fallback during recovery.
             let mut cfg = test_cfg(&context, NZU64!(5));
             cfg.write_buffer = NZUsize!(88);
             let mut journal = Journal::<_, Digest>::init(context.child("seed"), cfg.clone())

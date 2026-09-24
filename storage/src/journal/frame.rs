@@ -260,7 +260,7 @@ pub(super) fn encode_frame_into<V: Codec>(
 /// Compressed case of [encode_frame_into], kept out of line so the uncompressed path saves
 /// fewer registers and uses a smaller stack frame.
 #[inline(never)]
-fn encode_compressed_frame_into<V: Codec>(
+pub(super) fn encode_compressed_frame_into<V: Codec>(
     compression: u8,
     item: &V,
     buf: &mut Vec<u8>,
