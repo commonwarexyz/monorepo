@@ -169,6 +169,9 @@ impl crate::Storage for Storage {
             if existing.is_none() {
                 self.pending.forget(partition, Some(name));
             }
+
+            // Attaching fails while a handle from an earlier open is alive or a failure is
+            // retained. The open owes completion when predecessor work or debt remains.
             let (generation, wait, owed) = self.pending.attach(partition, name)?;
 
             // Existing headers retain their layout. New headers become visible only after
@@ -2149,9 +2152,10 @@ mod tests {
     #[test]
     fn test_synced_drop_leaves_no_debt() {
         iouring::Runner::default().start(|_| async {
-            // Each durability entry point must cover its mutations before the open settles.
             let (storage, storage_directory) = create_test_storage();
 
+            // Each durability entry point (sync, start_sync, and a SYNC write) must cover its
+            // mutations before the open settles.
             let (blob, _) = storage.open("partition", b"sync").await.unwrap();
             blob.write_at(0, b"hello", WriteOptions::default())
                 .await

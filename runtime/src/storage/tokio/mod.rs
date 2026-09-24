@@ -227,6 +227,10 @@ impl crate::Storage for Storage {
                 if existing.is_none() {
                     pending.forget(&partition, Some(&name));
                 }
+
+                // Attaching fails while a handle from an earlier open is alive or a failure is
+                // retained. The open owes completion when predecessor work or debt remains.
+                // Outside Linux, this instance's first open of an existing blob also owes a flush.
                 let (generation, wait, owed) = pending.attach(&partition, &name)?;
                 let owed = owed || pending.first_open(&generation, existing.is_some());
 
@@ -234,6 +238,7 @@ impl crate::Storage for Storage {
                 // their namespace entries are durable.
                 let (mut logical_size, blob_version, data_offset) = match existing {
                     Some(resolved) => {
+                        // Make inherited directory entries durable before exposing the blob.
                         partitions.sync_once(parent)?;
                         resolved
                     }
@@ -828,6 +833,8 @@ mod tests {
                     .await;
                 drop(release);
 
+                // The independent open and the retry both succeed. The retry sees the seeded
+                // contents, or an empty blob when unseeded.
                 drop(independent.unwrap());
                 let (blob, size) = retry
                     .expect("retry panicked")
@@ -1598,7 +1605,6 @@ mod tests {
     /// sync through any owner clears the state.
     #[tokio::test]
     async fn test_shared_blob_dirty_state() {
-        // Multiple Arc owners share one logical open and one mutation tracker.
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_shared_{}", random_suffix()));
         let config = Config::new(storage_directory.clone(), Layout::ALL);
@@ -1614,6 +1620,8 @@ mod tests {
         drop(blob);
         assert_eq!(storage.pending.outstanding(), 0);
         assert!(!storage.pending.owes("partition", b"blob"));
+
+        // A sync through the remaining owner covers the write, so the final drop leaves no debt.
         retained.sync().await.unwrap();
         drop(retained);
         settle(&storage).await;

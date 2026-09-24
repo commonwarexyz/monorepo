@@ -1430,7 +1430,8 @@ mod tests {
             assert_eq!(writer.append(&4u64.to_be_bytes()).await.unwrap(), 32);
             writer.sync().await.unwrap();
 
-            // Reopening must preserve the appended values after every snapshot is released.
+            // The snapshot shares the writer's blob, so drop both before reopening. The reopened
+            // writer must recover all five synced values.
             drop(snapshot);
             drop(writer);
             let (blob, size) = context.open("append_value", b"blob").await.unwrap();

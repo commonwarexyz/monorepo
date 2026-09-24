@@ -60,10 +60,11 @@ impl Generations {
     }
 }
 
-/// In-memory storage with independent snapshots of durable blob contents.
+/// In-memory storage implementation for the commonware runtime.
 ///
-/// Writes remain local to an open until synchronized. Removing or replacing a blob retires
-/// its previous incarnation, preventing old handles from publishing into the new one.
+/// Each open copies the blob's durable contents. Writes remain local to that copy until
+/// synchronized. Removing or replacing a blob retires its previous incarnation, preventing old
+/// handles from publishing into the new one.
 #[derive(Clone)]
 pub(crate) struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,

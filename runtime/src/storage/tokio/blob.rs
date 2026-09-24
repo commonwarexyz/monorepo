@@ -715,7 +715,9 @@ mod tests {
             }
         }
 
-        // Exercise both result orders and caller cancellation for every durability path.
+        // Exercise both result orders and caller cancellation for every durability path. On
+        // Linux, `Write(1)` fuses the barrier into its single submission. The larger write spans
+        // more than one submission, so it writes and then runs a separate barrier.
         for operation in [
             Operation::Sync,
             Operation::StartSync,
@@ -724,6 +726,7 @@ mod tests {
         ] {
             for failure_first in [false, true] {
                 for cancel in [false, true] {
+                    // Open a blob with unsynced data so `sync` and `start_sync` issue a barrier.
                     let (storage, directory) = storage_for_reopen_test(
                         &format!("overlapping_failure_{operation:?}_{failure_first}_{cancel}"),
                         Layout::ALL,
@@ -733,7 +736,9 @@ mod tests {
                         .await
                         .unwrap();
 
-                    // Pause the first barrier before its result reaches the tracker.
+                    // With `failure_first`, the first barrier is a `Sync` that takes the injected
+                    // flush failure. Otherwise it runs `operation` and succeeds. Pause it before
+                    // its result reaches the tracker.
                     let (entered, entering) = oneshot::channel();
                     let (release, gate) = mpsc::channel();
                     *blob.shared.test.after_sync.lock() = Some((entered, gate));
@@ -755,8 +760,8 @@ mod tests {
                         "barrier released admission before accounting"
                     );
 
-                    // Cancellation releases the awaiter while the blocking barrier retains
-                    // its permit and responsibility for publishing the result.
+                    // Canceling drops only the first caller's future. The blocking barrier keeps
+                    // running and holds `durability` until its accounting finishes.
                     let first = if cancel {
                         drop(first);
                         None
@@ -764,14 +769,14 @@ mod tests {
                         Some(first)
                     };
 
-                    // In the other result order, inject failure after the first barrier starts
-                    // but before the competing barrier can begin.
+                    // Without `failure_first`, inject the failure while the first barrier is
+                    // paused, so only the competing `Sync` takes it.
                     if !failure_first {
                         *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
                     }
 
-                    // A competing barrier cannot finish while its predecessor's result is
-                    // still withheld, regardless of which operation will report the failure.
+                    // The competing barrier cannot finish while the paused barrier holds
+                    // `durability`, in either result order.
                     let mut second = Box::pin(run(
                         &blob,
                         if failure_first {
@@ -789,6 +794,8 @@ mod tests {
                     );
 
                     // Once accounting completes, every later durability claim sees the failure.
+                    // When the first barrier fails, neither barrier credits a sync, so the open
+                    // stays dirty.
                     let first = futures::future::OptionFuture::from(first).await;
                     let second = second.await;
                     if failure_first {
@@ -834,8 +841,9 @@ mod tests {
         let mut reopening = None;
         if replace {
             // The removed incarnation's reopen stays in flight while the name is recreated
-            // underneath it. Whether it flushes the unlinked file or reads no debt, it publishes
-            // nothing into the recreated name.
+            // underneath it. The scan returns after the reopen's namespace dispatch, so the
+            // reopen captures the old file before the removal. Whether it flushes the unlinked
+            // file or reads no debt, it publishes nothing into the recreated name.
             let (old, _) = storage.open("partition", b"blob").await.unwrap();
             old.write_at(0, b"old", WriteOptions::default())
                 .await
@@ -850,6 +858,7 @@ mod tests {
 
         // Hold a mutation in the blocking pool after its caller and public blob are dropped.
         // The outstanding request must retain the file and its eventual durability debt.
+        // `wait` fires once the request finishes and the dropped open settles.
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         if shrink {
             blob.write_at(0, b"orphaned", WriteOptions::SYNC)
@@ -892,14 +901,17 @@ mod tests {
             reopening.unwrap_or_else(|| Box::pin(storage.open("partition", b"blob")));
         let early = (&mut reopening).now_or_never();
         if let Some((entering, release_attach)) = attachment {
+            // The reopen captures the file and its pre-mutation length, then pauses before
+            // attaching while the mutation finishes and its open settles. It attaches with no
+            // settlement outstanding, so only the recorded debt defers its length read.
             entering.await.unwrap();
             release.send(()).unwrap();
             Pending::wait(wait.clone()).await.unwrap();
             assert_eq!(storage.pending.outstanding(), 0);
             release_attach.send(()).unwrap();
         } else {
-            // Namespace dispatch completes before this barrier. The mutation still owns
-            // the file, so the captured descriptor's size is not yet authoritative.
+            // Namespace dispatch completes before this barrier. Without replacement, the
+            // mutation still owns the captured file, so its size is not yet authoritative.
             storage.scan("partition").await.unwrap();
             release.send(()).unwrap();
         }
@@ -1111,8 +1123,9 @@ mod tests {
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let mut file = File::open(directory.join("partition").join(hex(b"blob"))).unwrap();
 
-        // Capture metadata before shrinking, then resolve the header using that stale length.
-        // Cover both a short prefix and a file extending beyond the header read limit.
+        // Capture the raw length before shrinking, then resolve the header with that stale
+        // length. The original sizes put the stale length below and above the header read
+        // limit, and the retained sizes leave an empty or partial payload.
         for original in [8, 5000] {
             for retained in [0, 3] {
                 blob.resize(original).await.unwrap();
@@ -1128,6 +1141,9 @@ mod tests {
                 )
                 .unwrap()
                 .unwrap();
+
+                // The shrunken file is shorter than the requested prefix, so the size comes from
+                // the bytes read rather than the stale length.
                 assert_eq!(offset, Layout::V0.data_offset());
                 assert_eq!(size, retained);
             }
@@ -1234,8 +1250,8 @@ mod tests {
             let last = i64::MAX as u64;
             let completed = storage.pending.completions();
 
-            // Empty writes skip I/O but still reject overflow when adding the header offset.
             for options in [WriteOptions::default(), WriteOptions::SYNC] {
+                // Empty writes skip I/O but still reject overflow when adding the header offset.
                 blob.write_at(u64::MAX - header, IoBufs::default(), options)
                     .await
                     .unwrap();
@@ -1244,7 +1260,8 @@ mod tests {
                     Err(Error::OffsetOverflow)
                 ));
 
-                // Each nonempty write exceeds the signed file extent by one byte.
+                // Each nonempty write exceeds the signed file extent by one byte. Chunk counts
+                // cover one buffer, several buffers in one iovec batch, and more than one batch.
                 for chunks in [1, 2, IOVEC_BATCH_SIZE + 1] {
                     let physical = last - (Widen::widen(chunks) - 1);
                     let bufs = (0..chunks)

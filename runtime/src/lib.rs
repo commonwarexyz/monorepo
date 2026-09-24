@@ -1609,7 +1609,7 @@ mod tests {
         R::Context: Storage,
     {
         runner.start(|context| async move {
-            // Explicit sharing retains a single open even after its original owner drops.
+            // Cloning the Arc shares one open. A second open fails while that open is alive.
             let partition = "duplicate_open";
             let name = b"blob";
             let (first, _) = context.open(partition, name).await.unwrap();
@@ -1623,6 +1623,9 @@ mod tests {
                 context.open(partition, name).await,
                 Err(Error::BlobAlreadyOpen(p, n)) if p == partition && n == "626c6f62"
             ));
+
+            // Dropping the original owner leaves the clone holding the open. `open_versioned`
+            // still fails. The clone reads the unsynced write and syncs new contents.
             drop(first);
             assert!(matches!(
                 context.open_versioned(
