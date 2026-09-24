@@ -73,7 +73,7 @@ where
     codec_config: M::Cfg,
 
     /// Capacity of the decoded-message channel from the background receiver.
-    ingress_capacity: NonZeroUsize,
+    ingress_size: NonZeroUsize,
 
     /// Blocks peers whose messages fail to decode.
     blocker: B,
@@ -146,7 +146,7 @@ where
             priority: cfg.priority,
             deque_size: cfg.deque_size,
             codec_config: cfg.codec_config,
-            ingress_capacity: cfg.mailbox_size,
+            ingress_size: cfg.ingress_size,
             blocker: cfg.blocker,
             strategy: cfg.strategy,
             mailbox_receiver,
@@ -179,7 +179,7 @@ where
             network.1,
             self.codec_config.clone(),
             self.blocker.clone(),
-            self.ingress_capacity,
+            self.ingress_size,
             self.strategy.clone(),
         );
         // Keep the handle alive so the background decoder is not aborted.
