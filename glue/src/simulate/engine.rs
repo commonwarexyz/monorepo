@@ -29,8 +29,9 @@ pub struct InitContext<'a, P: PublicKey> {
     pub channels: Vec<ChannelPair<P>>,
     /// All participants in the simulation.
     pub participants: &'a [P],
-    /// Channel for reporting finalization events to the harness.
-    pub monitor: mpsc::Sender<FinalizationUpdate<P>>,
+    /// Lossless channel for reporting finalization events to the harness.
+    /// Closes when the exit condition first succeeds.
+    pub monitor: mpsc::UnboundedSender<FinalizationUpdate<P>>,
 }
 
 /// Defines how to construct and start one validator's service stack.

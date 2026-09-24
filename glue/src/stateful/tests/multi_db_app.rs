@@ -383,7 +383,6 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
 }
 
 /// Multi-database engine definition for the simulation harness.
-#[derive(Clone)]
 pub(crate) struct MultiDbEngine {
     participants: Vec<ed25519::PublicKey>,
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
@@ -392,6 +391,22 @@ pub(crate) struct MultiDbEngine {
     retained_marshal_blocks: usize,
     sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
+}
+
+// Each run owns fresh sync observations. A team retains the same definition across
+// restarts so recovery evidence stays within that run.
+impl Clone for MultiDbEngine {
+    fn clone(&self) -> Self {
+        Self {
+            participants: self.participants.clone(),
+            schemes: self.schemes.clone(),
+            enable_state_sync: self.enable_state_sync,
+            sync_config: self.sync_config,
+            retained_marshal_blocks: self.retained_marshal_blocks,
+            sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
+            sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
 }
 
 impl MultiDbEngine {
@@ -749,6 +764,7 @@ impl EngineDefinition for MultiDbEngine {
         (
             handle,
             MockValidatorState {
+                public_key: public_key.clone(),
                 marshal: marshal_mailbox,
                 state_sync_entries: self
                     .sync_entries

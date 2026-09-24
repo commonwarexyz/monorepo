@@ -204,11 +204,20 @@ where
     }
 }
 
-/// Post-run property: a validator started state sync, crashed before it
-/// completed, restarted, re-entered state sync, then advanced beyond the
-/// synced height.
-#[derive(Clone, Copy)]
-pub(crate) struct CrashDuringStateSyncRecovery;
+/// Post-run property: the delayed validator entered state sync twice and
+/// advanced beyond the synced height. The recovery campaign checks that its
+/// scheduled crash and restart occurred between the two entries.
+#[derive(Clone)]
+pub(crate) struct CrashDuringStateSyncRecovery {
+    /// Validator whose delayed startup is interrupted by the recovery campaign.
+    late_joiner: ed25519::PublicKey,
+}
+
+impl CrashDuringStateSyncRecovery {
+    pub(crate) fn new(late_joiner: ed25519::PublicKey) -> Self {
+        Self { late_joiner }
+    }
+}
 
 impl<V> Property<ed25519::PublicKey, MockValidatorState<V>> for CrashDuringStateSyncRecovery
 where
@@ -226,29 +235,27 @@ where
         states: &'a [&'a MockValidatorState<V>],
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
-            let mut observed = Vec::new();
-            for state in states {
-                let processed_height = state.processed_height().await;
-                observed.push(format!(
-                    "entries={} sync_height={:?} processed_height={processed_height}",
-                    state.state_sync_entries(),
-                    state.state_sync_height(),
-                ));
+            // Recovery evidence must belong to the validator whose startup was delayed.
+            let Some(state) = states
+                .iter()
+                .find(|state| state.public_key == self.late_joiner)
+            else {
+                return Err("delayed validator is not active after restart".to_string());
+            };
 
-                let Some(sync_height) = state.state_sync_height() else {
-                    continue;
-                };
-                if state.state_sync_entries() < 2 {
-                    continue;
-                }
-                if processed_height > sync_height {
-                    return Ok(());
-                }
+            // A completed sync is durable and skips peer state sync on restart.
+            // Two entries for this validator imply its first sync was interrupted.
+            let processed_height = state.processed_height().await;
+            let sync_height = state.state_sync_height();
+            if state.state_sync_entries() >= 2
+                && sync_height.is_some_and(|height| processed_height > height)
+            {
+                return Ok(());
             }
 
             Err(format!(
-                "no validator re-entered state sync after a crash and then advanced beyond the synced height; observed [{}]",
-                observed.join(", "),
+                "delayed validator did not re-enter state sync and advance after restart; entries={} sync_height={sync_height:?} processed_height={processed_height}",
+                state.state_sync_entries(),
             ))
         })
     }

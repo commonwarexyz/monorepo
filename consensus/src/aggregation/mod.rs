@@ -104,7 +104,9 @@ mod tests {
     };
     use commonware_cryptography::{
         bls12381::primitives::variant::{MinPk, MinSig},
-        certificate::mocks::Fixture,
+        certificate::{
+            Provider as CertificateProvider, Scheme as CertificateScheme, Scoped, mocks::Fixture,
+        },
         ed25519::PublicKey,
         sha256::Digest as Sha256Digest,
     };
@@ -119,13 +121,19 @@ mod tests {
     use commonware_utils::{
         NZU16, NZUsize, NonZeroDuration, TestRng,
         channel::{fallible::OneshotExt, oneshot},
-        probability, test_rng,
+        probability,
+        sync::Mutex,
+        test_rng,
     };
     use futures::future::join_all;
     use rand::RngExt as _;
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroU32, NonZeroUsize},
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
     use tracing::debug;
@@ -407,6 +415,150 @@ mod tests {
     }
 
     test_for_all_fixtures!(slow all_online);
+
+    /// Signals when an isolated engine has verified its two-height pending window.
+    #[derive(Clone)]
+    struct ObservedProvider<S: CertificateScheme + Clone> {
+        inner: mocks::Provider<S>,
+        /// Scheme lookups since startup, shared across provider clones.
+        lookups: Arc<AtomicUsize>,
+        /// Notifies the test at the second verified digest's signing attempt.
+        verified: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    }
+
+    impl<S: CertificateScheme + Clone> CertificateProvider for ObservedProvider<S> {
+        type Scope = Epoch;
+        type Scheme = S;
+
+        fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
+            self.inner.scoped(epoch)
+        }
+
+        fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
+            // With peers stopped, one lookup initializes the engine and the next two
+            // attempt to sign its verified digests. Signal at the second digest so
+            // epoch rotation cannot precede verification of the pending window.
+            if self.lookups.fetch_add(1, Ordering::SeqCst) == 2
+                && let Some(sender) = self.verified.lock().take()
+            {
+                sender.send_lossy(());
+            }
+            self.inner.scheme(epoch)
+        }
+    }
+
+    #[test_traced("INFO")]
+    fn test_admitted_signer_certifies_pending_heights() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            // Rotate one member of a four-validator committee. The fifth participant
+            // starts outside the committee and joins in the next epoch.
+            let mut rng = test_rng();
+            let fixture = ed25519::fixture(&mut rng, TEST_NAMESPACE, 5);
+            let epoch = Epoch::new(111);
+            let next_epoch = Epoch::new(112);
+            let former: commonware_utils::ordered::Set<PublicKey> =
+                fixture.participants[..4].to_vec().try_into().unwrap();
+            let current: commonware_utils::ordered::Set<PublicKey> =
+                fixture.participants[1..].to_vec().try_into().unwrap();
+            let (oracle, mut registrations) =
+                initialize_simulation(context.child("simulation"), &fixture, RELIABLE_LINK).await;
+
+            // Start the joining validator first and keep one current member offline.
+            // All three running validators must contribute their acks to reach quorum.
+            let admitted = mocks::Monitor::new(epoch);
+            let (verified_sender, verified) = oneshot::channel();
+            let mut verified_sender = Some(verified_sender);
+            let mut verified = Some(verified);
+            let mut admitted_reporter = None;
+
+            for index in [4, 1, 2] {
+                let participant = &fixture.participants[index];
+                let provider = mocks::Provider::new();
+                if index == 4 {
+                    provider.register(
+                        epoch,
+                        ed25519::Scheme::verifier(TEST_NAMESPACE, former.clone()),
+                    );
+                }
+                provider.register(
+                    next_epoch,
+                    ed25519::Scheme::signer(
+                        TEST_NAMESPACE,
+                        current.clone(),
+                        fixture.private_keys[index].clone(),
+                    )
+                    .unwrap(),
+                );
+                let monitor = if index == 4 {
+                    admitted.clone()
+                } else {
+                    mocks::Monitor::new(next_epoch)
+                };
+                let (reporter, mailbox) = mocks::Reporter::new(
+                    context.child("reporter"),
+                    ed25519::Scheme::verifier(TEST_NAMESPACE, current.clone()),
+                );
+                reporter.start();
+                if index == 4 {
+                    admitted_reporter = Some(mailbox.clone());
+                }
+
+                // Fill a two-height window before admission so progress requires
+                // signing both existing digests under the new committee.
+                let engine = Engine::new(
+                    context.child("engine"),
+                    Config {
+                        monitor,
+                        provider: ObservedProvider {
+                            inner: provider,
+                            lookups: Arc::new(AtomicUsize::new(0)),
+                            verified: Arc::new(Mutex::new(if index == 4 { verified_sender.take() } else { None })),
+                        },
+                        automaton: mocks::Application::new(mocks::Strategy::Correct),
+                        reporter: mailbox,
+                        blocker: oracle.control(participant.clone()),
+                        priority_acks: false,
+                        rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_millis(50)),
+                        epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
+                        window: std::num::NonZeroU64::new(2).unwrap(),
+                        activity_timeout: HeightDelta::new(10),
+                        journal_partition: format!("admission-{index}"),
+                        journal_write_buffer: NZUsize!(4096),
+                        journal_replay_buffer: NZUsize!(4096),
+                        journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
+                        journal_compression: Some(3),
+                        journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        strategy: Sequential,
+                    },
+                );
+                engine.start(registrations.remove(participant).unwrap());
+
+                // Wait for both digests to be verified without signing authority
+                // before changing epochs or starting peers that could send acks.
+                if index == 4 {
+                    select! {
+                        result = verified.take().unwrap() => assert!(result.is_ok(), "digests were not verified"),
+                        _ = context.sleep(Duration::from_secs(1)) => panic!("digests were not verified"),
+                    }
+                    admitted.update(next_epoch);
+                }
+            }
+
+            // Both pending heights must certify at the joining validator, requiring
+            // it to count its own newly signed acks as well as those from its peers.
+            let mut mailbox = admitted_reporter.unwrap();
+            for height in [Height::zero(), Height::new(1)] {
+                select! {
+                    _ = async {
+                        while mailbox.get(height).await.is_none() {
+                            context.sleep(Duration::from_millis(10)).await;
+                        }
+                    } => {},
+                    _ = context.sleep(Duration::from_secs(2)) => panic!("admitted signer did not certify height {height}"),
+                }
+            }
+        });
+    }
 
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<S, F>(fixture: F)
