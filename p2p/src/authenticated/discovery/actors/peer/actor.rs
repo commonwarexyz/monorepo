@@ -157,18 +157,19 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         channels: Channels<C>,
     ) -> Result<(), Error<S::Error, R::Error>> {
         // Create per-connection counters and rate limiters
+        let sent_messages = &self.sent_messages;
         let (received, rate_limited) = (&self.received_messages, &self.rate_limited);
-        let sent_counter = |label| self.sent_messages.get_or_create_owned(&label);
         let mut sent = Sent {
-            greeting: sent_counter(metrics::Message::new_greeting(&peer)),
-            bit_vec: sent_counter(metrics::Message::new_bit_vec(&peer)),
-            peers: sent_counter(metrics::Message::new_peers(&peer)),
+            greeting: sent_messages.get_or_create_owned(&metrics::Message::new_greeting(&peer)),
+            bit_vec: sent_messages.get_or_create_owned(&metrics::Message::new_bit_vec(&peer)),
+            peers: sent_messages.get_or_create_owned(&metrics::Message::new_peers(&peer)),
             data: HashMap::new(),
         };
         let mut inbound = HashMap::new();
         for (channel, (rate, sender)) in channels.collect() {
             let label = metrics::Message::new_data(&peer, channel);
-            sent.data.insert(channel, sent_counter(label.clone()));
+            sent.data
+                .insert(channel, sent_messages.get_or_create_owned(&label));
             let rate_limiter = RateLimiter::direct_with_clock(
                 rate,
                 self.context
