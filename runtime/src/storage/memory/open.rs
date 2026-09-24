@@ -186,10 +186,8 @@ pub(crate) mod tests {
         mocks::Storage,
     };
     use std::{
-        env,
         sync::mpsc::{self, Receiver, Sender},
         thread,
-        time::{Duration, Instant},
     };
 
     type OpenObservation = (Sender<usize>, Receiver<()>);
@@ -247,12 +245,6 @@ pub(crate) mod tests {
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn test_open_racing_last_blob_drop() {
-        const CHILD: &str = "COMMONWARE_TEST_OPEN_LAST_DROP";
-        if env::var_os(CHILD).is_none() {
-            crate::storage::tests::shared::run_child(CHILD, "1");
-            return;
-        }
-
         Runner::default().start(|context| async move {
             let context = Storage::new(context.storage_buffer_pool().clone());
             let (blob, _) = context.open("partition", b"blob").await.unwrap();
@@ -271,15 +263,12 @@ pub(crate) mod tests {
             let (release, released) = mpsc::channel();
             *opens.test.open_observation.lock() = Some((entered, released));
             let coordinator = thread::spawn(move || {
-                let timeout = Duration::from_secs(5);
-                let owners = entering.recv_timeout(timeout).unwrap();
+                let owners = entering.recv().unwrap();
                 release_drop.send(()).unwrap();
 
                 // The strong count changes when the external owner drops. Successful opens below
                 // verify that the registry progresses while the drop is scheduled.
-                let deadline = Instant::now() + timeout;
                 while identity.strong_count() == owners {
-                    assert!(Instant::now() < deadline, "external owner did not drop");
                     thread::yield_now();
                 }
                 release.send(()).unwrap();

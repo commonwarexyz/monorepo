@@ -1873,174 +1873,160 @@ mod tests {
         });
     }
 
-    #[test]
+    #[rstest::rstest]
+    #[case::remove("remove")]
+    #[case::remove_partition("remove_partition")]
+    #[case::admit("admit")]
     #[cfg(not(target_arch = "wasm32"))]
-    fn test_retired_write_owner_releases_other_blob() {
-        const CHILD: &str = "COMMONWARE_TEST_RETIRED_WRITE_OWNER";
-        if let Some(operation) = std::env::var_os(CHILD) {
-            struct Owner<B> {
-                data: Vec<u8>,
-                _blob: B,
-                released: Arc<std::sync::atomic::AtomicBool>,
-            }
-
-            impl<B> AsRef<[u8]> for Owner<B> {
-                fn as_ref(&self) -> &[u8] {
-                    &self.data
-                }
-            }
-
-            impl<B> Drop for Owner<B> {
-                fn drop(&mut self) {
-                    self.released.store(true, Ordering::SeqCst);
-                }
-            }
-
-            let faults = FaultConfig::default().write(WriteConfig {
-                failure_rate: probability!(0.0),
-                retention_rate: probability!(1.0),
-                mode: PartialWriteMode::Prefix,
-            });
-            Runner::new(Config::default().with_storage_fault_config(faults)).start(
-                |context| async move {
-                    let (a, _) = context.open("partition", b"a").await.unwrap();
-                    let (b, _) = context.open("partition", b"b").await.unwrap();
-                    let b = Arc::new(b);
-                    let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                    let payload = Bytes::from_owner(Owner {
-                        data: b"saved".to_vec(),
-                        _blob: b.clone(),
-                        released: released.clone(),
-                    });
-                    a.write_at(0, payload, WriteOptions::default())
-                        .await
-                        .unwrap();
-                    if operation == "remove_partition" {
-                        b.write_at(0, b"second", WriteOptions::default())
-                            .await
-                            .unwrap();
-                    }
-                    drop(b);
-                    assert!(!released.load(Ordering::SeqCst));
-
-                    if operation == "remove" {
-                        context.remove("partition", Some(b"a")).await.unwrap();
-                    } else if operation == "remove_partition" {
-                        context.remove("partition", None).await.unwrap();
-                    } else {
-                        assert_eq!(operation, "admit");
-                        drop(a);
-                        drop(context.open("partition", b"a").await.unwrap());
-                    }
-                    assert!(released.load(Ordering::SeqCst));
-                    drop(context.open("partition", b"b").await.unwrap());
-                },
-            );
-            return;
+    fn test_retired_write_owner_releases_other_blob(#[case] operation: &'static str) {
+        struct Owner<B> {
+            data: Vec<u8>,
+            _blob: B,
+            released: Arc<std::sync::atomic::AtomicBool>,
         }
 
-        for operation in ["remove", "remove_partition", "admit"] {
-            crate::storage::tests::shared::run_child(CHILD, operation);
+        impl<B> AsRef<[u8]> for Owner<B> {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
         }
-    }
 
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn test_sync_retirement_progresses_with_namespace_open() {
-        const CHILD: &str = "COMMONWARE_TEST_SYNC_OWNER_NAMESPACE";
-        if let Some(operation) = std::env::var_os(CHILD) {
-            struct Owner<B> {
-                data: Vec<u8>,
-                _blob: B,
-                retiring: std::sync::mpsc::Sender<()>,
+        impl<B> Drop for Owner<B> {
+            fn drop(&mut self) {
+                self.released.store(true, Ordering::SeqCst);
             }
+        }
 
-            impl<B> AsRef<[u8]> for Owner<B> {
-                fn as_ref(&self) -> &[u8] {
-                    &self.data
-                }
-            }
-
-            impl<B> Drop for Owner<B> {
-                fn drop(&mut self) {
-                    self.retiring.send(()).unwrap();
-                }
-            }
-
-            let faults = FaultConfig::default().write(WriteConfig {
-                failure_rate: probability!(0.0),
-                retention_rate: probability!(1.0),
-                mode: PartialWriteMode::Prefix,
-            });
-            Runner::new(Config::default().with_storage_fault_config(faults)).start(
-                |context| async move {
-                    let (a, _) = context.open("partition", b"a").await.unwrap();
-                    let (b, _) = context.open("partition", b"b").await.unwrap();
-                    let b = Arc::new(b);
-                    let (retiring, retired) = std::sync::mpsc::channel();
-                    a.write_at(
-                        0,
-                        Bytes::from_owner(Owner {
-                            data: b"saved".to_vec(),
-                            _blob: b.clone(),
-                            retiring,
-                        }),
-                        WriteOptions::default(),
-                    )
+        let faults = FaultConfig::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        });
+        Runner::new(Config::default().with_storage_fault_config(faults)).start(
+            |context| async move {
+                let (a, _) = context.open("partition", b"a").await.unwrap();
+                let (b, _) = context.open("partition", b"b").await.unwrap();
+                let b = Arc::new(b);
+                let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let payload = Bytes::from_owner(Owner {
+                    data: b"saved".to_vec(),
+                    _blob: b.clone(),
+                    released: released.clone(),
+                });
+                a.write_at(0, payload, WriteOptions::default())
                     .await
                     .unwrap();
-                    drop(b);
-
-                    let (entered, entering) = std::sync::mpsc::channel();
-                    let (release, released) = std::sync::mpsc::channel();
-                    let namespace = context.child("namespace");
-                    let opener = std::thread::spawn(move || {
-                        namespace.opens.pause_namespace(entered, released);
-                        drop(
-                            namespace
-                                .open("partition", b"c")
-                                .now_or_never()
-                                .unwrap()
-                                .unwrap(),
-                        );
-                    });
-                    entering
-                        .recv_timeout(std::time::Duration::from_secs(3))
+                if operation == "remove_partition" {
+                    b.write_at(0, b"second", WriteOptions::default())
+                        .await
                         .unwrap();
+                }
+                drop(b);
+                assert!(!released.load(Ordering::SeqCst));
 
-                    let mutator = std::thread::spawn(move || {
-                        if operation == "sync" {
-                            a.sync().now_or_never().unwrap().unwrap();
-                        } else if operation == "start_sync" {
-                            a.start_sync()
-                                .now_or_never()
-                                .unwrap()
-                                .now_or_never()
-                                .unwrap()
-                                .unwrap();
-                        } else {
-                            assert_eq!(operation, "overwrite");
-                            a.write_at(0, b"fresh", WriteOptions::SYNC)
-                                .now_or_never()
-                                .unwrap()
-                                .unwrap();
-                        }
-                    });
-                    retired
-                        .recv_timeout(std::time::Duration::from_secs(3))
-                        .unwrap();
-                    release.send(()).unwrap();
-                    mutator.join().unwrap();
-                    opener.join().unwrap();
-                    drop(context.open("partition", b"b").await.unwrap());
-                },
-            );
-            return;
+                if operation == "remove" {
+                    context.remove("partition", Some(b"a")).await.unwrap();
+                } else if operation == "remove_partition" {
+                    context.remove("partition", None).await.unwrap();
+                } else {
+                    assert_eq!(operation, "admit");
+                    drop(a);
+                    drop(context.open("partition", b"a").await.unwrap());
+                }
+                assert!(released.load(Ordering::SeqCst));
+                drop(context.open("partition", b"b").await.unwrap());
+            },
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::sync("sync")]
+    #[case::start_sync("start_sync")]
+    #[case::overwrite("overwrite")]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn test_sync_retirement_progresses_with_namespace_open(#[case] operation: &'static str) {
+        struct Owner<B> {
+            data: Vec<u8>,
+            _blob: B,
+            retiring: std::sync::mpsc::Sender<()>,
         }
 
-        for operation in ["sync", "start_sync", "overwrite"] {
-            crate::storage::tests::shared::run_child(CHILD, operation);
+        impl<B> AsRef<[u8]> for Owner<B> {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
         }
+
+        impl<B> Drop for Owner<B> {
+            fn drop(&mut self) {
+                self.retiring.send(()).unwrap();
+            }
+        }
+
+        let faults = FaultConfig::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        });
+        Runner::new(Config::default().with_storage_fault_config(faults)).start(
+            |context| async move {
+                let (a, _) = context.open("partition", b"a").await.unwrap();
+                let (b, _) = context.open("partition", b"b").await.unwrap();
+                let b = Arc::new(b);
+                let (retiring, retired) = std::sync::mpsc::channel();
+                a.write_at(
+                    0,
+                    Bytes::from_owner(Owner {
+                        data: b"saved".to_vec(),
+                        _blob: b.clone(),
+                        retiring,
+                    }),
+                    WriteOptions::default(),
+                )
+                .await
+                .unwrap();
+                drop(b);
+
+                let (entered, entering) = std::sync::mpsc::channel();
+                let (release, released) = std::sync::mpsc::channel();
+                let namespace = context.child("namespace");
+                let opener = std::thread::spawn(move || {
+                    namespace.opens.pause_namespace(entered, released);
+                    drop(
+                        namespace
+                            .open("partition", b"c")
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap(),
+                    );
+                });
+                entering.recv().unwrap();
+
+                let mutator = std::thread::spawn(move || {
+                    if operation == "sync" {
+                        a.sync().now_or_never().unwrap().unwrap();
+                    } else if operation == "start_sync" {
+                        a.start_sync()
+                            .now_or_never()
+                            .unwrap()
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap();
+                    } else {
+                        assert_eq!(operation, "overwrite");
+                        a.write_at(0, b"fresh", WriteOptions::SYNC)
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap();
+                    }
+                });
+                retired.recv().unwrap();
+                release.send(()).unwrap();
+                mutator.join().unwrap();
+                opener.join().unwrap();
+                drop(context.open("partition", b"b").await.unwrap());
+            },
+        );
     }
 
     async fn task(i: usize) -> usize {

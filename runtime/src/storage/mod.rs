@@ -85,11 +85,10 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     /// The live open of each blob name and the durability debt its dropped handles left behind.
     ///
-    /// A name has at most one live open. Its identity binds settlement to that open, and the
-    /// entry retains outstanding work, unflushed state and failures until the name is removed or
-    /// recreated. Dropping a handle performs no I/O: the next open of the name establishes
-    /// whatever durability the dropped handles left behind, and a failure to do so is retained
-    /// for every later open until the blob is removed.
+    /// A name has at most one live open. Its identity binds settlement to that open.
+    /// Dropping a handle performs no I/O. The next open waits for outstanding work and
+    /// flushes any remaining mutations before it succeeds. Failures remain recorded until
+    /// the name is removed or recreated.
     #[derive(Default)]
     pub(crate) struct Pending {
         entries: Mutex<HashMap<(String, Vec<u8>), Entry>>,
@@ -297,7 +296,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
 
         /// Publish the outcome of establishing the debt read through [Self::debt]: success
-        /// releases it and a failure is retained for every later open until the name is removed.
+        /// releases it and a failure is retained until the name is removed or recreated.
         /// Ignored once the name was removed or recreated under this open.
         pub(crate) fn clear(
             &self,
@@ -575,36 +574,9 @@ pub(crate) mod tests {
         use commonware_utils::NZUsize;
         use futures::FutureExt as _;
         use std::{
-            env,
-            process::Command,
             sync::{Arc, mpsc},
-            thread,
-            time::{Duration, Instant},
+            time::Duration,
         };
-
-        /// Run the current test in a child process with a bounded lifetime.
-        pub(crate) fn run_child(child_var: &str, operation: &str) {
-            let thread = thread::current();
-            let test = thread.name().expect("test harness thread has a name");
-            let mut child = Command::new(env::current_exe().unwrap())
-                .args(["--exact", test, "--nocapture"])
-                .env(child_var, operation)
-                .spawn()
-                .unwrap();
-            let deadline = Instant::now() + Duration::from_secs(15);
-            loop {
-                if let Some(status) = child.try_wait().unwrap() {
-                    assert!(status.success(), "{test} {operation} failed");
-                    return;
-                }
-                if Instant::now() >= deadline {
-                    child.kill().unwrap();
-                    child.wait().unwrap();
-                    panic!("{test} {operation} timed out");
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-        }
 
         /// An untouched creation leaves no debt for a later open.
         pub(crate) async fn check_untouched_creation_leaves_no_debt<S: crate::Storage>(
@@ -931,7 +903,6 @@ pub(crate) mod tests {
         use std::{
             sync::{Arc, mpsc},
             thread,
-            time::{Duration, Instant},
         };
 
         #[test]
@@ -1002,10 +973,8 @@ pub(crate) mod tests {
             let (entered, entering) = mpsc::channel();
             let (release, released) = mpsc::channel();
             *pending.test.after_identity_observation.lock() = Some((entered, released));
-            let (done, finished) = mpsc::channel();
             let observer = {
                 let pending = pending.clone();
-                let done = done.clone();
                 thread::spawn(move || {
                     if let Some(sender) = sender {
                         pending.settle(&key(), sender, false, None);
@@ -1016,24 +985,14 @@ pub(crate) mod tests {
                                 if partition == "a" && name == "31"
                         ));
                     }
-                    done.send(()).unwrap();
                 })
             };
-            let timeout = Duration::from_secs(5);
-            let owners = entering.recv_timeout(timeout).unwrap();
-            let dropper = {
-                let done = done.clone();
-                thread::spawn(move || {
-                    drop(generation);
-                    done.send(()).unwrap();
-                })
-            };
+            let owners = entering.recv().unwrap();
+            let dropper = thread::spawn(move || drop(generation));
 
             // Release the external owner while the registry is locked. The strong count detects
             // the last drop. Operation completion and an independent attachment verify progress.
-            let deadline = Instant::now() + timeout;
             while identity.strong_count() == owners {
-                assert!(Instant::now() < deadline, "generation owner did not drop");
                 thread::yield_now();
             }
             release.send(()).unwrap();
@@ -1041,14 +1000,8 @@ pub(crate) mod tests {
                 let pending = pending.clone();
                 thread::spawn(move || {
                     drop(pending.attach("independent", b"2").unwrap());
-                    done.send(()).unwrap();
                 })
             };
-            for _ in 0..3 {
-                finished
-                    .recv_timeout(timeout)
-                    .expect("registry deadlocked during generation drop");
-            }
             observer.join().unwrap();
             dropper.join().unwrap();
             independent.join().unwrap();

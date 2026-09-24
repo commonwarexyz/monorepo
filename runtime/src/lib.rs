@@ -715,8 +715,8 @@ stability_scope!(BETA {
         ///
         /// # Uniqueness
         ///
-        /// A blob has one open at a time. Wrap the returned blob in an [Arc] to share it, and
-        /// drop every owner before opening the blob again.
+        /// Only one handle can be opened for a blob at a time. Use an [Arc] to share the
+        /// handle, and drop all owners before reopening the blob.
         ///
         /// An otherwise valid open returns [`Error::BlobAlreadyOpen`] if a handle from an earlier
         /// open of the blob is still alive and the blob has not been removed since.

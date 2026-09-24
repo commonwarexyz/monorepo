@@ -292,7 +292,6 @@ impl Request {
                     RequestOutput::ReadAt(result),
                     RetiredResources::File {
                         _file: r.file,
-                        _cache: Some(r.cache),
                         _write: None,
                     },
                 )
@@ -309,7 +308,6 @@ impl Request {
                     RequestOutput::WriteAt(result),
                     RetiredResources::File {
                         _file: r.file,
-                        _cache: Some(r.cache),
                         _write: Some(r.write),
                     },
                 )
@@ -326,7 +324,6 @@ impl Request {
                     RequestOutput::Sync(result),
                     RetiredResources::File {
                         _file: r.file,
-                        _cache: None,
                         _write: None,
                     },
                 )
@@ -386,12 +383,10 @@ pub enum RetiredResources {
         /// Original byte owners, including consumed chunks.
         _write: WriteBuffers,
     },
-    /// Storage open, directory hold, and any positioned I/O buffer/cache owners.
+    /// Storage open, directory hold, and any positioned write buffers.
     File {
         /// Storage open carrying its file, directory hold, and durability debt.
         _file: Arc<Shared>,
-        /// Shared capability state retained by positioned I/O.
-        _cache: Option<Cache>,
         /// Original write owners, absent for reads and standalone sync.
         _write: Option<WriteBuffers>,
     },
