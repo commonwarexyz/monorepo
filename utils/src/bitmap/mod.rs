@@ -7,7 +7,7 @@
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write, util::at_least,
+    Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write, util::at_least_items,
 };
 use core::{
     fmt::{self, Formatter, Write as _},
@@ -881,12 +881,15 @@ impl<const N: usize> Read for BitMap<N> {
         }
 
         // Calculate how many chunks we need to read
-        let num_chunks = len.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
+        let num_chunks = usize::try_from(len.div_ceil(Self::CHUNK_SIZE_BITS))
+            .map_err(|_| CodecError::EndOfBuffer)?;
+
+        // Validate the full payload before allocating.
+        at_least_items(buf, num_chunks, N)?;
 
         // Parse chunks
         let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
-            at_least(buf, N)?;
             let mut chunk = [0u8; N];
             buf.copy_to_slice(&mut chunk);
             chunks.push_back(chunk);
@@ -2328,8 +2331,7 @@ mod tests {
         [0u8; 4].write(&mut buf);
 
         let result = BitMap::<4>::decode_cfg(&mut buf, &(..).into());
-        // Should fail when trying to read missing chunks
-        assert!(result.is_err());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
 
         // Test invalid trailing bits
 
@@ -2357,6 +2359,39 @@ mod tests {
                 "Invalid trailing bits in encoded data"
             ))
         ));
+    }
+
+    #[test]
+    fn test_codec_large_length_without_payload() {
+        let result = BitMap::<4>::decode_cfg(u64::MAX.encode(), &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
+    }
+
+    #[test]
+    fn test_codec_truncated_chunk() {
+        let mut buf = BytesMut::new();
+        33u64.write(&mut buf);
+        buf.extend_from_slice(&[0; 7]);
+        let mut buf = buf.freeze();
+
+        let result = BitMap::<4>::read_cfg(&mut buf, &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
+        // Reject incomplete payloads before consuming any chunks.
+        assert_eq!(buf.len(), 7);
+    }
+
+    #[test]
+    fn test_codec_invalid_length_without_payload() {
+        let result = BitMap::<4>::decode_cfg(100u64.encode(), &(..=99).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn test_codec_chunk_count_overflow() {
+        let len = (u64::from(u32::MAX) + 1) * BitMap::<4>::CHUNK_SIZE_BITS;
+        let result = BitMap::<4>::decode_cfg(len.encode(), &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
     }
 
     #[test]

@@ -409,7 +409,8 @@ impl<const N: usize> Write for Prunable<N> {
 }
 
 impl<const N: usize> Read for Prunable<N> {
-    /// Accepted range for the retained (unpruned) bits, not [Self::len], which includes pruned bits.
+    /// Accepted range for the number of retained (unpruned) bits.
+    /// [Self::len] also counts pruned bits.
     type Cfg = RangeCfg<u64>;
 
     fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
