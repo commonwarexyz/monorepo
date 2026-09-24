@@ -53,6 +53,20 @@ use std::{
 };
 use tracing::warn;
 
+/// Suffix appended to the base partition name for the data blobs.
+const DATA_SUFFIX: &str = "_data";
+
+/// Suffix appended to the base partition name for the offsets journal.
+const OFFSETS_SUFFIX: &str = "_offsets";
+
+/// Unused capacity a compressed [PreparedAppend] may retain before compaction is considered.
+///
+/// In-place compression reserves `ZSTD_compressBound` of each encoded item for one-pass
+/// compression. A compressible record leaves much of that reservation unused, and a caller may
+/// retain the batch across unrelated work. Compaction requires unused capacity above this floor
+/// and at least three times the stored length, borrowing zstd's `ZSTD_WORKSPACETOOLARGE_FACTOR`.
+const PREPARED_SPARE_LIMIT: usize = 64 * 1024;
+
 /// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
 /// [`Journal::append_prepared`].
 pub struct PreparedAppend<V> {
@@ -61,12 +75,6 @@ pub struct PreparedAppend<V> {
     compressed: bool,
     _marker: PhantomData<V>,
 }
-
-/// Suffix appended to the base partition name for the data blobs.
-const DATA_SUFFIX: &str = "_data";
-
-/// Suffix appended to the base partition name for the offsets journal.
-const OFFSETS_SUFFIX: &str = "_offsets";
 
 /// Provides an owned buffer for reading and reclaims the scratch unless retained fields share it.
 fn with_bytes<T>(scratch: &mut BytesMut, f: impl FnOnce(&Bytes) -> T) -> T {
@@ -1567,11 +1575,16 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
     }
 
     async fn append_many_inner<'a>(&'a mut self, items: Many<'a, V>) -> Result<u64, Error> {
-        self.write_encoded(self.prepare_append(items)?).await
+        let prepared = self.prepare_append::<false>(items)?;
+        self.write_encoded(prepared).await
     }
 
-    /// See [Journal::prepare_append].
-    pub(crate) fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
+    /// Encode a batch, optionally compacting unused capacity for a deferred append according to
+    /// [PREPARED_SPARE_LIMIT].
+    pub(crate) fn prepare_append<const COMPACT: bool>(
+        &self,
+        items: Many<'_, V>,
+    ) -> Result<PreparedAppend<V>, Error> {
         let mut encoded = Vec::new();
         let mut item_starts = Vec::with_capacity(items.len());
         let mut encode = |item: &V| {
@@ -1592,6 +1605,18 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 }
             }
         }
+
+        // Deferred batches (COMPACT) may be held across unrelated work, so shrink a buffer
+        // that compression left mostly unused (see PREPARED_SPARE_LIMIT). Do it here, while
+        // the buffer is still a local. Doing it on the returned PreparedAppend in
+        // Journal::prepare_append adds a struct copy to every call, including uncompressed ones.
+        if COMPACT && self.compression.is_some() {
+            let (len, capacity) = (encoded.len(), encoded.capacity());
+            if capacity - len > PREPARED_SPARE_LIMIT && len <= capacity / 4 {
+                encoded.shrink_to_fit();
+            }
+        }
+
         Ok(PreparedAppend {
             encoded,
             item_starts,
@@ -2292,7 +2317,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// This lets callers serialize borrowed items synchronously, release those borrows, and
     /// perform the append without holding unrelated locks across journal I/O.
     pub fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
-        self.0.prepare_append(items)
+        self.0.prepare_append::<true>(items)
     }
 
     /// Append items encoded by [`Self::prepare_append`], returning the position of the last item
@@ -2671,6 +2696,7 @@ mod tests {
     };
     use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
+    use rand::Rng as _;
     use std::num::NonZeroU16;
 
     // Use some jank sizes to exercise boundary conditions.
@@ -3962,6 +3988,70 @@ mod tests {
             assert_eq!(last, 4);
             for (pos, item) in items.iter().enumerate() {
                 assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_prepared_compressed_capacity() {
+        let executor = deterministic::Runner::default();
+        executor.start(|mut context| async move {
+            let cfg = Config {
+                partition: "prepared-compressed-capacity".into(),
+                items_per_section: NZU64!(1024),
+                compression: Some(3),
+                codec_config: (..).into(),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, Bytes>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+
+            // A highly compressible large record, small records whose buffer grows
+            // geometrically, and small records followed by a large one.
+            let large = Bytes::from(vec![0xAB; 1 << 20]);
+            let small: Vec<_> = (0..4096)
+                .map(|_| {
+                    let mut record = vec![0; 64];
+                    context.fill_bytes(&mut record);
+                    Bytes::from(record)
+                })
+                .collect();
+            let mixed: Vec<_> = small[..64].iter().cloned().chain([large.clone()]).collect();
+
+            // Immediate appends retain capacity even when a deferred batch would be compacted.
+            let immediate = journal
+                .0
+                .prepare_append::<false>(Many::Flat(std::slice::from_ref(&large)))
+                .unwrap();
+            let len = immediate.encoded.len();
+            let spare = immediate.encoded.capacity() - len;
+            assert!(spare > PREPARED_SPARE_LIMIT.max(len.saturating_mul(3)));
+
+            // Compaction must not change the frames.
+            for batch in [vec![large], small, mixed] {
+                let prepared = journal.prepare_append(Many::Flat(&batch)).unwrap();
+                let mut expected = Vec::new();
+                let mut starts = Vec::new();
+                for record in &batch {
+                    starts.push(expected.len());
+                    let mut frame = Vec::new();
+                    encode_frame_into(Some(3), record, &mut frame).unwrap();
+                    expected.extend_from_slice(&frame);
+                }
+                assert_eq!(prepared.encoded, expected);
+                assert_eq!(prepared.item_starts, starts);
+
+                let len = prepared.encoded.len();
+                let spare = prepared.encoded.capacity() - len;
+                assert!(
+                    spare <= PREPARED_SPARE_LIMIT.max(len.saturating_mul(3)),
+                    "{spare} unused bytes for {len} encoded bytes"
+                );
             }
 
             journal.destroy().await.unwrap();
