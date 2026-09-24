@@ -542,13 +542,14 @@ where
         let op = self.tip.witness.commit.clone();
         // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
         // pinned nodes for this request.
+        let proof = self.tip.proof.clone();
         Ok(match request {
             Request::Operations { .. } => Response::Operations {
-                proof: self.tip.proof.clone(),
+                proof,
                 operations: vec![op],
             },
             Request::Boundary { .. } => Response::Boundary {
-                proof: self.tip.proof.clone(),
+                proof,
                 op,
                 pinned_nodes: self.tip.witness.pinned_nodes.clone(),
             },
