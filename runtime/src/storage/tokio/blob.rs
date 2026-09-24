@@ -1207,7 +1207,11 @@ mod tests {
             storage.pool.clone(),
             0,
             storage.hold.clone(),
-            storage.pending.attach("partition", b"readonly").unwrap().0,
+            storage
+                .pending
+                .admit("partition", b"readonly", false)
+                .unwrap()
+                .0,
         );
 
         let accounted = Arc::new(AtomicBool::new(false));
@@ -1221,7 +1225,7 @@ mod tests {
         let result = blob.write_at(0, bufs, WriteOptions::SYNC).await;
         let poisoned = blob.shared.tracker.failure().is_some();
         drop(blob);
-        let retained = storage.pending.attach("partition", b"readonly");
+        let retained = storage.pending.admit("partition", b"readonly", true);
         drop(storage);
         std::fs::remove_dir_all(directory).unwrap();
         assert!(

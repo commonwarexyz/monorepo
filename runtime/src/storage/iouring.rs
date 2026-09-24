@@ -35,7 +35,7 @@
 //! It requires Linux kernel 6.1 or newer. See [crate::iouring] for details.
 
 use super::{
-    Generation, Header, Layout, Pending, Sender, Tracker,
+    Generation, Layout, Pending, Sender, Tracker, create_header,
     hold::{Held, Hold},
     resolve_header, sync_dir,
 };
@@ -57,7 +57,7 @@ use commonware_utils::{
 };
 use std::{
     fs::{self, File},
-    io::{Error as IoError, ErrorKind, Seek, SeekFrom, Write},
+    io::{Error as IoError, ErrorKind},
     ops::{Deref, RangeInclusive},
     path::PathBuf,
     sync::{Arc, OnceLock, atomic::AtomicBool},
@@ -165,20 +165,15 @@ impl crate::Storage for Storage {
                 name,
             )?;
 
-            // A fresh header starts a new incarnation with no retained predecessor state.
-            if existing.is_none() {
-                self.pending.forget(partition, Some(name));
-            }
-
-            // Attaching fails while a handle from an earlier open is alive or a failure is
-            // retained. The open owes completion when predecessor work or debt remains.
-            let (generation, wait, owed) = self.pending.attach(partition, name)?;
+            // Claim the name for this open. A fresh header starts a new incarnation.
+            let (generation, wait, owed) =
+                self.pending.admit(partition, name, existing.is_some())?;
 
             // Existing headers retain their layout. New headers become visible only after
             // their namespace entries are durable.
             let (mut logical_len, blob_version, data_offset) = match existing {
                 Some(resolved) => resolved,
-                None => (|| {
+                None => {
                     // Sync the directories before writing the header so a parseable header
                     // always implies durable directory entries (an open that parses a header
                     // never re-runs these). The storage directory is synced unconditionally:
@@ -187,31 +182,10 @@ impl crate::Storage for Storage {
                     sync_dir(parent)?;
                     sync_dir(&self.storage_directory)?;
 
-                    // Truncate to zero before writing, per the [Header::create] contract.
-                    let (region, blob_version) = Header::create(&self.blob_layouts, &versions);
-                    let data_offset = region.len() as u64;
-                    file.set_len(0).map_err(|e| {
-                        Error::BlobResizeFailed(partition.into(), hex(name), e.into())
-                    })?;
-                    file.seek(SeekFrom::Start(0))
-                        .map_err(|_| Error::WriteFailed)?;
-                    #[cfg(test)]
-                    if let Some(len) = self.pending.test.fail_creation_after.lock().take() {
-                        file.write_all(&region[..len.min(region.len())])
-                            .map_err(|_| Error::WriteFailed)?;
-                        return Err(Error::Closed);
-                    }
-                    file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-                    file.sync_all().map_err(|e| {
-                        Error::BlobSyncFailed(partition.into(), hex(name), e.into())
-                    })?;
-
-                    Ok((0, blob_version, data_offset))
-                })()
-                .inspect_err(|error: &Error| {
-                    // Retain creation failures until the blob is removed or recreated.
-                    self.pending.fail(&generation, error.clone());
-                })?,
+                    // Retain a creation failure until the blob is removed or recreated.
+                    create_header(&mut file, &self.blob_layouts, &versions, &generation)
+                        .inspect_err(|error| self.pending.fail(&generation, error.clone()))?
+                }
             };
 
             // With no predecessor work or debt, the captured file's length is final. Otherwise,
@@ -751,7 +725,7 @@ mod tests {
         Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Runner as _, Storage as _,
         iouring,
         storage::{
-            Layout,
+            Header, Layout,
             tests::{run_storage_tests, shared},
         },
         telemetry::metrics::{Register, Registry},
@@ -815,7 +789,7 @@ mod tests {
             test_pool(&mut registry),
             0,
             Arc::new(Pending::default())
-                .attach("partition", b"large")
+                .admit("partition", b"large", false)
                 .unwrap()
                 .0,
         );
@@ -1672,7 +1646,7 @@ mod tests {
                 pool,
                 Layout::V0.data_offset(),
                 Arc::new(Pending::default())
-                    .attach("partition", b"blob")
+                    .admit("partition", b"blob", false)
                     .unwrap()
                     .0,
             );
@@ -1781,7 +1755,7 @@ mod tests {
                     pool,
                     Layout::V0.data_offset(),
                     Arc::new(Pending::default())
-                        .attach("partition", b"blob")
+                        .admit("partition", b"blob", false)
                         .unwrap()
                         .0,
                 );
@@ -1984,7 +1958,7 @@ mod tests {
                 hold,
                 test_pool(&mut registry),
                 0,
-                pending.attach("partition", b"readonly").unwrap().0,
+                pending.admit("partition", b"readonly", false).unwrap().0,
             );
 
             iouring::Runner::default().start(|_| async move {
@@ -1998,7 +1972,7 @@ mod tests {
             // The write failed against the read-only descriptor after its caller left, so the
             // retired request left the name dirty, and poisoned when the sync was fused.
             assert!(pending.owes("partition", b"readonly"), "chunks={chunks}");
-            let attached = pending.attach("partition", b"readonly");
+            let attached = pending.admit("partition", b"readonly", true);
             if chunks == 1 {
                 assert!(
                     matches!(attached, Err(Error::BlobSyncFailed(_, _, error))

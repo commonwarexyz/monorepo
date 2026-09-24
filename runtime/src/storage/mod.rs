@@ -12,7 +12,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use std::{
         collections::HashMap,
         fs::File,
-        io::{self, Read as _, Seek as _, SeekFrom},
+        io::{self, Read as _, Seek as _, SeekFrom, Write as _},
         ops::RangeInclusive,
         path::Path,
         ptr,
@@ -120,7 +120,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Pause an open after its predecessor settled, before it reads the debt and the file's
         /// length.
         before_metadata: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
-        /// Pause the next attachment before it locks the registry, letting predecessor work retire.
+        /// Pause the next admission before it inspects the name's entry, letting predecessor work
+        /// retire.
         before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
     }
 
@@ -175,19 +176,25 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     pub(crate) type Sender = watch::Sender<bool>;
 
     impl Pending {
-        /// Attach a fresh open to a name while the backend holds its namespace lock.
+        /// Admit an open while the backend holds its namespace lock. `existing` reports whether
+        /// the file already had a valid header. Without one, the open starts a new incarnation and
+        /// discards the name's previous durability state.
         ///
         /// Returns [Error::BlobAlreadyOpen] while a handle from an earlier open is alive. Returns
         /// the name's retained failure until the name is removed or recreated. Otherwise returns
         /// the open's generation, the receiver that fires once a still-settling predecessor has
         /// finished its operations, and whether the name carries debt or outstanding work the
         /// open must observe through [Self::debt] before trusting the file. Descriptor metadata
-        /// must be observed after attachment, or after awaiting the returned receiver.
-        pub(crate) fn attach(
+        /// must be observed after admission, or after awaiting the returned receiver.
+        pub(crate) fn admit(
             self: &Arc<Self>,
             partition: &str,
             name: &[u8],
+            existing: bool,
         ) -> Result<(Arc<Generation>, Option<Receiver>, bool), Error> {
+            if !existing {
+                self.forget(partition, Some(name));
+            }
             #[cfg(test)]
             if let Some((entered, released)) = self.test.before_attach.lock().take() {
                 let _ = entered.send(());
@@ -207,6 +214,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             }
             let generation = Arc::new(Generation { pending: self.clone(), key });
             entry.identity = Arc::downgrade(&generation);
+
+            // Without a filesystem-wide startup flush, this instance's first open of an existing
+            // blob owes a flush of its inherited contents.
+            #[cfg(not(target_os = "linux"))]
+            if self.flushed.lock().insert(generation.key.clone()) && existing {
+                entry.dirty = true;
+            }
             let owed = entry.settle.is_some() || entry.dirty;
             Ok((generation, entry.settle.clone(), owed))
         }
@@ -313,34 +327,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             match result {
                 Ok(()) => entry.dirty = false,
                 Err(error) => entry.failed = Some(error.clone()),
-            }
-        }
-
-        cfg_if! {
-            if #[cfg(target_os = "linux")] {
-                /// Whether the first open of `generation`'s name through this instance owes a
-                /// flush. Linux flushes the filesystem at startup, so no open does.
-                pub(crate) const fn first_open(&self, _: &Generation, _: bool) -> bool {
-                    false
-                }
-            } else {
-                /// Whether the first open of `generation`'s name through this instance owes a
-                /// flush. There is no filesystem-wide startup flush here, so an existing blob owes
-                /// one the first time this instance opens it. Creations are durable on return and
-                /// owe nothing.
-                pub(crate) fn first_open(&self, generation: &Generation, existing: bool) -> bool {
-                    let first = self.flushed.lock().insert(generation.key.clone());
-                    if !(first && existing) {
-                        return false;
-                    }
-                    let mut entries = self.entries.lock();
-                    if let Some(entry) = entries.get_mut(&generation.key)
-                        && ptr::eq(entry.identity.as_ptr(), generation)
-                    {
-                        entry.dirty = true;
-                    }
-                    true
-                }
             }
         }
 
@@ -518,6 +504,36 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         // A complete prefix must retain the original length, which yields the logical size.
         let parse_len = if raw.len() < requested { Widen::widen(raw.len()) } else { raw_len };
         header::resolve(&raw, parse_len, layouts, versions, partition, name)
+    }
+
+    /// Write and sync a fresh header, returning the new blob's size, version, and data offset.
+    ///
+    /// Callers make the blob's directory entries durable first, so a parseable header implies
+    /// they are.
+    pub(crate) fn create_header(
+        file: &mut File,
+        layouts: &RangeInclusive<Layout>,
+        versions: &RangeInclusive<BlobVersion>,
+        generation: &Generation,
+    ) -> Result<(u64, BlobVersion, u64), Error> {
+        let (partition, name) = &generation.key;
+        let (region, blob_version) = Header::create(layouts, versions);
+        let data_offset = Widen::widen(region.len());
+
+        // Clear any previous bytes so a partial write cannot splice them into a valid header.
+        file.set_len(0)
+            .map_err(|e| Error::BlobResizeFailed(partition.clone(), hex(name), e.into()))?;
+        file.seek(SeekFrom::Start(0)).map_err(|_| Error::WriteFailed)?;
+        #[cfg(test)]
+        if let Some(len) = generation.pending.test.fail_creation_after.lock().take() {
+            file.write_all(&region[..len.min(region.len())])
+                .map_err(|_| Error::WriteFailed)?;
+            return Err(Error::Closed);
+        }
+        file.write_all(&region).map_err(|_| Error::WriteFailed)?;
+        file.sync_all()
+            .map_err(|e| Error::BlobSyncFailed(partition.clone(), hex(name), e.into()))?;
+        Ok((0, blob_version, data_offset))
     }
 
     pub(crate) mod hold;
@@ -996,7 +1012,7 @@ pub(crate) mod tests {
 
         fn check_last_generation_drop_during_observation(settle: bool) {
             let pending = Arc::new(Pending::default());
-            let (generation, _, _) = pending.attach("a", b"1").unwrap();
+            let (generation, _, _) = pending.admit("a", b"1", false).unwrap();
             let identity = Arc::downgrade(&generation);
             let sender = settle.then(|| generation.release().unwrap());
             let outcome = sender.as_ref().map(|sender| sender.subscribe());
@@ -1010,7 +1026,7 @@ pub(crate) mod tests {
                         pending.settle(&key(), sender, false, None);
                     } else {
                         assert!(matches!(
-                            pending.attach("a", b"1"),
+                            pending.admit("a", b"1", true),
                             Err(Error::BlobAlreadyOpen(partition, name))
                                 if partition == "a" && name == "31"
                         ));
@@ -1029,7 +1045,7 @@ pub(crate) mod tests {
             let independent = {
                 let pending = pending.clone();
                 thread::spawn(move || {
-                    drop(pending.attach("independent", b"2").unwrap());
+                    drop(pending.admit("independent", b"2", false).unwrap());
                 })
             };
             observer.join().unwrap();
@@ -1054,12 +1070,12 @@ pub(crate) mod tests {
         #[tokio::test]
         async fn test_wait_observes_settling_predecessor() {
             let pending = Arc::new(Pending::default());
-            let (generation, wait, owed) = pending.attach("a", b"1").unwrap();
+            let (generation, wait, owed) = pending.admit("a", b"1", false).unwrap();
             assert!(!owed);
             Pending::wait(wait).await.unwrap();
             let sender = generation.release().unwrap();
             drop(generation);
-            let (generation, wait, owed) = pending.attach("a", b"1").unwrap();
+            let (generation, wait, owed) = pending.admit("a", b"1", true).unwrap();
             assert!(owed);
             let waiter = tokio::spawn(Pending::wait(wait));
             tokio::task::yield_now().await;
@@ -1075,21 +1091,21 @@ pub(crate) mod tests {
         #[test]
         fn test_debt_is_established_by_the_next_open() {
             let pending = Arc::new(Pending::default());
-            let (first, _, _) = pending.attach("a", b"1").unwrap();
+            let (first, _, _) = pending.admit("a", b"1", false).unwrap();
             let sender = first.release().unwrap();
             drop(first);
             pending.settle(&key(), sender, true, None);
             assert!(pending.owes("a", b"1"));
 
             // Debt accumulates across settled opens until an open establishes it.
-            let (second, wait, owed) = pending.attach("a", b"1").unwrap();
+            let (second, wait, owed) = pending.admit("a", b"1", true).unwrap();
             assert!(wait.is_none());
             assert!(owed);
             assert!(pending.debt(&key(), &Arc::downgrade(&second)).unwrap());
             let sender = second.release().unwrap();
             drop(second);
             pending.settle(&key(), sender, false, None);
-            let (third, _, owed) = pending.attach("a", b"1").unwrap();
+            let (third, _, owed) = pending.admit("a", b"1", true).unwrap();
             assert!(owed);
             assert!(pending.debt(&key(), &Arc::downgrade(&third)).unwrap());
             pending.clear(&key(), &Arc::downgrade(&third), &Ok(()));
@@ -1104,17 +1120,17 @@ pub(crate) mod tests {
             let pending = Arc::new(Pending::default());
 
             // A failure published at settlement blocks later opens.
-            let (generation, _, _) = pending.attach("a", b"1").unwrap();
+            let (generation, _, _) = pending.admit("a", b"1", false).unwrap();
             let sender = generation.release().unwrap();
             pending.settle(&key(), sender, false, Some(Error::Closed));
             drop(generation);
             for _ in 0..2 {
-                assert!(matches!(pending.attach("a", b"1"), Err(Error::Closed)));
+                assert!(matches!(pending.admit("a", b"1", true), Err(Error::Closed)));
             }
             pending.forget("a", Some(b"1"));
 
             // A failed completion is retained the same way, and success never overwrites it.
-            let (generation, _, _) = pending.attach("a", b"1").unwrap();
+            let (generation, _, _) = pending.admit("a", b"1", false).unwrap();
             pending.clear(
                 &key(),
                 &Arc::downgrade(&generation),
@@ -1130,26 +1146,32 @@ pub(crate) mod tests {
                 Err(Error::ReadFailed)
             ));
             drop(generation);
-            assert!(matches!(pending.attach("a", b"1"), Err(Error::ReadFailed)));
+            assert!(matches!(
+                pending.admit("a", b"1", true),
+                Err(Error::ReadFailed)
+            ));
 
             // A creation failure is retained until the name is forgotten.
             pending.forget("a", Some(b"1"));
-            let (generation, _, _) = pending.attach("a", b"1").unwrap();
+            let (generation, _, _) = pending.admit("a", b"1", false).unwrap();
             pending.fail(&generation, Error::WriteFailed);
             drop(generation);
-            assert!(matches!(pending.attach("a", b"1"), Err(Error::WriteFailed)));
+            assert!(matches!(
+                pending.admit("a", b"1", true),
+                Err(Error::WriteFailed)
+            ));
             pending.forget("a", Some(b"1"));
-            drop(pending.attach("a", b"1").unwrap());
+            drop(pending.admit("a", b"1", false).unwrap());
             assert!(pending.entries.lock().is_empty());
         }
 
         #[test]
         fn test_stale_settlement_leaves_a_recreated_name_alone() {
             let pending = Arc::new(Pending::default());
-            let (old, _, _) = pending.attach("a", b"1").unwrap();
+            let (old, _, _) = pending.admit("a", b"1", false).unwrap();
             let stale = old.release().unwrap();
             pending.forget("a", Some(b"1"));
-            let (current, _, owed) = pending.attach("a", b"1").unwrap();
+            let (current, _, owed) = pending.admit("a", b"1", false).unwrap();
             assert!(!owed);
 
             // The removed open's settlement and outcome must not touch the replacement's entry.
@@ -1168,19 +1190,19 @@ pub(crate) mod tests {
         #[test]
         fn test_live_open_refuses_a_second_attach() {
             let pending = Arc::new(Pending::default());
-            let (first, _, _) = pending.attach("a", b"1").unwrap();
+            let (first, _, _) = pending.admit("a", b"1", false).unwrap();
             assert!(matches!(
-                pending.attach("a", b"1"),
+                pending.admit("a", b"1", true),
                 Err(Error::BlobAlreadyOpen(partition, name)) if partition == "a" && name == "31"
             ));
             drop(first);
-            drop(pending.attach("a", b"1").unwrap());
+            drop(pending.admit("a", b"1", true).unwrap());
         }
 
         #[test]
         fn test_generations_retire_and_release_clean_entries() {
             let pending = Arc::new(Pending::default());
-            let (first, _, _) = pending.attach("a", b"1").unwrap();
+            let (first, _, _) = pending.admit("a", b"1", false).unwrap();
             let sender = first.release().unwrap();
             drop(first);
             assert_eq!(pending.entries.lock().len(), 1);
@@ -1188,7 +1210,7 @@ pub(crate) mod tests {
             assert!(pending.entries.lock().is_empty());
 
             for name in 0..128u64 {
-                drop(pending.attach("clean", &name.to_be_bytes()).unwrap());
+                drop(pending.admit("clean", &name.to_be_bytes(), false).unwrap());
                 assert!(pending.entries.lock().is_empty());
             }
         }

@@ -1,4 +1,4 @@
-use super::{Header, Layout, Pending, hold::Hold, resolve_header, sync_dir};
+use super::{Layout, Pending, create_header, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::channel::oneshot;
@@ -6,7 +6,7 @@ use commonware_utils::channel::oneshot;
 use std::collections::HashSet;
 use std::{
     fs,
-    io::{ErrorKind, Seek as _, SeekFrom, Write as _},
+    io::ErrorKind,
     ops::RangeInclusive,
     path::{Path, PathBuf},
     sync::Arc,
@@ -37,10 +37,15 @@ impl Config {
 /// the header is complete.
 #[derive(Clone)]
 pub struct Storage {
+    /// Serializes namespace operations and access to partition durability records.
     lock: Arc<Mutex<Partitions>>,
+    /// Filesystem root and permitted on-disk header layouts.
     cfg: Config,
+    /// Shared pool used to allocate read buffers.
     pool: BufferPool,
+    /// Directory exclusion also retained by opened files and dispatched blocking operations.
     hold: Arc<Hold>,
+    /// The live open of each blob and the debt its dropped handles left behind.
     pending: Arc<Pending>,
 }
 
@@ -223,16 +228,9 @@ impl crate::Storage for Storage {
                     &name,
                 )?;
 
-                // A fresh header starts a new incarnation with no retained predecessor state.
-                if existing.is_none() {
-                    pending.forget(&partition, Some(&name));
-                }
-
-                // Attaching fails while a handle from an earlier open is alive or a failure is
-                // retained. The open owes completion when predecessor work or debt remains.
-                // Outside Linux, this instance's first open of an existing blob also owes a flush.
-                let (generation, wait, owed) = pending.attach(&partition, &name)?;
-                let owed = owed || pending.first_open(&generation, existing.is_some());
+                // Claim the name for this open. A fresh header starts a new incarnation.
+                let (generation, wait, owed) =
+                    pending.admit(&partition, &name, existing.is_some())?;
 
                 // Existing headers retain their layout. New headers become visible only after
                 // their namespace entries are durable.
@@ -242,35 +240,15 @@ impl crate::Storage for Storage {
                         partitions.sync_once(parent)?;
                         resolved
                     }
-                    None => (|| {
+                    None => {
                         // Make the blob name and its partition durable before writing a parseable
                         // header. A visible partition directory does not establish its durability.
                         partitions.sync(parent, Some(&storage_directory))?;
 
-                        // Truncate to zero before writing, per the [Header::create] contract.
-                        let (region, blob_version) = Header::create(&blob_layouts, &versions);
-                        let data_offset = region.len() as u64;
-                        file.set_len(0).map_err(|e| {
-                            Error::BlobResizeFailed(partition.clone(), hex(&name), e.into())
-                        })?;
-                        file.seek(SeekFrom::Start(0))
-                            .map_err(|_| Error::WriteFailed)?;
-                        #[cfg(test)]
-                        if let Some(len) = pending.test.fail_creation_after.lock().take() {
-                            file.write_all(&region[..len.min(region.len())])
-                                .map_err(|_| Error::WriteFailed)?;
-                            return Err(Error::Closed);
-                        }
-                        file.write_all(&region).map_err(|_| Error::WriteFailed)?;
-                        file.sync_all().map_err(|e| {
-                            Error::BlobSyncFailed(partition.clone(), hex(&name), e.into())
-                        })?;
-                        Ok((0, blob_version, data_offset))
-                    })()
-                    .inspect_err(|error: &Error| {
-                        // Retain creation failures until the blob is removed or recreated.
-                        pending.fail(&generation, error.clone());
-                    })?,
+                        // Retain a creation failure until the blob is removed or recreated.
+                        create_header(&mut file, &blob_layouts, &versions, &generation)
+                            .inspect_err(|error| pending.fail(&generation, error.clone()))?
+                    }
                 };
 
                 // With no predecessor work or debt, the captured file's length is final. Otherwise,
@@ -382,11 +360,11 @@ impl crate::Storage for Storage {
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
-    use super::{Header, *};
+    use super::*;
     use crate::{
         Blob, BufferPoolConfig, ReadOptions, Runner as _, Storage as _, WriteOptions,
         storage::{
-            Layout,
+            Header, Layout,
             tests::{run_storage_tests, shared},
         },
         telemetry::metrics::Registry,
