@@ -735,10 +735,17 @@ mod tests {
         const TEST: &str = "test_network_mptcp_interop";
         const LARGE: usize = 1024 * 1024;
 
-        if let Err(reason) = mptcp::supported() {
-            mptcp::skip(TEST, &reason);
-            return;
-        }
+        let supported = match mptcp::supported() {
+            Ok(()) => true,
+            Err(reason) if mptcp::creation_error().is_some() => {
+                mptcp::skip(TEST, &format!("verifying TCP fallback only: {reason}"));
+                false
+            }
+            Err(reason) => {
+                mptcp::skip(TEST, &reason);
+                return;
+            }
+        };
         let mut addresses = vec![SocketAddr::from(([127, 0, 0, 1], 0))];
         if std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_ok() {
             addresses.push(SocketAddr::from((Ipv6Addr::LOCALHOST, 0)));
@@ -750,7 +757,7 @@ mod tests {
             for (dialer_mptcp, listener_mptcp) in
                 [(false, false), (true, true), (true, false), (false, true)]
             {
-                let negotiated = dialer_mptcp && listener_mptcp;
+                let negotiated = supported && dialer_mptcp && listener_mptcp;
                 let mut listener = new_network(listener_mptcp)
                     .bind(address)
                     .await
@@ -773,7 +780,7 @@ mod tests {
                     .dial(listener_addr)
                     .await
                     .expect("Failed to dial server");
-                let protocol = if dialer_mptcp {
+                let protocol = if supported && dialer_mptcp {
                     libc::IPPROTO_MPTCP
                 } else {
                     libc::IPPROTO_TCP
@@ -853,6 +860,11 @@ mod tests {
         N: crate::Network,
         SinkOf<N>: AsFd,
     {
+        if let Err(reason) = mptcp::supported() {
+            mptcp::skip("test_network_mptcp_multipath", &reason);
+            return;
+        }
+
         const CHUNK: usize = 256 * 1024;
         // Chunks acknowledged before checking that both subflows carried data.
         const BOTH_PATHS: u64 = 64;
