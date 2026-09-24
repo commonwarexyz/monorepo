@@ -62,14 +62,31 @@ pub struct PreparedAppend<V> {
     _marker: PhantomData<V>,
 }
 
+impl<V> PreparedAppend<V> {
+    /// Releases capacity reserved by compressed frames but left unused.
+    ///
+    /// See [PREPARED_SPARE_LIMIT] for the compaction thresholds.
+    fn compact(&mut self) {
+        let (len, capacity) = (self.encoded.len(), self.encoded.capacity());
+        if capacity - len > PREPARED_SPARE_LIMIT && len <= capacity / 4 {
+            self.encoded.shrink_to_fit();
+        }
+    }
+}
+
 /// Suffix appended to the base partition name for the data blobs.
 const DATA_SUFFIX: &str = "_data";
 
 /// Suffix appended to the base partition name for the offsets journal.
 const OFFSETS_SUFFIX: &str = "_offsets";
 
-/// A compressed [PreparedAppend] is compacted when its unused capacity exceeds both this and
-/// three times its encoded length.
+/// Unused capacity a deferred [PreparedAppend] may retain before compaction is considered.
+///
+/// In-place compression reserves `ZSTD_compressBound` of each encoded item for one-pass
+/// compression. A compressible record leaves much of that reservation unused, and a caller may
+/// retain the batch across unrelated work. Compaction requires unused capacity above this floor
+/// and at least three times the stored length, borrowing zstd's `ZSTD_WORKSPACETOOLARGE_FACTOR`.
+/// Uncompressed frames reserve only what they write, so their batches do not meet both conditions.
 const PREPARED_SPARE_LIMIT: usize = 64 * 1024;
 
 /// Provides an owned buffer for reading and reclaims the scratch unless retained fields share it.
@@ -1596,15 +1613,6 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
                 }
             }
         }
-
-        // Limit oversized reservations retained by deferred appends.
-        let spare = encoded.capacity() - encoded.len();
-        if self.compression.is_some()
-            && spare > PREPARED_SPARE_LIMIT
-            && spare > encoded.len().saturating_mul(3)
-        {
-            encoded.shrink_to_fit();
-        }
         Ok(PreparedAppend {
             encoded,
             item_starts,
@@ -2305,7 +2313,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// This lets callers serialize borrowed items synchronously, release those borrows, and
     /// perform the append without holding unrelated locks across journal I/O.
     pub fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
-        self.0.prepare_append(items)
+        let mut prepared = self.0.prepare_append(items)?;
+        prepared.compact();
+        Ok(prepared)
     }
 
     /// Append items encoded by [`Self::prepare_append`], returning the position of the last item
