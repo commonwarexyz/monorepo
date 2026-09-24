@@ -883,8 +883,9 @@ pub struct InstanceUrls {
 }
 
 /// Phase 1 (optional): Install apt packages on binary instances
-/// Only needed when profiling is enabled or NVMe instance-store devices are mounted.
-pub(crate) fn install_binary_apt_cmd(profiling: bool, nvme: bool) -> Option<String> {
+/// Only needed when profiling is enabled, NVMe instance-store devices are mounted, or MPTCP is
+/// enabled.
+pub(crate) fn install_binary_apt_cmd(profiling: bool, nvme: bool, mptcp: bool) -> Option<String> {
     let mut packages = Vec::new();
     if profiling {
         packages.extend([
@@ -895,6 +896,9 @@ pub(crate) fn install_binary_apt_cmd(profiling: bool, nvme: bool) -> Option<Stri
     }
     if nvme {
         packages.push("mdadm");
+    }
+    if mptcp {
+        packages.push("nftables");
     }
     if packages.is_empty() {
         return None;
@@ -1032,6 +1036,70 @@ sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
 "#,
         mount_directory = HOME_DIRECTORY,
     )
+}
+
+/// Returns a command that lets MPTCP sockets open an extra subflow to each peer.
+///
+/// The in-kernel path manager never opens a subflow from the local address a connection started
+/// on, and each instance has a single private IPv4 address. A dummy address registered as a
+/// `subflow` endpoint, and masqueraded to the primary address, gives each connection a second
+/// 5-tuple to the peer's existing address and port.
+pub(crate) const fn mptcp_setup_cmd() -> &'static str {
+    r#"set -e
+
+sudo tee /usr/local/bin/setup-mptcp.sh >/dev/null <<'EOF'
+#!/bin/bash
+set -e
+IFACE=$(ip -o route get 8.8.8.8 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
+ADDR=198.18.0.1
+
+sysctl -qw net.mptcp.enabled=1
+ip link show mptcp0 >/dev/null 2>&1 || ip link add mptcp0 type dummy
+ip link set mptcp0 up
+ip addr replace "$ADDR/32" dev mptcp0
+
+# EC2 drops packets whose source is not assigned to the interface, so rewrite the
+# dummy source to the primary private address on the way out.
+nft -f - <<NFT
+table ip commonware_mptcp
+delete table ip commonware_mptcp
+table ip commonware_mptcp {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        ip saddr $ADDR oifname "$IFACE" masquerade
+    }
+}
+NFT
+
+# Out-of-window segments marked invalid would skip the reverse translation and
+# reset the subflow.
+sysctl -qw net.netfilter.nf_conntrack_tcp_be_liberal=1
+
+# The listener also tries a subflow from its dummy address toward the dialer's
+# ephemeral port, which the dialer's security group drops. Allow more extra
+# subflows than the one each side needs so that attempt never blocks the join.
+ip mptcp limits set subflows 4 add_addr_accepted 0
+ip mptcp endpoint flush
+ip mptcp endpoint add "$ADDR" dev "$IFACE" subflow
+EOF
+sudo chmod +x /usr/local/bin/setup-mptcp.sh
+sudo tee /etc/systemd/system/setup-mptcp.service >/dev/null <<'EOF'
+[Unit]
+Description=Configure MPTCP subflow endpoints
+After=network-online.target
+Wants=network-online.target
+Before=binary.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/setup-mptcp.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now setup-mptcp.service
+"#
 }
 
 /// Phase 3: Setup and start services on binary instances
@@ -1666,6 +1734,39 @@ mod tests {
 
         let promtail = promtail_config("10.0.0.1", "worker", "10.0.1.2", "us-east-1", "arm64");
         assert!(promtail.contains("filename: /var/lib/promtail/positions.yaml"));
+    }
+
+    #[test]
+    fn test_binary_apt_installs_nftables_for_mptcp() {
+        assert!(install_binary_apt_cmd(false, false, false).is_none());
+        let cmd = install_binary_apt_cmd(false, false, true).unwrap();
+        assert!(cmd.contains("apt-get install -y nftables"));
+    }
+
+    #[test]
+    fn test_mptcp_setup_cmd() {
+        let cmd = mptcp_setup_cmd();
+        let (_, script) = cmd.split_once("<<'EOF'\n").unwrap();
+        let (script, _) = script.split_once("\nEOF\n").unwrap();
+        for shell in [cmd, script] {
+            let status = std::process::Command::new("bash")
+                .args(["-n", "-c", shell])
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+
+        let positions = [
+            "ip addr replace \"$ADDR/32\" dev mptcp0",
+            "ip saddr $ADDR oifname \"$IFACE\" masquerade",
+            "nf_conntrack_tcp_be_liberal=1",
+            "ip mptcp limits set subflows 4 add_addr_accepted 0",
+            "ip mptcp endpoint add \"$ADDR\" dev \"$IFACE\" subflow",
+        ]
+        .map(|step| script.find(step).unwrap());
+        assert!(positions.is_sorted());
+        assert!(cmd.contains("Before=binary.service"));
+        assert!(cmd.contains("sudo systemctl enable --now setup-mptcp.service"));
     }
 
     #[test]

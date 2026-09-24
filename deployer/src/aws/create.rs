@@ -1215,11 +1215,15 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
             ssh_execute(private_key, &ip, disable_automatic_apt_upgrades_cmd()).await?;
             let download_start = Instant::now();
-            if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling, nvme) {
+            if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling, nvme, instance.mptcp)
+            {
                 ssh_execute(private_key, &ip, &apt_cmd).await?;
             }
             if nvme {
                 ssh_execute(private_key, &ip, &nvme_setup_cmd()).await?;
+            }
+            if instance.mptcp {
+                ssh_execute(private_key, &ip, mptcp_setup_cmd()).await?;
             }
             ssh_execute(private_key, &ip, &install_binary_download_cmd(&urls)).await?;
             let download = format!("{:.1}s", download_start.elapsed().as_secs_f64());
@@ -1565,6 +1569,7 @@ mod tests {
             binary: "binary".to_string(),
             config: "config.yaml".to_string(),
             profiling: false,
+            mptcp: false,
         }
     }
 
