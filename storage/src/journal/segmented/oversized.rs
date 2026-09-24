@@ -55,6 +55,8 @@
 //! order, and the first invalid value truncates the section's remainder. Markers trail proven
 //! syncs, publishing once a section is durable and idle (or on an empty flush).
 
+#[commonware_macros::stability(ALPHA)]
+use super::glob::Reader;
 use super::{
     fixed::{
         Config as FixedConfig, Journal as FixedJournal, RecoveryPreflight, Replay as FixedReplay,
@@ -986,32 +988,29 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Flushes and syncs the values through [Glob::snapshot]. This does not sync the index or
     /// publish a tracked recovery marker. The reader supports concurrent appends and removal,
     /// but truncation into its captured extent makes affected reads unspecified.
+    #[commonware_macros::stability(ALPHA)]
     pub async fn value_snapshot(
         mut self,
         section: u64,
-    ) -> Result<(Self, super::glob::Reader<E::Blob, V>), Error> {
+    ) -> Result<(Self, Reader<E::Blob, V>), Error> {
         let reader;
         (self.values, reader) = self.values.snapshot(section).await?;
         Ok((self, reader))
     }
 
-    /// Start a joint index/value sync and capture a reader at the same value boundary.
+    /// Capture an owned reader of the current value extent of `section` without I/O.
     ///
-    /// The reader is available once buffered values have been flushed; the returned handle
-    /// separately reports whether both journals became durable. The in-flight or completed value sync
-    /// is reused when capturing the reader. An error from the returned handle is fatal to the
-    /// returned journal.
-    pub async fn start_sync_with_snapshot(
-        mut self,
-        section: u64,
-    ) -> Result<(Self, Handle<()>, super::glob::Reader<E::Blob, V>), Error> {
-        let handle;
-        (self, handle) = self.start_sync(section).await?;
-        let value_handle;
-        let reader;
-        (self.values, value_handle, reader) = self.values.start_sync_with_snapshot(section).await?;
-        drop(value_handle);
-        Ok((self, handle, reader))
+    /// Call after a flush of `section` (such as [Oversized::start_sync]) and before any further
+    /// append to it: the reader reads the value blob directly, so buffered values count toward its
+    /// extent but are unreadable. The reader is usable before the sync completes; if the sync
+    /// handle fails, discard the reader along with the journal. Appends and removal after capture
+    /// do not affect the reader, but rewinds into its extent make affected reads unspecified.
+    ///
+    /// Returns [Error::AlreadyPrunedToSection] for a pruned section and
+    /// [Error::SectionOutOfRange] for a section without values.
+    #[commonware_macros::stability(ALPHA)]
+    pub fn capture(&self, section: u64) -> Result<Reader<E::Blob, V>, Error> {
+        self.values.capture(section)
     }
 
     /// Consumes the journal and returns an owned [Replay] reader over index entries
@@ -1902,10 +1901,9 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_start_sync_with_snapshot_reuses_value_sync() {
+    fn test_capture_after_start_sync() {
         deterministic::Runner::default().start(|context| async move {
             let pending = PendingSyncs::default();
-            pending.unblock();
             let delayed = DelayedSyncContext {
                 inner: context.child("delayed"),
                 pending: pending.clone(),
@@ -1920,23 +1918,28 @@ mod tests {
                 .expect("failed to append");
 
             let starts = pending.starts();
-            let (journal, handle, reader) = journal
-                .start_sync_with_snapshot(1)
-                .await
-                .expect("failed to start sync and capture reader");
+            let (journal, handle) = journal.start_sync(1).await.expect("failed to start sync");
+            let reader = journal.capture(1).expect("failed to capture reader");
             assert_eq!(
                 pending.starts() - starts,
                 2,
-                "snapshot must reuse the value sync started by the joint cut"
+                "capture must not start syncs beyond the joint cut"
             );
-            handle.await.expect("joint sync failed");
+            assert_eq!(pending.completions(), 0);
             assert_eq!(reader.get(offset, size).await.unwrap(), [1; 16]);
+            assert!(matches!(
+                journal.capture(2),
+                Err(Error::SectionOutOfRange(2))
+            ));
+
+            pending.unblock();
+            handle.await.expect("joint sync failed");
             journal.destroy().await.expect("failed to destroy");
         });
     }
 
     #[test_traced]
-    fn test_start_sync_with_snapshot_preserves_value_sync_failure() {
+    fn test_capture_keeps_value_sync_failure() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg(&context);
             let faulty = SyncFaultContext {
@@ -1951,14 +1954,32 @@ mod tests {
                 .await
                 .expect("failed to append");
 
-            let (_journal, handle, _reader) = journal
-                .start_sync_with_snapshot(1)
-                .await
-                .expect("failed to start sync and capture reader");
+            let (journal, handle) = journal.start_sync(1).await.expect("failed to start sync");
+            let _reader = journal.capture(1).expect("failed to capture reader");
             assert!(
                 handle.await.is_err(),
                 "value sync failure must reach caller"
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_capture_pruned_section() {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = test_cfg(&context);
+            let journal = Oversized::<_, TestEntry, TestValue>::init(context, cfg)
+                .await
+                .expect("failed to init");
+            let (journal, _, _, _) = journal
+                .append(1, TestEntry::new(1, 0, 0), &[1; 16])
+                .await
+                .expect("failed to append");
+            let (journal, pruned) = journal.prune(2).await.expect("failed to prune");
+            assert!(pruned);
+            assert!(matches!(
+                journal.capture(1),
+                Err(Error::AlreadyPrunedToSection(2))
+            ));
         });
     }
 
