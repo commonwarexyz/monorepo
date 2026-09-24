@@ -363,10 +363,7 @@ mod tests {
     use super::*;
     use crate::{
         Blob, BufferPoolConfig, ReadOptions, Runner as _, Storage as _, WriteOptions,
-        storage::{
-            Header, Layout,
-            tests::{run_storage_tests, shared},
-        },
+        storage::{Header, Layout, shared, tests::run_storage_tests},
         telemetry::metrics::Registry,
         tokio::Runner,
     };

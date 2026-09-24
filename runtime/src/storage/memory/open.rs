@@ -32,14 +32,8 @@ impl Opens {
         name: &[u8],
         open: impl Future<Output = Result<(B, u64, BlobVersion), Error>> + Send,
     ) -> Result<Opened<'_, B>, Error> {
-        #[cfg(test)]
-        self.test.registry_entry(self.live.is_locked());
-        let mut opens = self.live.lock();
-        let (inner, len, version) = open
-            .now_or_never()
-            .expect("memory namespace work completes in one poll")?;
-        #[cfg(test)]
-        self.test.namespace_handoff();
+        let mut opens = self.enter();
+        let (inner, len, version) = self.complete(open)?;
         let key = (partition.to_owned(), name.to_vec());
 
         // Observing liveness must not acquire an owner whose destructor locks this registry.
@@ -71,14 +65,7 @@ impl Opens {
         name: Option<&[u8]>,
         remove: impl Future<Output = Result<R, Error>> + Send,
     ) -> Result<R, Error> {
-        self.replace(partition, name, || {
-            let removed = remove
-                .now_or_never()
-                .expect("memory namespace work completes in one poll")?;
-            #[cfg(test)]
-            self.test.namespace_handoff();
-            Ok(removed)
-        })
+        self.replace(partition, name, || self.complete(remove))
     }
 
     /// Retires registrations atomically with removal or installation of a raw memory image.
@@ -88,14 +75,29 @@ impl Opens {
         name: Option<&[u8]>,
         replace: impl FnOnce() -> Result<R, Error>,
     ) -> Result<R, Error> {
-        #[cfg(test)]
-        self.test.registry_entry(self.live.is_locked());
-        let mut opens = self.live.lock();
+        let mut opens = self.enter();
         let replaced = replace()?;
         opens.retain(|(stored_partition, stored_name), _| {
             stored_partition != partition || name.is_some_and(|name| stored_name != name)
         });
         Ok(replaced)
+    }
+
+    /// Lock the registry.
+    fn enter(&self) -> MutexGuard<'_, BTreeMap<Key, Weak<Live>>> {
+        #[cfg(test)]
+        self.test.registry_entry(self.live.is_locked());
+        self.live.lock()
+    }
+
+    /// Complete namespace work that must finish in one poll.
+    fn complete<R>(&self, work: impl Future<Output = Result<R, Error>>) -> Result<R, Error> {
+        let result = work
+            .now_or_never()
+            .expect("memory namespace work completes in one poll")?;
+        #[cfg(test)]
+        self.test.namespace_handoff();
+        Ok(result)
     }
 }
 
@@ -244,7 +246,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[cfg(not(target_arch = "wasm32"))]
     fn test_open_racing_last_blob_drop() {
         Runner::default().start(|context| async move {
             let context = Storage::new(context.storage_buffer_pool().clone());

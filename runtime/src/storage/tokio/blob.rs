@@ -12,6 +12,8 @@ use commonware_utils::{
     channel::oneshot,
     sync::{Mutex, MutexGuard},
 };
+#[cfg(test)]
+use std::sync::mpsc;
 use std::{
     fs::File,
     io::IoSlice,
@@ -23,12 +25,6 @@ use std::{
     },
 };
 use tokio::task;
-
-cfg_if! {
-    if #[cfg(test)] {
-        use std::sync::mpsc;
-    }
-}
 
 // Linux rejects more than IOV_MAX (1024) iovecs with EINVAL. Use the maximum so storage writes
 // span as few submissions as possible.
@@ -678,8 +674,6 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use futures::FutureExt as _;
-    #[cfg(target_os = "linux")]
-    use std::sync::Weak;
     use std::{env, ops::RangeInclusive, path::PathBuf, process, sync::mpsc};
 
     fn storage_for_reopen_test(label: &str, layouts: RangeInclusive<Layout>) -> (Storage, PathBuf) {
@@ -1184,31 +1178,28 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
-    struct WriteErrorObserver {
-        shared: Weak<Shared>,
-        accounted: Arc<AtomicBool>,
-    }
-
-    #[cfg(target_os = "linux")]
-    impl AsRef<[u8]> for WriteErrorObserver {
-        fn as_ref(&self) -> &[u8] {
-            b"x"
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    impl Drop for WriteErrorObserver {
-        fn drop(&mut self) {
-            self.accounted.store(
-                self.shared.upgrade().unwrap().tracker.is_dirty(),
-                Ordering::Release,
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn test_fused_write_error_is_recorded_before_buffer_drop() {
+        struct WriteErrorObserver {
+            shared: std::sync::Weak<Shared>,
+            accounted: Arc<AtomicBool>,
+        }
+
+        impl AsRef<[u8]> for WriteErrorObserver {
+            fn as_ref(&self) -> &[u8] {
+                b"x"
+            }
+        }
+
+        impl Drop for WriteErrorObserver {
+            fn drop(&mut self) {
+                self.accounted.store(
+                    self.shared.upgrade().unwrap().tracker.is_dirty(),
+                    Ordering::Release,
+                );
+            }
+        }
+
         let (storage, directory) = storage_for_reopen_test("write_error_order", Layout::ALL);
         let path = directory.join("readonly");
         std::fs::write(&path, b"").unwrap();
@@ -1344,8 +1335,7 @@ mod tests {
                 release: released,
             },
         ))];
-        let count = if cfg!(target_os = "linux") { 1025 } else { 4 };
-        for _ in 1..count {
+        for _ in 0..IOVEC_BATCH_SIZE {
             chunks.push(crate::IoBuf::from(vec![b'x']));
         }
         let blob = Arc::new(blob);

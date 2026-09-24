@@ -720,10 +720,7 @@ mod tests {
     use crate::{
         Blob as _, BufferPool, BufferPoolConfig, IoBuf, IoBufMut, Runner as _, Storage as _,
         iouring,
-        storage::{
-            Header, Layout,
-            tests::{run_storage_tests, shared},
-        },
+        storage::{Header, Layout, shared, tests::run_storage_tests},
         telemetry::metrics::{Register, Registry},
     };
     use std::{

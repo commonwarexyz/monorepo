@@ -1702,7 +1702,6 @@ mod tests {
     #[case::open_partition(true, false)]
     #[case::remove_named(false, true)]
     #[case::remove_partition(false, false)]
-    #[cfg(not(target_arch = "wasm32"))]
     fn test_logical_open_namespace_handoff(#[case] open_first: bool, #[case] named: bool) {
         Runner::default().start(|context| async move {
             // Nonempty durable contents distinguish the unlinked incarnation from its replacement.
@@ -1888,7 +1887,6 @@ mod tests {
     #[case::remove("remove")]
     #[case::remove_partition("remove_partition")]
     #[case::admit("admit")]
-    #[cfg(not(target_arch = "wasm32"))]
     fn test_retired_write_owner_releases_other_blob(#[case] operation: &'static str) {
         struct Owner<B> {
             data: Vec<u8>,
@@ -1962,7 +1960,6 @@ mod tests {
     #[case::sync("sync")]
     #[case::start_sync("start_sync")]
     #[case::overwrite("overwrite")]
-    #[cfg(not(target_arch = "wasm32"))]
     fn test_sync_retirement_progresses_with_namespace_open(#[case] operation: &'static str) {
         /// Signals retirement before releasing another blob's open.
         struct Owner<B> {
