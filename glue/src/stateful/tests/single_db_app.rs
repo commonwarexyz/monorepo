@@ -426,6 +426,7 @@ impl EngineDefinition for SingleDbEngine {
         let broadcast_config = buffered::Config {
             public_key: public_key.clone(),
             mailbox_size: NZUsize!(100),
+            ingress_size: NZUsize!(100),
             deque_size: 10,
             priority: false,
             codec_config: (),

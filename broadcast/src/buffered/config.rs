@@ -14,11 +14,15 @@ pub struct Config<
     /// The public key of the participant.
     pub public_key: P,
 
-    /// Capacity of the application inbox and the separate decoded-message inbox.
+    /// Capacity of the application inbox.
     ///
     /// Application requests beyond this capacity follow the mailbox overflow policy.
-    /// Decoded messages are dropped when their inbox is full.
     pub mailbox_size: NonZeroUsize,
+
+    /// Capacity of the inbox of decoded messages from the network.
+    ///
+    /// Decoded messages are dropped when this inbox is full.
+    pub ingress_size: NonZeroUsize,
 
     /// The maximum number of cached items per sender.
     pub deque_size: usize,
