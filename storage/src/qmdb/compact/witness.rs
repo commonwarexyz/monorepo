@@ -132,6 +132,7 @@ enum Durability {
 pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     journal: Journal<E, F, D>,
 
+    /// The verified tip witness. The db's root and size read from it.
     tip_witness: VerifiedWitness<F, D>,
 
     /// Whether the cached witness came from compact sync and has not been written to the
@@ -177,7 +178,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         }
     }
 
-    /// The cached tip witness.
+    /// The verified tip witness.
     pub(crate) const fn tip(&self) -> &VerifiedWitness<F, D> {
         &self.tip_witness
     }
@@ -220,22 +221,18 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
         // After the checks above, `start == last_commit_loc`, so the stored pinned nodes are the
         // pinned nodes for this request.
+        let proof = self.tip_witness.proof.clone();
         Ok(match request {
             Request::Operations { .. } => Response::Operations {
-                proof: self.tip_witness.proof.clone(),
+                proof,
                 operations: vec![op],
             },
             Request::Boundary { .. } => Response::Boundary {
-                proof: self.tip_witness.proof.clone(),
+                proof,
                 op,
                 pinned_nodes: self.tip_witness.witness.pinned_nodes.clone(),
             },
         })
-    }
-
-    /// Replace the cached witness after the matching compact Merkle state is staged or loaded.
-    pub(crate) fn replace(&mut self, witness: VerifiedWitness<F, D>) {
-        self.tip_witness = witness;
     }
 
     /// Apply the current compact state to the witness journal.
@@ -266,7 +263,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         self.import_pending = false;
         self.uncommitted = true;
         merkle.prune_to_frontier();
-        self.replace(verified);
+        self.tip_witness = verified;
         Ok(self)
     }
 
@@ -423,12 +420,12 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         // start_sync may still be proving that tip durable, which pending_sync tracks separately.
         // During a pending import the cached witness is not in the journal yet, so it is exactly
         // what must be persisted. Replace the journal's contents with it.
-        let cached_size = self.tip().size();
+        let cached_size = self.tip_witness.size();
         let verified = if cached_size == merkle.leaves() {
             if !self.import_pending {
                 return Ok((self, None));
             }
-            self.tip().clone()
+            self.tip_witness.clone()
         } else if cached_size > merkle.leaves() {
             return Err(Error::DataCorrupted("witness ahead of in-memory state"));
         } else {

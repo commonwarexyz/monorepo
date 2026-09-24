@@ -385,7 +385,6 @@ where
         )
         .await?;
 
-        // Commit metadata, location, and root must all come from the same verified witness.
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
