@@ -290,11 +290,6 @@ fn clear_pending<B>(
     pending: &PendingMutations<B>,
     generations: &[Arc<FileGeneration>],
 ) -> Retired<B> {
-    if generations.is_empty() {
-        return Retired {
-            _mutations: Vec::new(),
-        };
-    }
     let mut pending = pending.lock();
     let retired = pending
         .extract_if(.., |mutation| {
@@ -685,7 +680,7 @@ impl<B: crate::Blob> Blob<B> {
                 retained.push(mutation);
                 continue;
             }
-            let (write_generation, write_blob, write_offset, mut bufs, retention, selection_offset) =
+            let (write_generation, write_blob, write_offset, mut bufs, retention, selection) =
                 match mutation {
                     PendingMutation::Write {
                         generation,
@@ -718,7 +713,7 @@ impl<B: crate::Blob> Blob<B> {
                     offset: write_offset,
                     bufs,
                     retention,
-                    selection_offset,
+                    selection_offset: selection,
                 });
                 continue;
             }
@@ -736,7 +731,7 @@ impl<B: crate::Blob> Blob<B> {
                     offset: write_offset,
                     bufs: prefix,
                     retention: retention.clone(),
-                    selection_offset,
+                    selection_offset: selection,
                 });
             }
             if overlap_end < write_end {
@@ -748,7 +743,7 @@ impl<B: crate::Blob> Blob<B> {
                     offset: overlap_end,
                     bufs,
                     retention,
-                    selection_offset: selection_offset
+                    selection_offset: selection
                         .checked_add(suffix_start)
                         .expect("a pending-write fragment stays within its selection"),
                 });
@@ -2130,6 +2125,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_partition_removal_preserves_unrelated_crash_writes() {
+        // Retain every unsynced write so crash replay exposes evidence lost during removal.
         let h = Harness::new(Config::default().write(WriteConfig {
             failure_rate: probability!(0.0),
             retention_rate: probability!(1.0),
@@ -2152,10 +2148,12 @@ mod tests {
         }
         drop((a, b, kept));
 
+        // Retirement must remove both names' evidence and leave exactly the kept writes.
         h.storage.remove("removed", None).await.unwrap();
         assert_eq!(h.storage.pending.lock().len(), 2);
         h.storage.crash().unwrap();
 
+        // Replay preserves both ranges in the surviving partition and cannot revive removed names.
         assert!(matches!(
             h.inner.scan("removed").await,
             Err(Error::PartitionMissing(_))

@@ -1007,19 +1007,24 @@ mod tests {
     /// The synced snapshot is a control whose fallback already covers the captured tail.
     /// The fallback length assertion verifies the expected disk state was actually reached.
     #[rstest::rstest]
-    #[case::partial(0, 13, false)]
-    #[case::page_boundary(1, PAGE_SIZE.get() as usize, false)]
-    #[case::next_page(1, PAGE_SIZE.get() as usize + 7, false)]
-    #[case::synced_snapshot(1, 13, true)]
+    #[case::partial(0, 13, false, u64::MAX)]
+    #[case::page_boundary(1, PAGE_SIZE.get() as usize, false, u64::MAX)]
+    #[case::next_page(1, PAGE_SIZE.get() as usize + 7, false, u64::MAX)]
+    #[case::synced_snapshot(1, 13, true, u64::MAX)]
+    #[case::capped(1, 13, false, u64::from(PAGE_SIZE.get()) + 5)]
     fn test_replay_preserves_tail_during_partial_page_rewrite(
         #[case] full_pages: usize,
         #[case] next_len: usize,
         #[case] sync_snapshot: bool,
+        #[case] cap: u64,
         #[values(false, true)] writer_replay: bool,
     ) {
         deterministic::Runner::default().start(|context| async move {
             const DURABLE_TAIL: usize = 3;
             const SNAPSHOT_TAIL: usize = 7;
+
+            // Persist a short partial page, then extend it without advancing its durable slot.
+            // The snapshot must retain the longer tail even if disk validation falls back.
             let page_size = PAGE_SIZE.get() as usize;
             let physical_page_size = page_size + CHECKSUM_SIZE as usize;
             let offset = Widen::widen(full_pages * physical_page_size);
@@ -1039,10 +1044,14 @@ mod tests {
             writer.append(&extension).await.unwrap();
             expected.extend_from_slice(&extension);
             let snapshot = writer.snapshot().await.unwrap();
+
+            // The synced control has a durable fallback that already includes the snapshot.
             if sync_snapshot {
                 writer.sync().await.unwrap();
             }
 
+            // Locate the checksum slot the next flush will rewrite so the pause exposes the
+            // new length before its matching checksum, leaving only the other slot valid.
             let page = blob
                 .read_at(offset, physical_page_size, ReadOptions::default())
                 .await
@@ -1055,9 +1064,17 @@ mod tests {
             } else {
                 active.slot
             };
+
+            // Capture each replay before the rewrite. A writer prefix may end inside the
+            // frozen tail, beyond the shorter durable fallback. Sealed replay stays uncapped.
+            let replay_len = if writer_replay {
+                cap.min(Widen::widen(expected.len())) as usize
+            } else {
+                expected.len()
+            };
             let mut replay = if writer_replay {
                 writer
-                    .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
+                    .replay_prefix(cap, NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .await
                     .unwrap()
             } else {
@@ -1065,7 +1082,7 @@ mod tests {
                     .replay(NZUsize!(BUFFER_SIZE), ReadOptions::default())
                     .unwrap()
             };
-            assert_eq!(replay.blob_size(), Widen::widen(expected.len()));
+            assert_eq!(replay.blob_size(), Widen::widen(replay_len));
 
             // The writer supplies every byte. A short backend write exposes the new slot length
             // before its CRC, while the other slot still validates the durable prefix.
@@ -1087,6 +1104,7 @@ mod tests {
                 _ = flushing.as_mut() => panic!("write completed before its suffix was released"),
             }
 
+            // Inspect the paused disk image and both read paths before the write can finish.
             let page = blob
                 .read_at(offset, physical_page_size, ReadOptions::default())
                 .await
@@ -1126,10 +1144,10 @@ mod tests {
             let replayed = replayed.unwrap();
             assert_eq!(
                 replayed.len(),
-                expected.len(),
+                replay_len,
                 "replay shortened the immutable snapshot"
             );
-            assert_eq!(replayed, expected);
+            assert_eq!(replayed, expected[..replay_len]);
         });
     }
 

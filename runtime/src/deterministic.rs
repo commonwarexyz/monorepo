@@ -1860,7 +1860,7 @@ mod tests {
             ));
             assert_ne!(before, context.auditor().state());
 
-            // A full sync on the new open must supersede the admitted snapshot.
+            // Mutations on the new open must supersede the admitted snapshot.
             if sync {
                 retained
                     .write_at(0, b"fresh", WriteOptions::default())
@@ -1930,7 +1930,7 @@ mod tests {
                     .await
                     .unwrap();
 
-                // Partition removal must retire evidence for both names.
+                // Give partition removal evidence under both names.
                 if operation == "remove_partition" {
                     b.write_at(0, b"second", WriteOptions::default())
                         .await
@@ -1939,8 +1939,8 @@ mod tests {
                 drop(b);
                 assert!(!released.load(Ordering::SeqCst));
 
-                // Retiring a's payload must release the namespace and pending-mutation locks
-                // before destroying it, so b can release its open.
+                // Retiring a's payload must release the namespace lock before destroying it,
+                // so b can release its open.
                 if operation == "remove" {
                     context.remove("partition", Some(b"a")).await.unwrap();
                 } else if operation == "remove_partition" {

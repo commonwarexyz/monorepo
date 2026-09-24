@@ -48,6 +48,7 @@ use std::num::NonZeroUsize;
 ///     blob.write_at(11, b"!").await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
+///     // Release the writer and read back the persisted data through a new open.
 ///     drop(blob);
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));

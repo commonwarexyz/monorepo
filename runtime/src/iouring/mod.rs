@@ -21,11 +21,11 @@
 //! # Storage
 //!
 //! Failures while synchronizing blob contents, including during
-//! [SYNC](crate::WriteOptions::SYNC) writes, are retained across opens of the blob,
-//! even after every handle is dropped.
-//! Creation failures are retained when the header is complete. Removing or
-//! recreating the blob clears its retained error. A new runtime instance starts
-//! without the error record and still requires normal storage recovery.
+//! [SYNC](crate::WriteOptions::SYNC) writes, are retained across opens of the
+//! blob, even after every handle is dropped. Creation failures are retained
+//! when the header is complete. Removing or recreating the blob clears its
+//! retained error. A new runtime instance starts without the error record and
+//! still requires normal storage recovery.
 //!
 //! # Requirements and Progress
 //!

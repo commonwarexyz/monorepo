@@ -1,4 +1,4 @@
-//! Logical opens for the memory backend and its deterministic fault stack.
+//! Exclusive logical opens for the memory backend.
 
 use crate::{BlobVersion, Error, Handle, IoBufs, IoBufsMut, ReadOptions, WriteOptions};
 use commonware_formatting::hex;
@@ -18,7 +18,7 @@ type Key = (String, Vec<u8>);
 pub(crate) struct Opens {
     live: Mutex<BTreeMap<Key, Weak<Live>>>,
     #[cfg(test)]
-    test: tests::TestState,
+    test: tests::Hooks,
 }
 
 impl Opens {
@@ -99,7 +99,7 @@ impl Opens {
     }
 }
 
-/// Keeps admission in the namespace transaction until predecessor crash evidence is retired.
+/// Holds the namespace lock until the opened blob is returned.
 pub(crate) struct Opened<'a, B> {
     // Release the registry before dropping the user lease, including during unwinding.
     _namespace: MutexGuard<'a, BTreeMap<Key, Weak<Live>>>,
@@ -194,7 +194,7 @@ pub(crate) mod tests {
 
     /// One-shot observations and pauses for a single logical-open registry.
     #[derive(Default)]
-    pub(super) struct TestState {
+    pub(super) struct Hooks {
         open_observation: Mutex<Option<OpenObservation>>,
         namespace_handoff: Mutex<Option<(Sender<()>, Receiver<()>)>>,
         registry_observation: Mutex<Option<Sender<bool>>>,
@@ -213,7 +213,7 @@ pub(crate) mod tests {
         }
     }
 
-    impl TestState {
+    impl Hooks {
         /// Report the namespace handoff and wait for release.
         pub(super) fn namespace_handoff(&self) {
             let hook = self.namespace_handoff.lock().take();
@@ -230,7 +230,8 @@ pub(crate) mod tests {
             }
         }
 
-        /// Report the current owner count and wait for release. A missing registration has zero owners.
+        /// Report the current owner count and wait for release.
+        /// A missing registration has zero owners.
         pub(super) fn observe_open(&self, identity: Option<&Weak<Live>>) {
             let hook = self.open_observation.lock().take();
             if let Some((entered, released)) = hook {

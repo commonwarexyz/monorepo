@@ -522,7 +522,7 @@ impl<B: Blob> Writer<B> {
     /// [`Self::sync`] if the returned handle's bytes must survive a crash.
     ///
     /// Later appends preserve this view, including its frozen partial page. Close all
-    /// disk-backed views before reopening the storage for initialization repair.
+    /// disk-backed views before reopening the storage.
     pub async fn snapshot(&mut self) -> Result<super::Sealed<B>, Error> {
         self.flush_internal(true, false).await?;
         Ok(self.sealed_handle(self.id))
@@ -1215,9 +1215,8 @@ impl<B: Blob, Phase> Writer<B, Phase> {
     /// Flushes any buffered data, then returns a [Replay] for the underlying blob.
     ///
     /// The returned replay validates checksums for stored pages and retains a frozen copy of the
-    /// current partial page. CRCs are not included in the output.
-    /// Every underlying blob read performed by the returned replay uses `read_options`, including
-    /// refills after seeking.
+    /// current partial page. CRCs are not included in the output. Every underlying blob read
+    /// performed by the returned replay uses `read_options`, including refills after seeking.
     ///
     /// This does not establish durability. Use [`sync`](Self::sync) if the replayed bytes must
     /// survive a crash.
@@ -1432,6 +1431,7 @@ mod tests {
             assert_eq!(writer.append(&4u64.to_be_bytes()).await.unwrap(), 32);
             writer.sync().await.unwrap();
 
+            // Reopening must preserve the appended values after every snapshot is released.
             drop(snapshot);
             drop(writer);
             let (blob, size) = context.open("append_value", b"blob").await.unwrap();

@@ -7,8 +7,8 @@
 //! Requests stay on that worker, with completion forwarded when their futures are
 //! polled elsewhere. Storage and blob handles retain no ring identity and can move
 //! between workers. Moving a future does not keep its original worker alive.
-//! Empty reads and writes return without touching the ring. Metadata and resize
-//! remain synchronous.
+//! Empty reads and writes return without touching the ring. Metadata, resize, and
+//! flushing a dirty predecessor during reopen run synchronously on the calling worker.
 //!
 //! Registered requests retain the open they were issued through, with its file,
 //! directory hold, and durability debt. Dropping a caller never releases them
@@ -164,11 +164,14 @@ impl crate::Storage for Storage {
                 name,
             )?;
 
+            // A fresh header starts a new incarnation with no retained predecessor state.
             if existing.is_none() {
                 self.pending.forget(partition, Some(name));
             }
             let (generation, wait, owed) = self.pending.attach(partition, name)?;
 
+            // Existing headers retain their layout. New headers become visible only after
+            // their namespace entries are durable.
             let (mut logical_len, blob_version, data_offset) = match existing {
                 Some(resolved) => resolved,
                 None => (|| {
@@ -207,6 +210,8 @@ impl crate::Storage for Storage {
                 })?,
             };
 
+            // With no predecessor work or debt, the captured file's length is final. Otherwise,
+            // it is read below once outstanding work settles and any debt is flushed.
             if !owed {
                 logical_len = file.metadata().map_err(|_| Error::ReadFailed)?.len() - data_offset;
             }
@@ -220,6 +225,9 @@ impl crate::Storage for Storage {
             );
             (blob, logical_len, blob_version, wait, owed)
         };
+
+        // Outside the namespace lock, wait for any outstanding work, then flush any debt and read
+        // the final file length.
         if owed {
             Pending::wait(wait).await?;
             logical_len = blob.complete()?;
@@ -494,7 +502,7 @@ impl Blob {
     }
 
     /// Establish what the settled predecessor left unflushed, then read the captured file's
-    /// length. A failed flush is retained for every later open of the name.
+    /// length. A failed flush is retained until the name is removed or recreated.
     fn complete(&self) -> Result<u64, Error> {
         let shared = &self.shared;
         let identity = Arc::downgrade(&self.generation);
@@ -1955,8 +1963,8 @@ mod tests {
 
     /// A durable write that fails after its caller stopped waiting dirties the open. A fused
     /// write also poisons it, since its failure may have consumed the kernel's writeback error,
-    /// so its name retains the failure for every later open. A batched write that fails before
-    /// its trailing sync only leaves the open dirty.
+    /// so its name retains the failure until removed or recreated. A batched write that fails
+    /// before its trailing sync only leaves the open dirty.
     #[test]
     fn test_orphaned_failed_durable_write_poisons_the_open() {
         // One batch fuses the sync into the write. More batches end in a trailing sync.
@@ -2139,6 +2147,7 @@ mod tests {
     #[test]
     fn test_synced_drop_leaves_no_debt() {
         iouring::Runner::default().start(|_| async {
+            // Each durability entry point must cover its mutations before the open settles.
             let (storage, storage_directory) = create_test_storage();
 
             let (blob, _) = storage.open("partition", b"sync").await.unwrap();
@@ -2159,6 +2168,7 @@ mod tests {
                 .unwrap();
             drop(blob);
 
+            // Clean settlement permits reopening without an additional completion flush.
             settle(&storage.pending).await;
             for name in [b"sync".as_slice(), b"start_sync", b"sync_write"] {
                 assert!(!storage.pending.owes("partition", name));

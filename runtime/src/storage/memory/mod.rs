@@ -60,10 +60,10 @@ impl Generations {
     }
 }
 
-/// Raw memory snapshots used by the deterministic fault model.
+/// In-memory storage with independent snapshots of durable blob contents.
 ///
-/// Each open reads an independent durable snapshot. Logical user leases belong to the enclosing
-/// [open::Opens] so retained crash mutations can outlive them.
+/// Writes remain local to an open until synchronized. Removing or replacing a blob retires
+/// its previous incarnation, preventing old handles from publishing into the new one.
 #[derive(Clone)]
 pub(crate) struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
@@ -620,7 +620,13 @@ mod tests {
             ));
             drop(first);
             assert!(matches!(
-                shared.open_versioned("partition", b"blob", crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION).await,
+                shared
+                    .open_versioned(
+                        "partition",
+                        b"blob",
+                        crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION,
+                    )
+                    .await,
                 Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
             ));
             drop(retained);

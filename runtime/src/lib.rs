@@ -1609,6 +1609,7 @@ mod tests {
         R::Context: Storage,
     {
         runner.start(|context| async move {
+            // Explicit sharing retains a single open even after its original owner drops.
             let partition = "duplicate_open";
             let name = b"blob";
             let (first, _) = context.open(partition, name).await.unwrap();
@@ -1644,6 +1645,7 @@ mod tests {
             retained.sync().await.unwrap();
             drop(retained);
 
+            // The final owner's drop permits reopening the synchronized contents.
             let (old, size) = context.open(partition, name).await.unwrap();
             assert_eq!(size, 3);
             assert_eq!(
@@ -1653,6 +1655,9 @@ mod tests {
                     .coalesce(),
                 b"new".as_slice()
             );
+
+            // Removal permits a replacement while the old handle remains alive. Dropping that
+            // old handle must not release the replacement's registration.
             context.remove(partition, Some(name)).await.unwrap();
             let (current, size) = context.open(partition, name).await.unwrap();
             assert_eq!(size, 0);
@@ -1668,6 +1673,7 @@ mod tests {
             current.sync().await.unwrap();
             drop(current);
 
+            // Reopening the replacement must return its own durable contents.
             let (reopened, size) = context.open(partition, name).await.unwrap();
             assert_eq!(size, 11);
             assert_eq!(

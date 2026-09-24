@@ -13,22 +13,22 @@
 //! warning, until then. A `Context`, `Storage`, or `Blob` kept past `start`
 //! keeps the hold.
 //!
-//! Before user code starts, Linux flushes the storage filesystem. macOS flushes
-//! the storage directory, then each existing partition before its first scan or
-//! open. These directory flushes make inherited partition and blob removals
-//! durable before recovery observes their absence. Creation and removal
-//! synchronize subsequent directory changes.
+//! Before user code starts, Linux flushes the storage filesystem. Other
+//! platforms synchronize the storage directory, then each existing partition
+//! before its first scan or open. These directory flushes make inherited
+//! partition and blob removals durable before recovery observes their absence.
+//! Creation and removal synchronize subsequent directory changes.
 //!
-//! On macOS, existing blobs are also flushed individually on their first open.
-//! Directory synchronization covers names. This separate flush covers file data.
-//! Both use `F_FULLFSYNC` through [`std::fs::File::sync_all`].
+//! Other platforms also flush existing blobs individually on their first open.
+//! Directory synchronization covers names. This separate flush covers file
+//! data. On macOS, both use `F_FULLFSYNC` through [`std::fs::File::sync_all`].
 //!
 //! Failures while synchronizing blob contents, including during
-//! [SYNC](crate::WriteOptions::SYNC) writes, are retained across opens of the blob,
-//! even after every handle is dropped.
-//! Creation failures are retained when the header is complete. Removing or
-//! recreating the blob clears its retained error. A new runtime instance starts
-//! without the error record and still requires normal storage recovery.
+//! [SYNC](crate::WriteOptions::SYNC) writes, are retained across opens of the
+//! blob, even after every handle is dropped. Creation failures are retained
+//! when the header is complete. Removing or recreating the blob clears its
+//! retained error. A new runtime instance starts without the error record and
+//! still requires normal storage recovery.
 //!
 //! # Example
 //!

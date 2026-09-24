@@ -474,8 +474,8 @@ impl crate::Runner for Runner {
         );
 
         // Under the hold, a prior run's operations have finished. Linux flushes the filesystem.
-        // macOS flushes the storage directory so inherited partition removals are durable.
-        // macOS partitions and existing blob contents are flushed on their first access.
+        // Other platforms sync the storage directory here so inherited partition removals are
+        // durable, then partition directories and existing blob contents on first access.
         if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
             panic!(
                 "failed to sync storage at startup ({}): {e}",

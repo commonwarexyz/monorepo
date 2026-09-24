@@ -4,10 +4,9 @@ use commonware_macros::stability_scope;
 
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use crate::{BlobVersion, Error};
-    use ::tokio::sync::watch;
     use cfg_if::cfg_if;
     use commonware_formatting::hex;
-    use commonware_utils::sync::Mutex;
+    use commonware_utils::{Widen, channel::watch, sync::Mutex};
     #[cfg(not(target_os = "linux"))]
     use std::collections::HashSet;
     use std::{
@@ -27,7 +26,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
 
     cfg_if! {
         if #[cfg(test)] {
-            use ::tokio::sync::oneshot::Sender as OneshotSender;
+            use commonware_utils::channel::oneshot::Sender as OneshotSender;
             use std::sync::mpsc::{Receiver as MpscReceiver, Sender as MpscSender};
         }
     }
@@ -37,8 +36,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             /// Make what a prior process wrote crash-durable before any storage structure reads by
             /// flushing the whole filesystem containing `dir` with `syncfs(2)`.
             ///
-            /// Assumes storage lives on a single filesystem. Reliable error detection needs kernel
-            /// >= 5.8.
+            /// Assumes storage lives on a single filesystem. Reliable error detection needs
+            /// kernel >= 5.8.
             pub(crate) fn sync(dir: &Path) -> io::Result<()> {
                 let file = File::open(dir)?;
                 // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
@@ -48,18 +47,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
                 }
                 Ok(())
             }
-        } else if #[cfg(target_os = "macos")] {
+        } else {
             /// Make inherited partition entries durable before user code starts. Partition
             /// directories and existing blob contents are synchronized on their first access.
             pub(crate) fn sync(dir: &Path) -> io::Result<()> {
                 File::open(dir)?.sync_all()
-            }
-        } else {
-            /// Flush nothing at startup. No filesystem-wide flush on this platform makes what a
-            /// prior process wrote crash-durable, so the first open of each existing blob flushes
-            /// it instead (see [Pending::first_open]).
-            pub(crate) const fn sync(_: &Path) -> io::Result<()> {
-                Ok(())
             }
         }
     }
@@ -100,7 +92,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         #[cfg(not(target_os = "linux"))]
         flushed: Mutex<HashSet<(String, Vec<u8>)>>,
         #[cfg(test)]
-        test: TestState,
+        test: Hooks,
     }
 
     /// Counters and hooks for controlling storage lifecycle tests.
@@ -109,7 +101,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// arrival, then wait for a release message or for the release sender to be dropped.
     #[cfg(test)]
     #[derive(Default)]
-    struct TestState {
+    struct Hooks {
         /// Number of flushes an open performed to establish a settled predecessor's debt.
         completions: AtomicU64,
         /// Report that the next completion is about to flush the file, then pause it.
@@ -132,6 +124,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         before_attach: Mutex<Option<(OneshotSender<()>, MpscReceiver<()>)>>,
     }
 
+    /// Tracks one name's latest open, outstanding settlement, and retained durability state.
     #[derive(Default)]
     struct Entry {
         /// Liveness checks must not acquire an owner: its destructor locks this registry.
@@ -245,7 +238,9 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             {
                 let mut entries = self.entries.lock();
                 if let Some(entry) = entries.get_mut(key)
-                    && entry.settle.as_ref().is_some_and(|receiver| receiver.same_channel(&sender.subscribe()))
+                    && entry.settle.as_ref().is_some_and(|receiver| {
+                        receiver.same_channel(&sender.subscribe())
+                    })
                 {
                     entry.settle = None;
                     entry.dirty |= dirty;
@@ -281,7 +276,11 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The identity is weak so a cancelled open's completion neither keeps the name open nor
         /// publishes into a successor's entry.
-        pub(crate) fn debt(&self, key: &(String, Vec<u8>), identity: &Weak<Generation>) -> Result<bool, Error> {
+        pub(crate) fn debt(
+            &self,
+            key: &(String, Vec<u8>),
+            identity: &Weak<Generation>,
+        ) -> Result<bool, Error> {
             let entries = self.entries.lock();
             let Some(entry) = entries.get(key) else {
                 return Ok(false);
@@ -511,11 +510,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         let mut raw = Vec::with_capacity(requested);
         file.seek(SeekFrom::Start(0))
             .map_err(|_| Error::ReadFailed)?;
-        file.take(requested as u64).read_to_end(&mut raw).map_err(|_| Error::ReadFailed)?;
+        file.take(Widen::widen(requested))
+            .read_to_end(&mut raw)
+            .map_err(|_| Error::ReadFailed)?;
 
         // V0's prefix includes mutable payload that may shrink after metadata was read.
         // A complete prefix must retain the original length, which yields the logical size.
-        let parse_len = if raw.len() < requested { raw.len() as u64 } else { raw_len };
+        let parse_len = if raw.len() < requested { Widen::widen(raw.len()) } else { raw_len };
         header::resolve(&raw, parse_len, layouts, versions, partition, name)
     }
 
@@ -570,13 +571,9 @@ pub(crate) mod tests {
     pub(crate) mod shared {
         use super::super::Pending;
         use crate::{Blob as _, BufferPool, Error, ReadOptions, WriteOptions, buffer::Write};
-        use ::tokio::time::timeout;
-        use commonware_utils::NZUsize;
+        use commonware_utils::{NZUsize, channel::oneshot};
         use futures::FutureExt as _;
-        use std::{
-            sync::{Arc, mpsc},
-            time::Duration,
-        };
+        use std::sync::{Arc, mpsc};
 
         /// An untouched creation leaves no debt for a later open.
         pub(crate) async fn check_untouched_creation_leaves_no_debt<S: crate::Storage>(
@@ -835,7 +832,7 @@ pub(crate) mod tests {
                 // Block the reopen's flush. A shared owner keeps the replacement alive while the
                 // removed open drops, so only the replacement may record debt. Dropping the sender
                 // also releases the worker if an assertion unwinds.
-                let (entered, entering) = ::tokio::sync::oneshot::channel();
+                let (entered, entering) = oneshot::channel();
                 let (release, gate) = mpsc::channel();
                 *pending.test.before_complete.lock() = Some((entered, gate));
                 let completions = pending.completions();
@@ -844,14 +841,10 @@ pub(crate) mod tests {
                 drop(reader);
 
                 let mut reopen = Box::pin(storage.open(partition, name));
-                timeout(Duration::from_secs(5), async {
-                    commonware_macros::select! {
-                        entered = entering => entered.expect("reopen dropped its flush gate"),
-                        _ = &mut reopen => panic!("reopen completed before its flush"),
-                    }
-                })
-                .await
-                .expect("reopen did not begin its flush");
+                commonware_macros::select! {
+                    entered = entering => entered.expect("reopen dropped its flush gate"),
+                    _ = &mut reopen => panic!("reopen completed before its flush"),
+                }
                 assert!(
                     (&mut reopen).now_or_never().is_none(),
                     "reopen exposed the replacement before its flush"
@@ -859,12 +852,12 @@ pub(crate) mod tests {
 
                 // Waiting for this flush must leave the namespace lock available to unrelated
                 // scans and opens.
-                let clean_progress = timeout(Duration::from_secs(5), async {
+                let clean_progress = async {
                     let names = storage.scan("independent").await?;
                     let (blob, len) = storage.open("independent", b"ready").await?;
                     drop(blob);
                     Ok::<_, Error>((names, len))
-                })
+                }
                 .await;
 
                 // Release the worker before checking outcomes so failures cannot leave it
@@ -885,9 +878,7 @@ pub(crate) mod tests {
                     1,
                     "the replacement's debt is flushed once"
                 );
-                let (names, len) = clean_progress
-                    .expect("a flush blocked another partition")
-                    .unwrap();
+                let (names, len) = clean_progress.unwrap();
                 assert_eq!(names, vec![b"ready".to_vec()]);
                 assert_eq!(len, 0);
             }

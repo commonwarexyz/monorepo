@@ -27,7 +27,6 @@ use tokio::task;
 cfg_if! {
     if #[cfg(test)] {
         use std::sync::mpsc;
-        use tokio::sync::oneshot::Sender as OneshotSender;
     }
 }
 
@@ -83,23 +82,23 @@ struct Shared {
     key: (String, Vec<u8>),
     /// Settles the open once its last handle dropped and every operation finished.
     promise: OnceLock<Sender>,
-    #[cfg(test)]
-    test: TestState,
     /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
     /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
     dont_cache_supported: AtomicBool,
+    #[cfg(test)]
+    test: Hooks,
 }
 
 /// Hooks for controlling blocking storage operations in lifecycle tests.
 #[cfg(test)]
 #[derive(Default)]
-struct TestState {
+struct Hooks {
     /// Pause the next mutation after it enters the blocking pool.
-    before_mutation: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
+    before_mutation: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next sync after the filesystem operation completes.
-    after_sync: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
+    after_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
     /// Pause the next start_sync worker after publishing its completion.
-    after_start_sync: Mutex<Option<(OneshotSender<()>, mpsc::Receiver<()>)>>,
+    after_start_sync: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
 }
 
 #[cfg(test)]
@@ -191,8 +190,8 @@ impl Shared {
 
     /// Establish a settled predecessor's debt through this open's file.
     ///
-    /// A failure also poisons this open, so its settlement retains the error for every later
-    /// open even when a successor attached while the flush was still running.
+    /// A failure also poisons this open, so its settlement retains the error even when a
+    /// successor attached during the flush. Removing or recreating the name clears the error.
     fn complete(&self) -> Result<(), Error> {
         #[cfg(test)]
         self.pending.before_complete();
@@ -229,7 +228,7 @@ impl Drop for Blob {
 
 impl Blob {
     /// Establish what the settled predecessor left unflushed, then read the captured file's
-    /// length. A failed flush is retained for every later open of the name.
+    /// length. A failed flush is retained until the name is removed or recreated.
     pub(super) async fn complete(&self) -> Result<u64, Error> {
         let shared = self.shared.clone();
         let identity = Arc::downgrade(&self.generation);
@@ -271,9 +270,9 @@ impl Blob {
             pending: generation.pending.clone(),
             key: generation.key.clone(),
             promise: OnceLock::new(),
-            #[cfg(test)]
-            test: TestState::default(),
             dont_cache_supported: AtomicBool::new(true),
+            #[cfg(test)]
+            test: Hooks::default(),
         });
         Self {
             shared,
@@ -512,9 +511,9 @@ impl crate::Blob for Blob {
             .filter(|end| *end <= i64::MAX as u64)
             .ok_or(Error::OffsetOverflow)?;
 
+        // Derive per-write policy from the requested options. The blocking worker checks
+        // backend support before each hinted submission.
         let file = self.shared.clone();
-
-        // Derive per-write policy from the requested options and cached backend support.
         let sync = options.contains(WriteOptions::SYNC);
         if sync && let Some(error) = self.shared.tracker.failure() {
             return Err(error);
@@ -679,8 +678,7 @@ mod tests {
     use futures::FutureExt as _;
     #[cfg(target_os = "linux")]
     use std::sync::Weak;
-    use std::{env, ops::RangeInclusive, path::PathBuf, process, sync::mpsc, time::Duration};
-    use tokio::time::timeout;
+    use std::{env, ops::RangeInclusive, path::PathBuf, process, sync::mpsc};
 
     fn storage_for_reopen_test(label: &str, layouts: RangeInclusive<Layout>) -> (Storage, PathBuf) {
         let directory = env::temp_dir().join(format!("storage_tokio_{label}_{}", process::id()));
@@ -716,104 +714,117 @@ mod tests {
             }
         }
 
-        timeout(Duration::from_secs(20), async {
-            for operation in [
-                Operation::Sync,
-                Operation::StartSync,
-                Operation::Write(1),
-                Operation::Write(IOVEC_BATCH_SIZE + 1),
-            ] {
-                for failure_first in [false, true] {
-                    for cancel in [false, true] {
-                        let (storage, directory) = storage_for_reopen_test(
-                            &format!("overlapping_failure_{operation:?}_{failure_first}_{cancel}"),
-                            Layout::ALL,
-                        );
-                        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-                        blob.write_at(0, b"prefix", WriteOptions::default())
-                            .await
-                            .unwrap();
+        // Exercise both result orders and caller cancellation for every durability path.
+        for operation in [
+            Operation::Sync,
+            Operation::StartSync,
+            Operation::Write(1),
+            Operation::Write(IOVEC_BATCH_SIZE + 1),
+        ] {
+            for failure_first in [false, true] {
+                for cancel in [false, true] {
+                    let (storage, directory) = storage_for_reopen_test(
+                        &format!("overlapping_failure_{operation:?}_{failure_first}_{cancel}"),
+                        Layout::ALL,
+                    );
+                    let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+                    blob.write_at(0, b"prefix", WriteOptions::default())
+                        .await
+                        .unwrap();
 
-                        // Pause the first barrier before its result reaches the tracker.
-                        let (entered, entering) = ::tokio::sync::oneshot::channel();
-                        let (release, gate) = mpsc::channel();
-                        *blob.shared.test.after_sync.lock() = Some((entered, gate));
-                        if failure_first {
-                            *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
-                        }
-                        let mut first = Box::pin(run(
-                            &blob,
-                            if failure_first {
-                                Operation::Sync
-                            } else {
-                                operation
-                            },
-                        ));
-                        assert!((&mut first).now_or_never().is_none());
-                        entering.await.unwrap();
-                        assert!(
-                            blob.shared.durability.try_lock().is_none(),
-                            "barrier released admission before accounting"
-                        );
-                        let first = if cancel {
-                            drop(first);
-                            None
-                        } else {
-                            Some(first)
-                        };
-                        if !failure_first {
-                            *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
-                        }
-
-                        let mut second = Box::pin(run(
-                            &blob,
-                            if failure_first {
-                                operation
-                            } else {
-                                Operation::Sync
-                            },
-                        ));
-                        assert!((&mut second).now_or_never().is_none());
-                        let early = (&mut second).now_or_never();
-                        release.send(()).unwrap();
-                        assert!(
-                            early.is_none(),
-                            "barrier completed before predecessor accounting"
-                        );
-                        let first = futures::future::OptionFuture::from(first).await;
-                        let second = second.await;
-                        if failure_first {
-                            assert!(matches!(first, None | Some(Err(Error::Closed))));
-                            assert!(matches!(second, Err(Error::Closed)));
-                            assert!(blob.shared.tracker.is_dirty());
-                        } else {
-                            if let Some(first) = first {
-                                first.unwrap();
-                            }
-                            assert!(matches!(second, Err(Error::Closed)));
-                        }
-                        assert!(matches!(blob.shared.tracker.failure(), Some(Error::Closed)));
-                        drop(blob);
-                        assert!(matches!(
-                            storage.open("partition", b"blob").await,
-                            Err(Error::Closed)
-                        ));
-                        storage.remove("partition", None).await.unwrap();
-                        drop(storage);
-                        std::fs::remove_dir_all(directory).unwrap();
+                    // Pause the first barrier before its result reaches the tracker.
+                    let (entered, entering) = oneshot::channel();
+                    let (release, gate) = mpsc::channel();
+                    *blob.shared.test.after_sync.lock() = Some((entered, gate));
+                    if failure_first {
+                        *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
                     }
+                    let mut first = Box::pin(run(
+                        &blob,
+                        if failure_first {
+                            Operation::Sync
+                        } else {
+                            operation
+                        },
+                    ));
+                    assert!((&mut first).now_or_never().is_none());
+                    entering.await.unwrap();
+                    assert!(
+                        blob.shared.durability.try_lock().is_none(),
+                        "barrier released admission before accounting"
+                    );
+
+                    // Cancellation releases the awaiter while the blocking barrier retains
+                    // its permit and responsibility for publishing the result.
+                    let first = if cancel {
+                        drop(first);
+                        None
+                    } else {
+                        Some(first)
+                    };
+
+                    // In the other result order, inject failure after the first barrier starts
+                    // but before the competing barrier can begin.
+                    if !failure_first {
+                        *storage.pending.test.fail_flush.lock() = Some(Error::Closed);
+                    }
+
+                    // A competing barrier cannot finish while its predecessor's result is
+                    // still withheld, regardless of which operation will report the failure.
+                    let mut second = Box::pin(run(
+                        &blob,
+                        if failure_first {
+                            operation
+                        } else {
+                            Operation::Sync
+                        },
+                    ));
+                    assert!((&mut second).now_or_never().is_none());
+                    let early = (&mut second).now_or_never();
+                    release.send(()).unwrap();
+                    assert!(
+                        early.is_none(),
+                        "barrier completed before predecessor accounting"
+                    );
+
+                    // Once accounting completes, every later durability claim sees the failure.
+                    let first = futures::future::OptionFuture::from(first).await;
+                    let second = second.await;
+                    if failure_first {
+                        assert!(matches!(first, None | Some(Err(Error::Closed))));
+                        assert!(matches!(second, Err(Error::Closed)));
+                        assert!(blob.shared.tracker.is_dirty());
+                    } else {
+                        if let Some(first) = first {
+                            first.unwrap();
+                        }
+                        assert!(matches!(second, Err(Error::Closed)));
+                    }
+                    assert!(matches!(blob.shared.tracker.failure(), Some(Error::Closed)));
+
+                    // Settlement carries the failure into a later open of the same name.
+                    drop(blob);
+                    assert!(matches!(
+                        storage.open("partition", b"blob").await,
+                        Err(Error::Closed)
+                    ));
+                    storage.remove("partition", None).await.unwrap();
+                    drop(storage);
+                    std::fs::remove_dir_all(directory).unwrap();
                 }
             }
-        })
-        .await
-        .unwrap();
+        }
     }
 
+    /// A reopen of the same incarnation waits for the canceled write or resize, with retirement
+    /// on either side of its attachment. Replacement leaves an earlier reopen bound to the
+    /// removed file. Both paths report the captured file's settled contents.
     async fn check_reopen_after_gated_mutation(
         replace: bool,
         shrink: bool,
         retire_before_attach: bool,
     ) {
+        // Use V0 to cover opens whose header prefix includes payload bytes.
         let (storage, directory) = storage_for_reopen_test(
             &format!("gated_reopen_{replace}_{shrink}_{retire_before_attach}"),
             Layout::V0..=Layout::V0,
@@ -835,13 +846,15 @@ mod tests {
             storage.remove("partition", Some(b"blob")).await.unwrap();
         }
 
+        // Hold a mutation in the blocking pool after its caller and public blob are dropped.
+        // The outstanding request must retain the file and its eventual durability debt.
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         if shrink {
             blob.write_at(0, b"orphaned", WriteOptions::SYNC)
                 .await
                 .unwrap();
         }
-        let (entered, entering) = ::tokio::sync::oneshot::channel();
+        let (entered, entering) = oneshot::channel();
         let (release, gate) = mpsc::channel();
         *blob.shared.test.before_mutation.lock() = Some((entered, gate));
         let mut mutation = Box::pin(async {
@@ -864,8 +877,9 @@ mod tests {
             .settle
             .clone();
 
+        // Select whether retirement happens before or after the successor claims the name.
         let attachment = if retire_before_attach {
-            let (entered, entering) = ::tokio::sync::oneshot::channel();
+            let (entered, entering) = oneshot::channel();
             let (release, gate) = mpsc::channel();
             *storage.pending.test.before_attach.lock() = Some((entered, gate));
             Some((entering, release))
@@ -887,6 +901,9 @@ mod tests {
             storage.scan("partition").await.unwrap();
             release.send(()).unwrap();
         }
+
+        // With replacement, the earlier reopen captures the old incarnation. Every returned
+        // length and byte sequence must describe its captured file after mutations finish.
         let (reopened, size) = match early {
             Some(result) => result,
             None => reopening.as_mut().await,
@@ -894,7 +911,8 @@ mod tests {
         .unwrap();
         drop(reopening);
         Pending::wait(wait).await.unwrap();
-        if replace && size == 3 {
+        if replace {
+            assert_eq!(size, 3);
             assert_eq!(
                 reopened
                     .read_at(0, 3, ReadOptions::default())
@@ -932,179 +950,169 @@ mod tests {
 
     #[tokio::test]
     async fn test_reopen_replacement_after_gated_mutation() {
-        timeout(Duration::from_secs(10), async {
-            for shrink in [false, true] {
-                check_reopen_after_gated_mutation(true, shrink, false).await;
-            }
-        })
-        .await
-        .unwrap();
+        for shrink in [false, true] {
+            check_reopen_after_gated_mutation(true, shrink, false).await;
+        }
     }
 
     #[tokio::test]
     async fn test_reopen_after_gated_mutation() {
-        timeout(Duration::from_secs(10), async {
-            for shrink in [false, true] {
-                check_reopen_after_gated_mutation(false, shrink, false).await;
-            }
-        })
-        .await
-        .unwrap();
+        for shrink in [false, true] {
+            check_reopen_after_gated_mutation(false, shrink, false).await;
+        }
     }
 
     #[tokio::test]
     async fn test_reopen_after_retirement_before_attachment() {
-        timeout(Duration::from_secs(10), async {
-            for shrink in [false, true] {
-                check_reopen_after_gated_mutation(false, shrink, true).await;
-            }
-        })
-        .await
-        .unwrap();
+        for shrink in [false, true] {
+            check_reopen_after_gated_mutation(false, shrink, true).await;
+        }
     }
 
     #[tokio::test]
     async fn test_reopen_canceled_during_final_metadata() {
-        timeout(Duration::from_secs(10), async {
-            let (storage, directory) = storage_for_reopen_test("canceled_metadata", Layout::ALL);
-            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-            blob.write_at(0, b"old", WriteOptions::default())
-                .await
-                .unwrap();
-            let (flush_entered, _flush_entering) = ::tokio::sync::oneshot::channel();
-            let (flush_release, flush_gate) = mpsc::channel();
-            *storage.pending.test.before_complete.lock() = Some((flush_entered, flush_gate));
-            drop(blob);
-            let (entered, entering) = ::tokio::sync::oneshot::channel();
-            let (release, gate) = mpsc::channel();
-            *storage.pending.test.before_metadata.lock() = Some((entered, gate));
-            let mut opening = Box::pin(storage.open("partition", b"blob"));
-            assert!((&mut opening).now_or_never().is_none());
-            storage.scan("partition").await.unwrap();
-            flush_release.send(()).unwrap();
-            commonware_macros::select! {
-                entered = entering => entered.unwrap(),
-                _ = &mut opening => panic!("open must wait for metadata"),
-            }
-            drop(opening);
+        // Leave a dirty predecessor and pause its successor before the final flush and
+        // length read, after namespace dispatch has finished.
+        let (storage, directory) = storage_for_reopen_test("canceled_metadata", Layout::ALL);
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        blob.write_at(0, b"old", WriteOptions::default())
+            .await
+            .unwrap();
+        let (flush_entered, _flush_entering) = oneshot::channel();
+        let (flush_release, flush_gate) = mpsc::channel();
+        *storage.pending.test.before_complete.lock() = Some((flush_entered, flush_gate));
+        drop(blob);
+        let (entered, entering) = oneshot::channel();
+        let (release, gate) = mpsc::channel();
+        *storage.pending.test.before_metadata.lock() = Some((entered, gate));
+        let mut opening = Box::pin(storage.open("partition", b"blob"));
+        assert!((&mut opening).now_or_never().is_none());
+        storage.scan("partition").await.unwrap();
+        flush_release.send(()).unwrap();
+        commonware_macros::select! {
+            entered = entering => entered.unwrap(),
+            _ = &mut opening => panic!("open must wait for metadata"),
+        }
 
-            let mut retry = Box::pin(storage.open("partition", b"blob"));
-            assert!((&mut retry).now_or_never().is_none());
-            storage.scan("partition").await.unwrap();
-            release.send(()).unwrap();
-            let (blob, size) = retry.await.unwrap();
-            assert_eq!(size, 3);
-            assert_eq!(storage.pending.completions(), 1);
-            assert!(!storage.pending.owes("partition", b"blob"));
-            assert_eq!(
-                blob.read_at(0, 3, ReadOptions::default())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                b"old"
-            );
-            drop(blob);
-            storage.remove("partition", None).await.unwrap();
-            drop(storage);
-            std::fs::remove_dir_all(directory).unwrap();
-        })
-        .await
-        .unwrap();
+        // Canceling the awaiter must leave completion owned by the blocking operation.
+        drop(opening);
+
+        // The retry waits for that operation and observes exactly one successful flush.
+        let mut retry = Box::pin(storage.open("partition", b"blob"));
+        assert!((&mut retry).now_or_never().is_none());
+        storage.scan("partition").await.unwrap();
+        release.send(()).unwrap();
+        let (blob, size) = retry.await.unwrap();
+        assert_eq!(size, 3);
+        assert_eq!(storage.pending.completions(), 1);
+        assert!(!storage.pending.owes("partition", b"blob"));
+        assert_eq!(
+            blob.read_at(0, 3, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            b"old"
+        );
+        drop(blob);
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     /// An open canceled while its predecessor is still settling neither replaces that
     /// settlement nor keeps the name, and the predecessor's debt survives for the next open.
     #[tokio::test]
     async fn test_reopen_canceled_during_wait_keeps_debt() {
-        timeout(Duration::from_secs(10), async {
-            let (storage, directory) = storage_for_reopen_test("canceled_wait", Layout::ALL);
-            let key = ("partition".to_string(), b"blob".to_vec());
-            let (blob, _) = storage.open("partition", b"blob").await.unwrap();
+        let (storage, directory) = storage_for_reopen_test("canceled_wait", Layout::ALL);
+        let key = ("partition".to_string(), b"blob".to_vec());
+        let (blob, _) = storage.open("partition", b"blob").await.unwrap();
 
-            // Gate a plain write inside the blocking pool so the open settles only on release.
-            let (entered, entering) = ::tokio::sync::oneshot::channel();
-            let (release, gate) = mpsc::channel();
-            *blob.shared.test.before_mutation.lock() = Some((entered, gate));
-            let mut mutation = Box::pin(blob.write_at(0, b"orphaned", WriteOptions::default()));
-            assert!((&mut mutation).now_or_never().is_none());
-            entering.await.unwrap();
-            drop(mutation);
-            drop(blob);
-            let wait = storage
-                .pending
-                .entries
-                .lock()
-                .get(&key)
+        // Gate a plain write inside the blocking pool so the open settles only on release.
+        let (entered, entering) = oneshot::channel();
+        let (release, gate) = mpsc::channel();
+        *blob.shared.test.before_mutation.lock() = Some((entered, gate));
+        let mut mutation = Box::pin(blob.write_at(0, b"orphaned", WriteOptions::default()));
+        assert!((&mut mutation).now_or_never().is_none());
+        entering.await.unwrap();
+        drop(mutation);
+        drop(blob);
+        let wait = storage
+            .pending
+            .entries
+            .lock()
+            .get(&key)
+            .unwrap()
+            .settle
+            .clone();
+        assert!(wait.is_some());
+        assert_eq!(storage.pending.outstanding(), 1);
+
+        // The reopen attaches behind the settling predecessor and waits for it. The scan
+        // proves its namespace dispatch, and with it the attachment, completed.
+        let mut opening = Box::pin(storage.open("partition", b"blob"));
+        assert!((&mut opening).now_or_never().is_none());
+        storage.scan("partition").await.unwrap();
+        assert!((&mut opening).now_or_never().is_none());
+        {
+            let entries = storage.pending.entries.lock();
+            let entry = entries.get(&key).unwrap();
+            assert_eq!(entry.identity.strong_count(), 1);
+            assert!(entry.settle.is_some());
+            assert!(!entry.dirty);
+        }
+
+        // Canceling the waiting reopen releases the name without settling anything, so the
+        // entry keeps the predecessor's settlement.
+        drop(opening);
+        {
+            let entries = storage.pending.entries.lock();
+            let entry = entries.get(&key).unwrap();
+            assert_eq!(entry.identity.strong_count(), 0);
+            assert!(entry.settle.is_some());
+            assert!(!entry.dirty);
+            assert!(entry.failed.is_none());
+        }
+        assert_eq!(storage.pending.outstanding(), 1);
+        assert_eq!(storage.pending.completions(), 0);
+
+        // The write lands and its settlement records the debt on the retained entry.
+        release.send(()).unwrap();
+        Pending::wait(wait).await.unwrap();
+        assert_eq!(storage.pending.outstanding(), 0);
+        assert!(storage.pending.owes("partition", b"blob"));
+
+        // The next open establishes the debt before returning.
+        let (blob, size) = storage.open("partition", b"blob").await.unwrap();
+        assert_eq!(size, 8);
+        assert_eq!(storage.pending.completions(), 1);
+        assert!(!storage.pending.owes("partition", b"blob"));
+        assert_eq!(
+            blob.read_at(0, 8, ReadOptions::default())
+                .await
                 .unwrap()
-                .settle
-                .clone();
-            assert!(wait.is_some());
-            assert_eq!(storage.pending.outstanding(), 1);
-
-            // The reopen attaches behind the settling predecessor and waits for it. The scan
-            // proves its namespace dispatch, and with it the attachment, completed.
-            let mut opening = Box::pin(storage.open("partition", b"blob"));
-            assert!((&mut opening).now_or_never().is_none());
-            storage.scan("partition").await.unwrap();
-            assert!((&mut opening).now_or_never().is_none());
-            {
-                let entries = storage.pending.entries.lock();
-                let entry = entries.get(&key).unwrap();
-                assert_eq!(entry.identity.strong_count(), 1);
-                assert!(entry.settle.is_some());
-                assert!(!entry.dirty);
-            }
-
-            // Canceling the waiting reopen releases the name without settling anything, so the
-            // entry keeps the predecessor's settlement.
-            drop(opening);
-            {
-                let entries = storage.pending.entries.lock();
-                let entry = entries.get(&key).unwrap();
-                assert_eq!(entry.identity.strong_count(), 0);
-                assert!(entry.settle.is_some());
-                assert!(!entry.dirty);
-                assert!(entry.failed.is_none());
-            }
-            assert_eq!(storage.pending.outstanding(), 1);
-            assert_eq!(storage.pending.completions(), 0);
-
-            // The write lands and its settlement records the debt on the retained entry.
-            release.send(()).unwrap();
-            Pending::wait(wait).await.unwrap();
-            assert_eq!(storage.pending.outstanding(), 0);
-            assert!(storage.pending.owes("partition", b"blob"));
-
-            // The next open establishes the debt before returning.
-            let (blob, size) = storage.open("partition", b"blob").await.unwrap();
-            assert_eq!(size, 8);
-            assert_eq!(storage.pending.completions(), 1);
-            assert!(!storage.pending.owes("partition", b"blob"));
-            assert_eq!(
-                blob.read_at(0, 8, ReadOptions::default())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                b"orphaned"
-            );
-            drop(blob);
-            assert!(storage.pending.entries.lock().is_empty());
-            storage.remove("partition", None).await.unwrap();
-            drop(storage);
-            std::fs::remove_dir_all(directory).unwrap();
-        })
-        .await
-        .unwrap();
+                .coalesce()
+                .as_ref(),
+            b"orphaned"
+        );
+        drop(blob);
+        assert!(storage.pending.entries.lock().is_empty());
+        storage.remove("partition", None).await.unwrap();
+        drop(storage);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
     async fn test_header_read_after_payload_shrink() {
+        // V0 header reads overlap the payload, so a shrink can shorten the captured prefix
+        // without invalidating the header itself.
         let (storage, directory) =
             storage_for_reopen_test("header_shrink", Layout::V0..=Layout::V0);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let mut file = File::open(directory.join("partition").join(hex(b"blob"))).unwrap();
+
+        // Capture metadata before shrinking, then resolve the header using that stale length.
+        // Cover both a short prefix and a file extending beyond the header read limit.
         for original in [8, 5000] {
             for retained in [0, 3] {
                 blob.resize(original).await.unwrap();
@@ -1214,6 +1222,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_write_range_leaves_open_clean() {
+        // Validate physical extents with both header layouts before any mutation is recorded.
         for (case, layouts) in [Layout::V0..=Layout::V0, Layout::ALL]
             .into_iter()
             .enumerate()
@@ -1225,6 +1234,7 @@ mod tests {
             let last = i64::MAX as u64;
             let completed = storage.pending.completions();
 
+            // Empty writes skip I/O but still reject overflow when adding the header offset.
             for options in [WriteOptions::default(), WriteOptions::SYNC] {
                 blob.write_at(u64::MAX - header, IoBufs::default(), options)
                     .await
@@ -1252,6 +1262,7 @@ mod tests {
                 }
             }
 
+            // Rejected extents must leave neither flush debt nor a failure for the next open.
             drop(blob);
             let (blob, size) = storage.open("partition", b"blob").await.unwrap();
             assert_eq!(size, 0);
@@ -1264,8 +1275,9 @@ mod tests {
         }
     }
 
+    /// Pauses before panicking as the write releases its first buffer.
     struct PanickingOwner {
-        entered: Option<::tokio::sync::oneshot::Sender<()>>,
+        entered: Option<oneshot::Sender<()>>,
         release: mpsc::Receiver<()>,
     }
 
@@ -1285,13 +1297,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_reopen_syncs_fallback_write_after_owner_panic() {
+        // Exceed the Linux fused-write batch so payload destruction can interrupt the
+        // fallback path after bytes reach the file but before its full-file flush.
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_owner_panic_{}", process::id()));
         let mut registry = Registry::default();
         let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
         let storage = Storage::new(Config::new(storage_directory.clone(), Layout::ALL), pool);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-        let (entered, entering) = ::tokio::sync::oneshot::channel();
+        let (entered, entering) = oneshot::channel();
         let (release, released) = mpsc::channel();
         let mut chunks = vec![crate::IoBuf::from(bytes::Bytes::from_owner(
             PanickingOwner {
@@ -1309,27 +1323,28 @@ mod tests {
             ::tokio::spawn(
                 async move { writing_blob.write_at(0, chunks, WriteOptions::SYNC).await },
             );
-        let entered = ::tokio::time::timeout(std::time::Duration::from_secs(10), entering).await;
+
+        // Observe written bytes before releasing the destructor to unwind the worker.
+        entering.await.unwrap();
         let bytes = blob.read_at(0, 1, ReadOptions::default()).await;
         release.send(()).unwrap();
         let result = writing.await.unwrap();
-        entered.unwrap().unwrap();
         assert_eq!(bytes.unwrap().coalesce().as_ref(), b"x");
         assert!(matches!(result, Err(Error::WriteFailed)));
 
-        let (entered, _entering) = ::tokio::sync::oneshot::channel();
+        // The failed mutation leaves debt. A reopen must wait for its flush before returning
+        // the bytes that survived the worker panic.
+        let (entered, entering) = oneshot::channel();
         let (release, gate) = mpsc::channel();
         *storage.pending.test.before_complete.lock() = Some((entered, gate));
         drop(blob);
         let mut reopen = Box::pin(storage.open("partition", b"blob"));
-        let early = ::tokio::time::timeout(std::time::Duration::from_millis(20), &mut reopen).await;
-        release.send(()).ok();
-        let waited = early.is_err();
-        let (blob, size) = match early {
-            Ok(result) => result.unwrap(),
-            Err(_) => reopen.as_mut().await.unwrap(),
-        };
-        drop(reopen);
+        commonware_macros::select! {
+            entered = entering => entered.unwrap(),
+            _ = &mut reopen => panic!("reopen returned before the failed write was made durable"),
+        }
+        release.send(()).unwrap();
+        let (blob, size) = reopen.await.unwrap();
         assert!(size >= 1);
         assert_eq!(
             blob.read_at(0, 1, ReadOptions::default())
@@ -1343,10 +1358,6 @@ mod tests {
         let flushes = storage.pending.completions();
         drop(storage);
         let _ = std::fs::remove_dir_all(storage_directory);
-        assert!(
-            waited,
-            "reopen returned before the failed write was made durable"
-        );
         assert_eq!(flushes, 1);
     }
 
@@ -1354,7 +1365,7 @@ mod tests {
     async fn test_reopen_after_start_sync_completion() {
         let (storage, storage_directory) = storage_for_reopen_test("sync_completion", Layout::ALL);
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
-        let (entered, entering) = ::tokio::sync::oneshot::channel();
+        let (entered, entering) = oneshot::channel();
         let (release, released) = mpsc::channel();
         *blob.shared.test.after_start_sync.lock() = Some((entered, released));
 
@@ -1362,7 +1373,7 @@ mod tests {
         blob.write_at(0, b"before", WriteOptions::default())
             .await
             .unwrap();
-        let observed = timeout(Duration::from_secs(10), async {
+        let observed = async {
             blob.start_sync().await.await?;
             entering.await.expect("sync worker did not pause");
             blob.write_at(0, b"after sync", WriteOptions::default())
@@ -1373,14 +1384,12 @@ mod tests {
                 .read_at(0, len as usize, ReadOptions::default())
                 .await?;
             Ok::<_, Error>((len, bytes.coalesce(), storage.pending.completions()))
-        })
+        }
         .await;
 
         // Release the worker before checking results so a failure cannot strand it.
         let _ = release.send(());
-        let (len, bytes, syncs) = observed
-            .expect("completed sync retained blob ownership")
-            .unwrap();
+        let (len, bytes, syncs) = observed.unwrap();
         let _ = std::fs::remove_dir_all(storage_directory);
         assert_eq!(len, 10);
         assert_eq!(bytes.as_ref(), b"after sync");

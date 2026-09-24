@@ -2,7 +2,7 @@ use super::{Header, Layout, Pending, hold::Hold, resolve_header, sync_dir};
 use crate::{BlobVersion, BufferPool, Error};
 use commonware_formatting::{from_hex, hex};
 use commonware_utils::channel::oneshot;
-#[cfg(target_os = "macos")]
+#[cfg(not(target_os = "linux"))]
 use std::collections::HashSet;
 use std::{
     fs,
@@ -49,9 +49,9 @@ struct Partitions {
     /// Partitions whose inherited directory changes are durable. Creation and removal maintain
     /// this state under the same lock. Removal retires the entry before unlinking, and a blob
     /// removal restores it once the partition directory is synced.
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     synced: HashSet<PathBuf>,
-    #[cfg(all(test, target_os = "macos"))]
+    #[cfg(all(test, not(target_os = "linux")))]
     sync_hook: tests::SyncHook,
 }
 
@@ -59,7 +59,7 @@ impl Partitions {
     /// Makes storage root entry changes durable, with test hooks to pause or fail
     /// before the filesystem sync.
     fn sync_root(&mut self, root: &Path) -> Result<(), Error> {
-        #[cfg(all(test, target_os = "macos"))]
+        #[cfg(all(test, not(target_os = "linux")))]
         self.sync_hook.run()?;
         sync_dir(root)
     }
@@ -71,14 +71,14 @@ impl Partitions {
         path: impl AsRef<Path> + Into<PathBuf>,
         root: Option<&Path>,
     ) -> Result<(), Error> {
-        #[cfg(all(test, target_os = "macos"))]
+        #[cfg(all(test, not(target_os = "linux")))]
         self.sync_hook.run()?;
         sync_dir(path.as_ref())?;
         if let Some(root) = root {
             self.sync_root(root)?;
         }
 
-        #[cfg(target_os = "macos")]
+        #[cfg(not(target_os = "linux"))]
         self.synced.insert(path.into());
         Ok(())
     }
@@ -86,14 +86,14 @@ impl Partitions {
     /// Retire a partition's durability record before changing its directory entries.
     #[allow(clippy::missing_const_for_fn)]
     fn invalidate(&mut self, _path: &Path) {
-        #[cfg(target_os = "macos")]
+        #[cfg(not(target_os = "linux"))]
         self.synced.remove(_path);
     }
 
     /// Make a partition's inherited directory entries durable on first access.
     #[allow(clippy::missing_const_for_fn)]
     fn sync_once(&mut self, _path: &Path) -> Result<(), Error> {
-        #[cfg(target_os = "macos")]
+        #[cfg(not(target_os = "linux"))]
         {
             if self.synced.contains(_path) {
                 return Ok(());
@@ -222,12 +222,15 @@ impl crate::Storage for Storage {
                     &name,
                 )?;
 
+                // A fresh header starts a new incarnation with no retained predecessor state.
                 if existing.is_none() {
                     pending.forget(&partition, Some(&name));
                 }
                 let (generation, wait, owed) = pending.attach(&partition, &name)?;
                 let owed = owed || pending.first_open(&generation, existing.is_some());
 
+                // Existing headers retain their layout. New headers become visible only after
+                // their namespace entries are durable.
                 let (mut logical_size, blob_version, data_offset) = match existing {
                     Some(resolved) => {
                         partitions.sync_once(parent)?;
@@ -265,6 +268,8 @@ impl crate::Storage for Storage {
                     })?,
                 };
 
+                // With no predecessor work or debt, the captured file's length is final. Otherwise,
+                // it is read below once outstanding work settles and any debt is flushed.
                 if !owed {
                     logical_size =
                         file.metadata().map_err(|_| Error::ReadFailed)?.len() - data_offset;
@@ -275,6 +280,9 @@ impl crate::Storage for Storage {
                 Ok((blob, logical_size, blob_version, wait, owed))
             })
             .await?;
+
+        // Outside the namespace lock, wait for any outstanding work, then flush any debt and read
+        // the final file length.
         if owed {
             Pending::wait(wait).await?;
             logical_size = blob.complete().await?;
@@ -391,16 +399,16 @@ mod tests {
     };
 
     /// One-shot pause and failure controls applied before a directory sync.
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     #[derive(Default)]
     pub(super) struct SyncHook {
         /// Announces entry and waits for release before the filesystem sync.
-        pause: Option<(tokio::sync::oneshot::Sender<()>, mpsc::Receiver<()>)>,
+        pause: Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>,
         /// Error returned in place of the next filesystem sync.
         fail: Option<Error>,
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     impl SyncHook {
         pub(super) fn run(&mut self) -> Result<(), Error> {
             if let Some((entered, released)) = self.pause.take() {
@@ -783,6 +791,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_canceled_open_retires_result_before_retry() {
+        // Exercise cancellation after dispatch for both header layouts and for new and
+        // existing blobs, whose successful open results carry different contents.
         let directory = env::temp_dir().join(format!("storage_tokio_delivery_{}", random_suffix()));
         for layout in [Layout::V0, Layout::V1] {
             for seeded in [false, true] {
@@ -796,34 +806,30 @@ mod tests {
                         .unwrap();
                     blob.sync().await.unwrap();
                 }
-                let (entered, entering) = ::tokio::sync::oneshot::channel();
+
+                // Pause after dispatch has produced a blob, while the caller still owns
+                // only the future that will receive it.
+                let (entered, entering) = oneshot::channel();
                 let (release, released) = std::sync::mpsc::channel();
                 *storage.pending.test.after_dispatch.lock() = Some((entered, released));
                 let mut first = Box::pin(storage.open("partition", b"blob"));
                 assert!(futures::poll!(&mut first).is_pending());
-                ::tokio::time::timeout(std::time::Duration::from_secs(5), entering)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                entering.await.unwrap();
 
                 // A completed filesystem operation must release the namespace lock even
                 // while its caller has not polled the result.
-                let independent = ::tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    storage.open("partition", b"independent"),
-                )
-                .await;
+                let independent = storage.open("partition", b"independent").await;
+
+                // Canceling delivery must drop the unclaimed blob and release its name
+                // before the paused dispatch task returns.
                 drop(first);
-                let retry = ::tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    std::panic::AssertUnwindSafe(storage.open("partition", b"blob")).catch_unwind(),
-                )
-                .await;
+                let retry = std::panic::AssertUnwindSafe(storage.open("partition", b"blob"))
+                    .catch_unwind()
+                    .await;
                 drop(release);
 
-                drop(independent.expect("independent name blocked").unwrap());
+                drop(independent.unwrap());
                 let (blob, size) = retry
-                    .expect("retry blocked")
                     .expect("retry panicked")
                     .expect("canceled output retained the name");
                 assert_eq!(size, expected.len() as u64);
@@ -836,6 +842,8 @@ mod tests {
                         expected,
                     );
                 }
+
+                // The retry must own a usable blob whose new contents survive another reopen.
                 blob.write_at(0, b"next", WriteOptions::default())
                     .await
                     .unwrap();
@@ -1128,7 +1136,7 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     #[rstest::rstest]
     #[case(false)]
     #[case(true)]
@@ -1145,7 +1153,7 @@ mod tests {
             crate::storage::sync(&directory).unwrap();
 
             // Pause the first directory barrier while it owns the namespace lock.
-            let (entered, entering) = tokio::sync::oneshot::channel();
+            let (entered, entering) = oneshot::channel();
             let (release, gate) = mpsc::channel();
             storage.lock.lock().await.sync_hook.pause = Some((entered, gate));
             {
@@ -1192,7 +1200,7 @@ mod tests {
         .unwrap();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn test_partition_scan_sync_failure() {
         let directory =
@@ -1216,7 +1224,7 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn test_partition_open_syncs_once() {
         let directory =
@@ -1246,7 +1254,7 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn test_partition_sync_creation_and_removal() {
         let directory =
@@ -1308,7 +1316,7 @@ mod tests {
 
     /// A failed blob-removal directory sync leaves the partition uncached so the next scan
     /// completes that barrier before reporting the removal.
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn test_blob_remove_sync_failure_retires_partition() {
         let directory =
@@ -1428,7 +1436,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&storage_directory);
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_os = "linux"))]
     #[tokio::test]
     async fn test_partition_open_sync_failure_keeps_content_debt() {
         let directory =
@@ -1590,11 +1598,13 @@ mod tests {
     /// sync through any owner clears the state.
     #[tokio::test]
     async fn test_shared_blob_dirty_state() {
+        // Multiple Arc owners share one logical open and one mutation tracker.
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_shared_{}", random_suffix()));
         let config = Config::new(storage_directory.clone(), Layout::ALL);
         let storage = Storage::new(config, test_pool());
 
+        // Dropping one owner cannot publish debt while another can still synchronize it.
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let blob = Arc::new(blob);
         let retained = Arc::clone(&blob);
@@ -1609,6 +1619,8 @@ mod tests {
         settle(&storage).await;
         assert!(!storage.pending.owes("partition", b"blob"));
 
+        // An unsynced resize leaves debt only after the final owner drops. The next open
+        // must establish that debt exactly once.
         let (blob, _) = storage.open("partition", b"blob").await.unwrap();
         let blob = Arc::new(blob);
         let retained = Arc::clone(&blob);
@@ -1844,7 +1856,7 @@ mod tests {
         drop(blob);
 
         // Hold the first reopen inside its flush, then cancel it while a second reopen waits.
-        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (entered, entering) = oneshot::channel();
         let (release, gate) = mpsc::channel();
         *storage.pending.test.before_complete.lock() = Some((entered, gate));
         let mut cancelled = Box::pin(storage.open("partition", b"blob"));
@@ -1887,7 +1899,7 @@ mod tests {
             .await
             .unwrap();
         drop(old);
-        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (entered, entering) = oneshot::channel();
         let (release, gate) = mpsc::channel();
         *storage.pending.test.before_complete.lock() = Some((entered, gate));
         let mut reopen = Box::pin(storage.open("partition", b"blob"));

@@ -264,9 +264,7 @@ mod tests {
             fixture: &mocks::SchemeFixture,
             index: usize,
         ) {
-            self.nodes[index].abort();
-            let _ = (&mut self.nodes[index].orchestrator_handle).await;
-            let _ = (&mut self.nodes[index].marshal_handle).await;
+            self.nodes[index].stop().await;
             self.nodes[index] = Node::start(
                 context,
                 &self.oracle,
@@ -464,6 +462,13 @@ mod tests {
         fn abort(&mut self) {
             self.orchestrator_handle.abort();
             self.marshal_handle.abort();
+        }
+
+        /// Abort and join the orchestrator and marshal tasks.
+        async fn stop(&mut self) {
+            self.abort();
+            let _ = (&mut self.orchestrator_handle).await;
+            let _ = (&mut self.marshal_handle).await;
         }
     }
 

@@ -41,9 +41,9 @@
 //! # Cleanup
 //!
 //! Observer callbacks and request-resource destruction go through [`Deferred`],
-//! outside the worker borrow. Closure detaches local and forwarded observers and cancels eligible
-//! requests. The worker continues servicing until all requests retire, keeping
-//! the driver in place throughout the drain.
+//! outside the worker borrow. Closure detaches local and forwarded observers and
+//! cancels eligible requests. The worker continues servicing until all requests
+//! retire, keeping the driver in place throughout the drain.
 
 use super::{
     registration::Observation,
@@ -175,6 +175,9 @@ impl Driver {
             self.state.pending_deadlines.push_back(id);
         }
 
+        // A durability request holds the open's permit through terminal accounting so a later
+        // barrier observes any earlier failure. Contended requests wait in `acquiring` outside
+        // the ready queue. They have no deadline and finish even if their caller is dropped.
         if let Some(durability) = durability {
             match durability.clone().try_lock_owned() {
                 Ok(permit) => self.state.acquired(id, permit, deferred),
@@ -2113,7 +2116,7 @@ pub mod tests {
             assert_eq!(harness.driver.state.ready_queue.pop_front(), Some(first));
             assert!(
                 !harness.driver.state.ready_queue.contains(&second),
-                "same-open durability request became ready before the preceding barrier was accounted"
+                "durability request became ready before its predecessor was accounted"
             );
 
             // Keep the SQE out of the ring so its failure is supplied only by the
