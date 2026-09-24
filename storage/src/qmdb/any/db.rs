@@ -8,7 +8,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable},
+        contiguous::{Contiguous, Mutable, Snapshottable},
     },
     merkle::{Family, Location, Proof},
     qmdb::{Error, bitmap::Shared, chain::Commitment, metrics::Metrics},
@@ -72,20 +72,20 @@ pub struct Db<
     /// are over keys that have been updated by some operation at or after this point).
     pub(crate) inactivity_floor_loc: Location<F>,
 
-    /// A snapshot of all currently active operations in the form of a map from each key to the
-    /// location in the log containing its most recent update.
+    /// An index of all currently active operations, mapping each key to the location in the
+    /// log containing its most recent update.
     ///
     /// # Invariant
     ///
     /// - Only references `Operation::Update`s.
-    pub(crate) snapshot: I,
+    pub(crate) index: I,
 
-    /// The number of active keys in the snapshot.
+    /// The number of active keys in the index.
     pub(crate) active_keys: usize,
 
     /// Activity bitmap over committed operations. Rebuilt from the journal on init; never
     /// persisted. A hint for floor-raise scans; merkleization re-verifies each candidate
-    /// against the batch diff, ancestor diffs, and snapshot in the floor-raise loop.
+    /// against the batch diff, ancestor diffs, and index in the floor-raise loop.
     /// When wrapped by `current::Db`, this is also the bitmap that `current` reads for grafted-
     /// tree leaves and proofs.
     ///
@@ -148,7 +148,7 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Whether the snapshot currently has no active keys.
+    /// Whether the index currently has no active keys.
     pub const fn is_empty(&self) -> bool {
         self.active_keys == 0
     }
@@ -200,7 +200,7 @@ where
 
             // Translated keys can collide, so read candidates until the full key matches.
             let mut result = None;
-            for loc in self.snapshot.get(key).copied() {
+            for loc in self.index.get(key).copied() {
                 let op = self.log.read(*loc).await?;
                 let Operation::Update(data) = op else {
                     panic!("location does not reference update operation. loc={loc}");
@@ -304,7 +304,7 @@ where
         // Probe the in-memory index. Each key may map to multiple locations due to hash
         // collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        self.snapshot
+        self.index
             .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
 
         // Sort by position and deduplicate for the batched cache read.
@@ -404,11 +404,7 @@ where
         &self,
         loc: Location<F>,
     ) -> Result<Vec<H::Digest>, crate::qmdb::Error<F>> {
-        self.log
-            .merkle
-            .pinned_nodes_at(loc)
-            .await
-            .map_err(Into::into)
+        self.log.pinned_nodes_at(loc).await.map_err(Into::into)
     }
 }
 
@@ -450,7 +446,7 @@ where
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
-    /// snapshot.
+    /// index.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -503,19 +499,7 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
-        if historical_size > self.log.size() {
-            return Err(crate::qmdb::Error::Merkle(
-                crate::merkle::Error::RangeOutOfBounds(historical_size),
-            ));
-        }
-
-        let inactivity_floor =
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size).await?;
-        let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
-        self.log
-            .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
-            .await
-            .map_err(Into::into)
+        crate::qmdb::historical_proof(&self.log, historical_size, start_loc, max_ops).await
     }
 
     pub async fn proof(
@@ -528,8 +512,8 @@ where
 
     /// Returns a [Db] initialized from `log`. `shared_bitmap = None` allocates a fresh bitmap;
     /// `Some(b)` adopts a pre-allocated bitmap (used by `current::Db`, which sizes pruned chunks
-    /// from grafted metadata). `init_concurrency` is the index's snapshot-build concurrency
-    /// (see [crate::qmdb::SnapshotBuild::Concurrency]).
+    /// from grafted metadata). `init_concurrency` is the index-build concurrency
+    /// (see [crate::qmdb::IndexBuild::Concurrency]).
     ///
     /// # Panics
     ///
@@ -541,17 +525,17 @@ where
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
-        init_concurrency: <I as crate::qmdb::SnapshotBuild<F>>::Concurrency,
+        init_concurrency: <I as crate::qmdb::IndexBuild<F>>::Concurrency,
         init_buffer: NonZeroUsize,
         cache_size: Option<NonZeroUsize>,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>>
     where
         E: Spawner,
-        I: crate::qmdb::SnapshotBuild<F>,
+        I: crate::qmdb::IndexBuild<F>,
         C: 'static,
     {
-        // Share the log so the snapshot build can hand each parallel worker its own reader. Sole
+        // Share the log so the index build can hand each parallel worker its own reader. Sole
         // ownership is recovered (`Arc::into_inner`) once the build has dropped every worker clone.
         let log = Arc::new(log);
         let (inactivity_floor_loc, active_keys, bitmap) = {
@@ -563,9 +547,9 @@ where
                 crate::qmdb::find_inactivity_floor_at::<F, _>(&*log, Location::new(bounds.end))
                     .await?;
 
-            // Build the snapshot, collecting each replayed location's activity status.
+            // Build the index, collecting each replayed location's activity status.
             let (active_keys, activity) = index
-                .build_snapshot(
+                .build_index(
                     context,
                     inactivity_floor_loc,
                     &log,
@@ -607,7 +591,7 @@ where
         };
 
         // The build has returned, so every worker clone of the log is dropped. Reclaim it.
-        let log = Arc::into_inner(log).expect("snapshot build retained a log reference");
+        let log = Arc::into_inner(log).expect("index build retained a log reference");
 
         // The bitmap must have exactly one bit per retained log location.
         if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size() {
@@ -623,7 +607,7 @@ where
             log,
             root,
             inactivity_floor_loc,
-            snapshot: index,
+            index,
             active_keys,
             bitmap,
             metrics,
@@ -706,5 +690,27 @@ where
         // retaining the entire `self` in the future.
         let Self { log, .. } = self;
         log.destroy().await.map_err(Into::into)
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context,
+    C: Snapshottable<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    /// Capture an owned immutable snapshot of the database's operations log, with bounds
+    /// frozen at capture. The snapshot includes applied-but-uncommitted operations.
+    pub async fn snapshot(
+        mut self,
+    ) -> Result<(Self, authenticated::Snapshot<F, E, C::Reader, H>), crate::qmdb::Error<F>> {
+        let log;
+        (self.log, log) = self.log.snapshot().await?;
+        Ok((self, log))
     }
 }

@@ -10,7 +10,7 @@ use crate::{
     journal::{authenticated, contiguous::Mutable},
     merkle::{self, Location, full},
     qmdb::{
-        self, SnapshotBuild,
+        self, IndexBuild,
         any::{
             Config,
             db::Db,
@@ -40,7 +40,7 @@ async fn build_db<F, E, U, I, H, C, const N: usize, S>(
     pinned_nodes: Option<Vec<H::Digest>>,
     range: NonEmptyRange<Location<F>>,
     apply_batch_size: NonZeroU64,
-    init_concurrency: <I as SnapshotBuild<F>>::Concurrency,
+    init_concurrency: <I as crate::qmdb::IndexBuild<F>>::Concurrency,
     init_buffer: NonZeroUsize,
     cache_size: Option<NonZeroUsize>,
 ) -> Result<Db<F, E, C, I, H, U, N, S>, qmdb::Error<F>>
@@ -48,7 +48,7 @@ where
     F: merkle::Family,
     E: Context + Spawner,
     U: Update,
-    I: IndexFactory + SnapshotBuild<F>,
+    I: IndexFactory + crate::qmdb::IndexBuild<F>,
     H: Hasher,
     C: Mutable<Item = Operation<F, U>> + 'static,
     S: Strategy,
@@ -75,10 +75,10 @@ where
         apply_batch_size.get(),
     )
     .await?;
-    let snapshot_context = context.child("snapshot");
+    let index_context = context.child("index");
     let metrics = Metrics::new(context);
     let db = Db::init_from_log(
-        snapshot_context,
+        index_context,
         index,
         log,
         None,
@@ -100,7 +100,7 @@ where
         + sync::Journal<F, Context = E, Op = Operation<F, U>>
         + 'static,
     <C as sync::Journal<F>>::Config: Clone + Send,
-    I: IndexFactory + SnapshotBuild<F> + Unordered<Value = Location<F>>,
+    I: IndexFactory + IndexBuild<F> + Unordered<Value = Location<F>>,
     H: Hasher,
     U: Update,
     S: Strategy,
@@ -115,7 +115,7 @@ where
         I::Translator,
         <C as sync::Journal<F>>::Config,
         S,
-        <I as SnapshotBuild<F>>::Concurrency,
+        <I as IndexBuild<F>>::Concurrency,
     >;
     type Digest = H::Digest;
 

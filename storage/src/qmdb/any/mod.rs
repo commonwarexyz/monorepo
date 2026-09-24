@@ -129,17 +129,17 @@ pub struct Config<T: Translator, J, S: Strategy, B = ()> {
     pub translator: T,
 
     /// Maximum number of entries in the `(location -> key)` cache used during init to resolve
-    /// snapshot collisions without re-reading the log; `None` disables it.
+    /// index collisions without re-reading the log; `None` disables it.
     pub init_cache: Option<NonZeroUsize>,
 
     /// Size (in bytes) of the read buffer used to replay the log during init.
     pub init_buffer: NonZeroUsize,
 
-    /// The index's snapshot-build concurrency (see [crate::qmdb::SnapshotBuild::Concurrency]): `()`
-    /// for index types that build serially, and the number of build tasks for index types that
-    /// build in parallel. A value of `1` builds the index entirely on the init task. Values of
-    /// `2` and `3` decode on the init task and insert on one or two workers. Larger values split
-    /// between spawned decode and insert tasks while the init task merely forwards batches.
+    /// The index-build concurrency (see [crate::qmdb::IndexBuild::Concurrency]): `()` for index
+    /// types that build serially, and the number of build tasks for index types that build in
+    /// parallel. A value of `1` builds the index entirely on the init task. Values of `2` and `3`
+    /// decode on the init task and insert on one or two workers. Larger values split between
+    /// spawned decode and insert tasks while the init task merely forwards batches.
     pub init_concurrency: B,
 }
 
@@ -157,7 +157,7 @@ pub type VariableConfig<T, C, S, B = ()> = Config<T, VConfig<C>, S, B>;
 /// requires one operation. Subsequent appends may exceed this initialization bound.
 pub async fn init<F, E, U, H, I, J, S>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
     max_size: Option<Location<F>>,
 ) -> Result<db::Db<F, E, J, I, H, U, BITMAP_CHUNK_BYTES, S>, QmdbError<F>>
 where
@@ -165,7 +165,7 @@ where
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -179,7 +179,7 @@ where
 #[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, I, J, S, const N: usize>(
     context: E,
-    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::SnapshotBuild<F>>::Concurrency>,
+    cfg: Config<I::Translator, J::Config, S, <I as crate::qmdb::IndexBuild<F>>::Concurrency>,
     bitmap: Option<Arc<Shared<N>>>,
     max_size: Option<Location<F>>,
     pair_absorption_threshold: Option<u64>,
@@ -189,7 +189,7 @@ where
     E: Context + Spawner,
     U: Update,
     H: Hasher,
-    I: IndexFactory<Value = Location<F>> + crate::qmdb::SnapshotBuild<F>,
+    I: IndexFactory<Value = Location<F>> + crate::qmdb::IndexBuild<F>,
     J: authenticated::Backing<E, Item = Operation<F, U>> + 'static,
     S: Strategy,
     Operation<F, U>: Codec,
@@ -233,12 +233,12 @@ where
         log = log.sync().await?;
     }
 
-    // Rebuild the volatile snapshot and bitmap from the selected commit's retained floor.
+    // Rebuild the volatile index and bitmap from the selected commit's retained floor.
     let index = I::new(context.child("index"), cfg.translator);
-    let snapshot_context = context.child("snapshot");
+    let index_context = context.child("index");
     let metrics = Metrics::new(context);
     db::Db::init_from_log(
-        snapshot_context,
+        index_context,
         index,
         log,
         bitmap,
@@ -301,7 +301,7 @@ pub(crate) mod test {
     }
 
     /// Shared config construction for every fixed-value flavor, generic over the strategy and
-    /// the index's snapshot-build concurrency.
+    /// the index-build concurrency.
     pub(crate) fn fixed_db_config_full<
         T: Translator + Default,
         S: commonware_parallel::Strategy,
@@ -361,7 +361,7 @@ pub(crate) mod test {
     }
 
     /// Shared config construction for every variable-value flavor, generic over the index's
-    /// snapshot-build concurrency.
+    /// index-build concurrency.
     pub(crate) fn variable_db_config_full<T: Translator + Default, B>(
         suffix: &str,
         pooler: &impl BufferPooler,
@@ -741,7 +741,7 @@ pub(crate) mod test {
         let initial_size = db.size();
         let initial_floor = db.inactivity_floor_loc();
 
-        // Selecting the earlier empty commit must rebuild an empty snapshot.
+        // Selecting the earlier empty commit must rebuild an empty index.
         let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
         let (db, empty_range) = db.apply_batch(merkleized).await.unwrap();
         let db = db.commit().await.unwrap();
@@ -1700,17 +1700,17 @@ pub(crate) mod test {
     }
 
     /// Dropping an in-flight parallel init (e.g. losing a select against a timeout) aborts
-    /// its snapshot workers and decoders rather than leaving them running until they happen
+    /// its index workers and decoders rather than leaving them running until they happen
     /// to observe a closed channel.
     #[test_traced("INFO")]
     fn test_parallel_init_aborted_on_cancel() {
-        /// Sum of the runtime's running-task gauges for snapshot build tasks.
+        /// Sum of the runtime's running-task gauges for index build tasks.
         fn running_build_tasks(metrics: &str) -> u64 {
             metrics
                 .lines()
                 .filter(|line| {
                     line.starts_with("runtime_tasks_running{")
-                        && (line.contains("snapshot_worker") || line.contains("snapshot_decoder"))
+                        && (line.contains("index_worker") || line.contains("index_decoder"))
                 })
                 .filter_map(|line| line.rsplit_once(' ')?.1.trim().parse::<u64>().ok())
                 .sum()
@@ -1737,7 +1737,7 @@ pub(crate) mod test {
             drop(db);
 
             {
-                // Poll until snapshot tasks own the pending build, then cancel before init returns.
+                // Poll until index tasks own the pending build, then cancel before init returns.
                 let init = UnorderedFixedP1::init(ctx.child("storage"), cfg(), None);
                 pin_mut!(init);
                 let mut spawned = false;
@@ -3058,7 +3058,7 @@ pub(crate) mod test {
 #[cfg(test)]
 mod bitmap_tests {
     //! Regression tests for activity-bitmap maintenance in `any::Db`. The mutation code in
-    //! `apply_batch`, `prune_bitmap`, and initialization is independent of the snapshot index
+    //! `apply_batch`, `prune_bitmap`, and initialization is independent of the index
     //! variant, so one variant (`unordered::variable`) suffices as the test bed.
     use crate::qmdb::any::unordered::variable::test::{AnyTest, create_test_config};
     use commonware_cryptography::{Hasher as _, Sha256};
@@ -3239,7 +3239,7 @@ mod bitmap_tests {
                 .unwrap();
             let (db, _) = db.apply_batch(b).await.unwrap();
 
-            // Setup sanity: anchor in committed snapshot.
+            // Setup sanity: anchor in committed index.
             assert_eq!(db.get(&anchor).await.unwrap(), Some(vec![1]));
             let committed_bitmap_len = db.bitmap.len();
 

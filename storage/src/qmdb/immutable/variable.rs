@@ -275,6 +275,7 @@ mod tests {
         test_variable_bounded_initialization_repeated_key => run_bounded_initialization_repeated_key, open_with_max;
         test_variable_bounded_initialization_after_reopen_repeated_key_retained =>
             run_bounded_initialization_after_reopen_repeated_key_retained, open_with_max;
+        test_variable_snapshot => run_snapshot, open;
     }
 
     #[boxed]

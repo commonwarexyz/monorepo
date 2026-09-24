@@ -190,7 +190,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// The snapshot never observes later mutations: mutators copy-on-write while a snapshot is
     /// alive. Use this to move committed node fallback into a job running off the calling task;
     /// prefer [`Merkle::with_mem`] when a borrow suffices.
-    pub(crate) fn snapshot(&self) -> Arc<Mem<F, D>> {
+    pub(crate) fn mem(&self) -> Arc<Mem<F, D>> {
         Arc::clone(&self.inner.read())
     }
 

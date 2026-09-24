@@ -338,3 +338,14 @@ pub trait Mutable: Contiguous + Sized {
     /// provided by the concrete type when the journal must remain recoverable.
     fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 }
+
+/// A [Contiguous] journal that can capture an owned snapshot reader of itself.
+#[commonware_macros::stability(ALPHA)]
+pub trait Snapshottable: Contiguous + Sized {
+    /// The owned reader type produced by [Self::snapshot], with bounds frozen at capture.
+    type Reader: Contiguous<Item = Self::Item>;
+
+    /// Capture an owned snapshot reader over the current journal. Bounds freeze at capture,
+    /// and the reader stays readable across appends and prunes.
+    fn snapshot(self) -> impl Future<Output = Result<(Self, Self::Reader), Error>> + Send;
+}
