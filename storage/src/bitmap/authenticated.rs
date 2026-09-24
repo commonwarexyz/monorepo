@@ -228,15 +228,15 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
             return false;
         }
 
-        // The chunk index should always be < MAX_LEAVES.
-        let chunked_leaves = Location::new(PrunableBitMap::<N>::to_chunk_index(bit_len) as u64);
+        // Proof indices need not fit usize, even on 32-bit platforms.
+        let chunked_leaves = Location::new(bit_len / Self::CHUNK_SIZE_BITS);
         let mut mmr_proof = Proof {
             leaves: chunked_leaves,
             inactive_peaks: 0,
             digests: proof.digests.clone(),
         };
 
-        let loc = Location::new(PrunableBitMap::<N>::to_chunk_index(bit) as u64);
+        let loc = Location::new(bit / Self::CHUNK_SIZE_BITS);
         if bit_len.is_multiple_of(Self::CHUNK_SIZE_BITS) {
             return mmr_proof.verify_element_inclusion(hasher, chunk, loc, root);
         }
@@ -264,8 +264,7 @@ impl<E: Context, D: Digest, const N: usize, M: State<D>, S: Strategy> BitMap<E, 
             return reconstructed_root == *root;
         };
 
-        // For the case where the proof is over a bit in a full chunk, `last_digest` contains the
-        // digest of that chunk.
+        // For a proof over a full chunk, `last_digest` contains the partial chunk's digest.
         let mmr_root = match mmr_proof.reconstruct_root(hasher, &[chunk], loc) {
             Ok(root) => root,
             Err(error) => {
@@ -604,7 +603,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> Storage<mmr::Family>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::merkle::Bagging::ForwardFold;
+    use crate::merkle::Bagging::{self, BackwardFold, ForwardFold};
     use commonware_codec::FixedSize;
     use commonware_cryptography::{Hasher, Sha256, sha256};
     use commonware_macros::test_traced;
@@ -725,20 +724,25 @@ mod tests {
 
     #[test_traced]
     fn test_bitmap_verify_rejects_relocated_partial_chunk() {
-        // Empty MMR, single peaks, and multiple peaks.
-        for full_chunks in [0, 1, 2, 3, 7] {
-            test_bitmap_verify_rejects_relocated_partial_chunk_n::<1>(full_chunks);
-            test_bitmap_verify_rejects_relocated_partial_chunk_n::<32>(full_chunks);
-            test_bitmap_verify_rejects_relocated_partial_chunk_n::<64>(full_chunks);
+        for bagging in [ForwardFold, BackwardFold] {
+            // Empty MMR, single peaks, and multiple peaks.
+            for full_chunks in [0, 1, 2, 3, 7] {
+                test_bitmap_verify_rejects_relocated_partial_chunk_n::<1>(full_chunks, bagging);
+                test_bitmap_verify_rejects_relocated_partial_chunk_n::<32>(full_chunks, bagging);
+                test_bitmap_verify_rejects_relocated_partial_chunk_n::<64>(full_chunks, bagging);
+            }
         }
     }
 
-    fn test_bitmap_verify_rejects_relocated_partial_chunk_n<const N: usize>(full_chunks: u64) {
+    fn test_bitmap_verify_rejects_relocated_partial_chunk_n<const N: usize>(
+        full_chunks: u64,
+        bagging: Bagging,
+    ) {
         let chunk_bits = TestMerkleizedBitMap::<N>::CHUNK_SIZE_BITS;
         for tail_bits in [1, 2, chunk_bits - 1] {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {
-                let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+                let hasher = StandardHasher::<Sha256>::new(bagging);
                 let bitmap: TestMerkleizedBitMap<N> = TestMerkleizedBitMap::init(
                     context.child("bitmap"),
                     "test",
@@ -763,12 +767,22 @@ mod tests {
                 // The tail's absolute position must stay authenticated after pruning all full chunks.
                 for prune_to in [0, tail_start] {
                     bitmap.prune_to_bit(prune_to).unwrap();
-                    assert_eq!(bitmap.root(), root);
+                    bitmap = bitmap.into_dirty().merkleize(&hasher).unwrap();
+                    assert_eq!(
+                        bitmap.root(), root,
+                        "N={N}, bagging={bagging:?}, full_chunks={full_chunks}, \
+                         tail_bits={tail_bits}, prune_to={prune_to}",
+                    );
                     let (proof, chunk) = bitmap.proof(&hasher, tail_start).await.unwrap();
                     assert_eq!(*proof.leaves, tail_start + tail_bits);
 
-                    // Try every earlier chunk, the real tail, and nearby and distant future chunks.
-                    for target_chunk in (0..=full_chunks + 1).chain([full_chunks + 8]) {
+                    // Try earlier, original, and future positions, including integer boundaries.
+                    for target_chunk in (0..=full_chunks + 1).chain([
+                        full_chunks + 8,
+                        u64::from(u32::MAX) + 1,
+                        (*mmr::Family::MAX_LEAVES - tail_bits) / chunk_bits,
+                        (u64::MAX - tail_bits) / chunk_bits,
+                    ]) {
                         let mut relocated = proof.clone();
                         relocated.leaves = Location::new(target_chunk * chunk_bits + tail_bits);
                         for offset in 0..=tail_bits {
@@ -780,8 +794,58 @@ mod tests {
                             assert_eq!(
                                 valid,
                                 target_chunk == full_chunks && offset < tail_bits,
-                                "N={N}, full_chunks={full_chunks}, tail_bits={tail_bits}, \
+                                "N={N}, bagging={bagging:?}, full_chunks={full_chunks}, tail_bits={tail_bits}, \
                                  prune_to={prune_to}, target_chunk={target_chunk}, offset={offset}",
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    }
+
+    #[test_traced]
+    fn test_bitmap_verify_rejects_tampered_length() {
+        const CHUNK_BITS: u64 = TestMerkleizedBitMap::<1>::CHUNK_SIZE_BITS;
+        const MAX_BITS: u64 = 8 * CHUNK_BITS + 1;
+
+        for bagging in [ForwardFold, BackwardFold] {
+            deterministic::Runner::default().start(|context| async move {
+                let hasher = StandardHasher::<Sha256>::new(bagging);
+                let mut bitmap: TestMerkleizedBitMap<1> = TestMerkleizedBitMap::init(
+                    context.child("bitmap"),
+                    "test",
+                    Sequential,
+                    &hasher,
+                )
+                .await
+                .unwrap();
+
+                // Grow through every remainder and several MMR peak transitions.
+                for bit_len in 1..=MAX_BITS {
+                    let mut dirty = bitmap.into_dirty();
+                    dirty.push(bit_len % 2 == 0);
+                    bitmap = dirty.merkleize(&hasher).unwrap();
+                    let root = bitmap.root();
+
+                    // Exercise full chunks in aligned and partial bitmaps, and the partial tail.
+                    for bit in (0..bit_len).step_by(CHUNK_BITS as usize) {
+                        let (mut proof, chunk) = bitmap.proof(&hasher, bit).await.unwrap();
+                        // Include lengths whose chunk indices exceed 32-bit usize, the codec's
+                        // maximum leaf count, and the direct API's full u64 input range.
+                        for claimed_len in (0..=MAX_BITS).chain([
+                            (u64::from(u32::MAX) + 1) * CHUNK_BITS,
+                            (u64::from(u32::MAX) + 1) * CHUNK_BITS + 1,
+                            *mmr::Family::MAX_LEAVES,
+                            u64::MAX,
+                        ]) {
+                            proof.leaves = Location::new(claimed_len);
+                            assert_eq!(
+                                TestMerkleizedBitMap::<1>::verify_bit_inclusion(
+                                    &hasher, &proof, &chunk, bit, &root,
+                                ),
+                                claimed_len == bit_len,
+                                "bagging={bagging:?}, bit_len={bit_len}, bit={bit}, claimed_len={claimed_len}",
                             );
                         }
                     }
