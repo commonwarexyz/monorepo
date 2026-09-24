@@ -321,8 +321,9 @@ mod tests {
             ("clamped level", 1024, 255),
             ("empty after nonempty", 0, 9),
         ];
-        let mut rng = test_rng();
+
         // Appending frames must preserve any existing contents.
+        let mut rng = test_rng();
         let mut cached_frames = b"existing data".to_vec();
         let mut independent_frames = cached_frames.clone();
         for (case, len, level) in cases {
@@ -364,6 +365,7 @@ mod tests {
                 );
             }
         }
+
         assert!(
             COMPRESSOR.with(|slot| slot.borrow().1.is_some()),
             "the context must return to the thread's cache"

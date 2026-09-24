@@ -4001,6 +4001,8 @@ mod tests {
                 .await
                 .unwrap();
 
+            // A highly compressible large record, small records whose buffer grows
+            // geometrically, and small records followed by a large one.
             let large = Bytes::from(vec![0xAB; 1 << 20]);
             let small: Vec<_> = (0..4096)
                 .map(|_| {
@@ -4010,13 +4012,9 @@ mod tests {
                 })
                 .collect();
             let mixed: Vec<_> = small[..64].iter().cloned().chain([large.clone()]).collect();
-
-            // A highly compressible large record, small records whose buffer grows
-            // geometrically, and small records followed by a large one.
             for batch in [vec![large], small, mixed] {
-                let prepared = journal.prepare_append(Many::Flat(&batch)).unwrap();
-
                 // Compaction must not change the frames.
+                let prepared = journal.prepare_append(Many::Flat(&batch)).unwrap();
                 let mut expected = Vec::new();
                 let mut starts = Vec::new();
                 for record in &batch {

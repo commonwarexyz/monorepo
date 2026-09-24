@@ -19,12 +19,12 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
     let runner = tokio::Runner::default();
 
     // Cap input payloads at 32 MiB: the full 32,768-item sweep with 1 MiB records would
-    // otherwise allocate 32 GiB. Oversized batches are skipped below.
+    // otherwise allocate 32 GiB.
     let max_items = 32_768.min(32 * 1024 * 1024 / SIZE);
 
+    // Repeated bytes with distinct item prefixes provide highly compressible records.
+    // Random bytes exercise inputs with little opportunity for compression.
     for random in [false, true] {
-        // Repeated bytes with distinct item prefixes provide highly compressible records.
-        // Random bytes exercise inputs with little opportunity for compression.
         let mut rng = test_rng();
         let values: Vec<_> = (0..max_items as u64)
             .map(|i| {
@@ -42,6 +42,7 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
             if items > max_items {
                 continue;
             }
+
             let values = &values[..items];
             for compression in [None, Some(3)] {
                 // Fixed-size encoding copies the same number of bytes for either input pattern,
@@ -79,14 +80,14 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                             .unwrap();
 
                             // Include frame encoding, optional compression, compaction, and dropping
-                            // each batch. Input generation, journal initialization, and cleanup stay
-                            // outside the timed interval.
+                            // each batch.
                             let start = Instant::now();
                             for _ in 0..iters {
                                 black_box(journal.prepare_append(Many::Flat(black_box(values))))
                                     .unwrap();
                             }
                             let elapsed = start.elapsed();
+
                             journal.destroy().await.unwrap();
                             elapsed
                         });
