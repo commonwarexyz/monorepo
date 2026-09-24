@@ -396,7 +396,6 @@ impl StorageWorkload for AuthenticatedMmbWorkload {
     }
 }
 
-// Compressed fixtures pin zstd output; encoder upgrades can change hashes without breaking reads.
 conformance_tests! {
     StorageConformance<ContiguousFixedWorkload> => 512,
     StorageConformance<ContiguousVariableWorkload> => 512,
