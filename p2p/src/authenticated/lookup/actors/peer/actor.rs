@@ -22,13 +22,13 @@ use commonware_stream::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::BTreeMap, time::Duration};
 use tracing::debug;
 
 /// Send counters for one connection.
 struct Sent {
     ping: Counter,
-    data: HashMap<Channel, Counter>,
+    data: BTreeMap<Channel, Counter>,
 }
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
@@ -69,19 +69,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         )
     }
 
-    /// Converts pre-encoded data into an outbound counter/payload pair.
-    fn prepare_data(msg: EncodedData, sent: &Sent) -> (&Counter, IoBufs) {
-        let counter = sent
-            .data
+    /// Records pre-encoded data as sent and returns its payload.
+    fn prepare_data(msg: EncodedData, sent: &Sent) -> IoBufs {
+        sent.data
             .get(&msg.channel)
-            .expect("outbound message on invalid channel");
-        (counter, msg.payload)
-    }
-
-    /// Records the send metric and appends the payload to the batch.
-    fn push_batched(batch: &mut Vec<IoBufs>, counter: &Counter, payload: IoBufs) {
-        counter.inc();
-        batch.push(payload);
+            .expect("outbound message on invalid channel")
+            .inc();
+        msg.payload
     }
 
     fn try_recv_control(control: &mut ring::Receiver<Message>) -> Option<Message> {
@@ -92,7 +86,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
     ///
     /// Priority order: control > high > low. Only consumes messages that are
     /// already ready, so batching adds no buffering latency.
-    #[allow(clippy::too_many_arguments)]
     fn extend_send_many<S, R>(
         peer: &C,
         batch_size: usize,
@@ -109,13 +102,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 }
             }
             if let Some(msg) = try_recv(high) {
-                let (counter, payload) = Self::prepare_data(msg, sent);
-                Self::push_batched(batch, counter, payload);
+                batch.push(Self::prepare_data(msg, sent));
                 continue;
             }
             if let Some(msg) = try_recv(low) {
-                let (counter, payload) = Self::prepare_data(msg, sent);
-                Self::push_batched(batch, counter, payload);
+                batch.push(Self::prepare_data(msg, sent));
                 continue;
             }
             break;
@@ -150,20 +141,20 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         let (received, rate_limited) = (&self.received_messages, &self.rate_limited);
         let mut sent = Sent {
             ping: sent_messages.get_or_create_owned(&metrics::Message::new_ping(&peer)),
-            data: HashMap::new(),
+            data: BTreeMap::new(),
         };
-        let mut inbound = HashMap::new();
+        let mut inbound = BTreeMap::new();
         for (channel, (rate, sender)) in channels.collect() {
             let label = metrics::Message::new_data(&peer, channel);
             sent.data
                 .insert(channel, sent_messages.get_or_create_owned(&label));
-            let rate_limiter = RateLimiter::direct_with_clock(
+            let limiter = RateLimiter::direct_with_clock(
                 rate,
                 self.context
                     .child("rate_limiter")
                     .with_attribute("channel", channel),
             );
-            let throttle = Throttle::new(rate_limiter, received, rate_limited, &label);
+            let throttle = Throttle::new(limiter, received, rate_limited, &label);
             inbound.insert(channel, (throttle, sender));
         }
         let received_invalid = received.get_or_create_owned(&metrics::Message::new_invalid(&peer));
@@ -173,10 +164,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         // jitter at message boundaries.
         let half = (self.ping_frequency / 2).max(SYSTEM_TIME_PRECISION);
         let ping_rate = Quota::with_period(half).unwrap();
-        let rate_limiter =
+        let limiter =
             RateLimiter::direct_with_clock(ping_rate, self.context.child("ping_rate_limiter"));
         let label = metrics::Message::new_ping(&peer);
-        let ping_throttle = Throttle::new(rate_limiter, received, rate_limited, &label);
+        let ping_throttle = Throttle::new(limiter, received, rate_limited, &label);
 
         // Send/Receive messages from the peer
         let mut send_handler = self.context.child("sender").spawn({
@@ -194,11 +185,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     _ = context.sleep_until(deadline) => {
                         // Periodically send a ping to the peer, batching
                         // any already-queued messages into the same batch.
-                        Self::push_batched(
-                            &mut batch,
-                            &sent.ping,
-                            types::Message::Ping.encode_with_pool(&pool),
-                        );
+                        sent.ping.inc();
+                        batch.push(types::Message::Ping.encode_with_pool(&pool));
                         Self::extend_send_many(
                             &peer,
                             self.send_batch_size,
@@ -224,8 +212,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                                 Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             },
                             Prioritized::Data(encoded) => {
-                                let (counter, payload) = Self::prepare_data(encoded, &sent);
-                                Self::push_batched(&mut batch, counter, payload);
+                                batch.push(Self::prepare_data(encoded, &sent));
                             }
                         }
                         Self::extend_send_many(
@@ -247,51 +234,48 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 Ok(())
             }
         });
-        let mut receive_handler = self
-            .context
-            .child("receiver")
-            .spawn(move |context| async move {
-                loop {
-                    // Receive a message from the peer
-                    let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
+        let mut receive_handler = self.context.child("receiver").spawn(move |_| async move {
+            loop {
+                // Receive a message from the peer
+                let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
-                    // Parse the message
-                    let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
-                    let msg = match types::Message::decode_cfg(msg, &max_data_length) {
-                        Ok(msg) => msg,
-                        Err(err) => {
-                            debug!(?err, ?peer, "failed to decode message");
+                // Parse the message
+                let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
+                let msg = match types::Message::decode_cfg(msg, &max_data_length) {
+                    Ok(msg) => msg,
+                    Err(err) => {
+                        debug!(?err, ?peer, "failed to decode message");
+                        received_invalid.inc();
+                        return Err(Error::DecodeFailed(err));
+                    }
+                };
+
+                match msg {
+                    types::Message::Data(data) => {
+                        let Some((throttle, sender)) = inbound.get(&data.channel) else {
+                            debug!(?peer, channel = data.channel, "invalid channel");
                             received_invalid.inc();
-                            return Err(Error::DecodeFailed(err));
-                        }
-                    };
+                            return Err(Error::InvalidChannel);
+                        };
+                        throttle.receive(true).await;
 
-                    match msg {
-                        types::Message::Data(data) => {
-                            let Some((throttle, sender)) = inbound.get(&data.channel) else {
-                                debug!(?peer, channel = data.channel, "invalid channel");
-                                received_invalid.inc();
-                                return Err(Error::InvalidChannel);
-                            };
-                            throttle.receive(&context, true).await;
+                        // Send message to application without blocking.
+                        //
+                        // We intentionally drop messages when the application buffer is
+                        // full rather than blocking. Blocking here would also block
+                        // processing of Ping messages, causing the peer connection to
+                        // stall and potentially disconnect.
+                        let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
+                    }
+                    types::Message::Ping => {
+                        ping_throttle.receive(true).await;
 
-                            // Send message to application without blocking.
-                            //
-                            // We intentionally drop messages when the application buffer is
-                            // full rather than blocking. Blocking here would also block
-                            // processing of Ping messages, causing the peer connection to
-                            // stall and potentially disconnect.
-                            let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                        }
-                        types::Message::Ping => {
-                            ping_throttle.receive(&context, true).await;
-
-                            // We ignore ping messages, they are only used to keep
-                            // the connection alive
-                        }
+                        // We ignore ping messages, they are only used to keep
+                        // the connection alive
                     }
                 }
-            });
+            }
+        });
 
         // Wait for one of the handlers to finish or shutdown
         let mut shutdown = self.context.stopped();
@@ -447,16 +431,11 @@ mod tests {
                 .expect("listen failed")
                 .expect("listen result failed");
 
-            // Clone the received_messages family so we can inspect it after
-            // the actor finishes.
-            let received_messages = context.family(
-                "received_messages_override",
-                "test received messages override",
-            );
-            let cfg = Config {
-                received_messages: received_messages.clone(),
-                ..default_peer_config(context.child("config"))
-            };
+            // Clone the metric families so we can inspect them after the
+            // actor finishes.
+            let cfg = default_peer_config(context.child("config"));
+            let (received_messages, rate_limited) =
+                (cfg.received_messages.clone(), cfg.rate_limited.clone());
             let (peer_actor, _mailbox, _relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
@@ -466,6 +445,12 @@ mod tests {
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
             let (_sender, _receiver) = channels.register(0, quota, context.child("channel"));
+
+            // A valid ping first, so its counters are pinned too.
+            local_sender
+                .send(types::Message::Ping.encode())
+                .await
+                .expect("send failed");
 
             // Simulate the attack: send a Data message with an arbitrary
             // unregistered channel value. Before the fix, this would create
@@ -486,21 +471,34 @@ mod tests {
                 "Expected InvalidChannel error, got: {result:?}"
             );
 
+            // The ping is counted and not rate limited.
+            let ping_metric = metrics::Message::new_ping(&local_pk);
+            let ping_count = received_messages.get(&ping_metric).map(|c| c.get());
+            assert_eq!(ping_count, Some(1));
+            let ping_limited = rate_limited.get(&ping_metric).map(|c| c.get());
+            assert_eq!(ping_limited, Some(0));
+
+            // The registered channel has a series at zero from connection start.
+            let registered_metric = metrics::Message::new_data(&local_pk, 0);
+            let registered_count = received_messages.get(&registered_metric).map(|c| c.get());
+            assert_eq!(registered_count, Some(0));
+
             // The attacker-controlled channel value must NOT have created a
             // metric series. If it did, repeated reconnections with fresh
             // channel values would cause unbounded memory growth.
             let attacker_metric = metrics::Message::new_data(&local_pk, invalid_channel);
-            let attacker_count = received_messages.get_or_create(&attacker_metric).get();
-            assert_eq!(
-                attacker_count, 0,
+            assert!(
+                received_messages.get(&attacker_metric).is_none()
+                    && rate_limited.get(&attacker_metric).is_none(),
                 "metric was created for attacker-controlled channel, unbounded cardinality bug"
             );
 
             // The bounded "invalid" metric should have been incremented instead.
             let invalid_metric = metrics::Message::new_invalid(&local_pk);
-            let invalid_count = received_messages.get_or_create(&invalid_metric).get();
+            let invalid_count = received_messages.get(&invalid_metric).map(|c| c.get());
             assert_eq!(
-                invalid_count, 1,
+                invalid_count,
+                Some(1),
                 "invalid channel metric should be incremented"
             );
         });
@@ -565,6 +563,7 @@ mod tests {
                 send_batch_size: NZUsize!(2),
                 ..default_peer_config(context.child("config"))
             };
+            let sent_messages = cfg.sent_messages.clone();
             let (peer_actor, peer_mailbox, relay) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
@@ -592,9 +591,10 @@ mod tests {
                 "second send failed"
             );
 
+            let peer = local_pk.clone();
             let peer_handle = context.child("task").spawn(move |_context| async move {
                 peer_actor
-                    .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
+                    .run(peer, (remote_sender, remote_receiver), channels)
                     .await
             });
 
@@ -614,6 +614,14 @@ mod tests {
             };
             assert_eq!(second.message, IoBuf::from(b"second"));
             assert_eq!(sends.load(Ordering::Relaxed), 1);
+
+            // Both messages are counted under the data label and none as a ping
+            let data_metric = metrics::Message::new_data(&local_pk, 0);
+            let data_count = sent_messages.get(&data_metric).map(|c| c.get());
+            assert_eq!(data_count, Some(2));
+            let ping_metric = metrics::Message::new_ping(&local_pk);
+            let ping_count = sent_messages.get(&ping_metric).map(|c| c.get());
+            assert_eq!(ping_count, Some(0));
 
             peer_mailbox.kill();
             let result = peer_handle.await.expect("peer task failed");
