@@ -876,7 +876,9 @@ pub(crate) mod test {
     fn test_stage_and_expand_reject_foreign_db() {
         deterministic::Runner::default().start(|context| async move {
             let db_a = open_db(context.child("a")).await;
-            let db_b = open_db(context.child("b")).await;
+            let db_b = AnyTest::init(context.child("b"), create_test_config(1, &context), None)
+                .await
+                .unwrap();
             let key_a = Sha256::hash(&[b"a"]);
             let key_b = Sha256::hash(&[b"b"]);
 
