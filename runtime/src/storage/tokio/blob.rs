@@ -79,15 +79,15 @@ struct Shared {
     file: Held,
     tracker: Tracker,
     durability: Mutex<()>,
-    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
-    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
-    dont_cache_supported: AtomicBool,
     pending: Arc<Pending>,
     key: (String, Vec<u8>),
     /// Settles the open once its last handle dropped and every operation finished.
     promise: OnceLock<Sender>,
     #[cfg(test)]
     test: TestState,
+    /// Whether the kernel and filesystem may support `RWF_DONTCACHE`.
+    /// Cleared on the first EOPNOTSUPP to avoid probing on every hinted I/O operation.
+    dont_cache_supported: AtomicBool,
 }
 
 /// Hooks for controlling blocking storage operations in lifecycle tests.
@@ -268,12 +268,12 @@ impl Blob {
             file: Held::new(file, hold),
             tracker: Tracker::default(),
             durability: Mutex::new(()),
-            dont_cache_supported: AtomicBool::new(true),
             pending: generation.pending.clone(),
             key: generation.key.clone(),
             promise: OnceLock::new(),
             #[cfg(test)]
             test: TestState::default(),
+            dont_cache_supported: AtomicBool::new(true),
         });
         Self {
             shared,

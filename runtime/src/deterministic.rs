@@ -1712,6 +1712,8 @@ mod tests {
                 .unwrap();
             drop(seed);
 
+            // Pause between the namespace operation and its registration update to check that
+            // a competing operation cannot observe only half of the transaction.
             let name = named.then_some(b"blob".as_slice());
             let worker_context = context.child("namespace");
             let competing_context = context.child("competing");
@@ -1757,6 +1759,8 @@ mod tests {
                 (worker.join().unwrap(), competing)
             });
 
+            // Opening before removal preserves access to the old contents. Opening after
+            // removal must return a fresh incarnation.
             let (old, current) = if open_first {
                 let (old, len) = worker.unwrap();
                 assert_eq!(len, 5);
@@ -1785,6 +1789,8 @@ mod tests {
                 context.open("partition", b"blob").await,
                 Err(Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
             ));
+
+            // Dropping the replacement's last owner permits reopening its durable contents.
             retained
                 .write_at(0, b"new", WriteOptions::SYNC)
                 .await
@@ -1807,6 +1813,7 @@ mod tests {
     #[case::retained(false)]
     #[case::synced(true)]
     fn test_logical_open_releases_retained_mutations(#[case] sync: bool) {
+        // Keep unsynced writes eligible for crash replay without injecting write failures.
         let cfg = Config::default().with_storage_fault_config(FaultConfig::default().write(
             WriteConfig {
                 failure_rate: probability!(0.0),
@@ -1815,6 +1822,8 @@ mod tests {
             },
         ));
         let (_, checkpoint) = Runner::new(cfg).start_and_recover(|context| async move {
+            // The range sync persists only the middle byte of the overwrite. Reopening must
+            // discard the unsynced fragments excluded from that durable snapshot.
             let (blob, _) = context.open("partition", b"blob").await.unwrap();
             let blob = Arc::new(blob);
             blob.write_at(0, b"saved", WriteOptions::SYNC)
@@ -1828,7 +1837,7 @@ mod tests {
             drop(blob);
             drop(retained);
 
-            // Retained write fragments keep their replay targets, but release every user lease.
+            // Retained write fragments must not keep a logical open alive.
             let (reopened, len) = context.open("partition", b"blob").await.unwrap();
             let reopened = Arc::new(reopened);
             assert_eq!(len, 5);
@@ -1850,6 +1859,8 @@ mod tests {
                 Err(Error::BlobAlreadyOpen(_, _))
             ));
             assert_ne!(before, context.auditor().state());
+
+            // A full sync on the new open must supersede the admitted snapshot.
             if sync {
                 retained
                     .write_at(0, b"fresh", WriteOptions::default())
@@ -1859,7 +1870,7 @@ mod tests {
             }
         });
 
-        // An admitted snapshot stays durable unless the new handle mutates it.
+        // Crash replay must not restore fragments excluded by the successful reopen.
         Runner::from(checkpoint).start(|context| async move {
             let (blob, len) = context.open("partition", b"blob").await.unwrap();
             assert_eq!(len, 5);
@@ -1897,6 +1908,7 @@ mod tests {
             }
         }
 
+        // Retain successful writes so each namespace operation has payload owners to retire.
         let faults = FaultConfig::default().write(WriteConfig {
             failure_rate: probability!(0.0),
             retention_rate: probability!(1.0),
@@ -1904,6 +1916,7 @@ mod tests {
         });
         Runner::new(Config::default().with_storage_fault_config(faults)).start(
             |context| async move {
+                // The retained payload keeps b open, making its destruction re-enter the registry.
                 let (a, _) = context.open("partition", b"a").await.unwrap();
                 let (b, _) = context.open("partition", b"b").await.unwrap();
                 let b = Arc::new(b);
@@ -1916,6 +1929,8 @@ mod tests {
                 a.write_at(0, payload, WriteOptions::default())
                     .await
                     .unwrap();
+
+                // Partition removal must retire evidence for both names.
                 if operation == "remove_partition" {
                     b.write_at(0, b"second", WriteOptions::default())
                         .await
@@ -1924,6 +1939,8 @@ mod tests {
                 drop(b);
                 assert!(!released.load(Ordering::SeqCst));
 
+                // Retiring a's payload must release the namespace and pending-mutation locks
+                // before destroying it, so b can release its open.
                 if operation == "remove" {
                     context.remove("partition", Some(b"a")).await.unwrap();
                 } else if operation == "remove_partition" {
@@ -1933,6 +1950,8 @@ mod tests {
                     drop(a);
                     drop(context.open("partition", b"a").await.unwrap());
                 }
+
+                // Both payload destruction and release of b's open must finish before returning.
                 assert!(released.load(Ordering::SeqCst));
                 drop(context.open("partition", b"b").await.unwrap());
             },
@@ -1945,6 +1964,7 @@ mod tests {
     #[case::overwrite("overwrite")]
     #[cfg(not(target_arch = "wasm32"))]
     fn test_sync_retirement_progresses_with_namespace_open(#[case] operation: &'static str) {
+        /// Signals retirement before releasing another blob's open.
         struct Owner<B> {
             data: Vec<u8>,
             _blob: B,
@@ -1963,6 +1983,7 @@ mod tests {
             }
         }
 
+        // Keep the payload until a durability operation retires its write.
         let faults = FaultConfig::default().write(WriteConfig {
             failure_rate: probability!(0.0),
             retention_rate: probability!(1.0),
@@ -1970,6 +1991,7 @@ mod tests {
         });
         Runner::new(Config::default().with_storage_fault_config(faults)).start(
             |context| async move {
+                // Retiring a's write drops the last owner of b and needs the open registry.
                 let (a, _) = context.open("partition", b"a").await.unwrap();
                 let (b, _) = context.open("partition", b"b").await.unwrap();
                 let b = Arc::new(b);
@@ -1987,6 +2009,7 @@ mod tests {
                 .unwrap();
                 drop(b);
 
+                // Hold the registry while opening c, before admission locks the pending mutations.
                 let (entered, entering) = std::sync::mpsc::channel();
                 let (release, released) = std::sync::mpsc::channel();
                 let namespace = context.child("namespace");
@@ -2002,6 +2025,7 @@ mod tests {
                 });
                 entering.recv().unwrap();
 
+                // Retire a's payload concurrently, forcing b's cleanup to wait for the registry.
                 let mutator = std::thread::spawn(move || {
                     if operation == "sync" {
                         a.sync().now_or_never().unwrap().unwrap();
@@ -2020,6 +2044,9 @@ mod tests {
                             .unwrap();
                     }
                 });
+
+                // The signal precedes b's cleanup. Let c continue so both operations can finish
+                // only if retirement has released the pending-mutation lock.
                 retired.recv().unwrap();
                 release.send(()).unwrap();
                 mutator.join().unwrap();
@@ -2258,6 +2285,8 @@ mod tests {
             context.remove("partition", None).await.unwrap();
             let (current, len) = context.open("partition", b"blob").await.unwrap();
             assert_eq!(len, 0);
+
+            // Cleanup of the removed handle must not affect writes through its replacement.
             drop(old);
             current
                 .write_at(0, b"new", WriteOptions::default())
