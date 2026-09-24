@@ -6,7 +6,7 @@ mod conformance;
 use crate::{Hasher, sha256::Sha256};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, FixedSize,
+    Buf, EncodeSize, FixedSize, RangeCfg,
     codec::{Read, Write},
     error::Error as CodecError,
 };
@@ -291,13 +291,7 @@ impl<H: Hasher> Read for BloomFilter<H> {
                 "hashers doesn't match config",
             ));
         }
-        let bits = BitMap::read_cfg(buf, &bits_cfg.get())?;
-        if bits.len() != bits_cfg.get() {
-            return Err(CodecError::Invalid(
-                "BloomFilter",
-                "bitmap length doesn't match config",
-            ));
-        }
+        let bits = BitMap::read_cfg(buf, &RangeCfg::exact(bits_cfg.get()))?;
         Ok(Self {
             hashers: *hashers_cfg,
             bits,
@@ -449,13 +443,7 @@ mod tests {
 
         let cfg = (NZU8!(5), NZU64!(256));
         let result = BloomFilter::<Sha256>::decode_cfg(encoded.clone(), &cfg);
-        assert!(matches!(
-            result,
-            Err(CodecError::Invalid(
-                "BloomFilter",
-                "bitmap length doesn't match config"
-            ))
-        ));
+        assert!(matches!(result, Err(CodecError::InvalidLength(128))));
 
         // Non-power-of-2 bits
         let cfg = (NZU8!(5), NZU64!(100));

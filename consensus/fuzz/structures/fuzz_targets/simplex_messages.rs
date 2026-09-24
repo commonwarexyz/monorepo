@@ -13,10 +13,9 @@ use commonware_consensus::{
             bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
         },
         types::{
-            Activity, Artifact, Attributable, Backfiller, Certificate, ConflictingFinalize,
+            Activity, Artifact, Attributable, Certificate, ConflictingFinalize,
             ConflictingNotarize, Context, Finalization, Finalize, Notarization, Notarize,
-            Nullification, Nullify, NullifyFinalize, Proposal, Request, Response, Subject, Vote,
-            VoteTracker,
+            Nullification, Nullify, NullifyFinalize, Proposal, Subject, Vote, VoteTracker,
         },
     },
     types::{
@@ -101,8 +100,6 @@ enum StructuredKind {
     ActivityConflictingNotarize,
     ActivityConflictingFinalize,
     ActivityNullifyFinalize,
-    BackfillerRequest,
-    BackfillerResponse,
     Context,
 }
 
@@ -112,8 +109,6 @@ enum ArbitraryKind {
     Vote,
     Certificate,
     Artifact,
-    Backfiller,
-    Response,
     Activity,
     Commitment,
 }
@@ -123,10 +118,6 @@ enum FuzzInput {
     // Ed25519
     Ed25519Vote(Vec<u8>),
     Ed25519Certificate {
-        participants: u8,
-        data: Vec<u8>,
-    },
-    Ed25519Backfiller {
         participants: u8,
         data: Vec<u8>,
     },
@@ -215,17 +206,6 @@ fn roundtrip_certificate<S: SimplexScheme<sha256::Digest>>(
     }
 }
 
-fn roundtrip_decode<T>(data: &[u8], cfg: &T::Cfg)
-where
-    T: Read + Encode + EncodeSize,
-{
-    if let Ok(value) = T::decode_cfg(Copying(data), cfg) {
-        let encoded = value.encode();
-        assert_eq!(encoded.len(), value.encode_size());
-        assert_eq!(data, encoded.as_ref());
-    }
-}
-
 fn participant_cfg(participants: u8) -> usize {
     participants.clamp(4, 255) as usize
 }
@@ -255,16 +235,6 @@ where
         &scheme.certificate_codec_config(),
     )
     .expect("valid certificate");
-    assert_eq!(decoded.encode(), encoded);
-}
-
-fn assert_byte_roundtrip<T>(value: T, cfg: &T::Cfg)
-where
-    T: Read + Encode + EncodeSize,
-{
-    let encoded = value.encode();
-    assert_eq!(encoded.len(), value.encode_size());
-    let decoded = T::decode_cfg(Copying(encoded.as_ref()), cfg).expect("valid value");
     assert_eq!(decoded.encode(), encoded);
 }
 
@@ -319,14 +289,6 @@ where
     assert_eq!(decoded.view(), view);
     assert_eq!(decoded.epoch(), epoch);
     assert_eq!(decoded.encode(), encoded);
-}
-
-fn assert_backfiller_roundtrip<S>(scheme: &S, backfiller: Backfiller<S, sha256::Digest>, max: usize)
-where
-    S: SimplexScheme<sha256::Digest> + CertificateScheme,
-{
-    let cfg = (max, scheme.certificate_codec_config());
-    assert_byte_roundtrip(backfiller, &cfg);
 }
 
 fn assert_context_roundtrip(context: Context<sha256::Digest, PublicKey>) {
@@ -508,22 +470,6 @@ where
         Activity::ConflictingFinalize(conflicting_finalize),
     );
     assert_activity_roundtrip(&schemes[0], Activity::NullifyFinalize(nullify_finalize));
-
-    let response = Response::new(
-        proposal.round.view().get(),
-        vec![notarization],
-        vec![nullification],
-    );
-    let mut rng = TestRng::new(0);
-    assert!(response.verify(&mut rng, &schemes[0], &Sequential));
-    assert_backfiller_roundtrip(&schemes[0], Backfiller::Response(response), 2);
-
-    let request = Request::new(
-        proposal.round.view().get(),
-        vec![proposal.round.view()],
-        vec![proposal.parent],
-    );
-    assert_backfiller_roundtrip(&schemes[0], Backfiller::Request(request), 2);
 }
 
 fn structured<S>(
@@ -785,52 +731,6 @@ fn structured<S>(
             assert_structural(&conflict);
             assert_activity_roundtrip(&schemes[0], Activity::NullifyFinalize(conflict));
         }
-        StructuredKind::BackfillerRequest => {
-            let request = Request::new(
-                proposal.round.view().get(),
-                vec![proposal.round.view()],
-                vec![proposal.parent],
-            );
-            assert_backfiller_roundtrip(&schemes[0], Backfiller::Request(request), 2);
-        }
-        StructuredKind::BackfillerResponse => {
-            let Some(notarizes) = schemes
-                .iter()
-                .map(|scheme| Notarize::sign(scheme, proposal.clone()))
-                .collect::<Option<Vec<_>>>()
-            else {
-                return;
-            };
-            let Some(nullifies) = schemes
-                .iter()
-                .map(|scheme| Nullify::sign::<sha256::Digest>(scheme, proposal.round))
-                .collect::<Option<Vec<_>>>()
-            else {
-                return;
-            };
-            let Ok(notarization) = Notarization::from_notarizes(
-                &schemes[0],
-                non_empty![@notarizes.iter()],
-                &Sequential,
-            ) else {
-                return;
-            };
-            let Ok(nullification) = Nullification::from_nullifies(
-                &schemes[0],
-                non_empty![@nullifies.iter()],
-                &Sequential,
-            ) else {
-                return;
-            };
-            assert_structural(&notarization);
-            assert_structural(&nullification);
-            let response = Response::new(
-                proposal.round.view().get(),
-                vec![notarization],
-                vec![nullification],
-            );
-            assert_backfiller_roundtrip(&schemes[0], Backfiller::Response(response), 2);
-        }
         StructuredKind::Context => {
             let Some(leader) = schemes[0].participants().get(signer).cloned() else {
                 return;
@@ -920,18 +820,6 @@ fn arbitrary_case(kind: ArbitraryKind, participants: u8, data: Vec<u8>) {
             assert_arbitrary_byte_roundtrip::<Artifact<Ed25519Scheme, sha256::Digest>>(
                 &mut u,
                 &participants,
-            );
-        }
-        ArbitraryKind::Backfiller => {
-            assert_arbitrary_byte_roundtrip::<Backfiller<Ed25519Scheme, sha256::Digest>>(
-                &mut u,
-                &(participants, participants),
-            );
-        }
-        ArbitraryKind::Response => {
-            assert_arbitrary_byte_roundtrip::<Response<Ed25519Scheme, sha256::Digest>>(
-                &mut u,
-                &(participants, participants),
             );
         }
         ArbitraryKind::Activity => assert_arbitrary_activity(&data, participants, selector),
@@ -1159,12 +1047,6 @@ fn fuzz(input: FuzzInput) {
         FuzzInput::Ed25519Vote(data) => roundtrip_vote::<Ed25519Scheme>(&data),
         FuzzInput::Ed25519Certificate { participants, data } => {
             roundtrip_certificate::<Ed25519Scheme>(&data, &participant_cfg(participants))
-        }
-        FuzzInput::Ed25519Backfiller { participants, data } => {
-            roundtrip_decode::<Backfiller<Ed25519Scheme, sha256::Digest>>(
-                &data,
-                &(participant_cfg(participants), participant_cfg(participants)),
-            )
         }
 
         FuzzInput::MultisigMinPkVote(data) => roundtrip_vote::<Bls12381MultisigMinPk>(&data),
