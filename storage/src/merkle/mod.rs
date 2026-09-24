@@ -298,7 +298,8 @@ pub trait Graftable: Family {
     ///
     /// # Panics
     ///
-    /// Panics if `height` is excessively large (e.g., `>= 63`), or if arithmetic overflows.
+    /// Panics if `height` is excessively large (e.g., `>= 63`), if arithmetic overflows, or if the
+    /// node's birth size would exceed [`MAX_LEAVES`](Family::MAX_LEAVES).
     fn peak_birth_size(pos: Position<Self>, height: u32) -> u64 {
         *Self::subtree_birth_size(Self::leftmost_leaf(pos, height), height)
             .expect("birth size overflow")

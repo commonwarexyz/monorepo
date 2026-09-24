@@ -28,6 +28,7 @@ const SKEWED_OPS: usize = 512;
 /// Size of each large item in a skewed batch.
 const LARGE: usize = 1024 * 1024;
 
+/// Workers in the parallel strategy.
 const WORKERS: usize = 8;
 
 fn committed<F: Family>(hasher: &StandardHasher<Sha256>) -> Mem<F, sha256::Digest> {
@@ -62,6 +63,18 @@ fn bench_case<F: Family, S: Strategy>(
     });
 }
 
+/// Bench `items` on `mem` with one worker and with `WORKERS` workers.
+fn bench_workers<F: Family>(
+    c: &mut Criterion,
+    params: &str,
+    mem: &Mem<F, sha256::Digest>,
+    rayon: &Rayon,
+    items: &[Bytes],
+) {
+    bench_case(c, &format!("{params} workers=1"), mem, &Sequential, items);
+    bench_case(c, &format!("{params} workers={WORKERS}"), mem, rayon, items);
+}
+
 fn bench_uniform(c: &mut Criterion) {
     let hasher = StandardHasher::<Sha256>::new(ForwardFold);
     let mmr = committed::<commonware_storage::mmr::Family>(&hasher);
@@ -76,34 +89,8 @@ fn bench_uniform(c: &mut Criterion) {
                 Bytes::from(item)
             })
             .collect();
-        bench_case(
-            c,
-            &format!("family=mmr ops={ops} workers=1"),
-            &mmr,
-            &Sequential,
-            &items,
-        );
-        bench_case(
-            c,
-            &format!("family=mmr ops={ops} workers={WORKERS}"),
-            &mmr,
-            &rayon,
-            &items,
-        );
-        bench_case(
-            c,
-            &format!("family=mmb ops={ops} workers=1"),
-            &mmb,
-            &Sequential,
-            &items,
-        );
-        bench_case(
-            c,
-            &format!("family=mmb ops={ops} workers={WORKERS}"),
-            &mmb,
-            &rayon,
-            &items,
-        );
+        bench_workers(c, &format!("family=mmr ops={ops}"), &mmr, &rayon, &items);
+        bench_workers(c, &format!("family=mmb ops={ops}"), &mmb, &rayon, &items);
     }
 }
 
@@ -124,20 +111,8 @@ fn bench_skewed(c: &mut Criterion) {
                 _ => small.clone(),
             })
             .collect();
-        bench_case(
-            c,
-            &format!("payload={payload} workers=1"),
-            &mmr,
-            &Sequential,
-            &items,
-        );
-        bench_case(
-            c,
-            &format!("payload={payload} workers={WORKERS}"),
-            &mmr,
-            &rayon,
-            &items,
-        );
+        let params = format!("family=mmr ops={SKEWED_OPS} payload={payload}");
+        bench_workers(c, &params, &mmr, &rayon, &items);
     }
 }
 

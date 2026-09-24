@@ -337,42 +337,32 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
         let deferred = strategy.run_batches(items.len(), MIN_RANGE_LEAVES, 1, |batches| {
             let Some(batches) = batches else {
-                return vec![build_range(hasher, items, first, start, nodes)];
+                return vec![build_range(hasher, items, first, nodes)];
             };
             batches.map_collect_vec(
                 |ranges| {
                     // Slices are split off in order, so the ranges must cover `items` in order.
+                    let mut jobs = Vec::with_capacity(ranges.len());
                     let mut rest = nodes;
-                    let mut base = start;
                     let mut covered = 0;
-                    let prepared = ranges
-                        .into_iter()
-                        .map(|range| {
-                            assert!(
-                                range.start == covered && range.start < range.end,
-                                "batches must cover the items in order"
-                            );
-                            covered = range.end;
-                            let range_first = first + range.start as u64;
-                            let range_items = &items[range];
-                            let next =
-                                F::location_to_position(range_first + range_items.len() as u64);
-                            let slice = rest
-                                .split_off_mut(..(*next - *base) as usize)
-                                .expect("range ends within the batch");
-                            let batch = (range_first, range_items, base, slice);
-                            base = next;
-                            batch
-                        })
-                        .collect::<Vec<_>>();
-                    assert_eq!(
-                        covered,
-                        items.len(),
-                        "batches must cover the items in order"
-                    );
-                    prepared
+                    for range in ranges {
+                        assert!(
+                            range.start == covered && range.start < range.end,
+                            "batches must cover the items in order"
+                        );
+                        covered = range.end;
+                        let range_first = first + range.start as u64;
+                        let len = *F::location_to_position(first + range.end as u64)
+                            - *F::location_to_position(range_first);
+                        let slice = rest
+                            .split_off_mut(..len as usize)
+                            .expect("range ends within the batch");
+                        jobs.push((range_first, &items[range], slice));
+                    }
+                    assert!(rest.is_empty(), "batches must cover the items in order");
+                    jobs
                 },
-                |(first, items, base, nodes)| build_range(hasher, items, first, base, nodes),
+                |(first, items, nodes)| build_range(hasher, items, first, nodes),
             )
         });
         for (height, pos) in deferred.into_iter().flatten() {
@@ -553,19 +543,19 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 }
 
 /// Hash `items` into the leaves starting at `first` and compute every node in `nodes` (the
-/// positions from `base`) whose leaves are all among them. Returns the height and position of
-/// each remaining node in `nodes`.
+/// positions from leaf `first` on) whose leaves are all among them. Returns the height and
+/// position of each node in `nodes` left for `merkleize`.
 #[cfg(feature = "std")]
 fn build_range<F: Family, D: Digest, Item: Write>(
     hasher: &impl Hasher<F, Digest = D>,
     items: &[Item],
     first: Location<F>,
-    base: Position<F>,
     nodes: &mut [D],
 ) -> Vec<(u32, Position<F>)> {
     // A node is in `nodes` when one of these leaves creates it: `first < birth <= leaves_end`.
     let leaves_end = first + items.len() as u64;
-    let index = |pos: Position<F>| (*pos - *base) as usize;
+    let start = F::location_to_position(first);
+    let index = |pos: Position<F>| (*pos - *start) as usize;
 
     let mut buf = Vec::new();
     for (loc, item) in (*first..).zip(items) {
@@ -577,7 +567,7 @@ fn build_range<F: Family, D: Digest, Item: Write>(
 
     for height in 1..=(items.len() as u64).ilog2() {
         let width = 1u64 << height;
-        let children = |nodes: &[D], leaf: Location<F>| {
+        let child_digests = |nodes: &[D], leaf: Location<F>| {
             let left = F::subtree_root_position(leaf, height - 1);
             let right = F::subtree_root_position(leaf + width / 2, height - 1);
             (nodes[index(left)], nodes[index(right)])
@@ -595,12 +585,12 @@ fn build_range<F: Family, D: Digest, Item: Write>(
         };
         while let Some((left_leaf, left)) = next() {
             let Some((right_leaf, right)) = next() else {
-                let (l, r) = children(nodes, left_leaf);
+                let (l, r) = child_digests(nodes, left_leaf);
                 nodes[index(left)] = hasher.node_digest(left, &l, &r);
                 break;
             };
-            let (ll, lr) = children(nodes, left_leaf);
-            let (rl, rr) = children(nodes, right_leaf);
+            let (ll, lr) = child_digests(nodes, left_leaf);
+            let (rl, rr) = child_digests(nodes, right_leaf);
             let (left_digest, right_digest) =
                 hasher.node_digest_pair([(left, &ll, &lr), (right, &rl, &rr)]);
             nodes[index(left)] = left_digest;
@@ -1416,7 +1406,7 @@ mod tests {
         });
     }
 
-    /// A strategy that always splits work into `parallelism` batches, run on one thread.
+    /// A strategy that splits work into up to `parallelism` batches, run on one thread.
     fn split_strategy(parallelism: usize) -> Manual<Rayon> {
         Rayon::new(NZUsize!(1))
             .unwrap()
@@ -1429,13 +1419,18 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher: H = Standard::new(ForwardFold);
-            for (first, count) in [((1u64 << 62) - 1, 1u64), (*F::MAX_LEAVES - 7, 7)] {
+            // A 2^62-leaf tree, then the last leaves before `MAX_LEAVES` on one and three ranges.
+            for (first, count) in [
+                ((1u64 << 62) - 1, 1u64),
+                (*F::MAX_LEAVES - 7, 7),
+                (*F::MAX_LEAVES - 300, 300),
+            ] {
                 let first = Location::new(first);
                 let pinned = F::nodes_to_pin(first).map(|_| D::EMPTY).collect();
                 let base = Mem::<F, D>::from_components(Vec::new(), first, pinned).unwrap();
                 let items: Vec<u64> = (0..count).collect();
 
-                let batch = base
+                let batch = MerkleizedBatch::from_mem_with_strategy(&base, split_strategy(3))
                     .new_batch()
                     .add_many(&hasher, &items)
                     .merkleize(&base, &hasher);
