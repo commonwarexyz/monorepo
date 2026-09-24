@@ -134,7 +134,7 @@ impl StorageWorkload for ContiguousFixedWorkload {
     }
 }
 
-struct ContiguousVariableWorkload<const COMPRESSED: bool>;
+struct ContiguousVariableWorkload<const COMPRESSED: bool = false>;
 
 impl<const COMPRESSED: bool> StorageWorkload for ContiguousVariableWorkload<COMPRESSED> {
     type Error = crate::journal::Error;
@@ -200,7 +200,7 @@ impl StorageWorkload for SegmentedFixedWorkload {
     }
 }
 
-struct SegmentedGlobWorkload<const COMPRESSED: bool>;
+struct SegmentedGlobWorkload<const COMPRESSED: bool = false>;
 
 impl<const COMPRESSED: bool> StorageWorkload for SegmentedGlobWorkload<COMPRESSED> {
     type Error = crate::journal::Error;
@@ -233,7 +233,7 @@ impl<const COMPRESSED: bool> StorageWorkload for SegmentedGlobWorkload<COMPRESSE
     }
 }
 
-struct SegmentedVariableWorkload<const COMPRESSED: bool>;
+struct SegmentedVariableWorkload<const COMPRESSED: bool = false>;
 
 impl<const COMPRESSED: bool> StorageWorkload for SegmentedVariableWorkload<COMPRESSED> {
     type Error = crate::journal::Error;
@@ -316,7 +316,7 @@ impl Record for TestEntry {
     }
 }
 
-struct SegmentedOversizedWorkload<const COMPRESSED: bool>;
+struct SegmentedOversizedWorkload<const COMPRESSED: bool = false>;
 
 impl<const COMPRESSED: bool> StorageWorkload for SegmentedOversizedWorkload<COMPRESSED> {
     type Error = crate::journal::Error;
@@ -396,16 +396,17 @@ impl StorageWorkload for AuthenticatedMmbWorkload {
     }
 }
 
+// Compressed fixtures pin zstd output; encoder upgrades can change hashes without breaking reads.
 conformance_tests! {
     StorageConformance<ContiguousFixedWorkload> => 512,
-    StorageConformance<ContiguousVariableWorkload<false>> => 512,
+    StorageConformance<ContiguousVariableWorkload> => 512,
     StorageConformance<ContiguousVariableWorkload<true>> => 512,
     StorageConformance<SegmentedFixedWorkload> => 512,
-    StorageConformance<SegmentedGlobWorkload<false>> => 512,
+    StorageConformance<SegmentedGlobWorkload> => 512,
     StorageConformance<SegmentedGlobWorkload<true>> => 512,
-    StorageConformance<SegmentedVariableWorkload<false>> => 512,
+    StorageConformance<SegmentedVariableWorkload> => 512,
     StorageConformance<SegmentedVariableWorkload<true>> => 512,
-    StorageConformance<SegmentedOversizedWorkload<false>> => 512,
+    StorageConformance<SegmentedOversizedWorkload> => 512,
     StorageConformance<SegmentedOversizedWorkload<true>> => 512,
     StorageConformance<AuthenticatedMmrWorkload> => 256,
     StorageConformance<AuthenticatedMmbWorkload> => 256,

@@ -12,9 +12,9 @@
 //! # Compression
 //!
 //! [Archive] supports optional zstd compression of freezer values through
-//! [Config::freezer_value_compression]. Keep the choice between `None` and `Some(_)` fixed while
-//! stored values are retained. Only the compression level may change between initializations
-//! when compression is enabled.
+//! [Config::freezer_value_compression]. Keep the choice between `None` and `Some(_)` fixed for the
+//! life of the archive. Only the compression level may change between initializations when
+//! compression is enabled.
 //!
 //! # Durability and Recovery
 //!

@@ -117,16 +117,16 @@ pub(super) fn find_frame(buf: &mut impl Buf, offset: u64) -> Result<(u64, FrameI
 
 /// Decompress a journal payload into an owned buffer for zero-copy decoding.
 pub(super) fn decompress(compressed: &[u8]) -> Result<Vec<u8>, Error> {
-    // Journal writers emit single frames that declare their content size, so we can
-    // allocate the output buffer from it.
+    // Journal writers emit single frames that declare their content size, so we can allocate the
+    // output buffer from it.
     let size = get_frame_content_size(compressed)
         .ok()
         .flatten()
         .and_then(|size| usize::try_from(size).ok())
         .ok_or(Error::DecompressionFailed)?;
 
-    // Bulk decompression resets its fixed-size context before each frame, so it can
-    // be cached without cleanup, even after a failed decode.
+    // Bulk decompression resets its fixed-size context before each frame, so it can be cached
+    // without cleanup, even after a failed decode.
     Cached::take(&DECOMPRESSOR, Decompressor::new, |_| Ok(()))
         .and_then(|mut decompressor| decompressor.decompress(compressed, size))
         .map_err(|_| Error::DecompressionFailed)
@@ -189,7 +189,8 @@ pub(super) async fn read_frame_at<V: Codec>(
             total_len,
             ..
         } if compressed => {
-            // Reread the buffered prefix so contiguous payloads decompress without a staging copy.
+            // Reread the buffered prefix so a payload read as one chunk decompresses without a
+            // staging copy.
             let data_offset = offset
                 .checked_add(varint_len as u64)
                 .ok_or(Error::OffsetOverflow)?;

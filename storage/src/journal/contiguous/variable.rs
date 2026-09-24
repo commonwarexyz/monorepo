@@ -365,7 +365,10 @@ pub struct Config<C> {
     /// All non-final blobs are logically full.
     pub items_per_section: NonZeroU64,
 
-    /// Optional compression level for stored items.
+    /// Optional zstd compression level for stored items.
+    ///
+    /// Keep the choice between `None` and `Some(_)` fixed while stored items are retained.
+    /// Only the compression level may change between initializations when compression is enabled.
     pub compression: Option<u8>,
 
     /// [Codec] configuration for encoding/decoding items.
@@ -2694,9 +2697,7 @@ mod tests {
         },
         telemetry::metrics::{has_metric_value, metric_samples},
     };
-    use commonware_utils::{
-        NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes, test_rng,
-    };
+    use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, probability, sequence::FixedBytes};
     use futures::StreamExt as _;
     use rand::Rng as _;
     use std::num::NonZeroU16;
@@ -4063,7 +4064,7 @@ mod tests {
     #[test_traced]
     fn test_variable_compressed_frames_cross_pages() {
         let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
+        executor.start(|mut context| async move {
             let cfg = Config {
                 partition: "compressed-cross-pages".into(),
                 items_per_section: NZU64!(3),
@@ -4076,12 +4077,11 @@ mod tests {
 
             // Random items stay larger than a page after compression, so their frames span
             // checksummed page boundaries. Repeated items compress to a few bytes.
-            let mut rng = test_rng();
             let items: Vec<Vec<u8>> = (0..10)
                 .map(|i| {
                     let mut item = vec![i as u8; 1500 + i * 97];
                     if i % 3 != 2 {
-                        rng.fill_bytes(&mut item);
+                        context.fill_bytes(&mut item);
                     }
                     item
                 })

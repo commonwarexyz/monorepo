@@ -54,7 +54,8 @@ fn bench_size<const SIZE: usize>(c: &mut Criterion) {
                         .await
                         .unwrap();
 
-                        // Random items do not compress. Others differ only in a counter prefix.
+                        // Use the same items and read positions in every sample. Random items do
+                        // not compress; the others differ only in a counter prefix.
                         let mut rng = test_rng();
                         for i in 0..items {
                             let mut bytes = [0xAB; SIZE];
