@@ -62,12 +62,18 @@ fn all_zero(bytes: &[u8]) -> Choice {
         .fold(Choice::TRUE, |acc, b| acc & b.ct_eq(&0u8))
 }
 
+/// Partial product of pairings that can be built in parallel and merged before one final
+/// exponentiation.
 struct PairingProduct {
     pairing: Pairing,
+    /// Whether pending Miller loops were folded into the accumulator. Merging and the final
+    /// check both require a commit, and a merged product may be merged again, so a second
+    /// commit is a no-op. No pairs may be aggregated after a commit.
     committed: bool,
 }
 
 impl PairingProduct {
+    /// Creates an empty product over raw group elements (no hashing or domain separation tag).
     fn new() -> Self {
         Self {
             pairing: Pairing::new(false, &[]),
@@ -75,11 +81,13 @@ impl PairingProduct {
         }
     }
 
+    /// Multiplies `e(p1, p2)` into the product.
     fn aggregate(&mut self, p1: &blst_p1_affine, p2: &blst_p2_affine) {
         debug_assert!(!self.committed);
         self.pairing.raw_aggregate(p2, p1);
     }
 
+    /// Folds pending Miller loops into the accumulator, once.
     fn commit(&mut self) {
         if self.committed {
             return;
@@ -88,13 +96,19 @@ impl PairingProduct {
         self.committed = true;
     }
 
+    /// Returns the product of `self` and `other`.
     fn merge(mut self, mut other: Self) -> Self {
         self.commit();
         other.commit();
-        assert_eq!(self.pairing.merge(&other.pairing), BLST_ERROR::BLST_SUCCESS);
+        assert_eq!(
+            self.pairing.merge(&other.pairing),
+            BLST_ERROR::BLST_SUCCESS,
+            "products created by PairingProduct::new share one configuration"
+        );
         self
     }
 
+    /// Returns whether the product equals the identity.
     fn verify(mut self) -> bool {
         self.commit();
         self.pairing.finalverify(None)
