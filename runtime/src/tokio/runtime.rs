@@ -1017,6 +1017,56 @@ mod tests {
     }
 
     #[test]
+    fn test_inline_io_read_bypasses_occupied_blocking_pool() {
+        // With the only blocking thread occupied, a read handed to the pool cannot finish on its
+        // first poll, while an opted-in read runs on the task's thread during that poll.
+        for inline in [false, true] {
+            let cfg = Config::new().with_max_blocking_threads(1);
+            let storage_directory = cfg.storage_directory().clone();
+            Runner::new(cfg).start(move |context| async move {
+                let (blob, _) = context.open("inline-dispatch", b"blob").await.unwrap();
+                blob.write_at(
+                    0,
+                    Bytes::from_static(b"data"),
+                    crate::WriteOptions::default(),
+                )
+                .await
+                .unwrap();
+
+                let (started_tx, started_rx) = futures::channel::oneshot::channel();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                let blocker = ::tokio::task::spawn_blocking(move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                });
+                started_rx.await.unwrap();
+
+                let reader = context.child("reader").dedicated();
+                let reader = if inline { reader.inline_io() } else { reader };
+                let ready = reader
+                    .spawn(move |_| async move {
+                        let read = blob.read_at(0, 4, crate::ReadOptions::default());
+                        futures::pin_mut!(read);
+                        let result = futures::poll!(&mut read);
+                        let ready = result.is_ready();
+                        release_tx.send(()).unwrap();
+                        let bytes = match result {
+                            std::task::Poll::Ready(result) => result.unwrap(),
+                            std::task::Poll::Pending => read.await.unwrap(),
+                        };
+                        assert_eq!(bytes.coalesce().as_ref(), b"data");
+                        ready
+                    })
+                    .await
+                    .unwrap();
+                blocker.await.unwrap();
+                assert_eq!(ready, inline);
+            });
+            let _ = std::fs::remove_dir_all(storage_directory);
+        }
+    }
+
+    #[test]
     fn test_inline_io_requires_dedicated_opt_in() {
         fn thread_inline_io() -> bool {
             utils::thread::INLINE_IO.with(|inline| inline.get())
