@@ -1421,7 +1421,7 @@ where
             exact_retirements: commitments,
         });
 
-        // Retain the recorded predecessor as the application recovery anchor.
+        // Keep the processed block so the application can restart from it.
         self = self.prune_after_floor(dispatch_floor).await;
 
         // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
