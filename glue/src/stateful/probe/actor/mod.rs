@@ -3,7 +3,10 @@ use super::{
     sample::Sample,
 };
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::Epoch};
+use commonware_consensus::{
+    simplex::{marshal::core::Variant, scheme::Scheme},
+    types::Epoch,
+};
 use commonware_cryptography::{PublicKey, certificate::Provider};
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;

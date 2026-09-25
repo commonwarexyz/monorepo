@@ -21,7 +21,7 @@ use crate::stateful::{
         },
     },
 };
-use commonware_consensus::marshal::{
+use commonware_consensus::simplex::marshal::{
     ancestry::BlockProvider,
     core::{Mailbox as MarshalMailbox, Variant},
 };
