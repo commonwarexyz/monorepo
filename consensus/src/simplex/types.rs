@@ -3,7 +3,7 @@
 use crate::{
     Epochable, Viewable,
     simplex::scheme::{self, CertificateVerifier},
-    types::{Epoch, Participant, Round, View},
+    types::{Attributable, Epoch, Participant, Round, View},
 };
 use bytes::BufMut;
 use commonware_codec::{Buf, EncodeSize, Error, Read, ReadExt, Write};
@@ -91,13 +91,6 @@ where
             parent: (View::arbitrary(u)?, D::arbitrary(u)?),
         })
     }
-}
-
-/// Attributable is a trait that provides access to the signer index.
-/// This is used to identify which participant signed a given message.
-pub trait Attributable {
-    /// Returns the index of the signer (validator) who produced this message.
-    fn signer(&self) -> Participant;
 }
 
 /// A map of [Attributable] items keyed by their signer index.
