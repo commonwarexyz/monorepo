@@ -142,6 +142,7 @@ mod tests {
         test_keyless_variable_empty_db_recovery => run_empty_db_recovery, reopen_indexed;
         test_keyless_variable_replay_with_trailing_appends => run_replay_with_trailing_appends, reopen_indexed;
         test_keyless_variable_get_out_of_bounds => run_get_out_of_bounds, db;
+        test_keyless_variable_get_pruned => run_get_pruned, db;
         test_keyless_variable_metadata => run_metadata, db;
         test_keyless_variable_pruning => run_pruning, reopen;
         test_keyless_variable_batch_get => run_batch_get, db;

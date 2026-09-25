@@ -378,12 +378,10 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Merkle] with [merkle::Error::LocationOverflow] if `start_loc` >
-    ///   [Family::MAX_LEAVES].
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
     pub async fn proof(
         &self,
         start_loc: Location<F>,
@@ -447,8 +445,8 @@ where
     ///
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
     ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
     pub async fn historical_proof(
         &self,
         historical_leaves: Location<F>,
@@ -769,10 +767,12 @@ where
         Ok(self)
     }
 
-    /// Prune both the Merkle structure and journal to the given location.
+    /// Prune journal items before `prune_loc`, then raise the Merkle pruning boundary to the
+    /// journal's retained start if it is lower.
     ///
     /// # Returns
-    /// The new pruning boundary, which may be less than the requested `prune_loc`.
+    /// The journal's retained start, which may be less than `prune_loc`. After state sync, the
+    /// Merkle pruning boundary can remain above the returned start.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;

@@ -749,8 +749,7 @@ pub enum InitError<E: Debug, T: Debug> {
     },
 }
 
-/// Validate the complete target before returning a managed database.
-/// Bounds alone do not identify a checkpoint: its commitment and retained range must also match.
+/// Validate the complete sync target before returning a managed database.
 fn validate_initialization<E, T>(
     db: T,
     expected: Option<T::SyncTarget>,

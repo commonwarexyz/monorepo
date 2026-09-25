@@ -94,8 +94,9 @@ pub trait DbAny<F: Family>:
     /// Returns the root digest of the authenticated store.
     fn root(&self) -> Self::Digest;
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     fn bounds(&self) -> Range<Location<F>>;
 
     /// Return the Location of the next operation appended to this db.
@@ -109,6 +110,8 @@ pub trait DbAny<F: Family>:
     ) -> impl Future<Output = Result<Option<<Self as DbAny<F>>::Value>, Error<F>>> + Send;
 
     /// Prune historical operations prior to `loc`.
+    ///
+    /// The retained start in [`Self::bounds`] can remain below `loc`.
     fn prune(self, loc: Location<F>) -> impl Future<Output = Result<Self, Error<F>>> + Send;
 
     /// Begin durably persisting the database.
@@ -134,7 +137,7 @@ pub trait DbAny<F: Family>:
     where
         Self: Sized;
 
-    /// The location before which all operations can be pruned.
+    /// The location before which all operations are known to be inactive.
     fn inactivity_floor_loc(&self) -> Location<F>;
 
     /// The maximum location that [`Self::prune`] accepts and the most recent location from which

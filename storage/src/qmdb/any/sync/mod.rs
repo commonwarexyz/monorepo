@@ -158,12 +158,16 @@ where
             return Ok(None);
         }
 
-        // The target's range starts at the inactivity floor.
+        // The inactivity floor is carried by the last commit operation rather than being
+        // the target range's start.
+        let inactivity_floor =
+            qmdb::find_inactivity_floor_at::<F, _>(journal, target.range.end()).await?;
+
         qmdb::sync::local_pinned_nodes::<F, _, H, S>(
             context,
             config.merkle_config.clone(),
             target,
-            target.range.start(),
+            inactivity_floor,
         )
         .await
     }

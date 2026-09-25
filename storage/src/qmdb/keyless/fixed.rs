@@ -322,7 +322,7 @@ mod tests {
             assert_eq!(*client.bounds().start, 5);
             assert_eq!(*client.inactivity_floor_loc(), 0);
 
-            // Persist and reopen the imported prefix without requiring replay from its floor.
+            // Persist and reopen the imported suffix without requiring replay from its floor.
             _ = client.sync().await.unwrap();
             let client = TestDb::<mmr::Family>::init(context.child("reopened"), client_cfg, None)
                 .await
@@ -727,6 +727,7 @@ mod tests {
         test_keyless_fixed_empty_db_recovery => run_empty_db_recovery, reopen_indexed;
         test_keyless_fixed_replay_with_trailing_appends => run_replay_with_trailing_appends, reopen_indexed;
         test_keyless_fixed_get_out_of_bounds => run_get_out_of_bounds, db;
+        test_keyless_fixed_get_pruned => run_get_pruned, db;
         test_keyless_fixed_metadata => run_metadata, db;
         test_keyless_fixed_pruning => run_pruning, reopen;
         test_keyless_fixed_batch_get => run_batch_get, db;
