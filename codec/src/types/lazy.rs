@@ -67,13 +67,14 @@ use std::sync::OnceLock;
 /// ## Equality, Ordering, and Hashing
 ///
 /// Equality, ordering, and hashing follow the canonical encoding, so they never force
-/// decoding:
+/// decoding and never depend on whether deferred bytes were decoded:
 ///
 /// - Ordering is lexicographic over the encoded bytes and never consults `T`'s [`Ord`], so it
 ///   can differ from the order of the decoded values.
-/// - Equality uses `T`'s [`PartialEq`] only when that is cheaper than encoding, so `T`'s
-///   equality must agree with equality of encodings (as it does for canonical encodings).
-/// - Distinct undecodable byte strings stay distinct.
+/// - Two values constructed with [`Lazy::new`] compare with `T`'s [`PartialEq`], which is
+///   cheaper than encoding them, so `T`'s equality must agree with equality of encodings.
+/// - Deferred bytes compare as bytes, so encodings of one value that a lenient decoder accepts
+///   stay distinct, as do distinct undecodable byte strings.
 #[derive(Clone)]
 pub struct Lazy<T: Read> {
     /// This should only be `None` if `value` is initialized.
@@ -156,21 +157,6 @@ impl<T: Read> Lazy<T> {
     /// Returns a reference to the underlying value, or `None` if decoding failed.
     #[cfg(not(feature = "std"))]
     pub const fn get(&self) -> Option<&T> {
-        self.value.as_ref()
-    }
-
-    // Decoding is deferred only with `std`, where `OnceLock` caches the result on first access.
-    // Without it, `deferred` decodes up front into a plain `Option`.
-
-    /// Returns the value if it has already been decoded, without forcing a decode.
-    #[cfg(feature = "std")]
-    fn decoded(&self) -> Option<&T> {
-        self.value.get().and_then(Option::as_ref)
-    }
-
-    /// Returns the value if it has already been decoded, without forcing a decode.
-    #[cfg(not(feature = "std"))]
-    const fn decoded(&self) -> Option<&T> {
         self.value.as_ref()
     }
 }
@@ -285,14 +271,21 @@ impl<T: Read + Write + EncodeSize> Lazy<T> {
 
 impl<T: Read + Write + EncodeSize + PartialEq> PartialEq for Lazy<T> {
     fn eq(&self, other: &Self) -> bool {
-        // Retained bytes compare directly. Otherwise, two decoded values compare with `T`'s
-        // equality, which is cheaper than encoding an eager value and agrees with it.
+        // Choose by construction, never by decode state, so a decode cannot change the result.
+        // Retained bytes compare directly, and two eager values compare with `T`'s equality,
+        // which is cheaper than encoding them and agrees with it.
         match (&self.pending, &other.pending) {
             (Some(left), Some(right)) => left.bytes == right.bytes,
-            _ => match (self.decoded(), other.decoded()) {
-                (Some(left), Some(right)) => left == right,
-                _ => self.with_encoding(|left| other.with_encoding(|right| left == right)),
-            },
+            (None, None) => {
+                let left = self
+                    .get()
+                    .expect("Lazy should have a value if pending is None");
+                let right = other
+                    .get()
+                    .expect("Lazy should have a value if pending is None");
+                left == right
+            }
+            _ => self.with_encoding(|left| other.with_encoding(|right| left == right)),
         }
     }
 }
@@ -397,6 +390,28 @@ mod test {
         fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
             DECODES.fetch_add(1, SeqCst);
             Ok(Self(u8::read_cfg(buf, &())?))
+        }
+    }
+
+    /// A byte whose decoder ignores the top bit, so two encodings decode to each value.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Lenient(u8);
+
+    impl FixedSize for Lenient {
+        const SIZE: usize = 1;
+    }
+
+    impl Write for Lenient {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl Read for Lenient {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _cfg: &Self::Cfg) -> Result<Self, crate::Error> {
+            Ok(Self(u8::read_cfg(buf, &())? & 0x7f))
         }
     }
 
@@ -555,6 +570,27 @@ mod test {
         assert_ne!(a, b);
         assert!(a < b);
         assert!(Lazy::new(Small(100)) < a);
+    }
+
+    #[test]
+    fn test_lazy_equality_ignores_decode_state() {
+        let eager = Lazy::new(Lenient(1));
+        let canonical = Lazy::<Lenient>::deferred(&mut Bytes::from_static(&[0x01]), ());
+        let alternate = Lazy::<Lenient>::deferred(&mut Bytes::from_static(&[0x81]), ());
+
+        // Only the canonical bytes match the eager value's encoding
+        assert_eq!(eager, canonical);
+        assert_ne!(eager, alternate);
+        assert_ne!(canonical, alternate);
+
+        // Decoding both to the eager value changes no comparison
+        assert_eq!(canonical.get(), Some(&Lenient(1)));
+        assert_eq!(alternate.get(), Some(&Lenient(1)));
+        assert_eq!(eager, canonical);
+        assert_ne!(eager, alternate);
+        assert_ne!(alternate, eager);
+        assert_ne!(canonical, alternate);
+        assert_eq!(hash_of(&eager), hash_of(&canonical));
     }
 
     #[test]
