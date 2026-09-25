@@ -121,6 +121,9 @@ stability_scope!(BETA {
         fn max_encode_size(cfg: &Self::Cfg) -> usize;
     }
 });
+stability_scope!(ALPHA, cfg(any(test, feature = "mocks")) {
+    pub mod twins;
+});
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_actor::Feedback;
     use commonware_cryptography::{Digest, PublicKey};
