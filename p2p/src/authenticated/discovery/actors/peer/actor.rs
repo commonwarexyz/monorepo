@@ -9,7 +9,7 @@ use crate::{
             metrics,
             types::{self, InfoVerifier},
         },
-        relay::{Message as RelayMessage, Prioritized, Relay, recv_prioritized, try_recv},
+        relay::{self, Message as RelayMessage, Prioritized, Relay, recv_prioritized},
         throttle::Throttle,
     },
 };
@@ -18,14 +18,14 @@ use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
 use commonware_macros::{select, select_loop};
 use commonware_runtime::{
-    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner,
+    BufferPool, BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner,
     iobuf::EncodeExt,
     telemetry::metrics::{CounterFamily, raw::Counter},
 };
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRng;
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, time::Duration, vec::Drain};
 use tracing::debug;
 
 /// Send counters for one connection.
@@ -34,6 +34,95 @@ struct Sent {
     bit_vec: Counter,
     peers: Counter,
     data: BTreeMap<Channel, Counter>,
+}
+
+/// Outbound queues, send counters and the pending batch for one connection.
+struct Outbox<C: PublicKey> {
+    peer: C,
+    pool: BufferPool,
+
+    control: mailbox::UnreliableReceiver<Message<C>>,
+    high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+    low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+
+    sent: Sent,
+    batch: Vec<IoBufs>,
+    size: usize,
+}
+
+impl<C: PublicKey> Outbox<C> {
+    /// Records the greeting as sent and returns its payload.
+    fn greet(&self, info: types::Info<C>) -> IoBufs {
+        self.sent.greeting.inc();
+        types::Payload::Greeting(info).encode_with_pool(&self.pool)
+    }
+
+    /// Awaits the next outbound message.
+    ///
+    /// Priority order: control > high > low.
+    async fn recv(&mut self) -> Prioritized<Message<C>, EncodedData> {
+        recv_prioritized(&mut self.control, &mut self.high, &mut self.low).await
+    }
+
+    /// Returns the next already-queued outbound message, if any.
+    ///
+    /// Priority order: control > high > low.
+    fn try_recv(&mut self) -> Option<Prioritized<Message<C>, EncodedData>> {
+        if let Ok(msg) = self.control.try_recv() {
+            return Some(Prioritized::Control(msg));
+        }
+        relay::try_recv(&mut self.high)
+            .or_else(|| relay::try_recv(&mut self.low))
+            .map(Prioritized::Data)
+    }
+
+    /// Records a message as sent and appends its payload to the batch.
+    ///
+    /// Returns `Err` if `msg` terminates the connection (`Closed` or `Kill`).
+    fn push<S, R>(&mut self, msg: Prioritized<Message<C>, EncodedData>) -> Result<(), Error<S, R>> {
+        let payload = match msg {
+            Prioritized::Closed => return Err(Error::PeerDisconnected),
+            Prioritized::Control(msg) => {
+                let (counter, payload) = match msg {
+                    Message::BitVec(bit_vec) => {
+                        (&self.sent.bit_vec, types::Payload::BitVec(bit_vec))
+                    }
+                    Message::Peers(peers) => (&self.sent.peers, types::Payload::Peers(peers)),
+                    Message::Kill => return Err(Error::PeerKilled(self.peer.to_string())),
+                };
+                counter.inc();
+                payload.encode_with_pool(&self.pool)
+            }
+            Prioritized::Data(msg) => {
+                self.sent
+                    .data
+                    .get(&msg.channel)
+                    .expect("outbound message on invalid channel")
+                    .inc();
+                msg.payload
+            }
+        };
+        self.batch.push(payload);
+        Ok(())
+    }
+
+    /// Appends already-queued messages to the batch until it is full.
+    ///
+    /// Only consumes messages that are already ready, so batching adds no
+    /// buffering latency.
+    fn fill<S, R>(&mut self) -> Result<(), Error<S, R>> {
+        while self.batch.len() < self.size
+            && let Some(msg) = self.try_recv()
+        {
+            self.push(msg)?;
+        }
+        Ok(())
+    }
+
+    /// Removes and returns the batched payloads.
+    fn drain(&mut self) -> Drain<'_, IoBufs> {
+        self.batch.drain(..)
+    }
 }
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
@@ -80,66 +169,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         )
     }
 
-    /// Records a control message as sent and returns its payload.
-    ///
-    /// Returns `Err` for `Kill` so the caller can terminate the connection.
-    fn prepare_control<S, R>(
-        peer: &C,
-        msg: Message<C>,
-        pool: &commonware_runtime::BufferPool,
-        sent: &Sent,
-    ) -> Result<IoBufs, Error<S, R>> {
-        let (counter, payload) = match msg {
-            Message::BitVec(bit_vec) => (&sent.bit_vec, types::Payload::BitVec(bit_vec)),
-            Message::Peers(peers) => (&sent.peers, types::Payload::Peers(peers)),
-            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
-        };
-        counter.inc();
-        Ok(payload.encode_with_pool(pool))
-    }
-
-    /// Records pre-encoded data as sent and returns its payload.
-    fn prepare_data(msg: EncodedData, sent: &Sent) -> IoBufs {
-        sent.data
-            .get(&msg.channel)
-            .expect("outbound message on invalid channel")
-            .inc();
-        msg.payload
-    }
-
-    /// Drains already-queued messages into `batch`.
-    ///
-    /// Priority order: control > high > low. Only consumes messages that are
-    /// already ready, so batching adds no buffering latency.
-    #[allow(clippy::too_many_arguments)]
-    fn extend_send_many<S, R>(
-        peer: &C,
-        batch_size: usize,
-        batch: &mut Vec<IoBufs>,
-        control: &mut mailbox::UnreliableReceiver<Message<C>>,
-        pool: &commonware_runtime::BufferPool,
-        high: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-        low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-        sent: &Sent,
-    ) -> Result<(), Error<S, R>> {
-        while batch.len() < batch_size {
-            if let Ok(msg) = control.try_recv() {
-                batch.push(Self::prepare_control(peer, msg, pool, sent)?);
-                continue;
-            }
-            if let Some(msg) = try_recv(high) {
-                batch.push(Self::prepare_data(msg, sent));
-                continue;
-            }
-            if let Some(msg) = try_recv(low) {
-                batch.push(Self::prepare_data(msg, sent));
-                continue;
-            }
-            break;
-        }
-        Ok(())
-    }
-
     pub async fn run<S: Sender, R: Receiver>(
         self,
         peer: C,
@@ -174,7 +203,16 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         let received_greeting =
             received.get_or_create_owned(&metrics::Message::new_greeting(&peer));
         let received_invalid = received.get_or_create_owned(&metrics::Message::new_invalid(&peer));
-        let pool = self.context.network_buffer_pool().clone();
+        let mut outbox = Outbox {
+            peer: peer.clone(),
+            pool: self.context.network_buffer_pool().clone(),
+            control: self.control,
+            high: self.high,
+            low: self.low,
+            sent,
+            batch: Vec::with_capacity(self.send_batch_size),
+            size: self.send_batch_size,
+        };
 
         // Use half the gossip frequency for rate limiting to allow for timing
         // jitter at message boundaries.
@@ -195,9 +233,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             let tracker = tracker.clone();
             move |context| async move {
                 // Send the greeting before queued messages while the receiver runs concurrently.
-                sent.greeting.inc();
                 conn_sender
-                    .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
+                    .send(outbox.greet(greeting))
                     .await
                     .map_err(Error::SendFailed)?;
 
@@ -205,8 +242,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 let mut deadline = context.current();
 
                 // Enter into the main loop
-                let mut batch = Vec::with_capacity(self.send_batch_size);
-                let (control, high, low) = &mut (self.control, self.high, self.low);
                 select_loop! {
                     context,
                     on_stopped => {},
@@ -219,28 +254,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     },
                     // Await any outbound message (control, high, or low), then
                     // drain already-queued messages into one `send_many` call.
-                    // Priority order: control > high > low.
-                    msg = recv_prioritized(control, high, low) => {
-                        let payload = match msg {
-                            Prioritized::Closed => return Err(Error::PeerDisconnected),
-                            Prioritized::Control(msg) => {
-                                Self::prepare_control(&peer, msg, &pool, &sent)?
-                            }
-                            Prioritized::Data(encoded) => Self::prepare_data(encoded, &sent),
-                        };
-                        batch.push(payload);
-                        Self::extend_send_many(
-                            &peer,
-                            self.send_batch_size,
-                            &mut batch,
-                            control,
-                            &pool,
-                            high,
-                            low,
-                            &sent,
-                        )?;
+                    msg = outbox.recv() => {
+                        outbox.push(msg)?;
+                        outbox.fill()?;
                         conn_sender
-                            .send_many(batch.drain(..))
+                            .send_many(outbox.drain())
                             .await
                             .map_err(Error::SendFailed)?;
                     },
