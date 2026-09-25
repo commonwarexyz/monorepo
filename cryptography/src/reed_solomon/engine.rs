@@ -14,8 +14,8 @@
 //!
 //! - [`Naive`]
 //!     - Simple reference implementation.
-//! - [`NoSimd`]
-//!     - Basic optimized engine without SIMD so that it works on all CPUs.
+//! - [`Scalar`]
+//!     - Portable engine without SIMD that works on all CPUs.
 //! - `Avx2`
 //!     - Optimized engine that takes advantage of the x86(-64) AVX2 SIMD instructions.
 //! - `Avx512`
@@ -69,13 +69,13 @@ pub(crate) use self::shards::Shards;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use self::{engine_avx2::Avx2, engine_avx512::Avx512, engine_ssse3::Ssse3};
 pub use self::{
-    engine_default::DefaultEngine, engine_naive::Naive, engine_nosimd::NoSimd, shards::ShardsRefMut,
+    engine_default::DefaultEngine, engine_naive::Naive, engine_scalar::Scalar, shards::ShardsRefMut,
 };
 pub(crate) use utils::{fft_skew_end, formal_derivative, ifft_skew_end, xor_within};
 
 mod engine_default;
 mod engine_naive;
-mod engine_nosimd;
+mod engine_scalar;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod engine_avx2;
@@ -223,7 +223,7 @@ mod tests {
     /// Every engine the host supports.
     fn engines() -> Vec<Box<dyn Engine>> {
         let mut engines: Vec<Box<dyn Engine>> =
-            vec![Box::new(NoSimd::new()), Box::new(Naive::new())];
+            vec![Box::new(Scalar::new()), Box::new(Naive::new())];
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             if cpu_features::avx512() {
@@ -326,7 +326,7 @@ mod tests {
         let mut input = Box::new([0; GF_ORDER]);
         input[..4].copy_from_slice(&[1, 0, 1, 1]);
         let mut expected = input.clone();
-        NoSimd::eval_poly(&mut expected, 4);
+        Scalar::eval_poly(&mut expected, 4);
 
         type Evaluate = fn(&mut [GfElement; GF_ORDER], usize);
         let evaluators: &[(Evaluate, bool)] = &[
@@ -351,6 +351,13 @@ mod tests {
                 assert_eq!(actual, input);
             }
         }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    #[ignore = "requires AVX-512F and GFNI, run by the emulated AVX-512 CI job"]
+    fn avx512_available() {
+        assert!(cpu_features::avx512());
     }
 
     #[test]

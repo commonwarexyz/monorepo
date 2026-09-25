@@ -60,16 +60,22 @@ const fn validate_work_size(shard_bytes: usize, work_count: usize) -> Result<(),
     Ok(())
 }
 
-/// XOR-convolve `erasures` with the field logarithm table, exact on `..end`.
+/// XOR-convolve `erasures` with the field logarithm table.
 ///
-/// Entries at and after `end` must be zero. With `n = end.next_power_of_two()`, `i ^ j < n`
-/// for all `i, j < n`, so an `n`-point transform matches the full-field one on `..n`.
-fn eval_locator<E: Engine>(erasures: &mut [GfElement; GF_ORDER], end: usize) {
-    let n = end.next_power_of_two();
+/// `erasures` holds `n = end.next_power_of_two()` entries, and entries at and after `end` must
+/// be zero. Because `i ^ j < n` for all `i, j < n`, the `n`-point transform matches the first
+/// `n` outputs of the full-field one.
+///
+/// # Panics
+///
+/// If `erasures.len() != end.next_power_of_two()` or `end > GF_ORDER`.
+fn eval_locator<E: Engine>(erasures: &mut [GfElement], end: usize) {
+    let n = erasures.len();
+    assert_eq!(n, end.next_power_of_two());
     if n == GF_ORDER {
-        E::eval_poly(erasures, end);
+        E::eval_poly(erasures.try_into().expect("length is GF_ORDER"), end);
     } else {
-        engine::utils::eval_poly_short(&mut erasures[..n], end);
+        engine::utils::eval_poly_short(erasures, end);
     }
 }
 
@@ -251,7 +257,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{engine::NoSimd, test_util};
+    use crate::reed_solomon::{engine::Scalar, test_util};
 
     /// Checks that `validate` accepts the largest whole-chunk shard size for `work_count` work
     /// shards and rejects that size plus 2 bytes, which needs one more chunk per shard.
@@ -270,7 +276,7 @@ mod tests {
     /// Checks the shard size limit for counts such as (9, 3) and (3, 9), which encode with 12
     /// work shards (9 rounded up to a multiple of the chunk of 4) and decode with 16 (4 + 9
     /// rounded up to a power of two).
-    fn check_rate_capacity<R: Rate<NoSimd>>(original_count: usize, recovery_count: usize) {
+    fn check_rate_capacity<R: Rate<Scalar>>(original_count: usize, recovery_count: usize) {
         check_capacity(
             |shard_bytes| R::RateEncoder::validate(original_count, recovery_count, shard_bytes),
             12,
@@ -283,10 +289,10 @@ mod tests {
 
     #[test]
     fn working_space_capacity() {
-        check_rate_capacity::<HighRate<NoSimd>>(9, 3);
-        check_rate_capacity::<LowRate<NoSimd>>(3, 9);
-        check_rate_capacity::<DefaultRate<NoSimd>>(9, 3);
-        check_rate_capacity::<DefaultRate<NoSimd>>(3, 9);
+        check_rate_capacity::<HighRate<Scalar>>(9, 3);
+        check_rate_capacity::<LowRate<Scalar>>(3, 9);
+        check_rate_capacity::<DefaultRate<Scalar>>(9, 3);
+        check_rate_capacity::<DefaultRate<Scalar>>(3, 9);
     }
 
     #[test]
@@ -298,19 +304,19 @@ mod tests {
                 .into_iter()
                 .enumerate()
         {
-            let mut encoder = DefaultRate::<NoSimd>::encoder(
+            let mut encoder = DefaultRate::<Scalar>::encoder(
                 original_count,
                 recovery_count,
                 shard_bytes,
-                NoSimd::new(),
+                Scalar::new(),
                 encoder_work,
             )
             .unwrap();
-            let mut decoder = DefaultRate::<NoSimd>::decoder(
+            let mut decoder = DefaultRate::<Scalar>::decoder(
                 original_count,
                 recovery_count,
                 shard_bytes,
-                NoSimd::new(),
+                Scalar::new(),
                 decoder_work,
             )
             .unwrap();
@@ -320,11 +326,11 @@ mod tests {
                     shard_bytes,
                     (phase * 2 + round) as u8,
                 );
-                let mut fresh = DefaultRate::<NoSimd>::encoder(
+                let mut fresh = DefaultRate::<Scalar>::encoder(
                     original_count,
                     recovery_count,
                     shard_bytes,
-                    NoSimd::new(),
+                    Scalar::new(),
                     None,
                 )
                 .unwrap();

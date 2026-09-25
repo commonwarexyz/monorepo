@@ -165,14 +165,14 @@ impl<'a> ShardsRefMut<'a> {
     /// Returns mutable references to shards at
     /// `pos`, `pos + dist`, `pos + dist * 2` and `pos + dist * 3`.
     ///
-    /// See source code of [`NoSimd::fft`] for an example
+    /// See source code of [`Scalar::fft`] for an example
     /// (specifically the private method `fft_butterfly_two_layers`).
     ///
     /// # Panics
     ///
     /// If `dist` is `0` or any shard index is out of bounds.
     ///
-    /// [`NoSimd::fft`]: crate::reed_solomon::engine::NoSimd#method.fft
+    /// [`Scalar::fft`]: crate::reed_solomon::engine::Scalar#method.fft
     pub fn dist4_mut(&mut self, mut pos: usize, mut dist: usize) -> FourShardsMut<'_> {
         assert!(pos < self.shard_count && dist > 0 && dist <= (self.shard_count - 1 - pos) / 3);
         pos *= self.shard_chunk_count;

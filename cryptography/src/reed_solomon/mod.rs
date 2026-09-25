@@ -46,15 +46,16 @@
 //!   and naming rules.
 //! - Uses workspace dependencies and [`commonware_formatting`] in the test harness.
 //! - Uses [`thiserror`] for error display formatting.
-//! - Renamed upstream `ReedSolomonEncoder` and `ReedSolomonDecoder` to [`Encoder`] and [`Decoder`].
+//! - Renamed upstream `ReedSolomonEncoder` and `ReedSolomonDecoder` to [`Encoder`] and [`Decoder`],
+//!   and the `NoSimd` engine to [`Scalar`](engine::Scalar).
 //! - Uses plain code references for cfg-gated SIMD engine docs so rustdoc works on all targets.
 //! - Validates transform domains, shard ranges, and working-space sizes at their public boundaries.
 //! - Supports AVX-512 with GFNI multiplication and runtime CPU feature checks.
 //! - Adds [`Plan`] and plan-based decoding to reuse erasure coefficients across decoders.
 //! - Sizes decoder Walsh transforms to the decoding domain.
-//! - Fuses AVX-512 butterfly layers and formal-derivative leaves. The AVX-512 derivative leaf
-//!   runs whenever the `Avx512` engine's CPU features are present, regardless of the selected
-//!   engine.
+//! - Fuses AVX-512 butterfly layers and formal-derivative leaves. When the `Avx512` engine's CPU
+//!   features are present, the AVX-512 derivative leaf runs for suitable shard counts and sizes,
+//!   regardless of the selected engine.
 //! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
 //! - Rewrote comments in Commonware style: no section banners or uppercase step headers, and
 //!   comments sit directly above the code they describe.

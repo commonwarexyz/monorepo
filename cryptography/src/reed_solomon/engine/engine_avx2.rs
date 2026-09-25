@@ -11,12 +11,12 @@ use core::iter::zip;
 
 /// Optimized [`Engine`] using AVX2 instructions.
 ///
-/// [`Avx2`] is an optimized engine that follows the same algorithm as
-/// [`NoSimd`] but takes advantage of the x86 AVX2 SIMD instructions.
+/// [`Avx2`] runs the same transforms as [`Scalar`] and multiplies with the nibble lookup
+/// tables of [`Mul128`] through AVX2 byte shuffles.
 ///
 /// Construction and [`Engine::eval_poly`] panic if AVX2 is unavailable.
 ///
-/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+/// [`Scalar`]: crate::reed_solomon::engine::Scalar
 #[derive(Clone, Copy)]
 pub struct Avx2 {
     mul128: &'static Mul128,

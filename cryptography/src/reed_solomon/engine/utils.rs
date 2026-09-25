@@ -140,7 +140,7 @@ pub(crate) fn ifft_skew_end(
 ///
 /// The 16-shard AVX-512 leaf depends only on the CPU, not on the selected `Engine`. When the
 /// `Avx512` engine's feature check passes (AVX-512F and GFNI), rate decoders for every engine,
-/// including `Naive` and `NoSimd`, use it for blocks that meet the guard below.
+/// including `Naive` and `Scalar`, use it for blocks that meet the guard below.
 pub(crate) fn formal_derivative(data: &mut ShardsRefMut<'_>) {
     // Blocks of 16 shards use the AVX-512 leaf when each shard spans at least 512 bytes.
     // Shorter shards and shard lengths that are a multiple of 4 KiB favor the four-way leaf.
@@ -229,8 +229,8 @@ unsafe fn formal_derivative_16_avx512(data: &mut ShardsRefMut<'_>, base: usize) 
     let (_, mut suffix) = data.split_at_mut(base);
     let (mut block, _) = suffix.split_at_mut(16);
     for chunk in 0..block[0].len() {
-        // SAFETY: This function enables AVX-512F. Each `block[i][chunk]` is a 64-byte array,
-        // and the unaligned loads and stores accept any alignment.
+        // SAFETY: The caller guarantees AVX-512F support. Each `block[i][chunk]` is a 64-byte
+        // array, and the unaligned loads and stores accept any alignment.
         unsafe {
             let s0 = _mm512_loadu_si512(block[0][chunk].as_ptr().cast());
             let s1 = _mm512_loadu_si512(block[1][chunk].as_ptr().cast());

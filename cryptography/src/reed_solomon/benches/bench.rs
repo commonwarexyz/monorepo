@@ -6,7 +6,7 @@ use commonware_cryptography::reed_solomon::engine::Neon;
 use commonware_cryptography::reed_solomon::engine::{Avx2, Avx512, Ssse3};
 use commonware_cryptography::reed_solomon::{
     Decoder, Encoder, SHARD_CHUNK_BYTES,
-    engine::{DefaultEngine, Engine, GF_ORDER, Naive, NoSimd, ShardsRefMut},
+    engine::{DefaultEngine, Engine, GF_ORDER, Naive, Scalar, ShardsRefMut},
     rate::{
         HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder, RateDecoder, RateEncoder,
     },
@@ -377,7 +377,7 @@ fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn(
 /// Benchmarks every engine available on the target and detected at runtime.
 fn benchmarks_engine(c: &mut Criterion) {
     benchmarks_engine_one(c, "naive", Naive::new());
-    benchmarks_engine_one(c, "nosimd", NoSimd::new());
+    benchmarks_engine_one(c, "scalar", Scalar::new());
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {

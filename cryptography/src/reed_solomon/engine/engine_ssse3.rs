@@ -11,12 +11,12 @@ use core::iter::zip;
 
 /// Optimized [`Engine`] using SSSE3 instructions.
 ///
-/// [`Ssse3`] is an optimized engine that follows the same algorithm as
-/// [`NoSimd`] but takes advantage of the x86 SSSE3 SIMD instructions.
+/// [`Ssse3`] runs the same transforms as [`Scalar`] and multiplies with the nibble lookup
+/// tables of [`Mul128`] through SSSE3 byte shuffles.
 ///
 /// Construction and [`Engine::eval_poly`] panic if SSSE3 is unavailable.
 ///
-/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+/// [`Scalar`]: crate::reed_solomon::engine::Scalar
 #[derive(Clone, Copy)]
 pub struct Ssse3 {
     mul128: &'static Mul128,

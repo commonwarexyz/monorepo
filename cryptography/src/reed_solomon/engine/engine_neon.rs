@@ -7,12 +7,12 @@ use core::{arch::aarch64::*, iter::zip};
 
 /// Optimized [`Engine`] using Arm Neon instructions.
 ///
-/// [`Neon`] is an optimized engine that follows the same algorithm as
-/// [`NoSimd`] but takes advantage of the Arm Neon SIMD instructions.
+/// [`Neon`] runs the same transforms as [`Scalar`] and multiplies with the nibble lookup
+/// tables of [`Mul128`] through NEON table lookups.
 ///
 /// Construction and [`Engine::eval_poly`] panic if NEON is unavailable.
 ///
-/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+/// [`Scalar`]: crate::reed_solomon::engine::Scalar
 #[derive(Clone, Copy)]
 pub struct Neon {
     mul128: &'static Mul128,

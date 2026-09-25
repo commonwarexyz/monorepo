@@ -5,17 +5,18 @@ use crate::reed_solomon::engine::{
 };
 use core::iter::zip;
 
-/// Optimized [`Engine`] without SIMD.
+/// Portable [`Engine`] without SIMD.
 ///
-/// [`NoSimd`] is a basic optimized engine which works on all CPUs.
+/// [`Scalar`] works on all CPUs. It multiplies one field element at a time with four lookups in
+/// the nibble tables of [`Mul16`].
 #[derive(Clone, Copy)]
-pub struct NoSimd {
+pub struct Scalar {
     mul16: &'static Mul16,
     skew: &'static Skew,
 }
 
-impl NoSimd {
-    /// Creates a new [`NoSimd`] and initializes its multiplication and skew [tables].
+impl Scalar {
+    /// Creates a new [`Scalar`] and initializes its multiplication and skew [tables].
     ///
     /// Decoding builds its Walsh transform tables on first use.
     pub fn new() -> Self {
@@ -26,7 +27,7 @@ impl NoSimd {
     }
 }
 
-impl Engine for NoSimd {
+impl Engine for Scalar {
     fn fft(
         &self,
         data: &mut ShardsRefMut<'_>,
@@ -71,13 +72,13 @@ impl Engine for NoSimd {
     }
 }
 
-impl Default for NoSimd {
+impl Default for Scalar {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl NoSimd {
+impl Scalar {
     /// Computes `x ^= y * m` for each chunk, where `m` is the field element with logarithm
     /// `log_m`.
     ///
@@ -108,7 +109,7 @@ impl NoSimd {
     }
 }
 
-impl NoSimd {
+impl Scalar {
     /// Partial butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn fft_butterfly_partial(
@@ -211,7 +212,7 @@ impl NoSimd {
     }
 }
 
-impl NoSimd {
+impl Scalar {
     /// Partial IFFT butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn ifft_butterfly_partial(
@@ -315,7 +316,7 @@ impl NoSimd {
 
 #[cfg(test)]
 mod tests {
-    use crate::reed_solomon::engine::{Engine, Naive, NoSimd, SHARD_CHUNK_BYTES};
+    use crate::reed_solomon::engine::{Engine, Naive, SHARD_CHUNK_BYTES, Scalar};
     #[cfg(not(feature = "std"))]
     use alloc::vec;
     use rand::{Rng, RngExt as _, SeedableRng};
@@ -324,21 +325,21 @@ mod tests {
     #[test]
     fn mul() {
         let naive = Naive::default();
-        let nosimd = NoSimd::default();
+        let scalar = Scalar::default();
 
         let mut rng = ChaCha8Rng::from_seed([0; 32]);
 
         for shard_chunks in 0..6 {
-            let mut data_nosimd = vec![[0; SHARD_CHUNK_BYTES]; shard_chunks];
-            rng.fill_bytes(data_nosimd.as_flattened_mut());
-            let mut data_naive = data_nosimd.clone();
+            let mut data_scalar = vec![[0; SHARD_CHUNK_BYTES]; shard_chunks];
+            rng.fill_bytes(data_scalar.as_flattened_mut());
+            let mut data_naive = data_scalar.clone();
 
             let log_m = rng.random();
 
-            nosimd.mul(&mut data_nosimd, log_m);
+            scalar.mul(&mut data_scalar, log_m);
             naive.mul(&mut data_naive, log_m);
 
-            assert_eq!(data_nosimd, data_naive);
+            assert_eq!(data_scalar, data_naive);
         }
     }
 }

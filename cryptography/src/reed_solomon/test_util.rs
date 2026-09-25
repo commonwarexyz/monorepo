@@ -201,7 +201,7 @@ pub(crate) fn roundtrip_single<R: Rate<E>, E: Engine>(new_engine: fn() -> E, cfg
     roundtrip::<R, E>(&mut encoder, &mut decoder, cfg);
 }
 
-/// Runs [`roundtrip_single()`] for rate `$Rate` with the `Naive`, `NoSimd`, and `DefaultEngine`
+/// Runs [`roundtrip_single()`] for rate `$Rate` with the `Naive`, `Scalar`, and `DefaultEngine`
 /// engines.
 ///
 /// The remaining arguments are the [`Roundtrip`] fields in declaration order.
@@ -231,7 +231,7 @@ macro_rules! roundtrip_single {
         );
 
         crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
-            crate::reed_solomon::engine::NoSimd::new,
+            crate::reed_solomon::engine::Scalar::new,
             &cfg,
         );
 
@@ -242,7 +242,7 @@ macro_rules! roundtrip_single {
     };
 }
 
-/// Runs [`roundtrip_two_rounds_inner!`] for rate `$Rate` with the `Naive`, `NoSimd`, and
+/// Runs [`roundtrip_two_rounds_inner!`] for rate `$Rate` with the `Naive`, `Scalar`, and
 /// `DefaultEngine` engines.
 ///
 /// The caller must have the names that [`roundtrip_two_rounds_inner!`] requires in scope.
@@ -253,10 +253,10 @@ macro_rules! roundtrip_two_rounds {
         $round_a: tt,
         $round_b: tt $(,)?
     ) => {
-        use crate::reed_solomon::engine::{DefaultEngine, Naive, NoSimd};
+        use crate::reed_solomon::engine::{DefaultEngine, Naive, Scalar};
 
         roundtrip_two_rounds_inner!($Rate, Naive, $explicit_reset, $round_a, $round_b);
-        roundtrip_two_rounds_inner!($Rate, NoSimd, $explicit_reset, $round_a, $round_b);
+        roundtrip_two_rounds_inner!($Rate, Scalar, $explicit_reset, $round_a, $round_b);
         roundtrip_two_rounds_inner!($Rate, DefaultEngine, $explicit_reset, $round_a, $round_b);
     };
 }
@@ -351,7 +351,7 @@ macro_rules! roundtrip_two_rounds_inner {
 /// Generates `#[test]` fns checking the errors that `$Encoder::new`, `add_original_shard`,
 /// `encode`, and `reset` report.
 ///
-/// The caller must have `$Encoder`, `Error`, `NoSimd`, and the `RateEncoder` trait in scope.
+/// The caller must have `$Encoder`, `Error`, `Scalar`, and the `RateEncoder` trait in scope.
 macro_rules! test_rate_encoder_errors {
     ($Encoder:ident) => {
         #[test]
@@ -360,7 +360,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -376,7 +376,7 @@ macro_rules! test_rate_encoder_errors {
         #[test]
         fn invalid_shard_size_in_new() {
             assert_eq!(
-                $Encoder::new(1, 1, 123, NoSimd::new(), None).err(),
+                $Encoder::new(1, 1, 123, Scalar::new(), None).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 }),
             );
         }
@@ -387,7 +387,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -403,7 +403,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -422,7 +422,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -442,7 +442,7 @@ macro_rules! test_rate_encoder_errors {
                     0,
                     1,
                     crate::reed_solomon::SHARD_CHUNK_BYTES,
-                    NoSimd::new(),
+                    Scalar::new(),
                     None
                 )
                 .err(),
@@ -459,7 +459,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -477,7 +477,7 @@ macro_rules! test_rate_encoder_errors {
 /// Generates `#[test]` fns checking the errors that `$Decoder::new`, `add_original_shard`,
 /// `add_recovery_shard`, `decode`, and `reset` report.
 ///
-/// The caller must have `$Decoder`, `Error`, `NoSimd`, and the `RateDecoder` trait in scope.
+/// The caller must have `$Decoder`, `Error`, `Scalar`, and the `RateDecoder` trait in scope.
 macro_rules! test_rate_decoder_errors {
     ($Decoder:ident) => {
         #[test]
@@ -486,7 +486,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -505,7 +505,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -524,7 +524,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -543,7 +543,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -562,7 +562,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -581,7 +581,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -597,7 +597,7 @@ macro_rules! test_rate_decoder_errors {
         #[test]
         fn invalid_shard_size_in_new() {
             assert_eq!(
-                $Decoder::new(1, 1, 123, NoSimd::new(), None).err(),
+                $Decoder::new(1, 1, 123, Scalar::new(), None).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 }),
             );
         }
@@ -608,7 +608,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -624,7 +624,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -645,7 +645,7 @@ macro_rules! test_rate_decoder_errors {
                     0,
                     1,
                     crate::reed_solomon::SHARD_CHUNK_BYTES,
-                    NoSimd::new(),
+                    Scalar::new(),
                     None
                 )
                 .err(),
@@ -662,7 +662,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();

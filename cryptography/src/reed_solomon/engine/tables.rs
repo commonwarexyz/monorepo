@@ -10,7 +10,7 @@
 //! | [`Log`]      | 128 KiB | yes              | yes              | all                |
 //! | [`LogWalsh`] | 128 KiB | -                | yes              | all                |
 //! | Short Walsh  | < 128 KiB | -              | yes              | all                |
-//! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`NoSimd`]         |
+//! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`Scalar`]         |
 //! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Ssse3` |
 //! | `MulGfni`    | 2 MiB   | yes              | yes              | `Avx512` |
 //! | [`Skew`]     | 128 KiB | yes              | yes              | all                |
@@ -19,7 +19,7 @@
 //! domain of `n` positions uses an `n`-entry short Walsh kernel, built on first use for
 //! each `n`.
 //!
-//! [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+//! [`Scalar`]: crate::reed_solomon::engine::Scalar
 //! [`Engine`]: crate::reed_solomon::engine
 
 use crate::reed_solomon::engine::{
@@ -102,12 +102,12 @@ pub struct Multiply128lutT {
 /// [`Engine::eval_poly`]: crate::reed_solomon::engine::Engine::eval_poly
 pub type LogWalsh = [GfElement; GF_ORDER];
 
-/// Used by [`NoSimd`] engine for multiplications.
+/// Used by [`Scalar`] engine for multiplications.
 ///
 /// Entry `[log_m][i][x]` is the product of `x << (4 * i)` and the element with logarithm
 /// `log_m`.
 ///
-/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+/// [`Scalar`]: crate::reed_solomon::engine::Scalar
 pub type Mul16 = [[[GfElement; 16]; 4]; GF_ORDER];
 
 /// Used by all [`Engine`] implementations for FFT and IFFT.
@@ -178,7 +178,7 @@ pub(crate) fn get_short_log_walsh(n: usize) -> &'static [GfElement] {
     }
 }
 
-/// Lazily initialized multiplication table for the `NoSimd` engine.
+/// Lazily initialized multiplication table for the `Scalar` engine.
 pub fn get_mul16() -> &'static Mul16 {
     #[cfg(feature = "std")]
     {
@@ -192,7 +192,7 @@ pub fn get_mul16() -> &'static Mul16 {
     }
 }
 
-/// Lazily initialized multiplication table for SIMD engines.
+/// Lazily initialized multiplication table for the `Neon`, `Avx2`, and `Ssse3` engines.
 pub fn get_mul128() -> &'static Mul128 {
     #[cfg(feature = "std")]
     {

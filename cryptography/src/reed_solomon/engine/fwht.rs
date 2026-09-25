@@ -4,13 +4,17 @@ use crate::reed_solomon::engine::{GF_ORDER, GfElement, utils};
 
 /// Decimation in time (DIT) Fast Walsh-Hadamard Transform modulo `GF_MODULUS`.
 ///
-/// Entries at and after `m_truncated` must be zero. `data.len()` must be a power of two no
-/// larger than `GF_ORDER`. The transform is unnormalized. Applying it twice multiplies every
-/// entry by `data.len()` modulo `GF_MODULUS`.
+/// Entries at and after `m_truncated` must be zero. The transform is unnormalized. Applying it
+/// twice multiplies every entry by `data.len()` modulo `GF_MODULUS`.
+///
+/// # Panics
+///
+/// If `data.len()` is not a power of two no larger than `GF_ORDER`, or
+/// `m_truncated > data.len()`.
 #[inline(always)]
 pub(crate) fn fwht(data: &mut [GfElement], m_truncated: usize) {
-    debug_assert!(data.len().is_power_of_two() && data.len() <= GF_ORDER);
-    debug_assert!(m_truncated <= data.len());
+    assert!(data.len().is_power_of_two() && data.len() <= GF_ORDER);
+    assert!(m_truncated <= data.len());
 
     // A radix-8 pass (`fwht_8`) is slightly faster on x86 (AMD Ryzen 5 3600) but slower on ARM
     // (Apple silicon M1). A radix-16 pass (`fwht_16`) is always slower. See branch

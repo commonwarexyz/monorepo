@@ -1,10 +1,10 @@
 use crate::reed_solomon::{
     Error,
-    engine::{DefaultEngine, GF_ORDER, GfElement},
+    engine::{DefaultEngine, GfElement},
     rate::{rate_default::use_high_rate, rate_high, rate_low},
 };
 #[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use fixedbitset::FixedBitSet;
 
 /// Erasure coefficients prepared once for a fixed set of received shard indices.
@@ -118,14 +118,15 @@ impl Plan {
         let coefficients = if original_received == original_count {
             Vec::new()
         } else if high_rate {
-            let mut erasures = [0; GF_ORDER];
+            let mut erasures = vec![0; end.next_power_of_two()];
             rate_high::eval_erasures::<DefaultEngine>(
                 &mut erasures,
                 original_count,
                 recovery_count,
                 &received,
             );
-            erasures[..end].to_vec()
+            erasures.truncate(end);
+            erasures
         } else {
             rate_low::with_erasures::<DefaultEngine, _>(
                 original_count,

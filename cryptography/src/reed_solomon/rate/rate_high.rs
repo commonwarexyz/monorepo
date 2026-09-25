@@ -3,6 +3,8 @@ use crate::reed_solomon::{
     engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use core::marker::PhantomData;
 use fixedbitset::FixedBitSet;
 
@@ -10,10 +12,14 @@ use fixedbitset::FixedBitSet;
 /// `end = recovery_count.next_power_of_two() + original_count`.
 ///
 /// Missing recovery shards, the padding in `recovery_count..recovery_count.next_power_of_two()`,
-/// and missing originals are erased. `erasures` must be zeroed on entry. Entries at and after
-/// `end` are unspecified.
+/// and missing originals are erased. `erasures` must hold `end.next_power_of_two()` zeroed
+/// entries. Entries at and after `end` are unspecified.
+///
+/// # Panics
+///
+/// If `erasures.len() != end.next_power_of_two()`.
 pub(crate) fn eval_erasures<E: Engine>(
-    erasures: &mut [GfElement; GF_ORDER],
+    erasures: &mut [GfElement],
     original_count: usize,
     recovery_count: usize,
     received: &FixedBitSet,
@@ -295,7 +301,7 @@ impl<E: Engine> HighRateDecoder<E> {
         let erasures: &[GfElement] = match plan {
             Some(plan) => plan.coefficients(),
             None => {
-                owned_erasures = [0; GF_ORDER];
+                owned_erasures = vec![0; original_end.next_power_of_two()];
                 eval_erasures::<E>(
                     &mut owned_erasures,
                     original_count,
@@ -572,14 +578,14 @@ mod tests {
     mod high_rate {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{HighRate, Rate},
         };
 
         #[test]
         fn decoder() {
             assert_eq!(
-                HighRate::<NoSimd>::decoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                HighRate::<Scalar>::decoder(4096, 61440, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
@@ -588,7 +594,7 @@ mod tests {
             );
 
             assert!(
-                HighRate::<NoSimd>::decoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                HighRate::<Scalar>::decoder(61440, 4096, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .is_ok()
             );
         }
@@ -596,7 +602,7 @@ mod tests {
         #[test]
         fn encoder() {
             assert_eq!(
-                HighRate::<NoSimd>::encoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                HighRate::<Scalar>::encoder(4096, 61440, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
@@ -605,48 +611,48 @@ mod tests {
             );
 
             assert!(
-                HighRate::<NoSimd>::encoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                HighRate::<Scalar>::encoder(61440, 4096, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .is_ok()
             );
         }
 
         #[test]
         fn supports() {
-            assert!(!HighRate::<NoSimd>::supports(0, 1));
-            assert!(!HighRate::<NoSimd>::supports(1, 0));
+            assert!(!HighRate::<Scalar>::supports(0, 1));
+            assert!(!HighRate::<Scalar>::supports(1, 0));
 
-            assert!(!HighRate::<NoSimd>::supports(4096, 61440));
+            assert!(!HighRate::<Scalar>::supports(4096, 61440));
 
-            assert!(HighRate::<NoSimd>::supports(61440, 4096));
-            assert!(!HighRate::<NoSimd>::supports(61440, 4097));
-            assert!(!HighRate::<NoSimd>::supports(61441, 4096));
+            assert!(HighRate::<Scalar>::supports(61440, 4096));
+            assert!(!HighRate::<Scalar>::supports(61440, 4097));
+            assert!(!HighRate::<Scalar>::supports(61441, 4096));
 
-            assert!(!HighRate::<NoSimd>::supports(usize::MAX, usize::MAX));
+            assert!(!HighRate::<Scalar>::supports(usize::MAX, usize::MAX));
         }
 
         #[test]
         fn validate() {
             assert_eq!(
-                HighRate::<NoSimd>::validate(1, 1, 123).err(),
+                HighRate::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
             assert_eq!(
-                HighRate::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
+                HighRate::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
                     recovery_count: 61440,
                 })
             );
 
-            assert!(HighRate::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
+            assert!(HighRate::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
         }
     }
 
     mod high_rate_encoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{HighRateEncoder, RateEncoder},
         };
 
@@ -654,42 +660,42 @@ mod tests {
 
         #[test]
         fn supports() {
-            assert!(!HighRateEncoder::<NoSimd>::supports(4096, 61440));
-            assert!(HighRateEncoder::<NoSimd>::supports(61440, 4096));
+            assert!(!HighRateEncoder::<Scalar>::supports(4096, 61440));
+            assert!(HighRateEncoder::<Scalar>::supports(61440, 4096));
         }
 
         #[test]
         fn validate() {
             assert_eq!(
-                HighRateEncoder::<NoSimd>::validate(1, 1, 123).err(),
+                HighRateEncoder::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
             assert_eq!(
-                HighRateEncoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
+                HighRateEncoder::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
                     recovery_count: 61440,
                 })
             );
 
-            assert!(HighRateEncoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
+            assert!(HighRateEncoder::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
         }
 
         #[test]
         fn work_count() {
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(1, 1), 1);
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(4096, 1024), 4096);
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(4097, 1024), 5120);
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(4097, 1025), 6144);
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(32768, 32768), 32768);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(1, 1), 1);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(4096, 1024), 4096);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(4097, 1024), 5120);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(4097, 1025), 6144);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(32768, 32768), 32768);
         }
     }
 
     mod high_rate_decoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{HighRateDecoder, RateDecoder},
         };
 
@@ -697,36 +703,36 @@ mod tests {
 
         #[test]
         fn supports() {
-            assert!(!HighRateDecoder::<NoSimd>::supports(4096, 61440));
-            assert!(HighRateDecoder::<NoSimd>::supports(61440, 4096));
+            assert!(!HighRateDecoder::<Scalar>::supports(4096, 61440));
+            assert!(HighRateDecoder::<Scalar>::supports(61440, 4096));
         }
 
         #[test]
         fn validate() {
             assert_eq!(
-                HighRateDecoder::<NoSimd>::validate(1, 1, 123).err(),
+                HighRateDecoder::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
             assert_eq!(
-                HighRateDecoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
+                HighRateDecoder::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
                     recovery_count: 61440,
                 })
             );
 
-            assert!(HighRateDecoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
+            assert!(HighRateDecoder::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
         }
 
         #[test]
         fn work_count() {
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(1, 1), 2);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(2048, 1025), 4096);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(2049, 1025), 8192);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(3072, 1024), 4096);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(3073, 1024), 8192);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(32768, 32768), 65536);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(1, 1), 2);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(2048, 1025), 4096);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(2049, 1025), 8192);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(3072, 1024), 4096);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(3073, 1024), 8192);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(32768, 32768), 65536);
         }
     }
 }

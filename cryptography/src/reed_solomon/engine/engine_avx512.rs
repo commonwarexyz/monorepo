@@ -11,12 +11,12 @@ use core::iter::zip;
 
 /// Optimized [`Engine`] using AVX-512 instructions.
 ///
-/// [`Avx512`] is an optimized engine that follows the same algorithm as
-/// [`NoSimd`] but uses the x86 AVX-512F and GFNI instructions.
+/// [`Avx512`] runs the same transforms as [`Scalar`] and multiplies with GFNI affine
+/// transforms, one 512-bit vector per chunk.
 ///
 /// Construction and [`Engine::eval_poly`] panic if AVX-512F or GFNI is unavailable.
 ///
-/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+/// [`Scalar`]: crate::reed_solomon::engine::Scalar
 #[derive(Clone, Copy)]
 pub struct Avx512 {
     multiply: &'static MulGfni,
@@ -130,7 +130,8 @@ impl Avx512 {
         let lut = LutGfni::from(&self.multiply[log_m as usize]);
 
         for chunk in x.iter_mut() {
-            // SAFETY: This function enables the required features. Each chunk is exactly 64 bytes.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support. Each chunk is exactly 64
+            // bytes.
             unsafe {
                 let x_ptr = chunk.as_mut_ptr().cast::<__m512i>();
                 let x = _mm512_loadu_si512(x_ptr);
@@ -152,7 +153,7 @@ impl Avx512 {
     /// The CPU must support AVX-512F and GFNI.
     #[inline(always)]
     unsafe fn multiply_512(value: __m512i, lut: LutGfni) -> __m512i {
-        // SAFETY: The caller executes within the AVX-512 and GFNI target-feature boundary.
+        // SAFETY: The caller guarantees AVX-512F and GFNI support.
         unsafe {
             let swapped = _mm512_shuffle_i64x2(value, value, 0x4e);
             let direct = _mm512_gf2p8affine_epi64_epi8(value, lut.direct, 0);
@@ -168,7 +169,7 @@ impl Avx512 {
     /// The CPU must support AVX-512F and GFNI.
     #[inline(always)]
     unsafe fn muladd_512(x: __m512i, y: __m512i, lut: LutGfni) -> __m512i {
-        // SAFETY: The caller executes within the AVX-512 and GFNI target-feature boundary.
+        // SAFETY: The caller guarantees AVX-512F and GFNI support.
         unsafe {
             let prod = Self::multiply_512(y, lut);
             _mm512_xor_si512(x, prod)
@@ -195,8 +196,8 @@ impl Avx512 {
         let lut = LutGfni::from(&self.multiply[log_m as usize]);
 
         for (x_chunk, y_chunk) in zip(x.iter_mut(), y.iter_mut()) {
-            // SAFETY: The caller enables the required features. Both disjoint chunks are exactly
-            // 64 bytes.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support. Both disjoint chunks are
+            // exactly 64 bytes.
             unsafe {
                 let x_ptr = x_chunk.as_mut_ptr().cast::<__m512i>();
                 let y_ptr = y_chunk.as_mut_ptr().cast::<__m512i>();
@@ -245,8 +246,8 @@ impl Avx512 {
                 zip(zip(s0.iter_mut(), s1.iter_mut()), s2.iter_mut()),
                 s3.iter_mut(),
             ) {
-                // SAFETY: The caller enables AVX-512 and GFNI. All four disjoint chunks are exactly
-                // 64 bytes.
+                // SAFETY: The caller guarantees AVX-512F and GFNI support. All four disjoint chunks
+                // are exactly 64 bytes.
                 unsafe {
                     let s0_ptr = s0_chunk.as_mut_ptr().cast::<__m512i>();
                     let s1_ptr = s1_chunk.as_mut_ptr().cast::<__m512i>();
@@ -283,7 +284,7 @@ impl Avx512 {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
         } else {
-            // SAFETY: The caller enables the required features.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support.
             unsafe {
                 self.fft_butterfly_partial(s0, s2, log_m02);
                 self.fft_butterfly_partial(s1, s3, log_m02);
@@ -294,13 +295,13 @@ impl Avx512 {
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
-            // SAFETY: The caller enables the required features.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support.
             unsafe { self.fft_butterfly_partial(s0, s1, log_m01) };
         }
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
-            // SAFETY: The caller enables the required features.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support.
             unsafe { self.fft_butterfly_partial(s2, s3, log_m23) };
         }
     }
@@ -332,7 +333,7 @@ impl Avx512 {
                 let log_m23 = self.skew[base + dist * 2];
 
                 for i in r..r + dist {
-                    // SAFETY: This function enables the required features.
+                    // SAFETY: The caller guarantees AVX-512F and GFNI support.
                     unsafe {
                         self.fft_butterfly_two_layers(
                             data,
@@ -362,7 +363,7 @@ impl Avx512 {
                 if log_m == GF_MODULUS {
                     utils::xor(y, x);
                 } else {
-                    // SAFETY: This function enables the required features.
+                    // SAFETY: The caller guarantees AVX-512F and GFNI support.
                     unsafe { self.fft_butterfly_partial(x, y, log_m) };
                 }
 
@@ -391,8 +392,8 @@ impl Avx512 {
         let lut = LutGfni::from(&self.multiply[log_m as usize]);
 
         for (x_chunk, y_chunk) in zip(x.iter_mut(), y.iter_mut()) {
-            // SAFETY: The caller enables the required features. Both disjoint chunks are exactly
-            // 64 bytes.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support. Both disjoint chunks are
+            // exactly 64 bytes.
             unsafe {
                 let x_ptr = x_chunk.as_mut_ptr().cast::<__m512i>();
                 let y_ptr = y_chunk.as_mut_ptr().cast::<__m512i>();
@@ -441,8 +442,8 @@ impl Avx512 {
                 zip(zip(s0.iter_mut(), s1.iter_mut()), s2.iter_mut()),
                 s3.iter_mut(),
             ) {
-                // SAFETY: The caller enables AVX-512 and GFNI. All four disjoint chunks are exactly
-                // 64 bytes.
+                // SAFETY: The caller guarantees AVX-512F and GFNI support. All four disjoint chunks
+                // are exactly 64 bytes.
                 unsafe {
                     let s0_ptr = s0_chunk.as_mut_ptr().cast::<__m512i>();
                     let s1_ptr = s1_chunk.as_mut_ptr().cast::<__m512i>();
@@ -478,13 +479,13 @@ impl Avx512 {
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
-            // SAFETY: The caller enables the required features.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support.
             unsafe { self.ifft_butterfly_partial(s0, s1, log_m01) };
         }
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
-            // SAFETY: The caller enables the required features.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support.
             unsafe { self.ifft_butterfly_partial(s2, s3, log_m23) };
         }
 
@@ -493,7 +494,7 @@ impl Avx512 {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
         } else {
-            // SAFETY: The caller enables the required features.
+            // SAFETY: The caller guarantees AVX-512F and GFNI support.
             unsafe {
                 self.ifft_butterfly_partial(s0, s2, log_m02);
                 self.ifft_butterfly_partial(s1, s3, log_m02);
@@ -528,7 +529,7 @@ impl Avx512 {
                 let log_m23 = self.skew[base + dist * 2];
 
                 for i in r..r + dist {
-                    // SAFETY: This function enables the required features.
+                    // SAFETY: The caller guarantees AVX-512F and GFNI support.
                     unsafe {
                         self.ifft_butterfly_two_layers(
                             data,
@@ -555,7 +556,7 @@ impl Avx512 {
             } else {
                 let (mut a, mut b) = data.split_at_mut(pos + dist);
                 for i in 0..dist {
-                    // SAFETY: This function enables the required features.
+                    // SAFETY: The caller guarantees AVX-512F and GFNI support.
                     unsafe {
                         self.ifft_butterfly_partial(
                             &mut a[pos + i], // data[pos + i]

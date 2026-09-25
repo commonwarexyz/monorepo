@@ -71,7 +71,7 @@ features = ["js"]
 
 [dev-dependencies]
 anyhow.workspace = true
-arbitrary.workspace = true
+arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-math = { workspace = true, features = ["arbitrary"] }

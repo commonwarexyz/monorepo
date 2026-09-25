@@ -188,7 +188,9 @@ impl<'a> Recoveries<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{Decoder, Encoder, SHARD_CHUNK_BYTES, test_util};
+    use crate::reed_solomon::{
+        Decoder, Encoder, SHARD_CHUNK_BYTES, rate::rate_low::DIRECT_EVALUATION_LIMIT, test_util,
+    };
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
     use commonware_utils::test_rng;
@@ -356,9 +358,15 @@ mod tests {
 
     #[test]
     fn direct_recovery_matches_encoder() {
-        // The last two `(k, m)` cases straddle the direct-evaluation limit.
+        // The last two `(k, m)` cases end exactly at and one past DIRECT_EVALUATION_LIMIT.
         let mut rng = test_rng();
-        for (k, m) in [(7, 13), (84, 166), (128, 384), (128, 385)] {
+        let quarter = DIRECT_EVALUATION_LIMIT / 4;
+        for (k, m) in [
+            (7, 13),
+            (84, 166),
+            (quarter, 3 * quarter),
+            (quarter, 3 * quarter + 1),
+        ] {
             for shard_size in [2, 66, 1024] {
                 let originals = test_util::generate_original(k, shard_size, 0);
                 let mut encoder = Encoder::new(k, m, shard_size).unwrap();

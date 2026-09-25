@@ -8,7 +8,7 @@ use super::{
     Decoder, Error, Plan,
     engine::{
         CANTOR_BASIS, DefaultEngine, Engine, GF_MODULUS, GF_ORDER, GF_POLYNOMIAL, GfElement, Naive,
-        NoSimd, SHARD_CHUNK_BYTES, ShardsRefMut,
+        SHARD_CHUNK_BYTES, Scalar, ShardsRefMut,
     },
     rate::{DefaultRate, HighRate, LowRate, Rate, RateDecoder, RateEncoder},
 };
@@ -22,7 +22,7 @@ const SHARD_SIZES: [usize; 6] = [2, 62, 64, 66, 126, 130];
 /// Instantiate each supported engine, including implementations below the default CPU priority.
 macro_rules! each_engine {
     ($runner:ident ( $($arg:expr),* )) => {{
-        $runner::<NoSimd>($($arg,)* NoSimd::new);
+        $runner::<Scalar>($($arg,)* Scalar::new);
         $runner::<DefaultEngine>($($arg,)* DefaultEngine::new);
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
@@ -363,16 +363,17 @@ fn compare_rate_locator(
     }
     Naive::eval_poly(&mut expected, if high { end } else { GF_ORDER });
     let mut actual = [0; GF_ORDER];
+    let domain = &mut actual[..end.next_power_of_two()];
     if high {
-        super::rate::rate_high::eval_erasures::<NoSimd>(
-            &mut actual,
+        super::rate::rate_high::eval_erasures::<Scalar>(
+            domain,
             original_count,
             recovery_count,
             received,
         );
     } else {
-        super::rate::rate_low::eval_walsh::<NoSimd>(
-            &mut actual,
+        super::rate::rate_low::eval_walsh::<Scalar>(
+            domain,
             original_count,
             recovery_count,
             received,
@@ -1080,9 +1081,10 @@ fn prepared_round(
 /// Runs one prepared decode round with `plan` and checks it against ordinary decoding of the
 /// same shards.
 ///
-/// First checks that a plan with a different original count and a plan with one more recovery
-/// index both return `Error::PlanMismatch` and leave the submitted shards usable. `case` must have
-/// at least two recovery shards, so one stays unprovided for the second plan.
+/// First checks that a plan with a different original count, a plan with one more recovery
+/// index, and a plan with one provided recovery index swapped for an unprovided one each return
+/// `Error::PlanMismatch` and leave the submitted shards usable. `case` must have at least two
+/// recovery shards, so one stays unprovided for the second and third plans.
 fn prepared_round_with_plan(
     decoder: &mut Decoder,
     case: &RateCase,
@@ -1129,6 +1131,21 @@ fn prepared_round_with_plan(
     .unwrap();
     assert!(matches!(
         decoder.decode_with_recovery_plan(&changed),
+        Err(Error::PlanMismatch)
+    ));
+
+    // A plan with the same counts and one provided recovery index swapped for an unprovided one
+    // must also mismatch.
+    let swapped = provided.iter().position(|&present| present).unwrap();
+    let exchanged = Plan::new(
+        case.original_count,
+        case.recovery_count,
+        (0..case.original_count).filter(|&i| !missing[i]),
+        (0..case.recovery_count).filter(|&i| (provided[i] && i != swapped) || i == additional),
+    )
+    .unwrap();
+    assert!(matches!(
+        decoder.decode_with_recovery_plan(&exchanged),
         Err(Error::PlanMismatch)
     ));
     let result = decoder.decode_with_recovery_plan(plan).unwrap().unwrap();

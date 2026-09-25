@@ -3,12 +3,14 @@ use crate::reed_solomon::{
     engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, tables},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use core::marker::PhantomData;
 use fixedbitset::FixedBitSet;
 
 /// Largest decoding domain that `with_erasures` evaluates directly, bounding the quadratic
 /// calculation and its stack storage.
-pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 128;
+pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 32;
 
 /// Evaluate the log erasure locator for each position below `end` and pass those entries to
 /// `f`, where `end = original_count.next_power_of_two() + recovery_count`.
@@ -24,14 +26,14 @@ pub(crate) fn with_erasures<E: Engine, T>(
         eval_direct(&mut erasures[..end], original_count, received);
         f(&erasures[..end])
     } else {
-        let mut erasures = [0; GF_ORDER];
+        let mut erasures = vec![0; end.next_power_of_two()];
         eval_walsh::<E>(&mut erasures, original_count, recovery_count, received);
         f(&erasures[..end])
     }
 }
 
 /// Compute log erasure factors directly from the known positions in a small decoding domain.
-/// This avoids the zeroed `GF_ORDER` buffer and the Walsh transforms of `eval_walsh`.
+/// This avoids the zeroed buffer and the Walsh transforms of `eval_walsh`.
 ///
 /// `erasures.len()` is the domain end `original_count.next_power_of_two() + recovery_count` and
 /// must not exceed [`DIRECT_EVALUATION_LIMIT`].
@@ -64,10 +66,14 @@ fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &Fix
 /// Write the log erasure locator for each position in `erasures[..end]` with Walsh
 /// transforms, where `end = original_count.next_power_of_two() + recovery_count`.
 ///
-/// Missing shards and every position at and after `end` are erased. `erasures` must be
-/// zeroed on entry. Entries at and after `end` are unspecified.
+/// Missing shards and every position at and after `end` are erased. `erasures` must hold
+/// `end.next_power_of_two()` zeroed entries. Entries at and after `end` are unspecified.
+///
+/// # Panics
+///
+/// If `erasures.len() != end.next_power_of_two()`.
 pub(crate) fn eval_walsh<E: Engine>(
-    erasures: &mut [GfElement; GF_ORDER],
+    erasures: &mut [GfElement],
     original_count: usize,
     recovery_count: usize,
     received: &FixedBitSet,
@@ -342,7 +348,7 @@ impl<E: Engine> LowRateDecoder<E> {
         let work_count = work.len();
 
         // Take the erasure locators from the plan, or evaluate them with `with_erasures`.
-        // `with_erasures` lends coefficients from its own stack buffer, so the rest of decoding
+        // `with_erasures` lends coefficients from its own scratch buffer, so the rest of decoding
         // is a closure over either those or the plan's coefficients.
         let mut decode = |erasures: &[GfElement]| {
             // Multiply received shards by their erasure locators and zero everything else:
@@ -450,7 +456,7 @@ impl<E: Engine> LowRateDecoder<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{engine::NoSimd, test_util};
+    use crate::reed_solomon::{engine::Scalar, test_util};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
 
@@ -481,7 +487,7 @@ mod tests {
                         expected[i] = 0;
                     }
                 }
-                NoSimd::eval_poly(&mut expected, GF_ORDER);
+                Scalar::eval_poly(&mut expected, GF_ORDER);
                 let mut actual = [0; DIRECT_EVALUATION_LIMIT];
                 eval_direct(&mut actual[..end], original_count, &received);
                 for i in 0..end {
@@ -657,19 +663,19 @@ mod tests {
     mod low_rate {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{LowRate, Rate},
         };
 
         #[test]
         fn decoder() {
             assert!(
-                LowRate::<NoSimd>::decoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                LowRate::<Scalar>::decoder(4096, 61440, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .is_ok()
             );
 
             assert_eq!(
-                LowRate::<NoSimd>::decoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                LowRate::<Scalar>::decoder(61440, 4096, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
@@ -681,12 +687,12 @@ mod tests {
         #[test]
         fn encoder() {
             assert!(
-                LowRate::<NoSimd>::encoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                LowRate::<Scalar>::encoder(4096, 61440, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .is_ok()
             );
 
             assert_eq!(
-                LowRate::<NoSimd>::encoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                LowRate::<Scalar>::encoder(61440, 4096, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
@@ -697,29 +703,29 @@ mod tests {
 
         #[test]
         fn supports() {
-            assert!(!LowRate::<NoSimd>::supports(0, 1));
-            assert!(!LowRate::<NoSimd>::supports(1, 0));
+            assert!(!LowRate::<Scalar>::supports(0, 1));
+            assert!(!LowRate::<Scalar>::supports(1, 0));
 
-            assert!(LowRate::<NoSimd>::supports(4096, 61440));
-            assert!(!LowRate::<NoSimd>::supports(4096, 61441));
-            assert!(!LowRate::<NoSimd>::supports(4097, 61440));
+            assert!(LowRate::<Scalar>::supports(4096, 61440));
+            assert!(!LowRate::<Scalar>::supports(4096, 61441));
+            assert!(!LowRate::<Scalar>::supports(4097, 61440));
 
-            assert!(!LowRate::<NoSimd>::supports(61440, 4096));
+            assert!(!LowRate::<Scalar>::supports(61440, 4096));
 
-            assert!(!LowRate::<NoSimd>::supports(usize::MAX, usize::MAX));
+            assert!(!LowRate::<Scalar>::supports(usize::MAX, usize::MAX));
         }
 
         #[test]
         fn validate() {
             assert_eq!(
-                LowRate::<NoSimd>::validate(1, 1, 123).err(),
+                LowRate::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRate::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
+            assert!(LowRate::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRate::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
+                LowRate::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -731,7 +737,7 @@ mod tests {
     mod low_rate_encoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{LowRateEncoder, RateEncoder},
         };
 
@@ -739,21 +745,21 @@ mod tests {
 
         #[test]
         fn supports() {
-            assert!(LowRateEncoder::<NoSimd>::supports(4096, 61440));
-            assert!(!LowRateEncoder::<NoSimd>::supports(61440, 4096));
+            assert!(LowRateEncoder::<Scalar>::supports(4096, 61440));
+            assert!(!LowRateEncoder::<Scalar>::supports(61440, 4096));
         }
 
         #[test]
         fn validate() {
             assert_eq!(
-                LowRateEncoder::<NoSimd>::validate(1, 1, 123).err(),
+                LowRateEncoder::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRateEncoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
+            assert!(LowRateEncoder::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRateEncoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
+                LowRateEncoder::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -763,18 +769,18 @@ mod tests {
 
         #[test]
         fn work_count() {
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(1, 1), 1);
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(1024, 4096), 4096);
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(1024, 4097), 5120);
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(1025, 4097), 6144);
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(32768, 32768), 32768);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(1, 1), 1);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(1024, 4096), 4096);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(1024, 4097), 5120);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(1025, 4097), 6144);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(32768, 32768), 32768);
         }
     }
 
     mod low_rate_decoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{LowRateDecoder, RateDecoder},
         };
 
@@ -782,21 +788,21 @@ mod tests {
 
         #[test]
         fn supports() {
-            assert!(LowRateDecoder::<NoSimd>::supports(4096, 61440));
-            assert!(!LowRateDecoder::<NoSimd>::supports(61440, 4096));
+            assert!(LowRateDecoder::<Scalar>::supports(4096, 61440));
+            assert!(!LowRateDecoder::<Scalar>::supports(61440, 4096));
         }
 
         #[test]
         fn validate() {
             assert_eq!(
-                LowRateDecoder::<NoSimd>::validate(1, 1, 123).err(),
+                LowRateDecoder::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRateDecoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
+            assert!(LowRateDecoder::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRateDecoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
+                LowRateDecoder::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -806,12 +812,12 @@ mod tests {
 
         #[test]
         fn work_count() {
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1, 1), 2);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1024, 3072), 4096);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1024, 3073), 8192);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1025, 2048), 4096);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1025, 2049), 8192);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(32768, 32768), 65536);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1, 1), 2);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1024, 3072), 4096);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1024, 3073), 8192);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1025, 2048), 4096);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1025, 2049), 8192);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(32768, 32768), 65536);
         }
     }
 }

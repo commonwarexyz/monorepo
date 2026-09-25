@@ -509,35 +509,44 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 mod striped {
     use super::*;
 
-    /// Width in bytes of each tile coded within a stripe of `stripe_len` bytes.
+    /// Split a stripe `range` into the tiles that code it.
     ///
-    /// The transform holds at most `2 * (k + m).next_power_of_two()` shards, so a tile targets
-    /// [`MAX_TILE_WORK_BYTES`] of transform storage. A stripe with fewer than two full tiles is
-    /// coded as one tile. A tiled width is a multiple of [`SHARD_CHUNK_BYTES`], so every tile but
-    /// the last ends on a symbol-block boundary (see [`byte_ranges`]).
-    fn tile_width(k: usize, m: usize, stripe_len: usize) -> usize {
+    /// The transform holds at most `2 * (k + m).next_power_of_two()` shards, so the target tile
+    /// width is the number of whole blocks whose transform storage fits in
+    /// [`MAX_TILE_WORK_BYTES`]. A stripe with fewer than twice that many whole blocks is one
+    /// tile. Otherwise its whole blocks spread over the fewest tiles within the target, with
+    /// widths that differ by at most one block, and the last tile also takes the partial final
+    /// block. Every tile but the last ends on a symbol-block boundary (see [`byte_ranges`]).
+    ///
+    /// The decoder's sixteen-shard AVX-512 derivative leaf skips shard lengths that are a
+    /// multiple of 4 KiB, so a split whose widths would hit one uses one more tile.
+    pub(super) fn tiles(
+        k: usize,
+        m: usize,
+        range: Range<usize>,
+    ) -> impl Iterator<Item = Range<usize>> {
         let work_count = 2 * (k + m).next_power_of_two();
-        let chunks = (MAX_TILE_WORK_BYTES / (work_count * SHARD_CHUNK_BYTES)).max(1);
-        if stripe_len / SHARD_CHUNK_BYTES < 2 * chunks {
-            return stripe_len.max(1);
-        }
-        let width = chunks * SHARD_CHUNK_BYTES;
-
-        // The decoder's sixteen-shard AVX-512 derivative leaf skips shard lengths that are a
-        // multiple of 4 KiB. Shrink such widths by two blocks so full tiles can use it.
-        if width.is_multiple_of(4096) {
-            width - 2 * SHARD_CHUNK_BYTES
+        let target = (MAX_TILE_WORK_BYTES / (work_count * SHARD_CHUNK_BYTES)).max(1);
+        let blocks = range.len() / SHARD_CHUNK_BYTES;
+        let mut count = if blocks < 2 * target {
+            1
         } else {
-            width
+            blocks.div_ceil(target)
+        };
+        let page = 4096 / SHARD_CHUNK_BYTES;
+        while count > 1 && count < blocks {
+            let (width, extra) = (blocks / count, blocks % count);
+            if !width.is_multiple_of(page) && (extra == 0 || !(width + 1).is_multiple_of(page)) {
+                break;
+            }
+            count += 1;
         }
-    }
 
-    /// Split `range` into consecutive tiles of `width` bytes. The last tile may be shorter.
-    fn tiles(range: Range<usize>, width: usize) -> impl Iterator<Item = Range<usize>> {
-        let end = range.end;
-        (range.start..end)
-            .step_by(width)
-            .map(move |start| start..start.saturating_add(width).min(end))
+        // Tile `i` holds `width` whole blocks, plus one more for the first `extra` tiles.
+        let (width, extra) = (blocks / count, blocks % count);
+        let (start, end) = (range.start, range.end);
+        let edge = move |i: usize| start + (i * width + i.min(extra)) * SHARD_CHUNK_BYTES;
+        (0..count).map(move |i| edge(i)..if i + 1 == count { end } else { edge(i + 1) })
     }
 
     /// Split a shard-major buffer (`num_shards * shard_len`) into one group of mutable column
@@ -625,23 +634,23 @@ mod striped {
             return Ok(());
         }
         let offset = range.start;
-        let width = tile_width(k, m, range.len());
+        let mut tiles = tiles(k, m, range).peekable();
+        let mut len = tiles.peek().expect("a nonempty stripe has a tile").len();
         let mut decoder = Cached::take(
             &CACHED_DECODER,
-            || Decoder::new(k, m, width),
-            |dec| dec.reset(k, m, width),
+            || Decoder::new(k, m, len),
+            |dec| dec.reset(k, m, len),
         )
         .map_err(Error::ReedSolomon)?;
 
-        // Dropping a decode result clears the received shards, so full-width tiles reuse the
-        // decoder as is and only a shorter final tile resets it. The plan does not depend on
-        // shard length, so every tile shares it.
-        for tile in tiles(range, width) {
+        // Dropping a decode result clears the received shards, so a tile of the configured length
+        // reuses the decoder as is and a tile of another length resets it. The plan does not
+        // depend on shard length, so every tile shares it.
+        for tile in tiles {
             let local = tile.start - offset..tile.end - offset;
-            if tile.len() != width {
-                decoder
-                    .reset(k, m, tile.len())
-                    .map_err(Error::ReedSolomon)?;
+            if tile.len() != len {
+                len = tile.len();
+                decoder.reset(k, m, len).map_err(Error::ReedSolomon)?;
             }
 
             for (idx, shard) in provided.originals {
@@ -684,22 +693,22 @@ mod striped {
             return Ok(());
         }
         let offset = range.start;
-        let width = tile_width(k, m, range.len());
+        let mut tiles = tiles(k, m, range).peekable();
+        let mut len = tiles.peek().expect("a nonempty stripe has a tile").len();
         let mut encoder = Cached::take(
             &CACHED_ENCODER,
-            || Encoder::new(k, m, width),
-            |enc| enc.reset(k, m, width),
+            || Encoder::new(k, m, len),
+            |enc| enc.reset(k, m, len),
         )
         .map_err(Error::ReedSolomon)?;
 
-        // Dropping an encode result clears the added originals, so full-width tiles reuse the
-        // encoder as is and only a shorter final tile resets it.
-        for tile in tiles(range, width) {
+        // Dropping an encode result clears the added originals, so a tile of the configured length
+        // reuses the encoder as is and a tile of another length resets it.
+        for tile in tiles {
             let local = tile.start - offset..tile.end - offset;
-            if tile.len() != width {
-                encoder
-                    .reset(k, m, tile.len())
-                    .map_err(Error::ReedSolomon)?;
+            if tile.len() != len {
+                len = tile.len();
+                encoder.reset(k, m, len).map_err(Error::ReedSolomon)?;
             }
 
             for shard in originals.iter().take(k) {
@@ -2174,6 +2183,7 @@ mod tests {
     #[test]
     fn test_striped_encode_into_matches_full_width() {
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
+        let mut tiled = false;
         for (k, m) in [(2usize, 2usize), (32, 64)] {
             for shard_len in [
                 2 * MIN_STRIPE_BYTES,
@@ -2201,6 +2211,9 @@ mod tests {
                                 .try_map_collect_vec(
                                     |ranges| {
                                         let ranges = striped::byte_ranges(shard_len, ranges);
+                                        tiled |= ranges.iter().any(|range| {
+                                            striped::tiles(k, m, range.clone()).count() > 1
+                                        });
                                         let groups = striped::stripe_columns(
                                             &mut striped_recovery,
                                             shard_len,
@@ -2231,6 +2244,7 @@ mod tests {
                 }
             }
         }
+        assert!(tiled, "no case splits a stripe into tiles");
     }
 
     // Each tamper mutates a canonical codeword in place before a (malicious) commitment is
