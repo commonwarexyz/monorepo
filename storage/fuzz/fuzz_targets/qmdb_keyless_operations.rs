@@ -571,8 +571,10 @@ fn fuzz_family<F: Family, S: Strategy>(
                 }
 
                 Operation::OldestRetainedLoc => {
-                    assert!(db.bounds().start <= db.inactivity_floor_loc());
-                    assert!(db.bounds().start <= db.bounds().end);
+                    // Keyless recovery does not replay from the floor, so a bounded reopen can
+                    // restore a commit whose floor precedes the retained prefix. Only the last
+                    // commit must remain retained.
+                    assert!(db.bounds().start < db.bounds().end);
                     db
                 }
 
@@ -763,12 +765,11 @@ fn fuzz_family<F: Family, S: Strategy>(
                         db.inactivity_floor_loc(),
                         db.get_metadata().await.unwrap(),
                     ));
+                    // A historical proof only requires the commit at `size - 1` to be retained.
                     let bounds = db.bounds();
                     let candidates = commit_history
                         .iter()
-                        .filter(|(size, _, floor, _)| {
-                            *size > bounds.start && *floor >= bounds.start
-                        })
+                        .filter(|(size, _, _, _)| *size > bounds.start)
                         .collect::<Vec<_>>();
                     let expected = candidates[*size_offset as usize % candidates.len()];
                     let retained = (expected.0 - bounds.start).as_u64();
