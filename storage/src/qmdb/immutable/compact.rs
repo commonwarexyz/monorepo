@@ -704,7 +704,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::{Contiguous as _, variable::Config as JournalConfig},
+        journal::contiguous::{Contiguous as _, fixed, variable::Config as JournalConfig},
         merkle::{mmb, mmr},
         metadata::{Config as MetadataConfig, Metadata},
         qmdb::{
@@ -2514,8 +2514,9 @@ mod tests {
             }
             drop(db);
 
-            // From the tip down: a view ending at the bound with a smaller witness widens, and a
-            // bound at or below the retained start opens unbounded. Each selects by size.
+            // From the tip down: a view ending at the bound with a tip size below the bound
+            // widens, and a bound at or below the retained start opens unbounded. Each selects
+            // by size.
             for (size, root) in states.into_iter().rev() {
                 let db = open_bounded::<mmr::Family>(
                     context.child("bounded").with_attribute("cap", *size),
@@ -2532,6 +2533,98 @@ mod tests {
                     .await,
                 Err(Error::HistoricalFloorPruned(pruned)) if pruned == Location::new(1)
             ));
+        });
+    }
+
+    /// A bounded initialization whose selection fails leaves the witness offsets watermark
+    /// acknowledging every synced witness.
+    #[test_traced]
+    fn test_compact_failed_bounded_selection_preserves_acknowledged_offsets() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-failed-bounded-offsets";
+            let cap = Location::new(5);
+            let witness_cfg = sectioned_witness_config(partition, &context);
+            let offsets_partition = format!("{partition}-witness_offsets");
+            let cfg = Config {
+                strategy: Sequential,
+                witness: witness_cfg.clone(),
+                commit_codec_config: (),
+            };
+            let mut db: TestDb<mmr::Family> =
+                Db::init(context.child("seed"), cfg, None).await.unwrap();
+
+            // The first commit carries six sets, so the witness at position 1 has size 8, above
+            // the cap used below.
+            let mut batch = db.new_batch();
+            for key in 1..=6u8 {
+                batch = batch.set(Sha256::fill(key), Sha256::fill(key));
+            }
+            let batch = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
+            (db, _) = db.apply_batch(batch).await.unwrap();
+            db = db.sync().await.unwrap();
+            let first_retained_size = db.size();
+            assert!(first_retained_size > cap);
+
+            // Eight synced empty commits occupy positions 2 through 9 with sizes 9 through 16.
+            for _ in 0..8 {
+                let batch = db
+                    .new_batch()
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
+                (db, _) = db.apply_batch(batch).await.unwrap();
+                db = db.sync().await.unwrap();
+            }
+            let tip = db.size();
+
+            // Pruning at the first commit removes the bootstrap section. The retained start
+            // (position 1) lies below the cap while its size lies above it.
+            let db = db
+                .prune(first_retained_size)
+                .await
+                .unwrap()
+                .sync()
+                .await
+                .unwrap();
+            drop(db);
+
+            // Sync acknowledged all ten witnesses (positions 0 through 9). The watermark lies above
+            // the cap, so any lowering to the cap is visible below.
+            let watermark = fixed::Journal::<_, u64>::persisted_watermark(
+                context.child("watermark_before"),
+                &offsets_partition,
+            )
+            .await
+            .unwrap();
+            assert_eq!(watermark, Some(10));
+
+            // No compact-sync import put a smaller size at the journal end, so the bounded view
+            // ends at the cap with a tip size above it and recovery stays bounded. The offsets open
+            // clamps the watermark to the cap, so inspection anchors at the ceiling and leaves the
+            // acknowledged offsets untouched. No retained witness fits under the cap, so selection
+            // fails.
+            assert!(matches!(
+                open_bounded::<mmr::Family>(context.child("failed"), witness_cfg.clone(), cap)
+                    .await,
+                Err(Error::HistoricalFloorPruned(found)) if found == cap
+            ));
+
+            // Inspection anchored at the ceiling skips the offsets truncate, so the failed attempt
+            // leaves the durable watermark at 10.
+            let watermark = fixed::Journal::<_, u64>::persisted_watermark(
+                context.child("watermark_after"),
+                &offsets_partition,
+            )
+            .await
+            .unwrap();
+            assert_eq!(watermark, Some(10));
+
+            // A retry at the tip recovers every retained witness.
+            let reopened = open_bounded::<mmr::Family>(context.child("retry"), witness_cfg, tip)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size(), tip);
+            reopened.destroy().await.unwrap();
         });
     }
 

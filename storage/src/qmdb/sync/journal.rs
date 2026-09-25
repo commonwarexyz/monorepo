@@ -582,7 +582,7 @@ mod tests {
     #[case::range_before_retained(7, 20)]
     #[case::range_overlaps_retained(20, 60)]
     #[test_traced]
-    fn test_fixed_sync_journal_reset_leaves_pruned_blobs_unopened(
+    fn test_fixed_sync_journal_reset_leaves_retained_blobs_unopened(
         #[case] range_start: u64,
         #[case] range_end: u64,
     ) {
@@ -719,7 +719,7 @@ mod tests {
     #[case::range_before_retained(7, 20)]
     #[case::range_overlaps_retained(20, 60)]
     #[test_traced]
-    fn test_variable_sync_journal_reset_leaves_pruned_blobs_unopened(
+    fn test_variable_sync_journal_reset_leaves_retained_blobs_unopened(
         #[case] range_start: u64,
         #[case] range_end: u64,
     ) {
@@ -861,7 +861,7 @@ mod tests {
     #[case::stale_below_start_leaves_blobs_unopened(30, 50, 70, false)]
     #[case::start_inside_newest_blob_opens_it(27, 28, 40, true)]
     #[test_traced]
-    fn test_fixed_sync_journal_committed_tail_at_requested_start(
+    fn test_fixed_sync_journal_committed_tail_below_start(
         #[case] initial_end: u8,
         #[case] range_start: u64,
         #[case] range_end: u64,
@@ -1012,6 +1012,52 @@ mod tests {
             // Every stored item lies below the range start, so the journal is reset without
             // opening any blob: a torn tail costs no repair.
             assert_eq!(calls[0], calls[1]);
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_sync_journal_start_inside_newest_blob_resets() {
+        deterministic::Runner::default().start(|context| async move {
+            // Five items per section leave 25 and 26 in the newest data blob, whose capacity covers
+            // the range start 28.
+            let cfg = variable_test_cfg(&context);
+            let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..27u64 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Blob capacity covers the range start, so recovery opens the stored data. Only the
+            // recovered end shows that no item reaches 28, so the journal resets to the range
+            // start and discards the data partition.
+            let range = non_empty_range!(Location::<F>::new(28), Location::<F>::new(40));
+            let mut journal =
+                <VariableJournal as Journal<F>>::new(context.child("sync"), cfg.clone(), range)
+                    .await
+                    .unwrap();
+            assert_eq!(journal.bounds(), 28..28);
+
+            // The reset journal accepts appends. Their values lie outside every discarded one,
+            // so a stale frame cannot pass for an appended item.
+            for position in 28..31u64 {
+                (journal, _) = journal.append(&(position + 100)).await.unwrap();
+            }
+            let journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // An ordinary reopen recovers exactly the appended items. Data blobs left behind by
+            // the reset would sit below the offsets start and fail recovery.
+            let journal = VariableJournal::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 28..31);
+            for position in 28..31u64 {
+                assert_eq!(journal.read(position).await.unwrap(), position + 100);
+            }
+            journal.destroy().await.unwrap();
         });
     }
 }

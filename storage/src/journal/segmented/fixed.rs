@@ -74,10 +74,18 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
-/// Recovery mutations authorized by a completed non-mutating preflight.
+/// Recovery work authorized at open. [Journal::init_bounded] uses `Floors` with no floors. Every
+/// other value follows a completed non-mutating preflight.
 enum PreflightMode {
     /// Preserve each durable validation floor while replay repairs its suffix.
-    Floors(BTreeMap<u64, u64>),
+    Floors {
+        floors: BTreeMap<u64, u64>,
+
+        /// Highest section the recovery owner may open. Later sections stay unopened until paired
+        /// truncation removes them.
+        ceiling: u64,
+    },
+
     /// Restore one checkpoint section and discard every later section.
     Restore {
         /// The checkpoint section remains explicit because an empty checkpoint has no floor.
@@ -96,9 +104,6 @@ pub(crate) struct RecoveryPreflight<E: Storage + Metrics, A: CodecFixed> {
 
     /// Mutations permitted after sibling storage validates these boundaries.
     mode: PreflightMode,
-
-    /// Highest section the paired recovery owner may open.
-    ceiling: u64,
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
@@ -110,7 +115,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> RecoveryPreflight<E, A> {
     /// Apply the preflighted recovery work and open the journal writer.
     pub(crate) async fn finish(self) -> Result<Journal<E, A>, Error> {
         Ok(Journal(Box::new(
-            Inner::init(self.context, self.cfg, Some(self.mode), self.ceiling).await?,
+            Inner::init(self.context, self.cfg, self.mode).await?,
         )))
     }
 }
@@ -153,7 +158,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
         );
         let stored = Self::stored(&context, &cfg).await?;
         let page_size = cfg.page_cache.page_size();
-        let mut floor_sizes = BTreeMap::new();
+        let mut floors = BTreeMap::new();
         let mut boundaries = BTreeMap::new();
 
         for (&section, &items) in minimum_items {
@@ -177,7 +182,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             // already durable. Validate the terminal index page that binds the two journals.
             let (blob, _) = context.open(&cfg.partition, name).await?;
             let entry = Self::boundary(&blob, page_size, section, required).await?;
-            floor_sizes.insert(section, required);
+            floors.insert(section, required);
             boundaries.insert(section, Some(entry));
         }
 
@@ -185,8 +190,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             context,
             cfg,
             boundaries,
-            mode: PreflightMode::Floors(floor_sizes),
-            ceiling,
+            mode: PreflightMode::Floors { floors, ceiling },
         })
     }
 
@@ -256,7 +260,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
             cfg,
             boundaries,
             mode: PreflightMode::Restore { section, floors },
-            ceiling: section,
         })
     }
 
@@ -293,18 +296,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// See [Journal::init].
-    async fn init(
-        context: E,
-        cfg: Config,
-        mode: Option<PreflightMode>,
-        ceiling: u64,
-    ) -> Result<Self, Error> {
-        let (floors, restore) = match mode {
-            None => (BTreeMap::new(), None),
-            Some(PreflightMode::Floors(floors)) => (floors, None),
-            Some(PreflightMode::Restore { section, floors }) => {
+    async fn init(context: E, cfg: Config, mode: PreflightMode) -> Result<Self, Error> {
+        // Restore never opens a section above its checkpoint. The truncation below removes those
+        // sections unread.
+        let (floors, restore, ceiling) = match mode {
+            PreflightMode::Floors { floors, ceiling } => (floors, None, ceiling),
+            PreflightMode::Restore { section, floors } => {
                 let size = floors.get(&section).copied().unwrap_or(0);
-                (floors, Some((section, size)))
+                (floors, Some((section, size)), section)
             }
         };
 
@@ -645,19 +644,23 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Backing blobs are opened without scanning their full page prefixes. Use `replay` to validate
     /// and iterate over all items before appending to a retained section.
     pub async fn init(context: E, cfg: Config) -> Result<Self, Error> {
-        Ok(Self(Box::new(
-            Inner::init(context, cfg, None, u64::MAX).await?,
-        )))
+        Self::init_bounded(context, cfg, u64::MAX).await
     }
 
-    /// Open only sections through `ceiling` while paired recovery selects the retained prefix.
+    /// Open only sections through `ceiling`. [Journal::truncate_pending_tail] or [Journal::clear]
+    /// must remove any later section before the journal is published.
     pub(crate) async fn init_bounded(context: E, cfg: Config, ceiling: u64) -> Result<Self, Error> {
-        Ok(Self(Box::new(
-            Inner::init(context, cfg, None, ceiling).await?,
-        )))
+        let mode = PreflightMode::Floors {
+            floors: BTreeMap::new(),
+            ceiling,
+        };
+        Ok(Self(Box::new(Inner::init(context, cfg, mode).await?)))
     }
 
     /// Prove validation floors without opening a writer or mutating their blobs.
+    ///
+    /// [RecoveryPreflight::finish] opens only sections through `ceiling`. Panics if a floor lies
+    /// above `ceiling`.
     pub(crate) async fn preflight_floors(
         context: E,
         cfg: Config,

@@ -280,7 +280,7 @@ impl<E: Context, V: CodecShared> std::fmt::Debug for Glob<E, V> {
 impl<E: Context, V: CodecShared> Glob<E, V> {
     /// Initialize blob storage, opening existing section blobs.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Ok(Recovery::init(context, cfg).await?.into())
+        Ok(Recovery::init(context, cfg, u64::MAX).await?.into())
     }
 
     /// Append value to section.
@@ -393,17 +393,9 @@ impl<E: Context, V: CodecShared> From<Recovery<E, V>> for Glob<E, V> {
 }
 
 impl<E: Context, V: CodecShared> Recovery<E, V> {
-    /// Open the uncached sections under paired initialization ownership.
-    pub(crate) async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        Self::init_bounded(context, cfg, u64::MAX).await
-    }
-
-    /// Leave later value sections closed until paired recovery removes them.
-    pub(crate) async fn init_bounded(
-        context: E,
-        cfg: Config<V::Cfg>,
-        ceiling: u64,
-    ) -> Result<Self, Error> {
+    /// Open value sections through `ceiling` under paired initialization ownership. Later sections
+    /// stay closed until paired recovery removes them.
+    pub(crate) async fn init(context: E, cfg: Config<V::Cfg>, ceiling: u64) -> Result<Self, Error> {
         Ok(Self(Box::new(Inner::init(context, cfg, ceiling).await?)))
     }
 
@@ -525,7 +517,7 @@ mod tests {
                 codec_config: self.0.codec_config.clone(),
             };
             _ = self.sync_all().await?;
-            let pending = Recovery::init(context, cfg).await?;
+            let pending = Recovery::init(context, cfg, u64::MAX).await?;
             let pending = pending.truncate_section(section, end).await?;
             Ok(pending.into())
         }

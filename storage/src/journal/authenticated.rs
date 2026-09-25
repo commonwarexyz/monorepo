@@ -1220,16 +1220,22 @@ pub trait Backing<E: Context>: Mutable {
         size: u64,
     ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
 
-    /// Whether stored items may serve a sync range starting at `position`, without reading them.
+    /// Positions stored items may occupy, determined without reading them.
     ///
-    /// The retained start must be at or below `position`, with either a possible item at or above
-    /// it or an empty journal exactly at `position`. A pending reset counts as an empty journal
-    /// at its target.
-    fn covers(
+    /// The start is the retained start and the end bounds every stored item. A pending reset
+    /// yields an empty span at its target.
+    fn span(
         context: &E,
         cfg: &Self::Config,
-        position: u64,
-    ) -> impl Future<Output = Result<bool, JournalError>> + Send;
+    ) -> impl Future<Output = Result<Range<u64>, JournalError>> + Send;
+}
+
+/// Whether `span` can serve a sync range starting at `position`.
+///
+/// It must start at or below `position`, and either may hold an item at `position` or be empty
+/// exactly at `position`.
+pub(crate) fn covers(span: &Range<u64>, position: u64) -> bool {
+    position == span.start || span.contains(&position)
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
@@ -1240,24 +1246,20 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 ) -> Result<J, JournalError> {
     assert!(!range.is_empty(), "range must not be empty");
 
-    if !J::covers(&context, &cfg, range.start).await? {
-        return J::clear(context, cfg, range.start)
-            .await?
-            .finish(range.start)
-            .await;
-    }
-    let pending = J::recover(context, cfg, Some(range.end)).await?;
-    let bounds = pending.bounds();
+    // Stored positions that cannot serve the sync start are cleared without opening any blob.
+    let pending = if covers(&J::span(&context, &cfg).await?, range.start) {
+        let pending = J::recover(context, cfg, Some(range.end)).await?;
 
-    // A journal already empty at the sync start needs no reset.
-    if bounds == (range.start..range.start) {
-        return pending.finish(range.start).await;
-    }
-
-    // Blob capacity can overstate the recovered end when the tail is short or has a gap.
-    if bounds.start > range.start || bounds.end <= range.start {
-        return pending.reset(range.start).await?.finish(range.start).await;
-    }
+        // The recovered prefix must still cover the sync start. Blob capacity can overstate the
+        // recovered end when the tail is short or has a gap.
+        if covers(&pending.bounds(), range.start) {
+            pending
+        } else {
+            pending.reset(range.start).await?
+        }
+    } else {
+        J::clear(context, cfg, range.start).await?
+    };
 
     // Publish the retained prefix before pruning complete sections below the sync start.
     let journal = pending.finish(range.end).await?;

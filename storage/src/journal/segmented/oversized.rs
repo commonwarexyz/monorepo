@@ -127,17 +127,19 @@ pub struct Config<C> {
 /// `Floors` preserves per-section validated prefixes while repairing any suffix, and `Infer`
 /// derives the boundary entirely from journal contents.
 enum RecoveryMode<'a> {
-    Restore {
-        section: u64,
-        index_size: u64,
-    },
+    /// Restore one checkpoint section and remove every later section unread.
+    Restore { section: u64, index_size: u64 },
+
+    /// Prove committed floors, then repair suffixes. Index and value sections above `ceiling`
+    /// are never opened and must be removed before publication.
     Floors {
         floors: &'a BTreeMap<u64, u64>,
         ceiling: u64,
     },
-    Infer {
-        ceiling: u64,
-    },
+
+    /// Infer the durable state of every section through `ceiling`, leaving later index and value
+    /// sections unopened for removal before publication.
+    Infer { ceiling: u64 },
 }
 
 /// Durable recovery state for a journal that validates every uncommitted value during replay.
@@ -340,14 +342,14 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
         let (index, values) = match recovery {
             RecoveryMode::Infer { ceiling } => {
                 let index = FixedJournal::init_bounded(index_context, index_cfg, ceiling).await?;
-                let values = GlobRecovery::init_bounded(value_context, value_cfg, ceiling).await?;
+                let values = GlobRecovery::init(value_context, value_cfg, ceiling).await?;
                 (index, values)
             }
             RecoveryMode::Floors { floors, ceiling } => {
                 let preflight =
                     FixedJournal::preflight_floors(index_context, index_cfg, floors, ceiling)
                         .await?;
-                let values = GlobRecovery::init_bounded(value_context, value_cfg, ceiling).await?;
+                let values = GlobRecovery::init(value_context, value_cfg, ceiling).await?;
                 Self::validate_value_floors(&values, &preflight)?;
                 (preflight.finish().await?, values)
             }
@@ -358,7 +360,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
                 let preflight =
                     FixedJournal::preflight_restore(index_context, index_cfg, section, index_size)
                         .await?;
-                let values = GlobRecovery::init_bounded(value_context, value_cfg, section).await?;
+                let values = GlobRecovery::init(value_context, value_cfg, section).await?;
                 let value_size = Self::validate_restore_values(&values, &preflight, section)?;
                 let index = preflight.finish().await?;
 
@@ -717,9 +719,11 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
 }
 
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
-    /// Open through the given section and index-byte end, rounding down a partial entry.
-    /// Later index and value sections remain unopened, and whole index pages above `end`
-    /// are removed before opening. Recovery validates the paired retained prefix.
+    /// Open through `section` and index-byte `end`, rounding down a partial entry.
+    ///
+    /// Later index sections and whole index pages above `end` are removed before opening. Later
+    /// value sections are removed without being opened. Recovery validates the paired retained
+    /// prefix.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -806,8 +810,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// retained section and index-byte end.
     ///
     /// The selected paired boundary is validated before markers are lowered and suffix storage is
-    /// released. Later index and value sections remain unopened until the markers are durable.
-    /// The caller must drain the replay and call [Replay::finish_tracked].
+    /// released. Later index and value sections are never opened and are removed only after any
+    /// lowered markers are durable. The caller must drain the replay and call
+    /// [Replay::finish_tracked].
     pub async fn init_with_metadata_at_most(
         context: &E,
         cfg: Config<V::Cfg>,
