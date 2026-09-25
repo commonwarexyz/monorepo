@@ -6,7 +6,8 @@ use crate::reed_solomon::{
 use core::marker::PhantomData;
 use fixedbitset::FixedBitSet;
 
-// Bound the quadratic calculation and its stack storage.
+/// Largest decoding domain that `with_erasures` evaluates directly, bounding the quadratic
+/// calculation and its stack storage.
 pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 128;
 
 /// Evaluate the log erasure locator for each position below `end` and pass those entries to
@@ -85,9 +86,6 @@ pub(crate) fn eval_walsh<E: Engine>(
     }
 }
 
-// ======================================================================
-// LowRate - PUBLIC
-
 /// Reed-Solomon encoder/decoder generator using only low rate.
 pub struct LowRate<E: Engine>(PhantomData<E>);
 
@@ -103,9 +101,6 @@ impl<E: Engine> Rate<E> for LowRate<E> {
             && original_count.next_power_of_two() + recovery_count <= GF_ORDER
     }
 }
-
-// ======================================================================
-// LowRateEncoder - PUBLIC
 
 /// Reed-Solomon encoder using only low rate.
 pub struct LowRateEncoder<E: Engine> {
@@ -137,42 +132,31 @@ impl<E: Engine> RateEncoder<E> for LowRateEncoder<E> {
         let chunk_size = original_count.next_power_of_two();
         let engine = &self.engine;
 
-        // ZEROPAD ORIGINAL
-
+        // Zero-pad the originals to `chunk_size` and IFFT them.
         work.zero(original_count..chunk_size);
-
-        // IFFT - ORIGINAL
-
         engine.ifft(&mut work, 0, chunk_size, original_count, 0);
 
-        // COPY IFFT RESULT TO OTHER CHUNKS
-
+        // Copy the IFFT result into each remaining chunk.
         let mut chunk_start = chunk_size;
         while chunk_start < recovery_count {
             work.copy_within(0, chunk_start, chunk_size);
             chunk_start += chunk_size;
         }
 
-        // FFT - FULL CHUNKS
-
+        // FFT each full chunk.
         let mut chunk_start = 0;
         while chunk_start + chunk_size <= recovery_count {
             engine::fft_skew_end(engine, &mut work, chunk_start, chunk_size, chunk_size);
             chunk_start += chunk_size;
         }
 
-        // FFT - FINAL PARTIAL CHUNK
-
+        // FFT the final partial chunk.
         let last_count = recovery_count % chunk_size;
         if last_count > 0 {
             engine::fft_skew_end(engine, &mut work, chunk_start, chunk_size, last_count);
         }
 
-        // UNDO LAST CHUNK ENCODING
-
         self.work.undo_last_chunk_encoding();
-
-        // DONE
 
         Ok(EncoderResult::new(&mut self.work))
     }
@@ -203,9 +187,6 @@ impl<E: Engine> RateEncoder<E> for LowRateEncoder<E> {
     }
 }
 
-// ======================================================================
-// LowRateEncoder - PRIVATE
-
 impl<E: Engine> LowRateEncoder<E> {
     fn reset_work(
         original_count: usize,
@@ -231,9 +212,6 @@ impl<E: Engine> LowRateEncoder<E> {
         recovery_count.next_multiple_of(chunk_size)
     }
 }
-
-// ======================================================================
-// LowRateDecoder - PUBLIC
 
 /// Reed-Solomon decoder using only low rate.
 pub struct LowRateDecoder<E: Engine> {
@@ -302,9 +280,6 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// LowRateDecoder - CRATE
-
 impl<E: Engine> LowRateDecoder<E> {
     pub(crate) fn decode_with_plan(
         &mut self,
@@ -314,9 +289,6 @@ impl<E: Engine> LowRateDecoder<E> {
         self.decode_impl(compute_recovery, Some(plan))
     }
 }
-
-// ======================================================================
-// LowRateDecoder - PRIVATE
 
 impl<E: Engine> LowRateDecoder<E> {
     fn decode_impl(
@@ -340,19 +312,16 @@ impl<E: Engine> LowRateDecoder<E> {
         let recovery_end = chunk_size + recovery_count;
         let work_count = work.len();
 
-        // ERASURE LOCATIONS
-        //
+        // Take the erasure locators from the plan, or evaluate them with `with_erasures`.
         // `with_erasures` lends coefficients from its own stack buffer, so the rest of decoding
         // is a closure over either those or the plan's coefficients.
-
         let mut decode = |erasures: &[GfElement]| {
-            // MULTIPLY SHARDS
-
+            // Multiply received shards by their erasure locators and zero everything else:
+            //
             // work[               .. original_count] = original * erasures
             // work[original_count .. chunk_size    ] = 0
             // work[chunk_size     .. recovery_end  ] = recovery * erasures
             // work[recovery_end   ..               ] = 0
-
             for i in 0..original_count {
                 if received[i] {
                     self.engine.mul(&mut work[i], erasures[i]);
@@ -360,9 +329,7 @@ impl<E: Engine> LowRateDecoder<E> {
                     work[i].fill([0; SHARD_CHUNK_BYTES]);
                 }
             }
-
             work.zero(original_count..chunk_size);
-
             for i in chunk_size..recovery_end {
                 if received[i] {
                     self.engine.mul(&mut work[i], erasures[i]);
@@ -370,30 +337,25 @@ impl<E: Engine> LowRateDecoder<E> {
                     work[i].fill([0; SHARD_CHUNK_BYTES]);
                 }
             }
-
             work.zero(recovery_end..);
 
-            // IFFT / FORMAL DERIVATIVE / FFT
-
+            // Take the formal derivative between an IFFT and an FFT.
             self.engine.ifft(&mut work, 0, work_count, recovery_end, 0);
             engine::formal_derivative(&mut work);
             self.engine.fft(&mut work, 0, work_count, recovery_end, 0);
 
-            // REVEAL ERASURES
-
+            // Reveal the missing originals by scaling them by the inverse locator.
             for i in 0..original_count {
                 if !received[i] {
                     self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
                 }
             }
 
-            // REVEAL ERASURES (RECOVERY)
-            //
-            // Only when the caller passed `compute_recovery = true` to `decode`. Recovery shards
-            // live at `work[chunk_size..recovery_end]`. Un-scale the missing ones by the inverse
-            // locator so they hold the canonical recovery values, mirroring the original reveal above.
-            // This lets `DecoderResult::recovery` return them without a separate re-encode.
-
+            // When the caller passed `compute_recovery = true` to `decode`, reveal the missing
+            // recovery shards at `work[chunk_size..recovery_end]`. Scale them by the inverse
+            // locator so they hold the canonical recovery values, mirroring the reveal of the
+            // originals above. This lets `DecoderResult::recovery` return them without a separate
+            // re-encode.
             if compute_recovery {
                 for i in chunk_size..recovery_end {
                     if !received[i] {
@@ -407,14 +369,11 @@ impl<E: Engine> LowRateDecoder<E> {
             None => with_erasures::<E, _>(original_count, recovery_count, received, decode),
         }
 
-        // UNDO LAST CHUNK ENCODING
-
+        // Undo the last chunk encoding of the originals, and of the recovery shards if computed.
         self.work.undo_last_chunk_encoding();
         if compute_recovery {
             self.work.undo_last_chunk_encoding_recovery();
         }
-
-        // DONE
 
         Ok(Some(DecoderResult::new(&mut self.work)))
     }
@@ -447,9 +406,6 @@ impl<E: Engine> LowRateDecoder<E> {
         (original_count.next_power_of_two() + recovery_count).next_power_of_two()
     }
 }
-
-// ======================================================================
-// TESTS
 
 #[cfg(test)]
 mod tests {
@@ -499,9 +455,6 @@ mod tests {
             }
         }
     }
-
-    // ============================================================
-    // ROUNDTRIPS - SINGLE ROUND
 
     #[test]
     fn roundtrip_all_originals_missing() {
@@ -609,9 +562,6 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // ROUNDTRIPS - TWO ROUNDS
-
     #[test]
     fn two_rounds_implicit_reset() {
         roundtrip_two_rounds!(
@@ -663,9 +613,6 @@ mod tests {
             ),
         );
     }
-
-    // ============================================================
-    // LowRate
 
     mod low_rate {
         use crate::reed_solomon::{
@@ -741,9 +688,6 @@ mod tests {
         }
     }
 
-    // ============================================================
-    // LowRateEncoder
-
     mod low_rate_encoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
@@ -751,22 +695,13 @@ mod tests {
             rate::{LowRateEncoder, RateEncoder},
         };
 
-        // ==================================================
-        // ERRORS
-
         test_rate_encoder_errors! {LowRateEncoder}
-
-        // ==================================================
-        // supports
 
         #[test]
         fn supports() {
             assert!(LowRateEncoder::<NoSimd>::supports(4096, 61440));
             assert!(!LowRateEncoder::<NoSimd>::supports(61440, 4096));
         }
-
-        // ==================================================
-        // validate
 
         #[test]
         fn validate() {
@@ -786,9 +721,6 @@ mod tests {
             );
         }
 
-        // ==================================================
-        // work_count
-
         #[test]
         fn work_count() {
             assert_eq!(LowRateEncoder::<NoSimd>::work_count(1, 1), 1);
@@ -799,9 +731,6 @@ mod tests {
         }
     }
 
-    // ============================================================
-    // LowRateDecoder
-
     mod low_rate_decoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
@@ -809,22 +738,13 @@ mod tests {
             rate::{LowRateDecoder, RateDecoder},
         };
 
-        // ==================================================
-        // ERRORS
-
         test_rate_decoder_errors! {LowRateDecoder}
-
-        // ==================================================
-        // supports
 
         #[test]
         fn supports() {
             assert!(LowRateDecoder::<NoSimd>::supports(4096, 61440));
             assert!(!LowRateDecoder::<NoSimd>::supports(61440, 4096));
         }
-
-        // ==================================================
-        // validate
 
         #[test]
         fn validate() {
@@ -843,9 +763,6 @@ mod tests {
                 })
             );
         }
-
-        // ==================================================
-        // work_count
 
         #[test]
         fn work_count() {

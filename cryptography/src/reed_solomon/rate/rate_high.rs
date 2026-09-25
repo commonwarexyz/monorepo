@@ -34,9 +34,6 @@ pub(crate) fn eval_erasures<E: Engine>(
     super::eval_locator::<E>(erasures, end);
 }
 
-// ======================================================================
-// HighRate - PUBLIC
-
 /// Reed-Solomon encoder/decoder generator using only high rate.
 pub struct HighRate<E: Engine>(PhantomData<E>);
 
@@ -52,9 +49,6 @@ impl<E: Engine> Rate<E> for HighRate<E> {
             && recovery_count.next_power_of_two() + original_count <= GF_ORDER
     }
 }
-
-// ======================================================================
-// HighRateEncoder - PUBLIC
 
 /// Reed-Solomon encoder using only high rate.
 pub struct HighRateEncoder<E: Engine> {
@@ -86,16 +80,13 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
         let chunk_size = recovery_count.next_power_of_two();
         let engine = &self.engine;
 
-        // FIRST CHUNK
-
+        // Zero-pad the first chunk past `first_count` and IFFT it.
         let first_count = core::cmp::min(original_count, chunk_size);
-
         work.zero(first_count..chunk_size);
         engine::ifft_skew_end(engine, &mut work, 0, chunk_size, first_count);
 
         if original_count > chunk_size {
-            // FULL CHUNKS
-
+            // IFFT each full chunk and XOR it into the first chunk.
             let mut chunk_start = chunk_size;
             while chunk_start + chunk_size <= original_count {
                 engine::ifft_skew_end(engine, &mut work, chunk_start, chunk_size, chunk_size);
@@ -103,8 +94,7 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
                 chunk_start += chunk_size;
             }
 
-            // FINAL PARTIAL CHUNK
-
+            // Zero-pad the final partial chunk, IFFT it, and XOR it into the first chunk.
             let last_count = original_count % chunk_size;
             if last_count > 0 {
                 work.zero(chunk_start + last_count..);
@@ -113,15 +103,9 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
             }
         }
 
-        // FFT
-
         engine.fft(&mut work, 0, chunk_size, recovery_count, 0);
 
-        // UNDO LAST CHUNK ENCODING
-
         self.work.undo_last_chunk_encoding();
-
-        // DONE
 
         Ok(EncoderResult::new(&mut self.work))
     }
@@ -152,9 +136,6 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
     }
 }
 
-// ======================================================================
-// HighRateEncoder - PRIVATE
-
 impl<E: Engine> HighRateEncoder<E> {
     fn reset_work(
         original_count: usize,
@@ -180,9 +161,6 @@ impl<E: Engine> HighRateEncoder<E> {
         original_count.next_multiple_of(chunk_size)
     }
 }
-
-// ======================================================================
-// HighRateDecoder - PUBLIC
 
 /// Reed-Solomon decoder using only high rate.
 pub struct HighRateDecoder<E: Engine> {
@@ -251,9 +229,6 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// HighRateDecoder - CRATE
-
 impl<E: Engine> HighRateDecoder<E> {
     pub(crate) fn decode_with_plan(
         &mut self,
@@ -263,9 +238,6 @@ impl<E: Engine> HighRateDecoder<E> {
         self.decode_impl(compute_recovery, Some(plan))
     }
 }
-
-// ======================================================================
-// HighRateDecoder - PRIVATE
 
 impl<E: Engine> HighRateDecoder<E> {
     fn decode_impl(
@@ -289,8 +261,7 @@ impl<E: Engine> HighRateDecoder<E> {
         let original_end = chunk_size + original_count;
         let work_count = work.len();
 
-        // ERASURE LOCATIONS
-
+        // Take the erasure locators from the plan, or evaluate them from the received shards.
         let mut owned_erasures;
         #[expect(
             clippy::option_if_let_else,
@@ -310,13 +281,12 @@ impl<E: Engine> HighRateDecoder<E> {
             }
         };
 
-        // MULTIPLY SHARDS
-
+        // Multiply received shards by their erasure locators and zero everything else:
+        //
         // work[               .. recovery_count] = recovery * erasures
         // work[recovery_count .. chunk_size    ] = 0
         // work[chunk_size     .. original_end  ] = original * erasures
         // work[original_end   ..               ] = 0
-
         for i in 0..recovery_count {
             if received[i] {
                 self.engine.mul(&mut work[i], erasures[i]);
@@ -324,9 +294,7 @@ impl<E: Engine> HighRateDecoder<E> {
                 work[i].fill([0; SHARD_CHUNK_BYTES]);
             }
         }
-
         work.zero(recovery_count..chunk_size);
-
         for i in chunk_size..original_end {
             if received[i] {
                 self.engine.mul(&mut work[i], erasures[i]);
@@ -334,30 +302,24 @@ impl<E: Engine> HighRateDecoder<E> {
                 work[i].fill([0; SHARD_CHUNK_BYTES]);
             }
         }
-
         work.zero(original_end..);
 
-        // IFFT / FORMAL DERIVATIVE / FFT
-
+        // Take the formal derivative between an IFFT and an FFT.
         self.engine.ifft(&mut work, 0, work_count, original_end, 0);
         engine::formal_derivative(&mut work);
         self.engine.fft(&mut work, 0, work_count, original_end, 0);
 
-        // REVEAL ERASURES
-
+        // Reveal the missing originals by scaling them by the inverse locator.
         for i in chunk_size..original_end {
             if !received[i] {
                 self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
             }
         }
 
-        // REVEAL ERASURES (RECOVERY)
-        //
-        // Only when the caller passed `compute_recovery = true` to `decode`. Recovery shards
-        // live at `work[0..recovery_count]`. Un-scale the missing ones by the inverse locator so
-        // they hold the canonical recovery values, mirroring the original reveal above. This lets
-        // `DecoderResult::recovery` return them without a separate re-encode.
-
+        // When the caller passed `compute_recovery = true` to `decode`, reveal the missing
+        // recovery shards at `work[0..recovery_count]`. Scale them by the inverse locator so they
+        // hold the canonical recovery values, mirroring the reveal of the originals above. This
+        // lets `DecoderResult::recovery` return them without a separate re-encode.
         if compute_recovery {
             for i in 0..recovery_count {
                 if !received[i] {
@@ -366,14 +328,11 @@ impl<E: Engine> HighRateDecoder<E> {
             }
         }
 
-        // UNDO LAST CHUNK ENCODING
-
+        // Undo the last chunk encoding of the originals, and of the recovery shards if computed.
         self.work.undo_last_chunk_encoding();
         if compute_recovery {
             self.work.undo_last_chunk_encoding_recovery();
         }
-
-        // DONE
 
         Ok(Some(DecoderResult::new(&mut self.work)))
     }
@@ -407,16 +366,10 @@ impl<E: Engine> HighRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::reed_solomon::test_util;
-
-    // ============================================================
-    // ROUNDTRIPS - SINGLE ROUND
 
     #[test]
     fn roundtrip_all_originals_missing() {
@@ -524,9 +477,6 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // ROUNDTRIPS - TWO ROUNDS
-
     #[test]
     fn two_rounds_implicit_reset() {
         roundtrip_two_rounds!(
@@ -582,9 +532,6 @@ mod tests {
             ),
         );
     }
-
-    // ============================================================
-    // HighRate
 
     mod high_rate {
         use crate::reed_solomon::{
@@ -660,9 +607,6 @@ mod tests {
         }
     }
 
-    // ============================================================
-    // HighRateEncoder
-
     mod high_rate_encoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
@@ -670,22 +614,13 @@ mod tests {
             rate::{HighRateEncoder, RateEncoder},
         };
 
-        // ==================================================
-        // ERRORS
-
         test_rate_encoder_errors! {HighRateEncoder}
-
-        // ==================================================
-        // supports
 
         #[test]
         fn supports() {
             assert!(!HighRateEncoder::<NoSimd>::supports(4096, 61440));
             assert!(HighRateEncoder::<NoSimd>::supports(61440, 4096));
         }
-
-        // ==================================================
-        // validate
 
         #[test]
         fn validate() {
@@ -705,9 +640,6 @@ mod tests {
             assert!(HighRateEncoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
         }
 
-        // ==================================================
-        // work_count
-
         #[test]
         fn work_count() {
             assert_eq!(HighRateEncoder::<NoSimd>::work_count(1, 1), 1);
@@ -718,9 +650,6 @@ mod tests {
         }
     }
 
-    // ============================================================
-    // HighRateDecoder
-
     mod high_rate_decoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
@@ -728,22 +657,13 @@ mod tests {
             rate::{HighRateDecoder, RateDecoder},
         };
 
-        // ==================================================
-        // ERRORS
-
         test_rate_decoder_errors! {HighRateDecoder}
-
-        // ==================================================
-        // supports
 
         #[test]
         fn supports() {
             assert!(!HighRateDecoder::<NoSimd>::supports(4096, 61440));
             assert!(HighRateDecoder::<NoSimd>::supports(61440, 4096));
         }
-
-        // ==================================================
-        // validate
 
         #[test]
         fn validate() {
@@ -762,9 +682,6 @@ mod tests {
 
             assert!(HighRateDecoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
         }
-
-        // ==================================================
-        // work_count
 
         #[test]
         fn work_count() {

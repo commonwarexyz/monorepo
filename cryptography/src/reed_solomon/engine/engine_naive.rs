@@ -4,9 +4,6 @@ use crate::reed_solomon::engine::{
     utils,
 };
 
-// ======================================================================
-// Naive - PUBLIC
-
 /// Simple reference implementation of [`Engine`].
 ///
 /// - [`Naive`] is meant for those who want to study
@@ -21,13 +18,9 @@ pub struct Naive {
 }
 
 impl Naive {
-    /// Creates new [`Naive`], initializing all [tables]
-    /// needed for encoding or decoding.
+    /// Creates a new [`Naive`] and initializes its multiplication and skew [tables].
     ///
-    /// Currently only difference between encoding/decoding is
-    /// [`LogWalsh`] (128 kiB) which is only needed for decoding.
-    ///
-    /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
+    /// Decoding builds its Walsh transform tables on first use.
     pub fn new() -> Self {
         let exp_log = tables::get_exp_log();
         let skew = tables::get_skew();
@@ -59,8 +52,7 @@ impl Engine for Naive {
                 for i in r..r + dist {
                     let (a, b) = data.dist2_mut(pos + i, dist);
 
-                    // FFT BUTTERFLY
-
+                    // FFT butterfly.
                     if log_m != GF_MODULUS {
                         self.mul_add(a, b, log_m);
                     }
@@ -90,8 +82,7 @@ impl Engine for Naive {
                 for i in r..r + dist {
                     let (a, b) = data.dist2_mut(pos + i, dist);
 
-                    // IFFT BUTTERFLY
-
+                    // IFFT butterfly.
                     utils::xor(b, a);
                     if log_m != GF_MODULUS {
                         self.mul_add(a, b, log_m);
@@ -116,20 +107,14 @@ impl Engine for Naive {
     }
 }
 
-// ======================================================================
-// Naive - IMPL Default
-
 impl Default for Naive {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ======================================================================
-// Naive - PRIVATE
-
 impl Naive {
-    /// `x[] ^= y[] * log_m`
+    /// Computes `x[] ^= y[] * log_m`.
     fn mul_add(
         &self,
         x: &mut [[u8; SHARD_CHUNK_BYTES]],
@@ -149,8 +134,3 @@ impl Naive {
         }
     }
 }
-
-// ======================================================================
-// TESTS
-
-// Engines are tested indirectly via roundtrip tests of HighRate and LowRate.

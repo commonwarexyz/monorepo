@@ -8,10 +8,7 @@ use crate::reed_solomon::engine::{
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 
-// ======================================================================
-// DefaultEngine - PUBLIC
-
-/// [`Engine`] that at runtime selects the best Engine.
+/// [`Engine`] that selects the best available engine at runtime.
 pub struct DefaultEngine(Box<dyn Engine + Send + Sync>);
 
 impl DefaultEngine {
@@ -53,17 +50,11 @@ impl DefaultEngine {
     }
 }
 
-// ======================================================================
-// DefaultEngine - IMPL Default
-
 impl Default for DefaultEngine {
     fn default() -> Self {
         Self::new()
     }
 }
-
-// ======================================================================
-// DefaultEngine - IMPL Engine
 
 impl Engine for DefaultEngine {
     fn fft(

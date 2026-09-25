@@ -1,12 +1,8 @@
 use crate::reed_solomon::rate::EncoderWork;
 
-// ======================================================================
-// EncoderResult - PUBLIC
-
 /// Result of encoding. Contains the generated recovery shards.
 ///
-/// This struct is created by [`Encoder::encode`]
-/// and [`RateEncoder::encode`].
+/// This struct is created by [`Encoder::encode`] and [`RateEncoder::encode`].
 ///
 /// [`RateEncoder::encode`]: crate::reed_solomon::rate::RateEncoder::encode
 /// [`Encoder::encode`]: crate::reed_solomon::Encoder::encode
@@ -15,26 +11,22 @@ pub struct EncoderResult<'a> {
 }
 
 impl EncoderResult<'_> {
-    /// Returns recovery shard with given `index`
-    /// or `None` if `index >= recovery_count`.
+    /// Returns the recovery shard with the given `index`, or `None` if `index >= recovery_count`.
     ///
-    /// Recovery shards have indexes `0..recovery_count`
-    /// and these same indexes must be used when decoding.
+    /// Recovery shards have indexes `0..recovery_count`, and these same indexes must be used when
+    /// decoding.
     pub fn recovery(&self, index: usize) -> Option<&[u8]> {
         self.work.recovery(index)
     }
 
-    /// Returns iterator over all recovery shards ordered by their indexes.
+    /// Returns an iterator over all recovery shards, ordered by index.
     ///
-    /// Recovery shards have indexes `0..recovery_count`
-    /// and these same indexes must be used when decoding.
+    /// Recovery shards have indexes `0..recovery_count`, and these same indexes must be used when
+    /// decoding.
     pub const fn recovery_iter(&self) -> Recovery<'_> {
         Recovery::new(self.work)
     }
 }
-
-// ======================================================================
-// EncoderResult - CRATE
 
 impl<'a> EncoderResult<'a> {
     pub(crate) const fn new(work: &'a mut EncoderWork) -> Self {
@@ -42,17 +34,11 @@ impl<'a> EncoderResult<'a> {
     }
 }
 
-// ======================================================================
-// EncoderResult - IMPL DROP
-
 impl Drop for EncoderResult<'_> {
     fn drop(&mut self) {
         self.work.reset_received();
     }
 }
-
-// ======================================================================
-// Recovery - PUBLIC
 
 /// Iterator over generated recovery shards.
 ///
@@ -62,9 +48,6 @@ pub struct Recovery<'a> {
     next_index: usize,
     work: &'a EncoderWork,
 }
-
-// ======================================================================
-// Recovery - IMPL Iterator
 
 impl<'a> Iterator for Recovery<'a> {
     type Item = &'a [u8];
@@ -86,13 +69,7 @@ impl<'a> Iterator for Recovery<'a> {
     }
 }
 
-// ======================================================================
-// Recovery - IMPL ExactSizeIterator
-
 impl ExactSizeIterator for Recovery<'_> {}
-
-// ======================================================================
-// Recovery - CRATE
 
 impl<'a> Recovery<'a> {
     pub(crate) const fn new(work: &'a EncoderWork) -> Self {
@@ -104,9 +81,6 @@ impl<'a> Recovery<'a> {
     }
 }
 
-// ======================================================================
-// TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,10 +88,8 @@ mod tests {
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
 
+    /// Covers `EncoderResult::recovery`, `EncoderResult::recovery_iter`, and `Recovery`.
     #[test]
-    // EncoderResult::recovery
-    // EncoderResult::recovery_iter
-    // Recovery
     fn encoder_result() {
         let original = test_util::generate_original(2, 1024, 123);
         let mut encoder = Encoder::new(2, 3, 1024).unwrap();

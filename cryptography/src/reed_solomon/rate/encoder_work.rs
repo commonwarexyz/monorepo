@@ -3,9 +3,6 @@ use crate::reed_solomon::{
     engine::{SHARD_CHUNK_BYTES, Shards, ShardsRefMut},
 };
 
-// ======================================================================
-// EncoderWork - PUBLIC
-
 /// Working space for [`RateEncoder`].
 ///
 /// [`RateEncoder`]: crate::reed_solomon::rate::RateEncoder
@@ -20,8 +17,7 @@ pub struct EncoderWork {
 }
 
 impl EncoderWork {
-    /// Creates new [`EncoderWork`] which initially
-    /// has no working space allocated.
+    /// Creates a new [`EncoderWork`] with no working space allocated.
     pub const fn new() -> Self {
         Self {
             original_count: 0,
@@ -34,17 +30,11 @@ impl EncoderWork {
     }
 }
 
-// ======================================================================
-// EncoderWork - IMPL Default
-
 impl Default for EncoderWork {
     fn default() -> Self {
         Self::new()
     }
 }
-
-// ======================================================================
-// EncoderWork - CRATE
 
 impl EncoderWork {
     pub(crate) fn add_original_shard<T: AsRef<[u8]>>(
@@ -86,7 +76,7 @@ impl EncoderWork {
         }
     }
 
-    // This must only be called by `EncoderResult`.
+    /// This must only be called by `EncoderResult`.
     pub(crate) fn recovery(&self, index: usize) -> Option<&[u8]> {
         if index < self.recovery_count {
             Some(&self.shards[index].as_flattened()[..self.shard_bytes])

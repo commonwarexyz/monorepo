@@ -9,9 +9,6 @@ use core::arch::x86::*;
 use core::arch::x86_64::*;
 use core::iter::zip;
 
-// ======================================================================
-// Avx512 - PUBLIC
-
 /// Optimized [`Engine`] using AVX-512 instructions.
 ///
 /// [`Avx512`] is an optimized engine that follows the same algorithm as
@@ -27,17 +24,13 @@ pub struct Avx512 {
 }
 
 impl Avx512 {
-    /// Creates new [`Avx512`], initializing all [tables]
-    /// needed for encoding or decoding.
+    /// Creates a new [`Avx512`] and initializes its multiplication and skew [tables].
     ///
-    /// Currently only difference between encoding/decoding is
-    /// [`LogWalsh`] (128 kiB) which is only needed for decoding.
+    /// Decoding builds its Walsh transform tables on first use.
     ///
     /// # Panics
     ///
     /// If AVX-512F or GFNI is unavailable.
-    ///
-    /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
         assert!(super::cpu_features::avx512());
 
@@ -59,7 +52,8 @@ impl Engine for Avx512 {
     ) {
         super::validate_transform(data, pos, size, truncated_size, skew_delta);
 
-        // SAFETY: Construction verifies the required features, and transform validation bounds all offsets.
+        // SAFETY: Construction verifies the required features, and transform validation bounds all
+        // offsets.
         unsafe { self.fft_private(data, pos, size, truncated_size, skew_delta) }
     }
 
@@ -73,7 +67,8 @@ impl Engine for Avx512 {
     ) {
         super::validate_transform(data, pos, size, truncated_size, skew_delta);
 
-        // SAFETY: Construction verifies the required features, and transform validation bounds all offsets.
+        // SAFETY: Construction verifies the required features, and transform validation bounds all
+        // offsets.
         unsafe { self.ifft_private(data, pos, size, truncated_size, skew_delta) }
     }
 
@@ -90,17 +85,11 @@ impl Engine for Avx512 {
     }
 }
 
-// ======================================================================
-// Avx512 - IMPL Default
-
 impl Default for Avx512 {
     fn default() -> Self {
         Self::new()
     }
 }
-
-// ======================================================================
-// Avx512 - PRIVATE
 
 /// Affine matrices for one multiplier, laid out for a chunk of 32 low bytes followed by
 /// 32 high bytes.
@@ -146,12 +135,12 @@ impl Avx512 {
         }
     }
 
-    // Multiplies the 32 field elements of one chunk by the multiplier in `lut`.
-    //
-    // The low 256 bits hold the low bytes and the high 256 bits hold the high bytes.
-    // `direct` maps each half into the same output half. Shuffle immediate `0x4e` selects
-    // 128-bit lanes 2, 3, 0, 1, which swaps the halves, so `cross` maps each half into the
-    // other output half. Their XOR is the product.
+    /// Multiplies the 32 field elements of one chunk by the multiplier in `lut`.
+    ///
+    /// The low 256 bits hold the low bytes and the high 256 bits hold the high bytes.
+    /// `direct` maps each half into the same output half. Shuffle immediate `0x4e` selects
+    /// 128-bit lanes 2, 3, 0, 1, which swaps the halves, so `cross` maps each half into the
+    /// other output half. Their XOR is the product.
     #[inline(always)]
     unsafe fn multiply_512(value: __m512i, lut: LutGfni) -> __m512i {
         // SAFETY: The caller executes within the AVX-512 and GFNI target-feature boundary.
@@ -163,7 +152,7 @@ impl Avx512 {
         }
     }
 
-    // AVX-512 counterpart of LEO_MULADD_256. Returns `x ^ y * m`, where `lut` encodes `m`.
+    /// AVX-512 counterpart of LEO_MULADD_256. Returns `x ^ y * m`, where `lut` encodes `m`.
     #[inline(always)]
     unsafe fn muladd_512(x: __m512i, y: __m512i, lut: LutGfni) -> __m512i {
         // SAFETY: The caller executes within the AVX-512 and GFNI target-feature boundary.
@@ -174,12 +163,10 @@ impl Avx512 {
     }
 }
 
-// ======================================================================
-// Avx512 - PRIVATE - FFT (fast Fourier transform)
-
 impl Avx512 {
-    // AVX-512 counterpart of LEO_FFTB_256. Computes `x ^= y * m`, then `y ^= x`.
-    // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
+    /// AVX-512 counterpart of LEO_FFTB_256. Computes `x ^= y * m`, then `y ^= x`.
+    ///
+    /// Partial butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     unsafe fn fft_butterfly_partial(
         &self,
@@ -265,8 +252,7 @@ impl Avx512 {
             return;
         }
 
-        // FIRST LAYER
-
+        // First layer: (s0, s2) and (s1, s3).
         if log_m02 == GF_MODULUS {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
@@ -278,15 +264,13 @@ impl Avx512 {
             }
         }
 
-        // SECOND LAYER
-
+        // Second layer: (s0, s1) and (s2, s3).
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
             // SAFETY: The caller enables the required features.
             unsafe { self.fft_butterfly_partial(s0, s1, log_m01) };
         }
-
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
@@ -304,8 +288,7 @@ impl Avx512 {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // TWO LAYERS AT TIME
-
+        // Apply two butterfly layers per pass.
         let mut dist4 = size;
         let mut dist = size >> 2;
         while dist != 0 {
@@ -337,8 +320,7 @@ impl Avx512 {
             dist >>= 2;
         }
 
-        // FINAL ODD LAYER
-
+        // An odd log2(size) leaves one final layer.
         if dist4 == 2 {
             let mut r = 0;
             while r < truncated_size {
@@ -359,11 +341,8 @@ impl Avx512 {
     }
 }
 
-// ======================================================================
-// Avx512 - PRIVATE - IFFT (inverse fast Fourier transform)
-
 impl Avx512 {
-    // AVX-512 counterpart of LEO_IFFTB_256. Computes `y ^= x`, then `x ^= y * m`.
+    /// AVX-512 counterpart of LEO_IFFTB_256. Computes `y ^= x`, then `x ^= y * m`.
     #[inline(always)]
     unsafe fn ifft_butterfly_partial(
         &self,
@@ -449,15 +428,13 @@ impl Avx512 {
             return;
         }
 
-        // FIRST LAYER
-
+        // First layer: (s0, s1) and (s2, s3).
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
             // SAFETY: The caller enables the required features.
             unsafe { self.ifft_butterfly_partial(s0, s1, log_m01) };
         }
-
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
@@ -465,8 +442,7 @@ impl Avx512 {
             unsafe { self.ifft_butterfly_partial(s2, s3, log_m23) };
         }
 
-        // SECOND LAYER
-
+        // Second layer: (s0, s2) and (s1, s3).
         if log_m02 == GF_MODULUS {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
@@ -488,8 +464,7 @@ impl Avx512 {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // TWO LAYERS AT TIME
-
+        // Apply two butterfly layers per pass.
         let mut dist = 1;
         let mut dist4 = 4;
         while dist4 <= size {
@@ -521,8 +496,7 @@ impl Avx512 {
             dist4 <<= 2;
         }
 
-        // FINAL ODD LAYER
-
+        // An odd log2(size) leaves one final layer.
         if dist < size {
             let log_m = self.skew[dist + skew_delta - 1];
             if log_m == GF_MODULUS {
@@ -544,18 +518,12 @@ impl Avx512 {
     }
 }
 
-// ======================================================================
-// Avx512 - PRIVATE - Evaluate polynomial
-
 impl Avx512 {
     #[target_feature(enable = "avx512f,gfni")]
     unsafe fn eval_poly_avx512(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         utils::eval_poly(erasures, truncated_size);
     }
 }
-
-// ======================================================================
-// TESTS
 
 #[cfg(test)]
 mod tests {

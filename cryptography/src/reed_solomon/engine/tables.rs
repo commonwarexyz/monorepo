@@ -1,4 +1,4 @@
-//! Lookup-tables used by [`Engine`]:s.
+//! Lookup tables used by [`Engine`] implementations.
 //!
 //! All tables are global and each is initialized at most once.
 //!
@@ -6,14 +6,14 @@
 //!
 //! | Table        | Size    | Used in encoding | Used in decoding | By engines         |
 //! | ------------ | ------- | ---------------- | ---------------- | ------------------ |
-//! | [`Exp`]      | 128 kiB | yes              | yes              | all                |
-//! | [`Log`]      | 128 kiB | yes              | yes              | all                |
-//! | [`LogWalsh`] | 128 kiB | -                | yes              | all                |
-//! | Short Walsh  | < 128 kiB | -              | yes              | all                |
+//! | [`Exp`]      | 128 KiB | yes              | yes              | all                |
+//! | [`Log`]      | 128 KiB | yes              | yes              | all                |
+//! | [`LogWalsh`] | 128 KiB | -                | yes              | all                |
+//! | Short Walsh  | < 128 KiB | -              | yes              | all                |
 //! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`NoSimd`]         |
 //! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Ssse3` |
 //! | `MulGfni`    | 2 MiB   | yes              | yes              | `Avx512` |
-//! | [`Skew`]     | 128 kiB | yes              | yes              | all                |
+//! | [`Skew`]     | 128 KiB | yes              | yes              | all                |
 //!
 //! [`LogWalsh`] serves decoding domains of `GF_ORDER` positions. A smaller power-of-two
 //! domain of `n` positions uses an `n`-entry short Walsh kernel, built on first use for
@@ -21,7 +21,6 @@
 //!
 //! [`NoSimd`]: crate::reed_solomon::engine::NoSimd
 //! [`Engine`]: crate::reed_solomon::engine
-//!
 
 use crate::reed_solomon::engine::{
     CANTOR_BASIS, GF_BITS, GF_MODULUS, GF_ORDER, GF_POLYNOMIAL, GfElement, fwht, utils,
@@ -37,18 +36,15 @@ use once_cell::race::OnceBox;
 #[cfg(feature = "std")]
 use std::sync::{LazyLock, OnceLock};
 
-// ======================================================================
-// TYPE ALIASES - PUBLIC
-
 /// Used by [`Naive`] engine for multiplications
-/// and by all [`Engine`]:s to initialize other tables.
+/// and by all [`Engine`] implementations to initialize other tables.
 ///
 /// [`Naive`]: crate::reed_solomon::engine::Naive
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Exp = [GfElement; GF_ORDER];
 
 /// Used by [`Naive`] engine for multiplications
-/// and by all [`Engine`]:s to initialize other tables.
+/// and by all [`Engine`] implementations to initialize other tables.
 ///
 /// [`Naive`]: crate::reed_solomon::engine::Naive
 /// [`Engine`]: crate::reed_solomon::engine
@@ -93,7 +89,7 @@ pub struct Multiply128lutT {
     pub hi: [u128; 4],
 }
 
-/// Used by all [`Engine`]:s in [`Engine::eval_poly`].
+/// Used by all [`Engine`] implementations in [`Engine::eval_poly`].
 ///
 /// [`Engine`]: crate::reed_solomon::engine
 /// [`Engine::eval_poly`]: crate::reed_solomon::engine::Engine::eval_poly
@@ -104,13 +100,10 @@ pub type LogWalsh = [GfElement; GF_ORDER];
 /// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
 pub type Mul16 = [[[GfElement; 16]; 4]; GF_ORDER];
 
-/// Used by all [`Engine`]:s for FFT and IFFT.
+/// Used by all [`Engine`] implementations for FFT and IFFT.
 ///
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Skew = [GfElement; GF_MODULUS as usize];
-
-// ======================================================================
-// ExpLog - PUBLIC
 
 /// Struct holding the [`Exp`] and [`Log`] lookup tables.
 pub struct ExpLog {
@@ -119,9 +112,6 @@ pub struct ExpLog {
     /// Logarithm table.
     pub log: Box<Log>,
 }
-
-// ======================================================================
-// STATIC - PUBLIC
 
 /// Lazily initialized exponentiation and logarithm tables.
 pub fn get_exp_log() -> &'static ExpLog {
@@ -232,9 +222,6 @@ pub fn get_skew() -> &'static Skew {
     }
 }
 
-// ======================================================================
-// FUNCTIONS - PUBLIC - math
-
 /// Multiply `x` by `exp[log_m]` using [`Exp`] and [`Log`] tables.
 #[inline(always)]
 pub fn mul(x: GfElement, log_m: GfElement, exp: &Exp, log: &Log) -> GfElement {
@@ -245,15 +232,11 @@ pub fn mul(x: GfElement, log_m: GfElement, exp: &Exp, log: &Log) -> GfElement {
     }
 }
 
-// ======================================================================
-// FUNCTIONS - PRIVATE - initialize tables
-
 fn initialize_exp_log() -> ExpLog {
     let mut exp = Box::new([0; GF_ORDER]);
     let mut log = Box::new([0; GF_ORDER]);
 
-    // GENERATE LFSR TABLE
-
+    // Generate the LFSR table.
     let mut state = 1;
     for i in 0..GF_MODULUS {
         exp[state] = i;
@@ -264,8 +247,7 @@ fn initialize_exp_log() -> ExpLog {
     }
     exp[0] = GF_MODULUS;
 
-    // CONVERT TO CANTOR BASIS
-
+    // Convert to the Cantor basis.
     log[0] = 0;
     for (i, basis) in CANTOR_BASIS.iter().copied().enumerate().take(GF_BITS) {
         let width = 1usize << i;
@@ -273,11 +255,9 @@ fn initialize_exp_log() -> ExpLog {
             log[j + width] = log[j] ^ basis;
         }
     }
-
     for value in log.iter_mut() {
         *value = exp[*value as usize];
     }
-
     for (i, value) in log.iter().copied().enumerate() {
         exp[value as usize] = i as GfElement;
     }

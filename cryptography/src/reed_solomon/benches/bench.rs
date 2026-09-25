@@ -14,13 +14,7 @@ use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
 
-// ======================================================================
-// CONST
-
 const SHARD_BYTES: usize = 1024;
-
-// ======================================================================
-// UTIL
 
 fn generate_shard_chunks(
     shard_count: usize,
@@ -61,12 +55,9 @@ fn encode_recovery(
         .collect()
 }
 
-// ======================================================================
-// BENCHMARKS - MAIN
-
 fn benchmarks_main(c: &mut Criterion) {
     let cases = [
-        // 2^n. original_count == recovery_count
+        // Powers of two with equal original and recovery counts.
         (32, 32),
         (64, 64),
         (128, 128),
@@ -78,7 +69,7 @@ fn benchmarks_main(c: &mut Criterion) {
         (8192, 8192),
         (16384, 16384),
         (32768, 32768),
-        // And some other combinations
+        // Unequal counts and counts that are not powers of two.
         (128, 1024),
         (1000, 100),
         (1000, 10000),
@@ -144,7 +135,7 @@ fn benchmarks_main(c: &mut Criterion) {
             let max_original_loss_count = std::cmp::min(original_count, recovery_count);
 
             for loss_percent in [1, 100] {
-                // We round up to make sure at least one shard is lost for low shard counts.
+                // Round up so at least one shard is lost for low shard counts.
                 let original_loss_count = (max_original_loss_count * loss_percent).div_ceil(100);
                 let original_provided_count = original_count - original_loss_count;
                 let recovery_provided_count = original_loss_count;
@@ -184,9 +175,6 @@ fn benchmarks_main(c: &mut Criterion) {
         group.finish();
     }
 }
-
-// ======================================================================
-// BENCHMARKS - RATE
 
 fn benchmarks_rate(c: &mut Criterion) {
     benchmarks_rate_one(c, "rate", DefaultEngine::new);
@@ -360,9 +348,6 @@ fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn(
     }
 }
 
-// ======================================================================
-// BENCHMARKS - ENGINES
-
 fn benchmarks_engine(c: &mut Criterion) {
     benchmarks_engine_one(c, "naive", Naive::new());
     benchmarks_engine_one(c, "nosimd", NoSimd::new());
@@ -449,9 +434,6 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
         },
     );
 }
-
-// ======================================================================
-// MAIN
 
 criterion_group!(benches_main, benchmarks_main);
 criterion_group!(benches_rate, benchmarks_rate);

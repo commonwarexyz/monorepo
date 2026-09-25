@@ -56,6 +56,8 @@
 //!   runs whenever the `Avx512` engine's CPU features are present, regardless of the selected
 //!   engine.
 //! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
+//! - Rewrote comments in Commonware style: no section banners or uppercase step headers, and
+//!   comments sit directly above the code they describe.
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd
 //! [`thiserror`]: https://docs.rs/thiserror

@@ -1,4 +1,4 @@
-//! A collection of utility functions and helpers to facilitate the implementation of the [`Engine`] trait.
+//! Helpers for implementing the [`Engine`] trait.
 //!
 //! [`Engine`]: crate::reed_solomon::engine::Engine
 
@@ -10,9 +10,6 @@ use core::arch::x86::{_mm512_loadu_si512, _mm512_storeu_si512, _mm512_xor_si512}
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{_mm512_loadu_si512, _mm512_storeu_si512, _mm512_xor_si512};
 use core::iter::zip;
-
-// ======================================================================
-// FUNCTIONS - PUBLIC
 
 /// Evaluate Polynomial using Fast Walsh-Hadamard Transform (FWHT).
 ///
@@ -64,9 +61,6 @@ pub fn xor_within(data: &mut ShardsRefMut<'_>, x: usize, y: usize, count: usize)
     xor(xs, ys);
 }
 
-// ======================================================================
-// FUNCTIONS - CRATE - Galois field operations
-
 /// Addition modulo 65535, allowing both 0 and 65535 to represent zero.
 #[inline(always)]
 pub(crate) fn add_mod(x: GfElement, y: GfElement) -> GfElement {
@@ -80,9 +74,6 @@ pub(crate) fn sub_mod(x: GfElement, y: GfElement) -> GfElement {
     let dif = u32::from(x).wrapping_sub(u32::from(y));
     dif.wrapping_add(dif >> GF_BITS) as GfElement
 }
-
-// ======================================================================
-// FUNCTIONS - CRATE
 
 /// XOR-convolve `data` with the field logarithm table over its first `data.len()` positions.
 ///

@@ -5,9 +5,6 @@ use crate::reed_solomon::engine::{
 };
 use core::iter::zip;
 
-// ======================================================================
-// NoSimd - PUBLIC
-
 /// Optimized [`Engine`] without SIMD.
 ///
 /// [`NoSimd`] is a basic optimized engine which works on all CPUs.
@@ -18,13 +15,9 @@ pub struct NoSimd {
 }
 
 impl NoSimd {
-    /// Creates new [`NoSimd`], initializing all [tables]
-    /// needed for encoding or decoding.
+    /// Creates a new [`NoSimd`] and initializes its multiplication and skew [tables].
     ///
-    /// Currently only difference between encoding/decoding is
-    /// [`LogWalsh`] (128 kiB) which is only needed for decoding.
-    ///
-    /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
+    /// Decoding builds its Walsh transform tables on first use.
     pub fn new() -> Self {
         let mul16 = tables::get_mul16();
         let skew = tables::get_skew();
@@ -78,20 +71,14 @@ impl Engine for NoSimd {
     }
 }
 
-// ======================================================================
-// NoSimd - IMPL Default
-
 impl Default for NoSimd {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ======================================================================
-// NoSimd - PRIVATE
-
 impl NoSimd {
-    /// `x[] ^= y[] * log_m`
+    /// Computes `x[] ^= y[] * log_m`.
     fn mul_add(
         &self,
         x: &mut [[u8; SHARD_CHUNK_BYTES]],
@@ -118,11 +105,8 @@ impl NoSimd {
     }
 }
 
-// ======================================================================
-// NoSimd - PRIVATE - FFT (fast Fourier transform)
-
 impl NoSimd {
-    // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
+    /// Partial butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn fft_butterfly_partial(
         &self,
@@ -146,8 +130,7 @@ impl NoSimd {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
-        // FIRST LAYER
-
+        // First layer: (s0, s2) and (s1, s3).
         if log_m02 == GF_MODULUS {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
@@ -156,14 +139,12 @@ impl NoSimd {
             self.fft_butterfly_partial(s1, s3, log_m02);
         }
 
-        // SECOND LAYER
-
+        // Second layer: (s0, s1) and (s2, s3).
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
             self.fft_butterfly_partial(s0, s1, log_m01);
         }
-
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
@@ -180,8 +161,7 @@ impl NoSimd {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // TWO LAYERS AT TIME
-
+        // Apply two butterfly layers per pass.
         let mut dist4 = size;
         let mut dist = size >> 2;
         while dist != 0 {
@@ -203,8 +183,7 @@ impl NoSimd {
             dist >>= 2;
         }
 
-        // FINAL ODD LAYER
-
+        // An odd log2(size) leaves one final layer.
         if dist4 == 2 {
             let mut r = 0;
             while r < truncated_size {
@@ -224,11 +203,8 @@ impl NoSimd {
     }
 }
 
-// ======================================================================
-// NoSimd - PRIVATE - IFFT (inverse fast Fourier transform)
-
 impl NoSimd {
-    // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
+    /// Partial butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn ifft_butterfly_partial(
         &self,
@@ -252,22 +228,19 @@ impl NoSimd {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
-        // FIRST LAYER
-
+        // First layer: (s0, s1) and (s2, s3).
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
             self.ifft_butterfly_partial(s0, s1, log_m01);
         }
-
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
             self.ifft_butterfly_partial(s2, s3, log_m23);
         }
 
-        // SECOND LAYER
-
+        // Second layer: (s0, s2) and (s1, s3).
         if log_m02 == GF_MODULUS {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
@@ -286,8 +259,7 @@ impl NoSimd {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // TWO LAYERS AT TIME
-
+        // Apply two butterfly layers per pass.
         let mut dist = 1;
         let mut dist4 = 4;
         while dist4 <= size {
@@ -309,8 +281,7 @@ impl NoSimd {
             dist4 <<= 2;
         }
 
-        // FINAL ODD LAYER
-
+        // An odd log2(size) leaves one final layer.
         if dist < size {
             let log_m = self.skew[dist + skew_delta - 1];
             if log_m == GF_MODULUS {
@@ -328,11 +299,6 @@ impl NoSimd {
         }
     }
 }
-
-// ======================================================================
-// TESTS
-
-// Engines are tested indirectly via roundtrip tests of HighRate and LowRate.
 
 #[cfg(test)]
 mod tests {

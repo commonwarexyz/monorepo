@@ -67,14 +67,8 @@ fn eval_locator<E: Engine>(erasures: &mut [GfElement; GF_ORDER], end: usize) {
     }
 }
 
-// ======================================================================
-// Rate - PUBLIC
-
 /// Reed-Solomon encoder/decoder generator using specific rate.
 pub trait Rate<E: Engine> {
-    // ============================================================
-    // REQUIRED
-
     /// Encoder of this rate.
     type RateEncoder: RateEncoder<E>;
     /// Decoder of this rate.
@@ -83,9 +77,6 @@ pub trait Rate<E: Engine> {
     /// Returns `true` if given `original_count` / `recovery_count`
     /// combination is supported.
     fn supports(original_count: usize, recovery_count: usize) -> bool;
-
-    // ============================================================
-    // PROVIDED
 
     /// Creates new encoder. This is same as [`RateEncoder::new`].
     fn encoder(
@@ -131,17 +122,11 @@ pub trait Rate<E: Engine> {
     }
 }
 
-// ======================================================================
-// RateEncoder - PUBLIC
-
 /// Reed-Solomon encoder using specific rate.
 pub trait RateEncoder<E: Engine>
 where
     Self: Sized,
 {
-    // ============================================================
-    // REQUIRED
-
     /// Rate of this encoder.
     type Rate: Rate<E>;
 
@@ -181,9 +166,6 @@ where
         shard_bytes: usize,
     ) -> Result<(), Error>;
 
-    // ============================================================
-    // PROVIDED
-
     /// Returns `true` if given `original_count` / `recovery_count`
     /// combination is supported.
     ///
@@ -193,17 +175,11 @@ where
     }
 }
 
-// ======================================================================
-// RateDecoder - PUBLIC
-
 /// Reed-Solomon decoder using specific rate.
 pub trait RateDecoder<E: Engine>
 where
     Self: Sized,
 {
-    // ============================================================
-    // REQUIRED
-
     /// Rate of this decoder.
     type Rate: Rate<E>;
 
@@ -222,8 +198,9 @@ where
     ) -> Result<(), Error>;
 
     /// Like [`Decoder::decode`](crate::reed_solomon::Decoder::decode): reconstructs the missing
-    /// shards, or returns `Ok(None)` if every original was already provided (nothing to reconstruct).
-    /// When `compute_recovery` is set, the missing recovery shards are also reconstructed.
+    /// shards, or returns `Ok(None)` if every original was already provided (nothing to
+    /// reconstruct). When `compute_recovery` is set, the missing recovery shards are also
+    /// reconstructed.
     fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error>;
 
     /// Consumes this decoder returning its [`Engine`] and [`DecoderWork`]
@@ -256,9 +233,6 @@ where
         shard_bytes: usize,
     ) -> Result<(), Error>;
 
-    // ============================================================
-    // PROVIDED
-
     /// Returns `true` if given `original_count` / `recovery_count`
     /// combination is supported.
     ///
@@ -285,8 +259,9 @@ mod tests {
         );
     }
 
-    // (9, 3) and (3, 9) encode with 12 work shards (9 rounded up to a multiple of the chunk
-    // of 4) and decode with 16 (4 + 9 rounded up to a power of two).
+    /// Checks the shard size limit for counts such as (9, 3) and (3, 9), which encode with 12
+    /// work shards (9 rounded up to a multiple of the chunk of 4) and decode with 16 (4 + 9
+    /// rounded up to a power of two).
     fn check_rate_capacity<R: Rate<NoSimd>>(original_count: usize, recovery_count: usize) {
         check_capacity(
             |shard_bytes| R::RateEncoder::validate(original_count, recovery_count, shard_bytes),

@@ -3,15 +3,12 @@ use crate::reed_solomon::engine::SHARD_CHUNK_BYTES;
 use alloc::vec::Vec;
 use core::ops::{Bound, Index, IndexMut, Range, RangeBounds};
 
-// ======================================================================
-// Shards - CRATE
-
 pub(crate) struct Shards {
     shard_count: usize,
-    // Shard length in `SHARD_CHUNK_BYTES` chunks.
+    /// Shard length in `SHARD_CHUNK_BYTES` chunks.
     shard_chunk_count: usize,
 
-    // Flat Vec of `shard_count * shard_chunk_count * SHARD_CHUNK_BYTES` bytes.
+    /// Flat Vec of `shard_count * shard_chunk_count * SHARD_CHUNK_BYTES` bytes.
     data: Vec<[u8; SHARD_CHUNK_BYTES]>,
 }
 
@@ -51,8 +48,8 @@ impl Shards {
             .as_flattened_mut()
             .copy_from_slice(src_chunks);
 
-        // Last chunk is special if shard.len() % SHARD_CHUNK_BYTES != 0.
-        // See src/algorithm.md for an explanation.
+        // A partial final chunk holds a tail of `2 * n` bytes: `n` low bytes at offset 0 and
+        // `n` high bytes at offset `SHARD_CHUNK_BYTES / 2`. See `reed_solomon/algorithm.md`.
         if tail_len > 0 {
             let (src_lo, src_hi) = src_tail.split_at(tail_len / 2);
             let (dst_lo, dst_hi) = dst[whole_chunk_count].split_at_mut(SHARD_CHUNK_BYTES / 2);
@@ -61,7 +58,9 @@ impl Shards {
         }
     }
 
-    // Undoes the encoding of the last chunk for the given range of shards
+    /// Undoes the last-chunk encoding for the shards in `range`.
+    ///
+    /// Moves the high bytes of a partial final chunk to directly follow its low bytes.
     pub(crate) fn undo_last_chunk_encoding(&mut self, shard_bytes: usize, range: Range<usize>) {
         let whole_chunk_count = shard_bytes / SHARD_CHUNK_BYTES;
         let tail_len = shard_bytes % SHARD_CHUNK_BYTES;
@@ -80,9 +79,6 @@ impl Shards {
     }
 }
 
-// ======================================================================
-// Shards - IMPL Index
-
 impl Index<usize> for Shards {
     type Output = [[u8; SHARD_CHUNK_BYTES]];
     fn index(&self, index: usize) -> &Self::Output {
@@ -90,17 +86,11 @@ impl Index<usize> for Shards {
     }
 }
 
-// ======================================================================
-// Shards - IMPL IndexMut
-
 impl IndexMut<usize> for Shards {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.data[index * self.shard_chunk_count..(index + 1) * self.shard_chunk_count]
     }
 }
-
-// ======================================================================
-// ShardsRefMut - PUBLIC
 
 /// Mutable reference to a shard array.
 pub struct ShardsRefMut<'a> {
@@ -224,7 +214,7 @@ impl<'a> ShardsRefMut<'a> {
         )
     }
 
-    /// Fills the given shard-range with `0u8`:s.
+    /// Fills the shards in `range` with zero bytes.
     ///
     /// # Panics
     ///
@@ -248,9 +238,6 @@ impl<'a> ShardsRefMut<'a> {
     }
 }
 
-// ======================================================================
-// ShardsRefMut - IMPL Index
-
 impl Index<usize> for ShardsRefMut<'_> {
     type Output = [[u8; SHARD_CHUNK_BYTES]];
     fn index(&self, index: usize) -> &Self::Output {
@@ -259,18 +246,12 @@ impl Index<usize> for ShardsRefMut<'_> {
     }
 }
 
-// ======================================================================
-// ShardsRefMut - IMPL IndexMut
-
 impl IndexMut<usize> for ShardsRefMut<'_> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         assert!(index < self.shard_count);
         &mut self.data[index * self.shard_chunk_count..(index + 1) * self.shard_chunk_count]
     }
 }
-
-// ======================================================================
-// ShardsRefMut - CRATE
 
 impl ShardsRefMut<'_> {
     pub(crate) fn copy_within(&mut self, mut src: usize, mut dest: usize, mut count: usize) {
@@ -281,8 +262,11 @@ impl ShardsRefMut<'_> {
         self.data.copy_within(src..src + count, dest);
     }
 
-    // Returns mutable references to flat-arrays of shard-ranges
-    // `x .. x + count` and `y .. y + count`. Ranges must not overlap.
+    /// Returns mutable flat slices of shard ranges `x..x + count` and `y..y + count`.
+    ///
+    /// # Panics
+    ///
+    /// If either range extends beyond `self.len()` or the ranges overlap.
     pub(crate) fn flat2_mut(
         &mut self,
         mut x: usize,

@@ -8,9 +8,6 @@ use crate::reed_solomon::{
 };
 use core::{cmp::Ordering, marker::PhantomData};
 
-// ======================================================================
-// FUNCTIONS - CRATE
-
 pub(crate) fn use_high_rate(original_count: usize, recovery_count: usize) -> Result<bool, Error> {
     if original_count > GF_ORDER || recovery_count > GF_ORDER {
         return Err(Error::UnsupportedShardCount {
@@ -34,23 +31,20 @@ pub(crate) fn use_high_rate(original_count: usize, recovery_count: usize) -> Res
 
     match original_count_pow2.cmp(&recovery_count_pow2) {
         Ordering::Less => {
-            // The "correct" rate is generally faster here,
-            // and also must be used if `recovery_count > 32768`.
-
+            // The "correct" rate is generally faster here and must be used if
+            // `recovery_count > 32768`.
             Ok(false)
         }
 
         Ordering::Greater => {
-            // The "correct" rate is generally faster here,
-            // and also must be used if `original_count > 32768`.
-
+            // The "correct" rate is generally faster here and must be used if
+            // `original_count > 32768`.
             Ok(true)
         }
 
         Ordering::Equal => {
-            // Here counter-intuitively the "wrong" rate is generally faster
-            // in decoding if `original_count` and `recovery_count` differ a lot.
-
+            // Counter-intuitively, the "wrong" rate is generally faster at decoding here
+            // if `original_count` and `recovery_count` differ a lot.
             if original_count <= recovery_count {
                 // Using the "wrong" rate on purpose.
                 Ok(true)
@@ -61,9 +55,6 @@ pub(crate) fn use_high_rate(original_count: usize, recovery_count: usize) -> Res
         }
     }
 }
-
-// ======================================================================
-// DefaultRate - PUBLIC
 
 /// Reed-Solomon encoder/decoder generator using high or low rate as appropriate.
 pub struct DefaultRate<E: Engine>(PhantomData<E>);
@@ -77,21 +68,15 @@ impl<E: Engine> Rate<E> for DefaultRate<E> {
     }
 }
 
-// ======================================================================
-// InnerEncoder - PRIVATE
-
 #[derive(Default)]
 enum InnerEncoder<E: Engine> {
     High(HighRateEncoder<E>),
     Low(LowRateEncoder<E>),
 
-    // Used only after reset validation, while switching rates.
+    /// Used only after reset validation, while switching rates.
     #[default]
     None,
 }
-
-// ======================================================================
-// DefaultRateEncoder - PUBLIC
 
 /// Reed-Solomon encoder using high or low rate as appropriate.
 ///
@@ -224,21 +209,15 @@ impl<E: Engine> RateEncoder<E> for DefaultRateEncoder<E> {
     }
 }
 
-// ======================================================================
-// InnerDecoder - PRIVATE
-
 #[derive(Default)]
 enum InnerDecoder<E: Engine> {
     High(HighRateDecoder<E>),
     Low(LowRateDecoder<E>),
 
-    // Used only after reset validation, while switching rates.
+    /// Used only after reset validation, while switching rates.
     #[default]
     None,
 }
-
-// ======================================================================
-// DefaultRateDecoder - PUBLIC
 
 /// Reed-Solomon decoder using high or low rate as appropriate.
 ///
@@ -387,9 +366,6 @@ impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// DefaultRateDecoder - CRATE
-
 impl<E: Engine> DefaultRateDecoder<E> {
     pub(crate) fn decode_with_plan(
         &mut self,
@@ -404,16 +380,10 @@ impl<E: Engine> DefaultRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::reed_solomon::test_util;
-
-    // ============================================================
-    // ROUNDTRIPS - SINGLE ROUND
 
     #[test]
     fn roundtrips_tiny() {
@@ -433,9 +403,6 @@ mod tests {
             );
         }
     }
-
-    // ============================================================
-    // ROUNDTRIPS - TWO ROUNDS
 
     #[test]
     fn two_rounds_implicit_reset() {
@@ -575,9 +542,6 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // use_high_rate
-
     #[test]
     fn use_high_rate() {
         fn err(original_count: usize, recovery_count: usize) -> Result<bool, Error> {
@@ -590,21 +554,21 @@ mod tests {
         for (original_count, recovery_count, expected) in [
             (0, 1, err(0, 1)),
             (1, 0, err(1, 0)),
-            // CORRECT/WRONG RATE
+            // Unequal powers of two pick the "correct" rate, equal ones the "wrong" rate.
             (3, 3, Ok(true)),
             (3, 4, Ok(true)),
             (3, 5, Ok(false)),
             (4, 3, Ok(false)),
             (5, 3, Ok(true)),
-            // LOW RATE LIMIT
+            // Low rate limit.
             (4096, 61440, Ok(false)),
             (4096, 61441, err(4096, 61441)),
             (4097, 61440, err(4097, 61440)),
-            // HIGH RATE LIMIT
+            // High rate limit.
             (61440, 4096, Ok(true)),
             (61440, 4097, err(61440, 4097)),
             (61441, 4096, err(61441, 4096)),
-            // OVERFLOW CHECK
+            // Oversized counts fail before `next_power_of_two` can overflow.
             (usize::MAX, usize::MAX, err(usize::MAX, usize::MAX)),
         ] {
             assert_eq!(

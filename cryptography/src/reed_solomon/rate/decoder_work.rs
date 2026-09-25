@@ -4,9 +4,6 @@ use crate::reed_solomon::{
 };
 use fixedbitset::FixedBitSet;
 
-// ======================================================================
-// DecoderWork - PUBLIC
-
 /// Working space for [`RateDecoder`].
 ///
 /// [`RateDecoder`]: crate::reed_solomon::rate::RateDecoder
@@ -20,14 +17,13 @@ pub struct DecoderWork {
 
     original_received_count: usize,
     recovery_received_count: usize,
-    // May contain extra zero bits.
+    /// May contain extra zero bits.
     received: FixedBitSet,
     shards: Shards,
 }
 
 impl DecoderWork {
-    /// Creates new [`DecoderWork`] which initially
-    /// has no working space allocated.
+    /// Creates a new [`DecoderWork`] with no working space allocated.
     pub const fn new() -> Self {
         Self {
             original_count: 0,
@@ -45,17 +41,11 @@ impl DecoderWork {
     }
 }
 
-// ======================================================================
-// DecoderWork - IMPL Default
-
 impl Default for DecoderWork {
     fn default() -> Self {
         Self::new()
     }
 }
-
-// ======================================================================
-// DecoderWork - CRATE
 
 impl DecoderWork {
     /// Returns [`Error::PlanMismatch`] unless `plan` was built for these shard counts,
@@ -135,8 +125,9 @@ impl DecoderWork {
         }
     }
 
-    // Begin decode.
-    // - Returned `FixedBitSet` may contain extra zero bits.
+    /// Begins a decode.
+    ///
+    /// The returned `FixedBitSet` may contain extra zero bits.
     pub(crate) fn decode_begin(
         &mut self,
     ) -> Result<Option<(ShardsRefMut<'_>, usize, usize, &FixedBitSet)>, Error> {
@@ -204,7 +195,7 @@ impl DecoderWork {
         self.received.clear();
     }
 
-    // This must only be called by `DecoderResult`.
+    /// This must only be called by `DecoderResult`.
     pub(crate) fn original(&self, index: usize) -> Option<&[u8]> {
         if index >= self.original_count {
             return None;
@@ -218,10 +209,12 @@ impl DecoderWork {
         }
     }
 
-    // This must only be called by `RecoveryDecoderResult`, which is produced only by a
-    // recovery-computing decode (an original was missing and `compute_recovery` was set), so the
-    // recovery work buffers hold canonical values. Returns a reconstructed recovery shard, or `None`
-    // if `index` is not a missing recovery shard.
+    /// Returns a reconstructed recovery shard, or `None` if `index` is not a missing recovery
+    /// shard.
+    ///
+    /// This must only be called by `RecoveryDecoderResult`, which is produced only by a
+    /// recovery-computing decode (an original was missing and `compute_recovery` was set), so the
+    /// recovery work buffers hold canonical values.
     pub(crate) fn recovery(&self, index: usize) -> Option<&[u8]> {
         if index >= self.recovery_count {
             return None;

@@ -1,8 +1,5 @@
 use crate::reed_solomon::rate::DecoderWork;
 
-// ======================================================================
-// DecoderResult - PUBLIC
-
 /// The restored original shards from a decode that ran (an original was missing).
 ///
 /// [`Decoder::decode`] returns `None` instead when every original shard was already provided, since
@@ -14,22 +11,17 @@ pub struct DecoderResult<'a> {
 }
 
 impl DecoderResult<'_> {
-    /// Returns restored original shard with given `index`
-    /// or `None` if given `index` doesn't correspond to
-    /// a missing original shard.
+    /// Returns the restored original shard with the given `index`, or `None` if `index` does not
+    /// correspond to a missing original shard.
     pub fn original(&self, index: usize) -> Option<&[u8]> {
         self.work.original(index)
     }
 
-    /// Returns iterator over all restored original shards
-    /// and their indexes, ordered by indexes.
+    /// Returns an iterator over all restored original shards and their indexes, ordered by index.
     pub const fn original_iter(&self) -> Originals<'_> {
         Originals::new(self.work)
     }
 }
-
-// ======================================================================
-// DecoderResult - CRATE
 
 impl<'a> DecoderResult<'a> {
     pub(crate) const fn new(work: &'a mut DecoderWork) -> Self {
@@ -37,17 +29,11 @@ impl<'a> DecoderResult<'a> {
     }
 }
 
-// ======================================================================
-// DecoderResult - IMPL DROP
-
 impl Drop for DecoderResult<'_> {
     fn drop(&mut self) {
         self.work.reset_received();
     }
 }
-
-// ======================================================================
-// RecoveryDecoderResult - PUBLIC
 
 /// The restored shards from a successful [`Decoder::decode_with_recovery`] or
 /// [`Decoder::decode_with_recovery_plan`], exposing both the restored original shards (like
@@ -72,8 +58,8 @@ impl RecoveryDecoderResult<'_> {
         self.inner.original_iter()
     }
 
-    /// Returns the reconstructed recovery shard with the given `index`, or `None` if it was provided
-    /// or `index` is out of range.
+    /// Returns the reconstructed recovery shard with the given `index`, or `None` if it was
+    /// provided or `index` is out of range.
     pub fn recovery(&self, index: usize) -> Option<&[u8]> {
         self.inner.work.recovery(index)
     }
@@ -85,17 +71,11 @@ impl RecoveryDecoderResult<'_> {
     }
 }
 
-// ======================================================================
-// RecoveryDecoderResult - CRATE
-
 impl<'a> RecoveryDecoderResult<'a> {
     pub(crate) const fn new(inner: DecoderResult<'a>) -> Self {
         Self { inner }
     }
 }
-
-// ======================================================================
-// Originals - PUBLIC
 
 /// Iterator over restored original shards and their indexes.
 ///
@@ -105,9 +85,6 @@ pub struct Originals<'a> {
     next_index: usize,
     work: &'a DecoderWork,
 }
-
-// ======================================================================
-// Originals - IMPL Iterator
 
 impl<'a> Iterator for Originals<'a> {
     type Item = (usize, &'a [u8]);
@@ -134,13 +111,7 @@ impl<'a> Iterator for Originals<'a> {
     }
 }
 
-// ======================================================================
-// Originals - IMPL ExactSizeIterator
-
 impl ExactSizeIterator for Originals<'_> {}
-
-// ======================================================================
-// Originals - CRATE
 
 impl<'a> Originals<'a> {
     pub(crate) const fn new(work: &'a DecoderWork) -> Self {
@@ -152,9 +123,6 @@ impl<'a> Originals<'a> {
     }
 }
 
-// ======================================================================
-// Recoveries - PUBLIC
-
 /// Iterator over restored recovery shards and their indexes.
 ///
 /// This struct is created by [`RecoveryDecoderResult::recovery_iter`].
@@ -163,9 +131,6 @@ pub struct Recoveries<'a> {
     next_index: usize,
     work: &'a DecoderWork,
 }
-
-// ======================================================================
-// Recoveries - IMPL Iterator
 
 impl<'a> Iterator for Recoveries<'a> {
     type Item = (usize, &'a [u8]);
@@ -192,13 +157,7 @@ impl<'a> Iterator for Recoveries<'a> {
     }
 }
 
-// ======================================================================
-// Recoveries - IMPL ExactSizeIterator
-
 impl ExactSizeIterator for Recoveries<'_> {}
-
-// ======================================================================
-// Recoveries - CRATE
 
 impl<'a> Recoveries<'a> {
     pub(crate) const fn new(work: &'a DecoderWork) -> Self {
@@ -209,9 +168,6 @@ impl<'a> Recoveries<'a> {
         }
     }
 }
-
-// ======================================================================
-// TESTS
 
 #[cfg(test)]
 mod tests {
@@ -255,10 +211,8 @@ mod tests {
         assert_eq!(iter.next(), None);
     }
 
+    /// Covers `DecoderResult::original`, `DecoderResult::original_iter`, and `Originals`.
     #[test]
-    // DecoderResult::original
-    // DecoderResult::original_iter
-    // Originals
     fn decoder_result() {
         simple_roundtrip(1024);
     }
@@ -318,11 +272,11 @@ mod tests {
         assert_eq!(iter.len(), 0);
     }
 
-    // Decode from exactly `original_count` shards (dropping original 0 and every recovery
-    // except index 1) and assert the reconstructed recovery shards are byte-identical to the
-    // encoder's output. This is the load-bearing check for `recovery`: the reveal +
-    // last-chunk-undo on the recovery positions must reproduce `encoding.recovery(i)` exactly,
-    // including the partial-final-chunk path (shard sizes not divisible by SHARD_CHUNK_BYTES).
+    /// Decodes from exactly `original_count` shards (dropping original 0 and every recovery
+    /// except index 1) and asserts the reconstructed recovery shards are byte-identical to the
+    /// encoder's output. This is the load-bearing check for `recovery`. The reveal and
+    /// last-chunk undo on the recovery positions must reproduce `encoding.recovery(i)` exactly,
+    /// including the partial-final-chunk path (shard sizes not divisible by `SHARD_CHUNK_BYTES`).
     fn recovery_roundtrip(original_count: usize, recovery_count: usize, shard_size: usize) {
         let original = test_util::generate_original(original_count, shard_size, 0);
 
@@ -333,8 +287,8 @@ mod tests {
         let encoding = encoder.encode().unwrap();
         let recovery: Vec<Vec<u8>> = encoding.recovery_iter().map(<[u8]>::to_vec).collect();
 
-        // Provide originals 1..original_count plus recovery 1 == exactly `original_count` shards,
-        // so original 0 and every recovery except index 1 are reconstructed.
+        // Provide originals `1..original_count` plus recovery 1 (exactly `original_count`
+        // shards), so original 0 and every recovery except index 1 are reconstructed.
         let mut decoder = Decoder::new(original_count, recovery_count, shard_size).unwrap();
         for (i, original) in original.iter().enumerate().skip(1) {
             decoder.add_original_shard(i, original).unwrap();
@@ -369,12 +323,13 @@ mod tests {
 
     #[test]
     fn recovery_matches_encoder() {
-        // Shard sizes spanning the partial-final-chunk boundary (SHARD_CHUNK_BYTES = 64).
+        // Shard sizes span the partial-final-chunk boundary (`SHARD_CHUNK_BYTES` = 64).
         for shard_size in [2, 34, 62, SHARD_CHUNK_BYTES, 66, 130, 1024] {
             // HighRate selections (original_count_pow2 >= recovery_count_pow2).
             recovery_roundtrip(3, 2, shard_size);
             recovery_roundtrip(16, 4, shard_size);
-            // LowRate selections (original_count_pow2 < recovery_count_pow2), incl. the
+
+            // LowRate selections (original_count_pow2 < recovery_count_pow2), including the
             // 250-shard / k=83 / m=167 shape used by the coding crate.
             recovery_roundtrip(4, 8, shard_size);
             recovery_roundtrip(83, 167, shard_size);
@@ -383,7 +338,7 @@ mod tests {
 
     #[test]
     fn direct_recovery_matches_encoder() {
-        // The last two cases straddle the direct-evaluation limit.
+        // The last two `(k, m)` cases straddle the direct-evaluation limit.
         let mut rng = test_rng();
         for (k, m) in [(7, 13), (84, 166), (128, 384), (128, 385)] {
             for shard_size in [2, 66, 1024] {
@@ -426,8 +381,8 @@ mod tests {
         }
     }
 
-    // Every original is provided, so there is nothing to reconstruct: both decode entry points
-    // return `None`.
+    /// Provides every original, so there is nothing to reconstruct, and asserts both decode entry
+    /// points return `None`.
     fn assert_decode_none(original_count: usize, recovery_count: usize) {
         let shard_size = SHARD_CHUNK_BYTES;
         let original = test_util::generate_original(original_count, shard_size, 0);

@@ -90,9 +90,6 @@ mod shards;
 pub mod tables;
 pub mod utils;
 
-// ======================================================================
-// CONST - PUBLIC
-
 /// Size of Galois field element [`GfElement`] in bits.
 pub const GF_BITS: usize = 16;
 
@@ -108,7 +105,7 @@ pub const GF_POLYNOMIAL: usize = 0x1002D;
 /// Byte width of a shard chunk.
 ///
 /// [`Engine`] methods process shard buffers as arrays of this size.
-/// Input shards may span multiple chunks; any partial final chunk is padded
+/// Input shards may span multiple chunks. Any partial final chunk is padded
 /// during processing and returned at the original shard length.
 pub const SHARD_CHUNK_BYTES: usize = 64;
 
@@ -118,14 +115,8 @@ pub const CANTOR_BASIS: [GfElement; GF_BITS] = [
     0xFDB8, 0xFB34, 0xFF38, 0x991E,
 ];
 
-// ======================================================================
-// TYPE ALIASES - PUBLIC
-
 /// Galois field element expressed in the [`CANTOR_BASIS`].
 pub type GfElement = u16;
-
-// ======================================================================
-// Engine - PUBLIC
 
 /// Trait for compute-intensive low-level algorithms needed
 /// for Reed-Solomon encoding/decoding.
@@ -136,9 +127,6 @@ pub type GfElement = u16;
 /// [`Naive`] engine is provided for those who want to
 /// study the source code to understand [`Engine`].
 pub trait Engine {
-    // ============================================================
-    // REQUIRED
-
     /// In-place decimation-in-time FFT (fast Fourier transform).
     ///
     /// Transforms `data[pos..pos + size]`, producing the requested output prefix in
@@ -187,9 +175,6 @@ pub trait Engine {
     /// Exponents `0` and [`GF_MODULUS`] both represent the multiplicative identity.
     fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement);
 
-    // ============================================================
-    // PROVIDED
-
     /// Replace `erasures` with its XOR convolution against the field logarithm table.
     ///
     /// On return, `erasures[i]` is congruent modulo [`GF_MODULUS`] to the sum over `j != i`
@@ -209,9 +194,6 @@ pub trait Engine {
     }
 }
 
-// ======================================================================
-// FUNCTIONS - PRIVATE
-
 /// Assert the [`Engine::fft`] and [`Engine::ifft`] preconditions.
 #[inline]
 fn validate_transform(
@@ -229,9 +211,6 @@ fn validate_transform(
     // `GF_ORDER - 1` entries. A size-one transform has no butterflies.
     assert!(size == 1 || skew_delta <= GF_ORDER - size);
 }
-
-// ======================================================================
-// TESTS
 
 #[cfg(test)]
 mod tests {

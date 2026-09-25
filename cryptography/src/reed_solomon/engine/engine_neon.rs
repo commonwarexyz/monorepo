@@ -5,9 +5,6 @@ use crate::reed_solomon::engine::{
 };
 use core::{arch::aarch64::*, iter::zip};
 
-// ======================================================================
-// Neon - PUBLIC
-
 /// Optimized [`Engine`] using Arm Neon instructions.
 ///
 /// [`Neon`] is an optimized engine that follows the same algorithm as
@@ -23,17 +20,13 @@ pub struct Neon {
 }
 
 impl Neon {
-    /// Creates new [`Neon`], initializing all [tables]
-    /// needed for encoding or decoding.
+    /// Creates a new [`Neon`] and initializes its multiplication and skew [tables].
     ///
-    /// Currently only difference between encoding/decoding is
-    /// [`LogWalsh`] (128 kiB) which is only needed for decoding.
+    /// Decoding builds its Walsh transform tables on first use.
     ///
     /// # Panics
     ///
     /// If NEON is unavailable.
-    ///
-    /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
         assert!(super::cpu_features::neon());
 
@@ -78,7 +71,8 @@ impl Engine for Neon {
     }
 
     fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available.
+        // Offsets stay within fixed-size shard buffers.
         unsafe {
             self.mul_neon(x, log_m);
         }
@@ -92,17 +86,11 @@ impl Engine for Neon {
     }
 }
 
-// ======================================================================
-// Neon - IMPL Default
-
 impl Default for Neon {
     fn default() -> Self {
         Self::new()
     }
 }
-
-// ======================================================================
-// Neon - PRIVATE
 
 impl Neon {
     #[target_feature(enable = "neon")]
@@ -111,7 +99,9 @@ impl Neon {
 
         for chunk in x.iter_mut() {
             let x_ptr: *mut u8 = chunk.as_mut_ptr();
-            // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+
+            // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available.
+            // Offsets stay within fixed-size shard buffers.
             unsafe {
                 let x0_lo = vld1q_u8(x_ptr);
                 let x1_lo = vld1q_u8(x_ptr.add(16));
@@ -129,7 +119,7 @@ impl Neon {
         }
     }
 
-    // Implementation of LEO_MUL_128
+    /// Implementation of LEO_MUL_128.
     #[inline(always)]
     fn mul_128(
         value_lo: uint8x16_t,
@@ -139,7 +129,8 @@ impl Neon {
         let mut prod_lo: uint8x16_t;
         let mut prod_hi: uint8x16_t;
 
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available.
+        // Offsets stay within fixed-size shard buffers.
         unsafe {
             let t0_lo = vld1q_u8(core::ptr::from_ref::<u128>(&lut.lo[0]).cast::<u8>());
             let t1_lo = vld1q_u8(core::ptr::from_ref::<u128>(&lut.lo[1]).cast::<u8>());
@@ -173,8 +164,9 @@ impl Neon {
         (prod_lo, prod_hi)
     }
 
-    // {x_lo, x_hi} ^= {y_lo, y_hi} * log_m.
-    // Implementation of LEO_MULADD_128
+    /// Computes `{x_lo, x_hi} ^= {y_lo, y_hi} * log_m`.
+    ///
+    /// Implementation of LEO_MULADD_128.
     #[inline(always)]
     fn muladd_128(
         mut x_lo: uint8x16_t,
@@ -184,7 +176,9 @@ impl Neon {
         lut: &Multiply128lutT,
     ) -> (uint8x16_t, uint8x16_t) {
         let (prod_lo, prod_hi) = Self::mul_128(y_lo, y_hi, lut);
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available.
+        // Offsets stay within fixed-size shard buffers.
         unsafe {
             x_lo = veorq_u8(x_lo, prod_lo);
             x_hi = veorq_u8(x_hi, prod_hi);
@@ -193,11 +187,8 @@ impl Neon {
     }
 }
 
-// ======================================================================
-// Neon - PRIVATE - FFT (fast Fourier transform)
-
 impl Neon {
-    // Implementation of LEO_FFTB_128
+    /// Implementation of LEO_FFTB_128.
     #[inline(always)]
     fn fftb_128(
         &self,
@@ -208,7 +199,9 @@ impl Neon {
         let lut = &self.mul128[log_m as usize];
         let x_ptr: *mut u8 = x.as_mut_ptr();
         let y_ptr: *mut u8 = y.as_mut_ptr();
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available.
+        // Offsets stay within fixed-size shard buffers.
         unsafe {
             let mut x0_lo = vld1q_u8(x_ptr);
             let mut x1_lo = vld1q_u8(x_ptr.add(16));
@@ -240,7 +233,7 @@ impl Neon {
         }
     }
 
-    // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
+    /// Partial butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn fft_butterfly_partial(
         &self,
@@ -265,8 +258,7 @@ impl Neon {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
-        // FIRST LAYER
-
+        // First layer: (s0, s2) and (s1, s3).
         if log_m02 == GF_MODULUS {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
@@ -275,14 +267,12 @@ impl Neon {
             self.fft_butterfly_partial(s1, s3, log_m02);
         }
 
-        // SECOND LAYER
-
+        // Second layer: (s0, s1) and (s2, s3).
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
             self.fft_butterfly_partial(s0, s1, log_m01);
         }
-
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
@@ -311,8 +301,7 @@ impl Neon {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // TWO LAYERS AT TIME
-
+        // Apply two butterfly layers per pass.
         let mut dist4 = size;
         let mut dist = size >> 2;
         while dist != 0 {
@@ -334,8 +323,7 @@ impl Neon {
             dist >>= 2;
         }
 
-        // FINAL ODD LAYER
-
+        // An odd log2(size) leaves one final layer.
         if dist4 == 2 {
             let mut r = 0;
             while r < truncated_size {
@@ -355,11 +343,8 @@ impl Neon {
     }
 }
 
-// ======================================================================
-// Neon - PRIVATE - IFFT (inverse fast Fourier transform)
-
 impl Neon {
-    // Implementation of LEO_IFFTB_128
+    /// Implementation of LEO_IFFTB_128.
     #[inline(always)]
     fn ifftb_128(
         &self,
@@ -371,7 +356,8 @@ impl Neon {
         let x_ptr: *mut u8 = x.as_mut_ptr();
         let y_ptr: *mut u8 = y.as_mut_ptr();
 
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available.
+        // Offsets stay within fixed-size shard buffers.
         unsafe {
             let mut x0_lo = vld1q_u8(x_ptr);
             let mut x1_lo = vld1q_u8(x_ptr.add(16));
@@ -427,22 +413,19 @@ impl Neon {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
-        // FIRST LAYER
-
+        // First layer: (s0, s1) and (s2, s3).
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
             self.ifft_butterfly_partial(s0, s1, log_m01);
         }
-
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
             self.ifft_butterfly_partial(s2, s3, log_m23);
         }
 
-        // SECOND LAYER
-
+        // Second layer: (s0, s2) and (s1, s3).
         if log_m02 == GF_MODULUS {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
@@ -473,8 +456,7 @@ impl Neon {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // TWO LAYERS AT TIME
-
+        // Apply two butterfly layers per pass.
         let mut dist = 1;
         let mut dist4 = 4;
         while dist4 <= size {
@@ -496,8 +478,7 @@ impl Neon {
             dist4 <<= 2;
         }
 
-        // FINAL ODD LAYER
-
+        // An odd log2(size) leaves one final layer.
         if dist < size {
             let log_m = self.skew[dist + skew_delta - 1];
             if log_m == GF_MODULUS {
@@ -516,17 +497,9 @@ impl Neon {
     }
 }
 
-// ======================================================================
-// Neon - PRIVATE - Evaluate polynomial
-
 impl Neon {
     #[target_feature(enable = "neon")]
     unsafe fn eval_poly_neon(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         utils::eval_poly(erasures, truncated_size);
     }
 }
-
-// ======================================================================
-// TESTS
-
-// Engines are tested indirectly via roundtrip tests of HighRate and LowRate.

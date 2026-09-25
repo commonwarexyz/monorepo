@@ -1,8 +1,5 @@
 use crate::reed_solomon::engine::{GF_ORDER, GfElement, utils};
 
-// ======================================================================
-// FWHT (fast Walsh-Hadamard transform) - CRATE
-
 /// Decimation in time (DIT) Fast Walsh-Hadamard Transform modulo `GF_MODULUS`.
 ///
 /// Entries at and after `m_truncated` must be zero. `data.len()` must be a power of two no
@@ -13,9 +10,9 @@ pub(crate) fn fwht(data: &mut [GfElement], m_truncated: usize) {
     debug_assert!(data.len().is_power_of_two() && data.len() <= GF_ORDER);
     debug_assert!(m_truncated <= data.len());
 
-    // Note to self: fwht_8 is slightly faster on x86 (AMD Ryzen 5 3600),
-    // but slower on ARM (Apple silicon M1).
-    // fwht_16 is always slower. See branch: AndersTrier/FWHT_8_and_16
+    // A radix-8 pass (`fwht_8`) is slightly faster on x86 (AMD Ryzen 5 3600) but slower on ARM
+    // (Apple silicon M1). A radix-16 pass (`fwht_16`) is always slower. See branch
+    // AndersTrier/FWHT_8_and_16.
     let mut dist = 1;
     let mut dist4 = 4;
     while dist4 <= data.len() {
@@ -40,9 +37,6 @@ pub(crate) fn fwht(data: &mut [GfElement], m_truncated: usize) {
         }
     }
 }
-
-// ======================================================================
-// FWHT - PRIVATE
 
 #[inline(always)]
 fn fwht_2(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
@@ -71,9 +65,6 @@ fn fwht_4(data: &mut [GfElement], offset: u16, dist: u16) {
     data[i3] = d3;
 }
 
-// ======================================================================
-// FWHT - TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,7 +73,7 @@ mod tests {
     use rand::{RngExt as _, SeedableRng};
     use rand_chacha::ChaCha8Rng;
 
-    // Reference implementation
+    /// Reference radix-2 implementation of `fwht` over the whole slice.
     fn fwht_naive(data: &mut [GfElement]) {
         let mut dist = 1;
         let mut dist2 = 2;
@@ -103,8 +94,8 @@ mod tests {
     fn fwht_2_naive(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
         let (mut sum, sum_overflow) = a.overflowing_add(b);
         if sum_overflow {
-            // `sum` got reduced mod 65536, but we want to
-            // reduce it mod GF_MODULUS (65535) instead.
+            // `overflowing_add` reduced `sum` mod 65536. Adding one reduces it mod `GF_MODULUS`
+            // (65535) instead.
             sum += 1;
         }
 

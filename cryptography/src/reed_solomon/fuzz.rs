@@ -17,7 +17,7 @@ use fixedbitset::FixedBitSet;
 
 const SHARD_SIZES: [usize; 6] = [2, 62, 64, 66, 126, 130];
 
-// Instantiate each supported engine, including implementations below the default CPU priority.
+/// Instantiate each supported engine, including implementations below the default CPU priority.
 macro_rules! each_engine {
     ($runner:ident ( $($arg:expr),* )) => {{
         $runner::<NoSimd>($($arg,)* NoSimd::new);
@@ -1206,9 +1206,8 @@ mod tests {
 
     #[test]
     fn locator_domain_boundaries() {
-        // Straddle several Walsh size changes and the switch to the full field above 32768.
-        // The low-rate check calls `eval_walsh` directly, which does not use
-        // DIRECT_EVALUATION_LIMIT.
+        // Straddle several Walsh size changes and the switch to the full field above 32768. The
+        // low-rate check calls `eval_walsh` directly, which ignores DIRECT_EVALUATION_LIMIT.
         for high in [false, true] {
             for end in [
                 2, 3, 4, 7, 8, 15, 16, 127, 128, 129, 511, 512, 513, 32767, 32768, 32769, 65535,
