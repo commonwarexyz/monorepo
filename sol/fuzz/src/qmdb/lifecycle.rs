@@ -70,6 +70,7 @@ fn config(context: &deterministic::Context) -> FixedConfig<OneCap, Sequential> {
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
             page_cache: page_cache.clone(),
+            node_cache_size: None,
         },
         journal_config: JournalConfig {
             partition: "lifecycle-operations".into(),

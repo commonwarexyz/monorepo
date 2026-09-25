@@ -1464,6 +1464,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             strategy,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            node_cache_size: None,
         }
     }
 
@@ -2071,6 +2072,7 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
                 page_cache: CacheRef::from_pooler(pooler, page, PAGE_CACHE_SIZE),
+                node_cache_size: None,
             }
         }
 
