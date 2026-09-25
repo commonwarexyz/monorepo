@@ -82,7 +82,7 @@
 //! # Lazy Recovery
 //!
 //! When a parent has no pending or applied state, [`Stateful`] walks its ancestry through a
-//! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider) to the nearest known
+//! [`BlockProvider`](commonware_consensus::simplex::marshal::ancestry::BlockProvider) to the nearest known
 //! state, then replays forward with [`Application::apply`]. Each rebuilt state is retained even
 //! if the request is cancelled.
 //!
@@ -103,11 +103,13 @@
 //! [`Stateful`] supports [`Deferred`] and [`coding::Marshaled`]. [`Inline`] is incompatible
 //! because it does not verify the embedded context within the [`CertifiableBlock`].
 //!
-//! [`Deferred`]: commonware_consensus::marshal::standard::Deferred
-//! [`Inline`]: commonware_consensus::marshal::standard::Inline
-//! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
+//! [`Deferred`]: commonware_consensus::simplex::marshal::standard::Deferred
+//! [`Inline`]: commonware_consensus::simplex::marshal::standard::Inline
+//! [`coding::Marshaled`]: commonware_consensus::simplex::marshal::coding::Marshaled
 
-use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
+use commonware_consensus::{
+    CertifiableBlock, Epochable, Viewable, simplex::marshal::ancestry::Ancestry,
+};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;

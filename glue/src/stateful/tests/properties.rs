@@ -1,6 +1,6 @@
 use super::common::MockValidatorState;
 use crate::simulate::{processed::ProcessedHeight, property::Property, tracker::ProgressTracker};
-use commonware_consensus::marshal::core::Variant;
+use commonware_consensus::simplex::marshal::core::Variant;
 use commonware_cryptography::{Digestible, ed25519, sha256};
 use std::{future::Future, pin::Pin};
 
