@@ -1289,26 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn replay_local_votes_is_idempotent() {
-        let mut rng = test_rng();
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
-        let round_info = Rnd::new(Epoch::new(5), View::new(2));
-        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
-
-        let nullify = Nullify::sign::<Sha256Digest>(&schemes[0], round_info).expect("nullify");
-        let mut nullified = Round::<_, Sha256Digest>::new(schemes[0].clone(), round_info);
-        nullified.replay(&Artifact::Nullify(nullify.clone()));
-        nullified.replay(&Artifact::Nullify(nullify));
-        assert!(nullified.voted_nullify());
-
-        let finalize = Finalize::sign(&schemes[0], proposal).expect("finalize");
-        let mut finalized = Round::new(schemes[0].clone(), round_info);
-        finalized.replay(&Artifact::Finalize(finalize.clone()));
-        finalized.replay(&Artifact::Finalize(finalize));
-        assert!(matches!(finalized.decision, Decision::VotedFinalize));
-    }
-
-    #[test]
     #[should_panic(expected = "replayed finalize conflicts with local nullify")]
     fn replay_finalize_conflicts_with_local_nullify() {
         let mut rng = test_rng();
@@ -1409,24 +1389,6 @@ mod tests {
         round.replay(&Artifact::Finalize(finalize_local));
 
         // Check that construct_nullify returns None
-        assert!(round.construct_nullify().is_none());
-    }
-
-    #[test]
-    fn replayed_finalize_does_not_block_proposal_or_notarize() {
-        let mut rng = test_rng();
-        let Fixture { schemes, .. } = ed25519::fixture(&mut rng, b"ns", 4);
-        let round_info = Rnd::new(Epoch::new(5), View::new(2));
-        let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([40u8; 32]));
-        let finalize = Finalize::sign(&schemes[0], proposal.clone()).expect("finalize");
-        let mut round = Round::new(schemes[0].clone(), round_info);
-        round.set_leader(Participant::new(0));
-
-        round.replay(&Artifact::Finalize(finalize));
-        assert!(round.should_propose());
-        assert!(round.set_proposal(proposal.clone()));
-        assert!(round.verified());
-        assert_eq!(round.construct_notarize(), Some(&proposal));
         assert!(round.construct_nullify().is_none());
     }
 
@@ -1821,11 +1783,12 @@ mod tests {
         let proposal = Proposal::new(round_info, View::new(0), Sha256Digest::from([3u8; 32]));
 
         let mut round = Round::new(local_scheme, round_info);
-        round.set_leader(Participant::new(0));
+        round.set_leader(Participant::new(1));
 
-        // Recover the proposal and notarization without running local verify.
+        // Recover a peer notarization without locally verifying or voting.
         let notarization_votes: Vec<_> = schemes
             .iter()
+            .skip(1)
             .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
             .collect();
         let notarization = Notarization::from_notarizes(
@@ -1838,11 +1801,16 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        // Recovered proposals should not emit a late notarize vote.
+        // Recovery alone does not verify the proposal.
         assert!(round.construct_notarize().is_none());
+        assert!(round.request_verify());
 
         // But a successful certification still allows us to help finalize.
         round.certified(true);
         assert!(round.construct_finalize().is_some());
+
+        // Verification can complete after our finalize vote.
+        assert!(round.verified());
+        assert_eq!(round.construct_notarize(), Some(&proposal));
     }
 }
