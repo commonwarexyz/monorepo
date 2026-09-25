@@ -53,12 +53,15 @@
 //! - Supports AVX-512 with GFNI multiplication and runtime CPU feature checks.
 //! - Adds [`Plan`] and plan-based decoding to reuse erasure coefficients across decoders.
 //! - Sizes decoder Walsh transforms to the decoding domain.
-//! - Fuses AVX-512 butterfly layers and formal-derivative leaves. When the `Avx512` engine's CPU
-//!   features are present, the AVX-512 derivative leaf runs for suitable shard counts and sizes,
-//!   regardless of the selected engine.
+//! - Fuses AVX-512 butterfly layers.
+//! - Fuses formal-derivative leaves in blocks of four shards for every engine. When the `Avx512`
+//!   engine's CPU features are present, blocks of 16 shards use an AVX-512 leaf for suitable shard
+//!   counts and sizes, regardless of the selected engine.
+//! - Builds the 128-bit multiplication tables in native byte order, since the SIMD engines load
+//!   them byte by byte.
 //! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
-//! - Rewrote comments in Commonware style: no section banners or uppercase step headers, and
-//!   comments sit directly above the code they describe.
+//! - Rewrote comments in Commonware style: removed section banners and uppercase step headers,
+//!   and attached floating comments to the code they describe.
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd
 //! [`thiserror`]: https://docs.rs/thiserror
@@ -107,21 +110,21 @@ pub enum Error {
         got: usize,
     },
 
-    /// Decoder was given two original shards with same index.
+    /// Decoder or [`Plan`] was given the same original shard index twice.
     #[error("duplicate original shard index: {index}")]
     DuplicateOriginalShardIndex {
         /// Given duplicate index.
         index: usize,
     },
 
-    /// Decoder was given two recovery shards with same index.
+    /// Decoder or [`Plan`] was given the same recovery shard index twice.
     #[error("duplicate recovery shard index: {index}")]
     DuplicateRecoveryShardIndex {
         /// Given duplicate index.
         index: usize,
     },
 
-    /// Decoder was given original shard with invalid index,
+    /// Decoder or [`Plan`] was given an invalid original shard index,
     /// i.e. `index >= original_count`.
     #[error("invalid original shard index: {index} >= original_count {original_count}")]
     InvalidOriginalShardIndex {
@@ -131,7 +134,7 @@ pub enum Error {
         index: usize,
     },
 
-    /// Decoder was given recovery shard with invalid index,
+    /// Decoder or [`Plan`] was given an invalid recovery shard index,
     /// i.e. `index >= recovery_count`.
     #[error("invalid recovery shard index: {index} >= recovery_count {recovery_count}")]
     InvalidRecoveryShardIndex {
@@ -149,7 +152,7 @@ pub enum Error {
         shard_bytes: usize,
     },
 
-    /// Decoder was given too few shards.
+    /// Decoder or [`Plan`] was given too few shards.
     ///
     /// Decoding requires as many shards as there were original shards
     /// in total, in any combination of original shards and recovery shards.
@@ -159,9 +162,9 @@ pub enum Error {
     NotEnoughShards {
         /// Configured number of original shards.
         original_count: usize,
-        /// Number of original shards given to decoder.
+        /// Number of original shards given.
         original_received_count: usize,
-        /// Number of recovery shards given to decoder.
+        /// Number of recovery shards given.
         recovery_received_count: usize,
     },
 

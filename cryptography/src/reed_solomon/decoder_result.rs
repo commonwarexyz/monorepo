@@ -358,14 +358,16 @@ mod tests {
 
     #[test]
     fn direct_recovery_matches_encoder() {
-        // The last two `(k, m)` cases end exactly at and one past DIRECT_EVALUATION_LIMIT.
+        // `quarter` originals pad to a chunk of `quarter.next_power_of_two()`, so the last two
+        // `(k, m)` cases end exactly at and one past DIRECT_EVALUATION_LIMIT.
         let mut rng = test_rng();
         let quarter = DIRECT_EVALUATION_LIMIT / 4;
+        let recovery = DIRECT_EVALUATION_LIMIT - quarter.next_power_of_two();
         for (k, m) in [
             (7, 13),
             (84, 166),
-            (quarter, 3 * quarter),
-            (quarter, 3 * quarter + 1),
+            (quarter, recovery),
+            (quarter, recovery + 1),
         ] {
             for shard_size in [2, 66, 1024] {
                 let originals = test_util::generate_original(k, shard_size, 0);

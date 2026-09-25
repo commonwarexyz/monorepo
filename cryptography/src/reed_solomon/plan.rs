@@ -174,6 +174,7 @@ impl Plan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reed_solomon::{Decoder, Encoder, test_util};
 
     #[test]
     fn rejects_invalid_received_indices() {
@@ -202,6 +203,68 @@ mod tests {
                     ..
                 })
             ));
+        }
+    }
+
+    #[test]
+    fn decoders_reject_mismatched_plans() {
+        // Each case pairs a decoder's counts and received indices with a plan's.
+        type Shape = (usize, usize, &'static [usize], &'static [usize]);
+        let cases: [(Shape, Shape); 6] = [
+            // Only the recovery count differs, and both set the same work positions.
+            ((5, 1, &[0, 1, 3, 4], &[0]), (5, 3, &[0, 1], &[0, 1, 2])),
+            ((2, 4, &[0], &[0]), (2, 3, &[0], &[0])),
+            // Only the original count differs, and both set the same work positions.
+            ((4, 5, &[0, 1], &[0, 1]), (3, 5, &[0, 1], &[0, 1])),
+            ((4, 2, &[0, 1], &[0, 1]), (3, 2, &[0, 1], &[0, 1])),
+            // The decoder received one more recovery shard than the plan names.
+            ((2, 4, &[0], &[0, 1]), (2, 4, &[0], &[0])),
+            ((5, 3, &[0, 1, 2, 3], &[0, 1]), (5, 3, &[0, 1, 2, 3], &[0])),
+        ];
+        for ((k, m, originals, recoveries), (plan_k, plan_m, plan_originals, plan_recoveries)) in
+            cases
+        {
+            let data = test_util::generate_original(k, 64, 0);
+            let mut encoder = Encoder::new(k, m, 64).unwrap();
+            for shard in &data {
+                encoder.add_original_shard(shard).unwrap();
+            }
+            let encoded = encoder.encode().unwrap();
+            let mut decoder = Decoder::new(k, m, 64).unwrap();
+            for &i in originals {
+                decoder.add_original_shard(i, &data[i]).unwrap();
+            }
+            for &i in recoveries {
+                decoder
+                    .add_recovery_shard(i, encoded.recovery(i).unwrap())
+                    .unwrap();
+            }
+
+            let plan = Plan::new(
+                plan_k,
+                plan_m,
+                plan_originals.iter().copied(),
+                plan_recoveries.iter().copied(),
+            )
+            .unwrap();
+            assert!(matches!(
+                decoder.decode_with_plan(&plan),
+                Err(Error::PlanMismatch)
+            ));
+            assert!(matches!(
+                decoder.decode_with_recovery_plan(&plan),
+                Err(Error::PlanMismatch)
+            ));
+
+            // The decoder's own plan still recovers the missing originals.
+            let own =
+                Plan::new(k, m, originals.iter().copied(), recoveries.iter().copied()).unwrap();
+            let decoded = decoder.decode_with_plan(&own).unwrap().unwrap();
+            for (i, shard) in data.iter().enumerate() {
+                if !originals.contains(&i) {
+                    assert_eq!(decoded.original(i), Some(shard.as_slice()));
+                }
+            }
         }
     }
 }
