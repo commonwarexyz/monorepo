@@ -28,12 +28,8 @@ use commonware_runtime::{
     deterministic::{self, Context},
 };
 use commonware_utils::{
-    NZU16, NZUsize, NonZeroDuration,
-    channel::oneshot,
-    non_empty,
-    ordered::Quorum as _,
-    probability,
-    sync::Mutex,
+    NZU16, NZUsize, NonZeroDuration, channel::oneshot, non_empty, ordered::Quorum as _,
+    probability, sync::Mutex,
 };
 use futures::future::join_all;
 use std::{
@@ -366,12 +362,8 @@ where
         position,
         digest: digest(position),
     };
-    let quorum = usize::try_from(
-        fixture.schemes[0]
-            .participants()
-            .quorum::<S::Faults>(),
-    )
-    .expect("quorum count must fit in usize");
+    let quorum = usize::try_from(fixture.schemes[0].participants().quorum::<S::Faults>())
+        .expect("quorum count must fit in usize");
     let acks: Vec<_> = fixture
         .schemes
         .iter()
@@ -803,12 +795,8 @@ where
             position,
             digest: digest(position),
         };
-        let quorum = usize::try_from(
-            fixture.schemes[0]
-                .participants()
-                .quorum::<S::Faults>(),
-        )
-        .expect("quorum count must fit in usize");
+        let quorum = usize::try_from(fixture.schemes[0].participants().quorum::<S::Faults>())
+            .expect("quorum count must fit in usize");
         let acks: Vec<_> = fixture
             .schemes
             .iter()

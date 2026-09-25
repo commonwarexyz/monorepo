@@ -748,10 +748,7 @@ mod tests {
         simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
     };
     use commonware_actor::{Feedback, Unreliable};
-    use commonware_cryptography::{
-        Hasher, Sha256,
-        certificate::mocks::Fixture,
-    };
+    use commonware_cryptography::{Hasher, Sha256, certificate::mocks::Fixture};
 
     #[derive(Clone)]
     struct NoopRecoverer;
