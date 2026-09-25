@@ -3901,7 +3901,7 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
 /// Regression test: delayed block backfill delivered after floor advancement must not crash.
 ///
 /// This models a resolver peer that responds to `Key::Block` only after the
-/// victim has advanced its floor and pruned finalized storage. The stale delivery
+/// victim has advanced its floor past the requested height. The stale delivery
 /// must be rejected and must not be persisted.
 pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
     let runner = deterministic::Runner::new(
@@ -3986,7 +3986,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
         // Let block requests get issued while responses are still blocked.
         context.sleep(Duration::from_millis(500)).await;
 
-        // Advance floor beyond the stale block and prune.
+        // Advance floor beyond the stale block.
         let floor = Height::new(10);
         let floor_parent = H::make_test_block(
             Sha256::hash(&[b"floor-grandparent"]),
