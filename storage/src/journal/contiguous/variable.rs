@@ -28,7 +28,7 @@ use crate::{
         Error,
         durability::Barrier,
         frame::{
-            FrameInfo, decode_item, decode_length_prefix, encode_frame_into, find_frame,
+            FrameInfo, Limited, decode_item, decode_length_prefix, encode_frame_into, find_frame,
             read_frame_at,
         },
     },
@@ -184,7 +184,7 @@ impl<'a, B: RBlob, V: CodecShared> FrameScanner<'a, B, V> {
             .and_then(|offset| offset.checked_add(item_size as u64))
             .ok_or(Error::OffsetOverflow)?;
         decode_item::<V>(
-            (&mut self.replay).take(item_size),
+            Limited::new(&mut self.replay, item_size),
             self.codec_config,
             self.compressed,
         )?;

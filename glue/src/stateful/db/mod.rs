@@ -2352,6 +2352,59 @@ mod tests {
         }
 
         #[rstest]
+        #[case::any(PhantomData::<AnyFixed>, any_fixed_config)]
+        #[case::current(PhantomData::<CurrentUnorderedFixed>, current_fixed_config)]
+        #[case::immutable(PhantomData::<ImmutableFixed>, immutable_fixed_config)]
+        #[case::immutable_compact(
+            PhantomData::<ImmutableCompactFixed>, immutable_compact_fixed_config
+        )]
+        #[case::keyless(PhantomData::<KeylessFixed>, keyless_fixed_config)]
+        #[case::keyless_compact(
+            PhantomData::<KeylessCompactFixed>, keyless_compact_fixed_config
+        )]
+        fn merkleize_stale_batch_returns_error<T>(
+            #[case] _db: PhantomData<T>,
+            #[case] config: fn(&Context, &str) -> T::Config,
+        ) where
+            T: ManagedDb<Context> + 'static,
+            T::Unmerkleized: Unmerkleized<
+                    Merkleized = T::Merkleized,
+                    Error = commonware_storage::qmdb::Error<mmr::Family>,
+                >,
+            T::SyncTarget: Debug,
+        {
+            deterministic::Runner::default().start(|context| async move {
+                let config = config(&context, "db");
+                let database = T::init(context.child("db"), config, None).await.unwrap();
+                let db = Shared::new("test", database);
+                let stale = db.new_batch_for_test::<Context>().await;
+                let winner = db
+                    .new_batch_for_test::<Context>()
+                    .await
+                    .merkleize()
+                    .await
+                    .unwrap();
+
+                // Batch creation releases the read lock, permitting a sibling to be applied.
+                let (slot, database) = db.write().await;
+                let database = T::apply(database, winner).await.unwrap();
+                slot.put(database);
+
+                assert!(matches!(
+                    stale.merkleize().await,
+                    Err(commonware_storage::qmdb::Error::StaleBatch)
+                ));
+                assert!(
+                    db.new_batch_for_test::<Context>()
+                        .await
+                        .merkleize()
+                        .await
+                        .is_ok()
+                );
+            });
+        }
+
+        #[rstest]
         #[case::any_fixed(PhantomData::<AnyFixed>, any_fixed_config)]
         #[case::any_variable(PhantomData::<AnyVariable>, any_variable_config)]
         #[case::current_unordered_fixed(

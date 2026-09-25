@@ -83,7 +83,7 @@ use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
     Error,
     frame::{
-        FrameInfo, UncompressedFrame, decode_item, decode_length_prefix,
+        FrameInfo, Limited, UncompressedFrame, decode_item, decode_length_prefix,
         encode_compressed_frame_into, find_frame, read_frame_at,
     },
 };
@@ -886,7 +886,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 }
             }
 
-            // Decode item - use take() to limit bytes read
+            // Decode the item without reading past its frame
             let item_offset = current.offset;
             let next_offset = match current
                 .offset
@@ -900,7 +900,7 @@ impl<E: Storage + Metrics, V: CodecShared> Replay<E, V> {
                 }
             };
             match decode_item::<V>(
-                (&mut current.reader).take(item_size),
+                Limited::new(&mut current.reader, item_size),
                 &self.journal.0.codec_config,
                 self.journal.0.compression.is_some(),
             ) {
