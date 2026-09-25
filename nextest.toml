@@ -13,7 +13,3 @@ default-filter = 'test(/.*_conformance_$/)'
 
 [profile.all]
 default-filter = 'test(/.*/)'
-
-# crc32 reaches crc-fast's AVX-512 kernels, and blake3, lthash, and transcript reach blake3's.
-[profile.avx512]
-default-filter = '(package(commonware-cryptography-curve25519) | (package(commonware-cryptography) & test(/^((reed_solomon|sha256|crc32|blake3|lthash|transcript)::|fuzz::tests::test_fuzz_(crc32|blake3)$)/)) | (package(commonware-coding) & test(/reed_solomon/))) & not test(/(.*_slow_$|.*_conformance_$)/)'
