@@ -9,7 +9,7 @@ use crate::{
             metrics,
             types::{self, InfoVerifier},
         },
-        relay::{self, Message as RelayMessage, Prioritized, Relay, recv_prioritized},
+        relay::{self, Message as RelayMessage, Prioritized, Relay},
         throttle::Throttle,
     },
 };
@@ -61,7 +61,15 @@ impl<C: PublicKey> Outbox<C> {
     ///
     /// Priority order: control > high > low.
     async fn recv(&mut self) -> Prioritized<Message<C>, EncodedData> {
-        recv_prioritized(&mut self.control, &mut self.high, &mut self.low).await
+        select! {
+            msg = self.control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
+            msg = self.high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
+                msg.into_inner()
+            )),
+            msg = self.low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
+                msg.into_inner()
+            )),
+        }
     }
 
     /// Returns the next already-queued outbound message, if any.

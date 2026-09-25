@@ -2,7 +2,6 @@ use commonware_actor::{
     Feedback, Unreliable,
     mailbox::{self, UnreliablePolicy},
 };
-use commonware_macros::select;
 use commonware_runtime::Metrics;
 use std::{collections::VecDeque, num::NonZeroUsize};
 
@@ -68,23 +67,6 @@ pub enum Prioritized<C, D> {
     Data(D),
     /// One of the relay channels closed before yielding a message.
     Closed,
-}
-
-/// Awaits a message from control, high, or low priority receivers.
-pub async fn recv_prioritized<C: UnreliablePolicy, D>(
-    control: &mut mailbox::UnreliableReceiver<C>,
-    high: &mut mailbox::UnreliableReceiver<Message<D>>,
-    low: &mut mailbox::UnreliableReceiver<Message<D>>,
-) -> Prioritized<C, D> {
-    select! {
-        msg = control.recv() => msg.map_or(Prioritized::Closed, Prioritized::Control),
-        msg = high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
-            msg.into_inner()
-        )),
-        msg = low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
-            msg.into_inner()
-        )),
-    }
 }
 
 /// Attempts to receive one data message from a relay receiver.
