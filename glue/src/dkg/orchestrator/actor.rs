@@ -11,10 +11,10 @@ use crate::dkg::{
 use commonware_actor::mailbox;
 use commonware_consensus::{
     CertifiableAutomaton, Heightable, Relay, Reporter,
-    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::{
         self, Floor, ForwardPolicy, Plan, SkipPolicy,
         elector::Config as Elector,
+        marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
         scheme,
         types::{Activity, Context},
     },

@@ -4,8 +4,8 @@ use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Buf, Decode, Encode, Error as CodecError, ReadExt};
 use commonware_consensus::{
     Epochable,
-    marshal::core::Variant,
     simplex::{
+        marshal::core::Variant,
         scheme::Scheme,
         types::{Finalization, Proposal},
     },
