@@ -12,43 +12,59 @@ use super::{
     },
     rate::{DefaultRate, HighRate, LowRate, Rate, RateDecoder, RateEncoder},
 };
+use arbitrary::Unstructured;
 
 const SHARD_SIZES: [usize; 6] = [2, 62, 64, 66, 126, 130];
 
-macro_rules! selected_engine {
-    ($selector:expr, $runner:ident, $case_a:expr, $case_b:expr) => {{
-        match $selector % 5 {
-            0 => $runner::<NoSimd>($case_a, $case_b, NoSimd::new),
-            1 => $runner::<DefaultEngine>($case_a, $case_b, DefaultEngine::new),
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            2 if std::arch::is_x86_feature_detected!("avx512f")
+// Instantiate each supported engine, including implementations below the default CPU priority.
+macro_rules! each_engine {
+    ($runner:ident ( $($arg:expr),* )) => {{
+        $runner::<NoSimd>($($arg,)* NoSimd::new);
+        $runner::<DefaultEngine>($($arg,)* DefaultEngine::new);
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::arch::is_x86_feature_detected!("avx512f")
                 && std::arch::is_x86_feature_detected!("avx512vl")
                 && std::arch::is_x86_feature_detected!("avx512bw")
-                && std::arch::is_x86_feature_detected!("gfni") =>
+                && std::arch::is_x86_feature_detected!("gfni")
             {
-                $runner::<Avx512>($case_a, $case_b, Avx512::new)
+                $runner::<Avx512>($($arg,)* Avx512::new);
             }
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            3 if std::arch::is_x86_feature_detected!("avx2") => {
-                $runner::<Avx2>($case_a, $case_b, Avx2::new)
+            if std::arch::is_x86_feature_detected!("avx2") {
+                $runner::<Avx2>($($arg,)* Avx2::new);
             }
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            4 if std::arch::is_x86_feature_detected!("ssse3") => {
-                $runner::<Ssse3>($case_a, $case_b, Ssse3::new)
+            if std::arch::is_x86_feature_detected!("ssse3") {
+                $runner::<Ssse3>($($arg,)* Ssse3::new);
             }
-            #[cfg(target_arch = "aarch64")]
-            2 if std::arch::is_aarch64_feature_detected!("neon") => {
-                $runner::<Neon>($case_a, $case_b, Neon::new)
-            }
-            _ => $runner::<NoSimd>($case_a, $case_b, NoSimd::new),
+        }
+        #[cfg(target_arch = "aarch64")]
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            $runner::<Neon>($($arg,)* Neon::new);
         }
     }};
 }
 
-/// Compares bounded multiplication and FFT/IFFT inputs against the naive engine.
-pub fn differential_engine(input: &[u8]) {
-    let mut input = Input::new(input);
-    let log_m = match input.byte() % 8 {
+/// Bounded engine comparisons against independent field arithmetic and the naive engine.
+#[derive(Clone, Copy, Debug, arbitrary::Arbitrary)]
+pub enum EnginePlan {
+    /// Compare multiplication, including empty and multi-chunk operands.
+    Mul,
+    /// Compare FFT and IFFT with offsets, truncation, and sentinel shards.
+    Transform,
+}
+
+impl EnginePlan {
+    /// Run the selected check on every engine supported by this host.
+    pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        match self {
+            Self::Mul => fuzz_mul(u),
+            Self::Transform => fuzz_transform(u),
+        }
+    }
+}
+
+fn fuzz_mul(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+    let log_m = match u.int_in_range(0..=7)? {
         0 => 0,
         1 => 1,
         2 => 2,
@@ -56,28 +72,48 @@ pub fn differential_engine(input: &[u8]) {
         4 => GF_MODULUS / 2 + 1,
         5 => GF_MODULUS - 1,
         6 => GF_MODULUS,
-        _ => input.word(),
+        _ => u.arbitrary()?,
     };
-    let mul_chunks = usize::from(input.byte() % 4) + 1;
+    let mul_chunks = match u.int_in_range(0..=5)? {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 65,
+        _ => u.int_in_range(4..=16)?,
+    };
     let mut mul_input = vec![[0; SHARD_CHUNK_BYTES]; mul_chunks];
+    let mut input = Input::new(u.bytes(u.len())?);
     fill_chunks(&mut mul_input, &mut input);
     compare_mul(&mul_input, log_m);
+    Ok(())
+}
 
-    let size = 1usize << (input.byte() % 6);
-    let pos = usize::from(input.byte() % 4);
-    let suffix = usize::from(input.byte() % 4);
-    let truncated_size = usize::from(input.byte()) % (size + 1);
+fn fuzz_transform(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+    let size = 1usize << u.int_in_range(0..=6)?;
+    let pos = u.int_in_range(0..=5)?;
+    let suffix = u.int_in_range(0..=3)?;
+    let truncated_size = u.int_in_range(0..=size)?;
     let max_skew = GF_ORDER - size;
-    let skew_delta = match input.byte() % 5 {
+    let skew_delta = match u.int_in_range(0..=5)? {
         0 => 0,
         1 => 1.min(max_skew),
         2 => 7.min(max_skew),
         3 => max_skew,
-        _ => usize::from(input.word()) % (max_skew + 1),
+        4 => 17.min(max_skew),
+        _ => usize::from(u.arbitrary::<u16>()?) % (max_skew + 1),
     };
-    let shard_chunks = usize::from(input.byte() % 3) + 1;
+    let shard_chunks = match u.int_in_range(0..=5)? {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 17,
+        4 => 65,
+        _ => u.int_in_range(3..=8)?,
+    };
     let shard_count = pos + size + suffix;
     let mut transform_input = vec![[0; SHARD_CHUNK_BYTES]; shard_count * shard_chunks];
+    let mut input = Input::new(u.bytes(u.len())?);
     fill_chunks(&mut transform_input, &mut input);
     compare_transform(
         &transform_input,
@@ -88,34 +124,63 @@ pub fn differential_engine(input: &[u8]) {
         truncated_size,
         skew_delta,
     );
+    Ok(())
 }
 
-/// Compares bounded high-, low-, or default-rate operations against naive encoding.
-///
-/// Inputs also select a recovery-decoding sequence that checks automatic reuse after dropping a
-/// result, explicit reset across configurations, and reconstruction of missing recovery shards.
-pub fn differential_rate(input: &[u8]) {
-    let mut input = Input::new(input);
-    let operation = input.byte() % 4;
-    let engine = input.byte();
-    let small = usize::from(input.byte() % 3) + 2;
-    let large = usize::from(input.byte() % 4) + 9;
-    let shard_bytes_a = SHARD_SIZES[usize::from(input.byte()) % SHARD_SIZES.len()];
-    let shard_bytes_b = SHARD_SIZES[usize::from(input.byte()) % SHARD_SIZES.len()];
+/// Encoding rate exercised by the shared checks.
+#[derive(Clone, Copy, Debug, arbitrary::Arbitrary)]
+pub enum RateKind {
+    /// More original shards than recovery shards.
+    High,
+    /// More recovery shards than original shards.
+    Low,
+    /// Switch between high and low rates when resetting.
+    Default,
+}
 
-    let (counts_a, counts_b) = match operation {
-        0 => ((large, small), (large - 1, small + 1)),
-        1 => ((small, large), (small + 1, large - 1)),
-        _ => ((large, small), (small, large)),
-    };
-    let case_a = RateCase::new(counts_a.0, counts_a.1, shard_bytes_a, &mut input);
-    let case_b = RateCase::new(counts_b.0, counts_b.1, shard_bytes_b, &mut input);
+/// Bounded rate comparisons and backend-independent encoding/decoding contracts.
+#[derive(Clone, Copy, Debug, arbitrary::Arbitrary)]
+pub enum RatePlan {
+    /// Compare encoding with the naive engine and decode its recovery shards.
+    MatchesPortable(RateKind),
+    /// Check roundtrips, automatic reuse, and reset with the same backend.
+    Contract(RateKind),
+    /// Check the public recovery decoder's reuse and missing recovery shards.
+    Recovery,
+}
 
-    match operation {
-        0 => selected_engine!(engine, exercise_high, &case_a, &case_b),
-        1 => selected_engine!(engine, exercise_low, &case_a, &case_b),
-        2 => selected_engine!(engine, exercise_default, &case_a, &case_b),
-        _ => exercise_recovery_reuse(&case_a, &case_b),
+impl RatePlan {
+    /// Run rate checks on every supported engine, or exercise the public recovery decoder.
+    pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+        let small = u.int_in_range(2..=4)?;
+        let large = u.int_in_range(9..=12)?;
+        let shard_bytes_a = SHARD_SIZES[u.int_in_range(0..=5)?];
+        let shard_bytes_b = SHARD_SIZES[u.int_in_range(0..=5)?];
+
+        let (counts_a, counts_b) = match self {
+            Self::MatchesPortable(RateKind::High) | Self::Contract(RateKind::High) => {
+                ((large, small), (large - 1, small + 1))
+            }
+            Self::MatchesPortable(RateKind::Low) | Self::Contract(RateKind::Low) => {
+                ((small, large), (small + 1, large - 1))
+            }
+            _ => ((large, small), (small, large)),
+        };
+        let mut input = Input::new(u.bytes(u.len())?);
+        let case_a = RateCase::new(counts_a.0, counts_a.1, shard_bytes_a, &mut input);
+        let case_b = RateCase::new(counts_b.0, counts_b.1, shard_bytes_b, &mut input);
+
+        match self {
+            Self::MatchesPortable(kind) => {
+                each_engine!(rate_matches_portable(kind, &case_a, &case_b))
+            }
+            Self::Contract(kind) => {
+                rate_contract::<Naive>(kind, &case_a, &case_b, Naive::new);
+                each_engine!(rate_contract(kind, &case_a, &case_b));
+            }
+            Self::Recovery => exercise_recovery_reuse(&case_a, &case_b),
+        }
+        Ok(())
     }
 }
 
@@ -137,10 +202,6 @@ impl<'a> Input<'a> {
         self.offset += 1;
         byte
     }
-
-    const fn word(&mut self) -> u16 {
-        u16::from_le_bytes([self.byte(), self.byte()])
-    }
 }
 
 fn fill_chunks(chunks: &mut [[u8; SHARD_CHUNK_BYTES]], input: &mut Input<'_>) {
@@ -159,36 +220,6 @@ fn fill_chunks(chunks: &mut [[u8; SHARD_CHUNK_BYTES]], input: &mut Input<'_>) {
     }
 }
 
-fn candidate_engines() -> Vec<(&'static str, Box<dyn Engine>)> {
-    let mut engines: Vec<(&'static str, Box<dyn Engine>)> = vec![
-        ("NoSimd", Box::new(NoSimd::new())),
-        ("DefaultEngine", Box::new(DefaultEngine::new())),
-    ];
-
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    {
-        if std::arch::is_x86_feature_detected!("avx512f")
-            && std::arch::is_x86_feature_detected!("avx512vl")
-            && std::arch::is_x86_feature_detected!("avx512bw")
-            && std::arch::is_x86_feature_detected!("gfni")
-        {
-            engines.push(("Avx512", Box::new(Avx512::new())));
-        }
-        if std::arch::is_x86_feature_detected!("avx2") {
-            engines.push(("Avx2", Box::new(Avx2::new())));
-        }
-        if std::arch::is_x86_feature_detected!("ssse3") {
-            engines.push(("Ssse3", Box::new(Ssse3::new())));
-        }
-    }
-    #[cfg(target_arch = "aarch64")]
-    if std::arch::is_aarch64_feature_detected!("neon") {
-        engines.push(("Neon", Box::new(Neon::new())));
-    }
-
-    engines
-}
-
 fn compare_mul(input: &[[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
     let mut expected = input.to_vec();
     for chunk in &mut expected {
@@ -205,11 +236,23 @@ fn compare_mul(input: &[[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
     Naive::new().mul(&mut naive, log_m);
     assert_eq!(naive, expected, "Naive mul differs for log {log_m}");
 
-    for (name, engine) in candidate_engines() {
-        let mut actual = input.to_vec();
-        engine.mul(&mut actual, log_m);
-        assert_eq!(actual, expected, "{name} mul differs for log {log_m}");
-    }
+    each_engine!(check_mul(input, log_m, &naive));
+}
+
+fn check_mul<E: Engine>(
+    input: &[[u8; SHARD_CHUNK_BYTES]],
+    log_m: GfElement,
+    expected: &[[u8; SHARD_CHUNK_BYTES]],
+    new_engine: fn() -> E,
+) {
+    let mut actual = input.to_vec();
+    new_engine().mul(&mut actual, log_m);
+    assert_eq!(
+        actual,
+        expected,
+        "{} mul differs for log {log_m}",
+        core::any::type_name::<E>()
+    );
 }
 
 fn independent_mul(value: GfElement, log_m: GfElement) -> GfElement {
@@ -323,56 +366,81 @@ fn compare_transform(
             inverse,
         );
 
-        for (name, engine) in candidate_engines() {
-            let mut actual = operation_input.clone();
-            apply_transform(
-                engine.as_ref(),
-                &mut actual,
-                shard_count,
-                shard_chunks,
-                pos,
-                size,
-                truncated_size,
-                skew_delta,
-                inverse,
-            );
-            for shard in 0..shard_count {
+        for shard in 0..shard_count {
+            if shard < pos || shard >= pos + size {
                 let chunks = shard * shard_chunks..(shard + 1) * shard_chunks;
-
-                if shard < pos || shard >= pos + size {
-                    assert_eq!(
-                        expected[chunks.clone()],
-                        input[chunks.clone()],
-                        "Naive {} changed sentinel shard {shard}",
-                        if inverse { "ifft" } else { "fft" },
-                    );
-                    assert_eq!(
-                        actual[chunks.clone()],
-                        input[chunks],
-                        "{name} {} changed sentinel shard {shard}",
-                        if inverse { "ifft" } else { "fft" },
-                    );
-                    continue;
-                }
-
-                // FFT prunes outputs after the requested prefix. IFFT instead prunes its input, so
-                // a zero input suffix has a defined full-block result.
-                if inverse || shard < pos + truncated_size {
-                    assert_eq!(
-                        actual[chunks.clone()],
-                        expected[chunks],
-                        "{name} {} differs at shard {shard} for pos={pos} size={size} truncated={truncated_size} skew={skew_delta}",
-                        if inverse { "ifft" } else { "fft" },
-                    );
-                }
+                assert_eq!(
+                    expected[chunks.clone()],
+                    input[chunks],
+                    "Naive changed sentinel shard {shard}"
+                );
             }
+        }
+        each_engine!(check_transform(
+            &operation_input,
+            input,
+            &expected,
+            shard_count,
+            shard_chunks,
+            pos,
+            size,
+            truncated_size,
+            skew_delta,
+            inverse
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_transform<E: Engine>(
+    operation_input: &[[u8; SHARD_CHUNK_BYTES]],
+    input: &[[u8; SHARD_CHUNK_BYTES]],
+    expected: &[[u8; SHARD_CHUNK_BYTES]],
+    shard_count: usize,
+    shard_chunks: usize,
+    pos: usize,
+    size: usize,
+    truncated_size: usize,
+    skew_delta: usize,
+    inverse: bool,
+    new_engine: fn() -> E,
+) {
+    let name = core::any::type_name::<E>();
+    let mut actual = operation_input.to_vec();
+    apply_transform(
+        &new_engine(),
+        &mut actual,
+        shard_count,
+        shard_chunks,
+        pos,
+        size,
+        truncated_size,
+        skew_delta,
+        inverse,
+    );
+    for shard in 0..shard_count {
+        let chunks = shard * shard_chunks..(shard + 1) * shard_chunks;
+        if shard < pos || shard >= pos + size {
+            assert_eq!(
+                actual[chunks.clone()],
+                input[chunks],
+                "{name} changed sentinel shard {shard}"
+            );
+        } else if inverse || shard < pos + truncated_size {
+            // FFT specifies a prefix; IFFT specifies the entire block after zeroing its input suffix.
+            assert_eq!(
+                actual[chunks.clone()],
+                expected[chunks],
+                "{name} {} differs at shard {shard} for pos={pos} size={size} truncated={truncated_size} skew={skew_delta}",
+                if inverse { "ifft" } else { "fft" }
+            );
         }
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn apply_transform(
-    engine: &dyn Engine,
+fn apply_transform<E: Engine>(
+    engine: &E,
     data: &mut [[u8; SHARD_CHUNK_BYTES]],
     shard_count: usize,
     shard_chunks: usize,
@@ -513,13 +581,8 @@ fn decode_with<R, E>(
     }
 }
 
-fn exercise_rounds<R, E>(
-    case_a: &RateCase,
-    case_b: &RateCase,
-    expected_a: &[Vec<u8>],
-    expected_b: &[Vec<u8>],
-    new_engine: fn() -> E,
-) where
+fn check_rate_contract<R, E>(case_a: &RateCase, case_b: &RateCase, new_engine: fn() -> E)
+where
     R: Rate<E>,
     E: Engine,
 {
@@ -531,7 +594,7 @@ fn exercise_rounds<R, E>(
         None,
     )
     .unwrap();
-    assert_eq!(encode_with::<R, E>(&mut encoder, case_a), expected_a);
+    let recovery_a = encode_with::<R, E>(&mut encoder, case_a);
     encoder
         .reset(
             case_b.original_count,
@@ -539,8 +602,39 @@ fn exercise_rounds<R, E>(
             case_b.shard_bytes,
         )
         .unwrap();
-    assert_eq!(encode_with::<R, E>(&mut encoder, case_b), expected_b);
+    let recovery_b = encode_with::<R, E>(&mut encoder, case_b);
 
+    let mut decoder = R::decoder(
+        case_a.original_count,
+        case_a.recovery_count,
+        case_a.shard_bytes,
+        new_engine(),
+        None,
+    )
+    .unwrap();
+    decode_with::<R, E>(&mut decoder, case_a, &recovery_a, 0);
+    decode_with::<R, E>(&mut decoder, case_a, &recovery_a, 1);
+    decoder
+        .reset(
+            case_b.original_count,
+            case_b.recovery_count,
+            case_b.shard_bytes,
+        )
+        .unwrap();
+    decode_with::<R, E>(&mut decoder, case_b, &recovery_b, 1);
+    decode_with::<R, E>(&mut decoder, case_b, &recovery_b, 0);
+}
+
+fn decode_reference<R, E>(
+    case_a: &RateCase,
+    case_b: &RateCase,
+    expected_a: &[Vec<u8>],
+    expected_b: &[Vec<u8>],
+    new_engine: fn() -> E,
+) where
+    R: Rate<E>,
+    E: Engine,
+{
     let mut decoder = R::decoder(
         case_a.original_count,
         case_a.recovery_count,
@@ -560,22 +654,62 @@ fn exercise_rounds<R, E>(
     decode_with::<R, E>(&mut decoder, case_b, expected_b, 1);
 }
 
-fn exercise_high<E: Engine>(case_a: &RateCase, case_b: &RateCase, new_engine: fn() -> E) {
-    let expected_a = encode::<HighRate<Naive>, _>(case_a, Naive::new());
-    let expected_b = encode::<HighRate<Naive>, _>(case_b, Naive::new());
-    exercise_rounds::<HighRate<E>, E>(case_a, case_b, &expected_a, &expected_b, new_engine);
+fn rate_contract<E: Engine>(
+    kind: RateKind,
+    case_a: &RateCase,
+    case_b: &RateCase,
+    new_engine: fn() -> E,
+) {
+    match kind {
+        RateKind::High => check_rate_contract::<HighRate<E>, E>(case_a, case_b, new_engine),
+        RateKind::Low => check_rate_contract::<LowRate<E>, E>(case_a, case_b, new_engine),
+        RateKind::Default => check_rate_contract::<DefaultRate<E>, E>(case_a, case_b, new_engine),
+    }
 }
 
-fn exercise_low<E: Engine>(case_a: &RateCase, case_b: &RateCase, new_engine: fn() -> E) {
-    let expected_a = encode::<LowRate<Naive>, _>(case_a, Naive::new());
-    let expected_b = encode::<LowRate<Naive>, _>(case_b, Naive::new());
-    exercise_rounds::<LowRate<E>, E>(case_a, case_b, &expected_a, &expected_b, new_engine);
+fn rate_matches_portable<E: Engine>(
+    kind: RateKind,
+    case_a: &RateCase,
+    case_b: &RateCase,
+    new_engine: fn() -> E,
+) {
+    match kind {
+        RateKind::High => {
+            compare_rate::<HighRate<E>, HighRate<Naive>, E>(case_a, case_b, new_engine)
+        }
+        RateKind::Low => compare_rate::<LowRate<E>, LowRate<Naive>, E>(case_a, case_b, new_engine),
+        RateKind::Default => {
+            compare_rate::<DefaultRate<E>, DefaultRate<Naive>, E>(case_a, case_b, new_engine)
+        }
+    }
 }
 
-fn exercise_default<E: Engine>(case_a: &RateCase, case_b: &RateCase, new_engine: fn() -> E) {
-    let expected_a = encode::<DefaultRate<Naive>, _>(case_a, Naive::new());
-    let expected_b = encode::<DefaultRate<Naive>, _>(case_b, Naive::new());
-    exercise_rounds::<DefaultRate<E>, E>(case_a, case_b, &expected_a, &expected_b, new_engine);
+fn compare_rate<R, Reference, E>(case_a: &RateCase, case_b: &RateCase, new_engine: fn() -> E)
+where
+    R: Rate<E>,
+    Reference: Rate<Naive>,
+    E: Engine,
+{
+    let expected_a = encode::<Reference, _>(case_a, Naive::new());
+    let expected_b = encode::<Reference, _>(case_b, Naive::new());
+    let mut encoder = R::encoder(
+        case_a.original_count,
+        case_a.recovery_count,
+        case_a.shard_bytes,
+        new_engine(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(encode_with::<R, E>(&mut encoder, case_a), expected_a);
+    encoder
+        .reset(
+            case_b.original_count,
+            case_b.recovery_count,
+            case_b.shard_bytes,
+        )
+        .unwrap();
+    assert_eq!(encode_with::<R, E>(&mut encoder, case_b), expected_b);
+    decode_reference::<R, E>(case_a, case_b, &expected_a, &expected_b, new_engine);
 }
 
 fn recovery_round(
@@ -633,6 +767,7 @@ fn exercise_recovery_reuse(case_a: &RateCase, case_b: &RateCase) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_invariants::minifuzz;
 
     fn fixed_case(
         original_count: usize,
@@ -648,34 +783,11 @@ mod tests {
         )
     }
 
-    macro_rules! exercise_all_engines {
-        ($runner:ident, $case_a:expr, $case_b:expr) => {{
-            $runner::<NoSimd>($case_a, $case_b, NoSimd::new);
-            $runner::<DefaultEngine>($case_a, $case_b, DefaultEngine::new);
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                if std::arch::is_x86_feature_detected!("avx512f")
-                    && std::arch::is_x86_feature_detected!("avx512vl")
-                    && std::arch::is_x86_feature_detected!("avx512bw")
-                    && std::arch::is_x86_feature_detected!("gfni")
-                {
-                    $runner::<Avx512>($case_a, $case_b, Avx512::new);
-                }
-                if std::arch::is_x86_feature_detected!("avx2") {
-                    $runner::<Avx2>($case_a, $case_b, Avx2::new);
-                }
-                if std::arch::is_x86_feature_detected!("ssse3") {
-                    $runner::<Ssse3>($case_a, $case_b, Ssse3::new);
-                }
-            }
-            #[cfg(target_arch = "aarch64")]
-            if std::arch::is_aarch64_feature_detected!("neon") {
-                $runner::<Neon>($case_a, $case_b, Neon::new);
-            }
-        }};
-    }
-
-    fn compare_eval_poly<E: Engine>(input: &[GfElement; GF_ORDER], truncated_size: usize) {
+    fn compare_eval_poly<E: Engine>(
+        input: &[GfElement; GF_ORDER],
+        truncated_size: usize,
+        _new_engine: fn() -> E,
+    ) {
         let mut expected: Box<[GfElement; GF_ORDER]> =
             input.to_vec().into_boxed_slice().try_into().unwrap();
         Naive::eval_poly(expected.as_mut(), truncated_size);
@@ -683,6 +795,50 @@ mod tests {
             input.to_vec().into_boxed_slice().try_into().unwrap();
         E::eval_poly(actual.as_mut(), truncated_size);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn minifuzz_mul() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| EnginePlan::Mul.run(u));
+    }
+
+    #[test]
+    fn minifuzz_transform() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(64)
+            .test(|u| EnginePlan::Transform.run(u));
+    }
+
+    #[test]
+    fn minifuzz_rate_matches_portable() {
+        for kind in [RateKind::High, RateKind::Low, RateKind::Default] {
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(32)
+                .test(|u| RatePlan::MatchesPortable(kind).run(u));
+        }
+    }
+
+    #[test]
+    fn minifuzz_rate_contract() {
+        for kind in [RateKind::High, RateKind::Low, RateKind::Default] {
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .with_search_limit(32)
+                .test(|u| RatePlan::Contract(kind).run(u));
+        }
+    }
+
+    #[test]
+    fn minifuzz_recovery() {
+        minifuzz::Builder::default()
+            .with_seed(0)
+            .with_search_limit(32)
+            .test(|u| RatePlan::Recovery.run(u));
     }
 
     #[test]
@@ -706,8 +862,12 @@ mod tests {
             }
         }
         for log_m in [0, 1, 2, 0x7fff, 0x8000, 0xfffe, 0xffff] {
+            compare_mul(&[], log_m);
             compare_mul(&chunks, log_m);
         }
+        let mut multi_vector = vec![[0; SHARD_CHUNK_BYTES]; 65];
+        fill_chunks(&mut multi_vector, &mut Input::new(&[3, 0xff, 19, 0x80, 0]));
+        compare_mul(&multi_vector, 12_345);
     }
 
     #[test]
@@ -751,7 +911,14 @@ mod tests {
             (3, 4, 3, 7, 1),
             (2, 8, 5, 31, 3),
             (5, 16, 16, GF_ORDER - 16, 2),
-            (0, GF_ORDER, 1, 0, 1),
+            (1, 4, 4, 4, 0),
+            (1, 4, 0, 4, 1),
+            (1, 4, 4, 0, 1),
+            (2, 4, 3, 1, 65),
+            (3, 4, 2, 2, 1),
+            (2, 4, 4, 4, 65),
+            (1, 16, 13, 0, 1),
+            (2, 64, 37, 17, 17),
         ] {
             let shard_count = pos + size + 2;
             let mut input = vec![[0; SHARD_CHUNK_BYTES]; shard_count * shard_chunks];
@@ -769,6 +936,13 @@ mod tests {
     }
 
     #[test]
+    fn maximum_domain_transform_regression() {
+        let mut input = vec![[0; SHARD_CHUNK_BYTES]; GF_ORDER];
+        fill_chunks(&mut input, &mut Input::new(&[3, 0xff, 19, 0x80, 0]));
+        compare_transform(&input, GF_ORDER, 1, 0, GF_ORDER, 1, 0);
+    }
+
+    #[test]
     fn optimized_eval_poly_matches_naive() {
         for truncated_size in [0, 1, 257] {
             let mut input: Box<[GfElement; GF_ORDER]> =
@@ -776,28 +950,7 @@ mod tests {
             for (index, value) in input.iter_mut().enumerate().take(truncated_size) {
                 *value = [0, 1, 2, 0x7fff, 0x8000, 0xfffe, 0xffff][index % 7];
             }
-            compare_eval_poly::<NoSimd>(&input, truncated_size);
-            compare_eval_poly::<DefaultEngine>(&input, truncated_size);
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                if std::arch::is_x86_feature_detected!("avx512f")
-                    && std::arch::is_x86_feature_detected!("avx512vl")
-                    && std::arch::is_x86_feature_detected!("avx512bw")
-                    && std::arch::is_x86_feature_detected!("gfni")
-                {
-                    compare_eval_poly::<Avx512>(&input, truncated_size);
-                }
-                if std::arch::is_x86_feature_detected!("avx2") {
-                    compare_eval_poly::<Avx2>(&input, truncated_size);
-                }
-                if std::arch::is_x86_feature_detected!("ssse3") {
-                    compare_eval_poly::<Ssse3>(&input, truncated_size);
-                }
-            }
-            #[cfg(target_arch = "aarch64")]
-            if std::arch::is_aarch64_feature_detected!("neon") {
-                compare_eval_poly::<Neon>(&input, truncated_size);
-            }
+            each_engine!(compare_eval_poly(&input, truncated_size));
         }
     }
 
@@ -805,18 +958,18 @@ mod tests {
     fn rate_engines_match_naive_with_partial_chunks_and_mixed_erasures() {
         let high_a = fixed_case(11, 3, 66, 3);
         let high_b = fixed_case(9, 4, 130, 5);
-        exercise_all_engines!(exercise_high, &high_a, &high_b);
+        each_engine!(rate_matches_portable(RateKind::High, &high_a, &high_b));
 
         let low_a = fixed_case(3, 11, 126, 7);
         let low_b = fixed_case(4, 9, 62, 11);
-        exercise_all_engines!(exercise_low, &low_a, &low_b);
+        each_engine!(rate_matches_portable(RateKind::Low, &low_a, &low_b));
     }
 
     #[test]
     fn default_rate_switches_and_recovery_decoder_reuses_work() {
         let high = fixed_case(11, 3, 66, 13);
         let low = fixed_case(3, 11, 130, 17);
-        exercise_all_engines!(exercise_default, &high, &low);
+        each_engine!(rate_matches_portable(RateKind::Default, &high, &low));
         exercise_recovery_reuse(&high, &low);
     }
 }

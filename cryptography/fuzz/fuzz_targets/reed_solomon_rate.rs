@@ -1,8 +1,12 @@
 #![no_main]
 
-use commonware_cryptography::reed_solomon::fuzz::differential_rate;
+use arbitrary::{Arbitrary, Unstructured};
+use commonware_cryptography::reed_solomon::fuzz::RatePlan;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: &[u8]| {
-    differential_rate(input);
+    let mut u = Unstructured::new(input);
+    if let Ok(plan) = RatePlan::arbitrary(&mut u) {
+        let _ = plan.run(&mut u);
+    }
 });

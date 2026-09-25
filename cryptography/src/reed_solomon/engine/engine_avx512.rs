@@ -107,11 +107,16 @@ struct LutGfni {
 impl From<&MultiplyGfni> for LutGfni {
     #[inline(always)]
     fn from(lut: &MultiplyGfni) -> Self {
-        // SAFETY: Callers execute within a GFNI target-feature boundary, and each operand is exactly 64 bytes.
+        // SAFETY: Callers execute within a GFNI target-feature boundary.
         unsafe {
+            let direct_low = _mm256_set1_epi64x(lut.low_from_low.cast_signed());
+            let direct_high = _mm256_set1_epi64x(lut.high_from_high.cast_signed());
+            let cross_low = _mm256_set1_epi64x(lut.low_from_high.cast_signed());
+            let cross_high = _mm256_set1_epi64x(lut.high_from_low.cast_signed());
+
             Self {
-                direct: _mm512_loadu_si512(lut.direct.as_ptr().cast::<__m512i>()),
-                cross: _mm512_loadu_si512(lut.cross.as_ptr().cast::<__m512i>()),
+                direct: _mm512_inserti64x4(_mm512_castsi256_si512(direct_low), direct_high, 1),
+                cross: _mm512_inserti64x4(_mm512_castsi256_si512(cross_low), cross_high, 1),
             }
         }
     }
@@ -441,9 +446,6 @@ impl Avx512 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::engine::Naive;
-    use commonware_utils::TestRng;
-    use rand::Rng as _;
 
     #[test]
     fn gfni_all_multipliers_basis() {
@@ -466,79 +468,6 @@ mod tests {
                 let actual = actual[0][bit] as u16 | (actual[0][32 + bit] as u16) << 8;
                 let expected = tables::mul(1u16 << bit, log_m, &exp_log.exp, &exp_log.log);
                 assert_eq!(actual, expected, "log_m={log_m} input_bit={bit}");
-            }
-        }
-    }
-
-    #[test]
-    fn multiplication_matches_naive() {
-        if !super::super::cpu_features::avx512() {
-            return;
-        }
-        let gfni = Avx512::new();
-        let naive = Naive::new();
-        let mut rng = TestRng::new(8);
-
-        for chunk_count in [0, 1, 16, 256] {
-            let mut input = vec![[0u8; SHARD_CHUNK_BYTES]; chunk_count];
-            rng.fill_bytes(input.as_flattened_mut());
-            for log_m in [0, 1, 12_345, GF_MODULUS] {
-                let mut expected = input.clone();
-                let mut actual = input.clone();
-                naive.mul(&mut expected, log_m);
-                gfni.mul(&mut actual, log_m);
-                assert_eq!(actual, expected, "chunks={chunk_count} log_m={log_m}");
-            }
-        }
-    }
-
-    #[test]
-    fn transform_matches_naive() {
-        if !super::super::cpu_features::avx512() {
-            return;
-        }
-        let gfni = Avx512::new();
-        let naive = Naive::new();
-        let mut rng = TestRng::new(9);
-
-        for chunk_count in [1, 16, 256] {
-            let mut input = vec![[0u8; SHARD_CHUNK_BYTES]; 130 * chunk_count];
-            rng.fill_bytes(input.as_flattened_mut());
-
-            for skew_delta in [0, 257] {
-                for (inverse, truncated_size) in
-                    [(false, 128), (false, 77), (true, 128), (true, 77)]
-                {
-                    let mut expected = input.clone();
-                    let mut actual = input.clone();
-                    if inverse {
-                        expected[(1 + truncated_size) * chunk_count..129 * chunk_count]
-                            .fill([0; SHARD_CHUNK_BYTES]);
-                        actual[(1 + truncated_size) * chunk_count..129 * chunk_count]
-                            .fill([0; SHARD_CHUNK_BYTES]);
-                    }
-                    let mut expected_shards =
-                        ShardsRefMut::new(130, chunk_count, expected.as_mut_slice());
-                    let mut actual_shards =
-                        ShardsRefMut::new(130, chunk_count, actual.as_mut_slice());
-
-                    if inverse {
-                        naive.ifft(&mut expected_shards, 1, 128, truncated_size, skew_delta);
-                        gfni.ifft(&mut actual_shards, 1, 128, truncated_size, skew_delta);
-                    } else {
-                        naive.fft(&mut expected_shards, 1, 128, truncated_size, skew_delta);
-                        gfni.fft(&mut actual_shards, 1, 128, truncated_size, skew_delta);
-                    }
-
-                    let compared_end = if inverse { 129 } else { 1 + truncated_size };
-                    assert_eq!(
-                        &actual[chunk_count..compared_end * chunk_count],
-                        &expected[chunk_count..compared_end * chunk_count],
-                        "inverse={inverse} chunks={chunk_count} skew={skew_delta}"
-                    );
-                    assert_eq!(&actual[..chunk_count], &input[..chunk_count]);
-                    assert_eq!(&actual[129 * chunk_count..], &input[129 * chunk_count..]);
-                }
             }
         }
     }
