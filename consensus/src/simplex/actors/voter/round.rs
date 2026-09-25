@@ -1771,7 +1771,7 @@ mod tests {
     }
 
     #[test]
-    fn construct_finalize_allows_certified_recovered_proposal() {
+    fn certified_recovered_proposal_allows_finalize_then_notarize() {
         let mut rng = test_rng();
         let namespace = b"ns";
         let Fixture {
