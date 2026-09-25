@@ -1,6 +1,6 @@
 //! Low-level building blocks for Reed-Solomon encoding/decoding.
 //!
-//! **This is an advanced module which is not needed for [simple usage] or [basic usage].**
+//! See [basic usage] for encoding and decoding with automatic engine selection.
 //!
 //! This module is relevant if you want to
 //! - use [`rate`] module and need an [`Engine`] to use with it.
@@ -26,7 +26,6 @@
 //!     - Default engine which is used when no specific engine is given.
 //!     - Automatically selects best engine at runtime.
 //!
-//! [simple usage]: crate::reed_solomon#simple-usage
 //! [basic usage]: crate::reed_solomon#basic-usage
 //! [`Encoder`]: crate::reed_solomon::Encoder
 //! [`Decoder`]: crate::reed_solomon::Decoder
@@ -114,7 +113,7 @@ pub const CANTOR_BASIS: [GfElement; GF_BITS] = [
 // ======================================================================
 // TYPE ALIASES - PUBLIC
 
-/// Galois field element.
+/// Galois field element expressed in the [`CANTOR_BASIS`].
 pub type GfElement = u16;
 
 // ======================================================================
@@ -134,15 +133,17 @@ pub trait Engine {
 
     /// In-place decimation-in-time FFT (fast Fourier transform).
     ///
-    /// - FFT is done on chunk `data[pos .. pos + size]`
-    /// - `size` must be `2^n`
-    /// - Before function call `data[pos .. pos + size]` must be valid.
-    /// - After function call
-    ///     - `data[pos .. pos + truncated_size]`
-    ///       contains valid FFT result.
-    ///     - `data[pos + truncated_size .. pos + size]`
-    ///       contains valid FFT result if this contained
-    ///       only `0u8`:s and garbage otherwise.
+    /// Transforms `data[pos..pos + size]`, producing the requested output prefix in
+    /// `data[pos..pos + truncated_size]`. The remaining shards in the transform block have
+    /// unspecified values. Shards outside the block are unchanged.
+    ///
+    /// A transform of size one is the identity and ignores `skew_delta`.
+    ///
+    /// # Panics
+    ///
+    /// If `size` is not a power of two in `1..=GF_ORDER`, `truncated_size > size`, or the
+    /// transform block is outside `data`. For `size > 1`, also panics if
+    /// `skew_delta > GF_ORDER - size`.
     fn fft(
         &self,
         data: &mut ShardsRefMut<'_>,
@@ -154,15 +155,15 @@ pub trait Engine {
 
     /// In-place decimation-in-time IFFT (inverse fast Fourier transform).
     ///
-    /// - IFFT is done on chunk `data[pos .. pos + size]`
-    /// - `size` must be `2^n`
-    /// - Before function call `data[pos .. pos + size]` must be valid.
-    /// - After function call
-    ///     - `data[pos .. pos + truncated_size]`
-    ///       contains valid IFFT result.
-    ///     - `data[pos + truncated_size .. pos + size]`
-    ///       contains valid IFFT result if this contained
-    ///       only `0u8`:s and garbage otherwise.
+    /// Transforms `data[pos..pos + size]`. Input shards in
+    /// `data[pos + truncated_size..pos + size]` must be zero. The full transform block then
+    /// contains the inverse result. Shards outside the block are unchanged.
+    ///
+    /// A transform of size one is the identity and ignores `skew_delta`.
+    ///
+    /// # Panics
+    ///
+    /// If the size, range, or skew requirements of [`Engine::fft`] are not met.
     fn ifft(
         &self,
         data: &mut ShardsRefMut<'_>,
@@ -172,13 +173,20 @@ pub trait Engine {
         skew_delta: usize,
     );
 
-    /// `x[] *= log_m`
+    /// Multiply every field element in `x` by the field element with logarithm `log_m`.
+    ///
+    /// Each chunk stores 32 low bytes followed by their 32 high bytes.
+    /// Exponents `0` and [`GF_MODULUS`] both represent the multiplicative identity.
     fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement);
 
     // ============================================================
     // PROVIDED
 
-    /// Evaluate polynomial.
+    /// Evaluate a polynomial whose entries at and after `truncated_size` are zero.
+    ///
+    /// # Panics
+    ///
+    /// If `truncated_size > GF_ORDER`.
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize)
     where
         Self: Sized,
@@ -187,7 +195,139 @@ pub trait Engine {
     }
 }
 
+#[inline]
+fn validate_transform(
+    data: &ShardsRefMut<'_>,
+    pos: usize,
+    size: usize,
+    truncated_size: usize,
+    skew_delta: usize,
+) {
+    assert!(size.is_power_of_two() && size <= GF_ORDER);
+    assert!(truncated_size <= size);
+    assert!(pos <= data.len() && size <= data.len() - pos);
+    assert!(size == 1 || skew_delta <= GF_ORDER - size);
+}
+
 // ======================================================================
 // TESTS
 
-// Engines are tested indirectly via roundtrip tests of HighRate and LowRate.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    fn invalid_transform(
+        shard_count: usize,
+        pos: usize,
+        size: usize,
+        truncated_size: usize,
+        skew_delta: usize,
+    ) {
+        let engines: [&dyn Engine; 2] = [&NoSimd::new(), &Naive::new()];
+        for engine in engines {
+            for inverse in [false, true] {
+                let mut shards = ShardsRefMut::new(shard_count, 0, &mut []);
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    if inverse {
+                        engine.ifft(&mut shards, pos, size, truncated_size, skew_delta);
+                    } else {
+                        engine.fft(&mut shards, pos, size, truncated_size, skew_delta);
+                    }
+                }));
+                assert!(
+                    result.is_err(),
+                    "invalid transform accepted (inverse={inverse})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transform_zero_size() {
+        invalid_transform(4, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn transform_non_power_of_two_size() {
+        invalid_transform(4, 0, 3, 0, 0);
+    }
+
+    #[test]
+    fn transform_size_exceeds_field() {
+        invalid_transform(GF_ORDER * 2, 0, GF_ORDER * 2, 0, 0);
+    }
+
+    #[test]
+    fn transform_range_out_of_bounds() {
+        for pos in [3, 4, usize::MAX] {
+            invalid_transform(4, pos, 2, 0, 0);
+        }
+    }
+
+    #[test]
+    fn transform_truncation_out_of_bounds() {
+        invalid_transform(4, 0, 2, 3, 0);
+    }
+
+    #[test]
+    fn transform_skew_out_of_bounds() {
+        for skew_delta in [GF_ORDER - 1, usize::MAX] {
+            invalid_transform(4, 0, 2, 0, skew_delta);
+        }
+    }
+
+    #[test]
+    fn transform_empty_shards_and_identity() {
+        let engines: [&dyn Engine; 2] = [&NoSimd::new(), &Naive::new()];
+        for engine in engines {
+            let mut empty = ShardsRefMut::new(GF_ORDER + 3, 0, &mut []);
+            engine.fft(&mut empty, 3, GF_ORDER, 0, 0);
+            engine.ifft(&mut empty, 3, GF_ORDER, 0, 0);
+
+            for truncated_size in [0, 1] {
+                let mut data = [[17; SHARD_CHUNK_BYTES]; 3];
+                let mut shards = ShardsRefMut::new(3, 1, &mut data);
+                engine.fft(&mut shards, 1, 1, truncated_size, usize::MAX);
+                engine.ifft(&mut shards, 1, 1, 1, usize::MAX);
+                assert_eq!(data, [[17; SHARD_CHUNK_BYTES]; 3]);
+            }
+        }
+    }
+
+    #[test]
+    fn eval_poly_feature_guard() {
+        let mut input = Box::new([0; GF_ORDER]);
+        input[..4].copy_from_slice(&[1, 0, 1, 1]);
+        let mut expected = input.clone();
+        NoSimd::eval_poly(&mut expected, 4);
+
+        type Evaluate = fn(&mut [GfElement; GF_ORDER], usize);
+        let evaluators: &[(Evaluate, bool)] = &[
+            (DefaultEngine::eval_poly, true),
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            (Avx2::eval_poly, cpu_features::avx2()),
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            (Ssse3::eval_poly, cpu_features::ssse3()),
+            #[cfg(target_arch = "aarch64")]
+            (Neon::eval_poly, cpu_features::neon()),
+        ];
+
+        for (evaluate, supported) in evaluators {
+            let mut actual = input.clone();
+            if *supported {
+                evaluate(&mut actual, 4);
+                assert_eq!(actual, expected);
+            } else {
+                assert!(catch_unwind(AssertUnwindSafe(|| evaluate(&mut actual, 4))).is_err());
+                assert_eq!(actual, input);
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn eval_poly_truncation_out_of_bounds() {
+        utils::eval_poly(&mut [0; GF_ORDER], GF_ORDER + 1);
+    }
+}

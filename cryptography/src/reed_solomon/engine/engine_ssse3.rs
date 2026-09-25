@@ -18,6 +18,8 @@ use core::iter::zip;
 /// [`NoSimd`] but takes advantage of the x86 SSSE3 SIMD instructions.
 ///
 /// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
+///
+/// Construction and [`Engine::eval_poly`] panic if SSSE3 is unavailable.
 #[derive(Clone, Copy)]
 pub struct Ssse3 {
     mul128: &'static Mul128,
@@ -51,7 +53,9 @@ impl Engine for Ssse3 {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
+
+        // SAFETY: Construction checks SSSE3 support, and the transform dimensions are valid.
         unsafe {
             self.fft_private_ssse3(data, pos, size, truncated_size, skew_delta);
         }
@@ -65,7 +69,9 @@ impl Engine for Ssse3 {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
+
+        // SAFETY: Construction checks SSSE3 support, and the transform dimensions are valid.
         unsafe {
             self.ifft_private_ssse3(data, pos, size, truncated_size, skew_delta);
         }
@@ -79,7 +85,9 @@ impl Engine for Ssse3 {
     }
 
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
-        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
+        assert!(super::cpu_features::ssse3());
+
+        // SAFETY: The runtime feature check establishes SSSE3 support.
         unsafe { Self::eval_poly_ssse3(erasures, truncated_size) }
     }
 }

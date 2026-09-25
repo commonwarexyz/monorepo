@@ -1,6 +1,39 @@
-//! Vendored version of [`reed_solomon_simd`].
+//! Encode and reconstruct shards using Reed-Solomon erasure coding over GF(2^16).
+//!
+//! [`Encoder`] and [`Decoder`] select a rate and CPU engine automatically. Every shard
+//! must have the same nonzero, even byte length. [`Encoder::supports`] checks whether
+//! a pair of original and recovery shard counts is supported.
+//!
+//! Decoding requires at least as many distinct shards as there were original shards.
+//! All supplied shards must belong to the same codeword: this module reconstructs
+//! missing shards and does not authenticate their contents.
+//!
+//! # Basic Usage
+//!
+//! ```
+//! use commonware_cryptography::reed_solomon::{Decoder, Encoder};
+//!
+//! let originals = [[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]];
+//! let mut encoder = Encoder::new(2, 1, 6)?;
+//! for shard in &originals {
+//!     encoder.add_original_shard(shard)?;
+//! }
+//! let encoded = encoder.encode()?;
+//!
+//! let mut decoder = Decoder::new(2, 1, 6)?;
+//! decoder.add_original_shard(0, originals[0])?;
+//! decoder.add_recovery_shard(0, encoded.recovery(0).unwrap())?;
+//! let decoded = decoder.decode()?.unwrap();
+//! assert_eq!(decoded.original(1), Some(originals[1].as_slice()));
+//! # Ok::<(), commonware_cryptography::reed_solomon::Error>(())
+//! ```
+//!
+//! Result objects borrow the working buffers. Dropping a result resets its encoder
+//! or decoder for another round with the same configuration.
 //!
 //! # Changes vs. Upstream
+//!
+//! This module vendors [`reed_solomon_simd`].
 //!
 //! - Moved the crate into `commonware_cryptography::reed_solomon` and rewrote internal
 //!   `crate::` paths accordingly.
@@ -12,6 +45,8 @@
 //! - Uses [`thiserror`] for error display formatting.
 //! - Renamed upstream `ReedSolomonEncoder` and `ReedSolomonDecoder` to [`Encoder`] and [`Decoder`].
 //! - Uses plain code references for cfg-gated SIMD engine docs so rustdoc works on all targets.
+//! - Validates transform domains, shard ranges, and working-space sizes at their public boundaries.
+//! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd
 //! [`thiserror`]: https://docs.rs/thiserror
@@ -32,6 +67,9 @@ use thiserror::Error;
 #[cfg(test)]
 #[macro_use]
 mod test_util;
+
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz;
 
 mod decoder_result;
 mod encoder_result;
@@ -89,8 +127,9 @@ pub enum Error {
         index: usize,
     },
 
-    /// Configured shard size is invalid: size must be non-zero and even.
-    #[error("invalid shard size: {shard_bytes} bytes (must non-zero and multiple of 2)")]
+    /// Configured shard size is zero, odd, or requires more working space than a single
+    /// allocation can hold.
+    #[error("invalid shard size: {shard_bytes} bytes (zero, odd, or working space too large)")]
     InvalidShardSize {
         /// Configured shard size.
         shard_bytes: usize,

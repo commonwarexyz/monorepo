@@ -10,7 +10,7 @@
 //! | [`Log`]      | 128 kiB | yes              | yes              | all                |
 //! | [`LogWalsh`] | 128 kiB | -                | yes              | all                |
 //! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`NoSimd`]         |
-//! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Avx2` `Ssse3`     |
+//! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Ssse3` |
 //! | [`Skew`]     | 128 kiB | yes              | yes              | all                |
 //!
 //! [`NoSimd`]: crate::reed_solomon::engine::NoSimd
@@ -46,15 +46,17 @@ pub type Exp = [GfElement; GF_ORDER];
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Log = [GfElement; GF_ORDER];
 
-/// Used by `Avx2` and `Ssse3` engines for multiplications.
+/// Nibble multiplication tables for SIMD engines.
 pub type Mul128 = [Multiply128lutT; GF_ORDER];
 
-/// Elements of the Mul128 table
+/// Multiplication lookup bytes for the four nibbles of a field element.
+///
+/// Each `u128` stores 16 bytes in native byte order, indexed by the nibble value.
 #[derive(Clone, Debug)]
 pub struct Multiply128lutT {
-    /// Lower half of `GfElements`
+    /// Low product bytes for each nibble position.
     pub lo: [u128; 4],
-    /// Upper half of `GfElements`
+    /// High product bytes for each nibble position.
     pub hi: [u128; 4],
 }
 
@@ -161,7 +163,7 @@ pub fn get_skew() -> &'static Skew {
 // ======================================================================
 // FUNCTIONS - PUBLIC - math
 
-/// Calculates `x * log_m` using [`Exp`] and [`Log`] tables.
+/// Multiply `x` by `exp[log_m]` using [`Exp`] and [`Log`] tables.
 #[inline(always)]
 pub fn mul(x: GfElement, log_m: GfElement, exp: &Exp, log: &Log) -> GfElement {
     if x == 0 {
@@ -273,8 +275,8 @@ fn initialize_mul128() -> Box<Mul128> {
                 prod_lo[x] = prod as u8;
                 prod_hi[x] = (prod >> 8) as u8;
             }
-            mul128[log_m as usize].lo[i] = u128::from_le_bytes(prod_lo);
-            mul128[log_m as usize].hi[i] = u128::from_le_bytes(prod_hi);
+            mul128[log_m as usize].lo[i] = u128::from_ne_bytes(prod_lo);
+            mul128[log_m as usize].hi[i] = u128::from_ne_bytes(prod_hi);
         }
     }
 
@@ -320,4 +322,24 @@ fn initialize_skew() -> Box<Skew> {
     }
 
     skew
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mul128_byte_layout() {
+        let scalar = get_mul16();
+        for (vector, scalar) in get_mul128().iter().zip(scalar.iter()) {
+            for ((lo, hi), products) in vector.lo.iter().zip(&vector.hi).zip(scalar) {
+                let lo = lo.to_ne_bytes();
+                let hi = hi.to_ne_bytes();
+                for (index, product) in products.iter().enumerate() {
+                    assert_eq!(lo[index], *product as u8);
+                    assert_eq!(hi[index], (product >> 8) as u8);
+                }
+            }
+        }
+    }
 }
