@@ -1203,19 +1203,18 @@ mod tests {
     /// Init durably persists the bootstrap witness, so while syncs park the returned future
     /// must be driven with [drive_pending_syncs] (or the mock unblocked first).
     fn open_delayed_db(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let witness_cfg = witness_config(partition, context);
+        let witness_cfg = witness_config(partition, &context);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
             commit_codec_config: (),
         };
         let context = DelayedSyncContext {
-            inner: context.child(label),
+            inner: context,
             pending: pending.clone(),
         };
         DelayedDb::init(context, cfg, None)
@@ -1259,7 +1258,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-overlap";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1298,7 +1297,7 @@ mod tests {
             handle.await.unwrap();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.target(), second_target);
@@ -1314,7 +1313,7 @@ mod tests {
             let partition = "keyless-start-sync-recovery";
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", partition, &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), partition, &pending)
                 .await
                 .unwrap();
             db = apply_append(db, 1).await;
@@ -1325,7 +1324,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1342,7 +1341,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-fail", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "keyless-start-sync-fail", &pending)
                 .await
                 .unwrap();
             db = apply_append(db, 1).await;
@@ -1379,7 +1378,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-noop-drain";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1404,7 +1403,7 @@ mod tests {
             assert!(pending.completions() > completions_before);
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1418,8 +1417,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(
-                &ctx,
-                "delayed",
+                ctx.child("delayed"),
                 "keyless-start-sync-noop-sync-fail",
                 &pending,
             );
@@ -1447,7 +1445,11 @@ mod tests {
     fn test_compact_start_sync_then_noop_commit_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-noop-commit", &pending);
+            let open = open_delayed_db(
+                ctx.child("delayed"),
+                "keyless-start-sync-noop-commit",
+                &pending,
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1481,7 +1483,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-noop-second";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1503,7 +1505,7 @@ mod tests {
             assert_eq!(journal.size(), 2);
             drop(journal);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1517,7 +1519,11 @@ mod tests {
     fn test_compact_start_sync_metadata_failure_resurfaces_on_commit() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-meta-fail", &pending);
+            let open = open_delayed_db(
+                ctx.child("delayed"),
+                "keyless-start-sync-meta-fail",
+                &pending,
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1567,8 +1573,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(
-                &ctx,
-                "delayed",
+                ctx.child("delayed"),
                 "keyless-start-sync-dropped-meta-fail",
                 &pending,
             );
@@ -1596,9 +1601,10 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-proven", &pending)
-                .await
-                .unwrap();
+            let mut db =
+                open_delayed_db(ctx.child("delayed"), "keyless-start-sync-proven", &pending)
+                    .await
+                    .unwrap();
             db = apply_append(db, 1).await;
 
             let handle;
@@ -1640,7 +1646,7 @@ mod tests {
                 source.target()
             };
             let (_, size_b, pinned_b) = {
-                let journal = open_witness_journal(context.child("src_tip"), src).await;
+                let journal = open_witness_journal(context.child("tip"), src).await;
                 witness::tests::tip(&journal).await
             };
             assert_eq!(size_b, target_b.size);

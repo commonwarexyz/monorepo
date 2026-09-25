@@ -167,7 +167,7 @@ async fn init_tracked<E: Context>(
     cfg: Config<()>,
 ) -> Result<Oversized<E, TestEntry, TestValue>, JournalError> {
     let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-        &context,
+        context.child("oversized"),
         cfg,
         METADATA_PARTITION.into(),
         ReadOptions::default(),
@@ -589,7 +589,7 @@ fn fuzz(input: FuzzInput) {
                                 oversized = drive_pending_syncs(&pending, async {
                                     let bounded_context = context.child("capped");
                                     let mut replay = Oversized::init_with_metadata_at_most(
-                                        &bounded_context,
+                                        bounded_context.child("oversized"),
                                         config(&context),
                                         METADATA_PARTITION.into(),
                                         ReadOptions::default(),

@@ -798,7 +798,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// durable marker are retained after their cross-journal boundary is proven. Entries above it
     /// are value-validated in order and the first invalid entry truncates its section.
     pub async fn init_with_metadata(
-        context: &E,
+        context: E,
         cfg: Config<V::Cfg>,
         metadata_partition: String,
         read_options: ReadOptions,
@@ -814,7 +814,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// lowered markers are durable. The caller must drain the replay and call
     /// [Replay::finish_tracked].
     pub async fn init_with_metadata_at_most(
-        context: &E,
+        context: E,
         cfg: Config<V::Cfg>,
         metadata_partition: String,
         read_options: ReadOptions,
@@ -834,7 +834,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Open marker metadata, apply an optional retained bound, and start the required validation
     /// replay without publishing the paired journals.
     async fn init_tracked_inner(
-        context: &E,
+        context: E,
         cfg: Config<V::Cfg>,
         metadata_partition: String,
         read_options: ReadOptions,
@@ -881,7 +881,7 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
                 ceiling,
             }
         };
-        let mut journal = Pending::init(context.child("oversized"), cfg, recovery).await?;
+        let mut journal = Pending::init(context, cfg, recovery).await?;
 
         // Select the paired boundary before publishing lower markers or releasing either suffix.
         if let Some((section, end)) = cap {
@@ -1633,7 +1633,7 @@ mod tests {
             let cfg = test_cfg(&context);
             let seed_context = context.child("seed");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                &seed_context,
+                seed_context.child("oversized"),
                 cfg.clone(),
                 "overshooting-cap-markers".into(),
                 ReadOptions::default(),
@@ -1679,7 +1679,7 @@ mod tests {
             // Ordinary marker-backed initialization retains committed values for lazy reads.
             let ordinary_context = context.child("ordinary");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                &ordinary_context,
+                ordinary_context.child("oversized"),
                 cfg.clone(),
                 "overshooting-cap-markers".into(),
                 ReadOptions::default(),
@@ -1696,7 +1696,7 @@ mod tests {
             // A cap beyond the journal end must preserve the same lazy validation contract.
             let cap_context = context.child("cap");
             let result = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
-                &cap_context,
+                cap_context.child("oversized"),
                 cfg,
                 "overshooting-cap-markers".into(),
                 ReadOptions::default(),
@@ -1719,7 +1719,7 @@ mod tests {
                 let cfg = test_cfg(&context);
                 let seed = context.child("seed");
                 let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                    &seed,
+                    seed.child("oversized"),
                     cfg.clone(),
                     "markers".into(),
                     ReadOptions::default(),
@@ -1748,7 +1748,7 @@ mod tests {
                     commonware_runtime::mocks::RecordingContext::new(context);
                 let reopen = context.child("reopen");
                 let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
-                    &reopen,
+                    reopen.child("oversized"),
                     cfg,
                     "markers".into(),
                     ReadOptions::default(),
@@ -1778,7 +1778,7 @@ mod tests {
             let cfg = test_cfg(&context);
             let seed_context = context.child("seed");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                &seed_context,
+                seed_context.child("oversized"),
                 cfg.clone(),
                 "capped-markers".into(),
                 ReadOptions::default(),
@@ -1800,7 +1800,7 @@ mod tests {
             _ = journal.sync_all().await.unwrap();
             let cap_context = context.child("cap");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
-                &cap_context,
+                cap_context.child("oversized"),
                 cfg.clone(),
                 "capped-markers".into(),
                 ReadOptions::default(),
@@ -1820,7 +1820,7 @@ mod tests {
             // A normal restart must reproduce the selected prefix and append at its boundary.
             let restart_context = context.child("restart");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                &restart_context,
+                restart_context.child("oversized"),
                 cfg.clone(),
                 "capped-markers".into(),
                 ReadOptions::default(),
@@ -1844,7 +1844,7 @@ mod tests {
             // A second restart must retain the append made after bounded initialization.
             let verify_context = context.child("verify");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                &verify_context,
+                verify_context.child("oversized"),
                 cfg,
                 "capped-markers".into(),
                 ReadOptions::default(),
@@ -2240,7 +2240,7 @@ mod tests {
                 deterministic::Runner::default().start_and_recover(|context| async move {
                     let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
                         let mut replay = Oversized::init_with_metadata(
-                            &context,
+                            context.child("oversized"),
                             test_cfg(&context),
                             "cap-lost-values".into(),
                             ReadOptions::default(),
@@ -2272,7 +2272,7 @@ mod tests {
             deterministic::Runner::from(checkpoint).start(|context| async move {
                 let journal: Oversized<_, TestEntry, TestValue> = if tracked {
                     let mut replay = Oversized::init_with_metadata_at_most(
-                        &context,
+                        context.child("oversized"),
                         test_cfg(&context),
                         "cap-lost-values".into(),
                         ReadOptions::default(),
@@ -2360,7 +2360,7 @@ mod tests {
 
             let cap_context = context.child("cap");
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
-                &cap_context,
+                cap_context.child("oversized"),
                 cfg.clone(),
                 "cap-corrupt-floor".into(),
                 ReadOptions::default(),
@@ -3169,7 +3169,7 @@ mod tests {
 
             // Publish a floor of one committed item for each section in `markers`.
             let mut metadata: Metadata<_, SectionKey, u64> = Metadata::init(
-                context.child("seed_markers"),
+                context.child("markers"),
                 MetadataConfig {
                     partition: "bounded-markers".into(),
                     codec_config: (),
@@ -3204,7 +3204,7 @@ mod tests {
             let mut replay = drive_pending_syncs(
                 &pending,
                 Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
-                    &delayed,
+                    delayed.child("oversized"),
                     cfg.clone(),
                     "bounded-markers".into(),
                     ReadOptions::default(),
@@ -3248,7 +3248,7 @@ mod tests {
             let mut replay = drive_pending_syncs(
                 &pending,
                 Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                    &delayed,
+                    delayed.child("oversized"),
                     cfg.clone(),
                     "bounded-markers".into(),
                     ReadOptions::default(),
@@ -3322,11 +3322,11 @@ mod tests {
             let faults = WriteFaults::default();
             faults.arm();
             let faulty = WriteFaultContext {
-                inner: context.child("failed_open"),
+                inner: context.child("failed"),
                 faults,
             };
             let result = Oversized::<_, TestEntry, TestValue>::init_with_metadata_at_most(
-                &faulty,
+                faulty.child("oversized"),
                 cfg.clone(),
                 "failed-bounded-markers".into(),
                 ReadOptions::default(),
@@ -3585,7 +3585,7 @@ mod tests {
                 // Open each publication mode and establish an empty validated journal.
                 let mut journal: Oversized<_, TestEntry, TestValue> = if tracked {
                     let mut replay = Oversized::init_with_metadata(
-                        &context,
+                        context.child("oversized"),
                         cfg.clone(),
                         "replay-markers".into(),
                         ReadOptions::default(),
@@ -3633,7 +3633,7 @@ mod tests {
                 // Reinitialization must publish all four paired entries in either mode.
                 let journal: Oversized<_, TestEntry, TestValue> = if tracked {
                     let mut replay = Oversized::init_with_metadata(
-                        &context,
+                        context.child("oversized"),
                         cfg,
                         "replay-markers".into(),
                         ReadOptions::default(),
@@ -3676,7 +3676,7 @@ mod tests {
             _ = journal.sync_all().await.unwrap();
 
             let replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                &context,
+                context.child("oversized"),
                 cfg.clone(),
                 "completion-markers".into(),
                 ReadOptions::default(),
@@ -3689,7 +3689,7 @@ mod tests {
             ));
 
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                &context,
+                context.child("oversized"),
                 cfg.clone(),
                 "completion-markers".into(),
                 ReadOptions::default(),
@@ -3702,7 +3702,7 @@ mod tests {
             assert!(matches!(replay.finish(), Err(Error::ReplayFailed)));
 
             let mut replay = Oversized::<_, TestEntry, TestValue>::init_with_metadata(
-                &context,
+                context.child("oversized"),
                 cfg.clone(),
                 "completion-markers".into(),
                 ReadOptions::default(),

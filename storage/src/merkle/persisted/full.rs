@@ -17,7 +17,7 @@ use crate::{
     Context,
     journal::{
         Error as JError,
-        authenticated::{Backing as _, BackingRecovery as _, covers},
+        authenticated::{Backing as _, BackingRecovery as _, Stored},
         contiguous::{
             Contiguous, Many,
             fixed::{Config as JConfig, Journal, Recovery as JournalRecovery},
@@ -179,14 +179,6 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     pub(crate) strategy: S,
 }
 
-/// The node journal as sync recovery finds it.
-enum Nodes<E: Context, D: Digest> {
-    /// Stored nodes that may serve the range or its boundary pins, opened bounded at the range end.
-    Opened(Box<JournalRecovery<E, D>>),
-    /// Stored nodes that cannot serve the range, left unopened until the reset.
-    Unopened(E),
-}
-
 /// A validated Merkle prefix whose storage has not yet been deliberately truncated.
 pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
     /// Node journal that may extend beyond the greatest complete tree.
@@ -310,7 +302,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Metadata records a leaf pruning boundary. Reject caps that cannot retain it before
         // opening the node journal.
         let metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.child("merkle_metadata"),
+            context.child("metadata"),
             MConfig {
                 partition: cfg.metadata_partition,
                 codec_config: ((0..).into(), ()),
@@ -340,7 +332,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             .map(|leaves| Position::<F>::try_from(leaves).map_or(u64::MAX, |position| *position));
         let journal = Box::new(
             Journal::<E, D>::recover(
-                context.child("merkle_journal"),
+                context.child("journal"),
                 JConfig {
                     partition: cfg.journal_partition,
                     items_per_blob: cfg.items_per_blob,
@@ -473,13 +465,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         let prune_loc = cfg.range.start();
         let prune_pos = Position::try_from(prune_loc)?;
         let end_pos = Position::try_from(cfg.range.end())?;
-        let journal_cfg = JConfig {
-            partition: cfg.config.journal_partition.clone(),
-            items_per_blob: cfg.config.items_per_blob,
-            write_buffer: cfg.config.write_buffer,
-            replay_buffer: cfg.config.replay_buffer,
-            page_cache: cfg.config.page_cache.clone(),
-        };
 
         // Load metadata before deciding whether to open the journal. Boundary pins missing
         // from metadata may still be recoverable from nodes before the sync range.
@@ -487,7 +472,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             partition: cfg.config.metadata_partition,
             codec_config: ((0..).into(), ()),
         };
-        let mut metadata = Metadata::init(context.child("merkle_metadata"), metadata_cfg).await?;
+        let mut metadata = Metadata::init(context.child("metadata"), metadata_cfg).await?;
         let nodes_to_pin_persisted: Vec<_> = F::nodes_to_pin(prune_loc).collect();
 
         // Without caller pins, every boundary pin missing from metadata must come from the
@@ -504,19 +489,22 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         } else {
             prune_pos
         };
-        let journal_context = context.child("merkle_journal");
-        let span = Journal::<E, D>::span(&journal_context, &journal_cfg).await?;
-        let journal = if covers(&span, *journal_probe) {
-            Nodes::Opened(Box::new(
-                Journal::<E, D>::recover(journal_context, journal_cfg.clone(), Some(*end_pos))
-                    .await?,
-            ))
-        } else {
-            Nodes::Unopened(journal_context)
-        };
+        let journal = Stored::<E, Journal<E, D>>::open(
+            context.child("journal"),
+            JConfig {
+                partition: cfg.config.journal_partition,
+                items_per_blob: cfg.config.items_per_blob,
+                write_buffer: cfg.config.write_buffer,
+                replay_buffer: cfg.config.replay_buffer,
+                page_cache: cfg.config.page_cache,
+            },
+            *journal_probe,
+            *end_pos,
+        )
+        .await?;
         let opened = match &journal {
-            Nodes::Opened(journal) => Some(journal.as_ref()),
-            Nodes::Unopened(_) => None,
+            Stored::Opened(journal) => Some(journal),
+            Stored::Unopened { .. } => None,
         };
 
         // Coverage places an opened journal's start at or below the sync start, and the open caps
@@ -569,10 +557,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         // Pins must be durable before reset or pruning removes their journal sources.
         let metadata = metadata.sync().await?;
         let mut journal = match journal {
-            Nodes::Opened(journal) if reset => journal.clear_to_size(*prune_pos).await?,
-            Nodes::Opened(journal) => journal.truncate(*journal_size).await?,
-            Nodes::Unopened(journal_context) => {
-                Box::new(Journal::<E, D>::clear(journal_context, journal_cfg, *prune_pos).await?)
+            Stored::Opened(journal) if reset => Box::new(journal).clear_to_size(*prune_pos).await?,
+            Stored::Opened(journal) => Box::new(journal).truncate(*journal_size).await?,
+            Stored::Unopened { context, cfg } => {
+                Box::new(Journal::<E, D>::clear(context, cfg, *prune_pos).await?)
             }
         };
         (journal, _) = journal.prune(*prune_pos).await?;
@@ -4213,7 +4201,7 @@ mod tests {
             // tail below `end_pos` is a crash shape rather than corruption.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
-                inner: context.child("seed_delayed"),
+                inner: context.child("seeding"),
                 pending: pending.clone(),
             };
             let merkle = drive_pending_syncs(
@@ -4265,7 +4253,7 @@ mod tests {
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
-                inner: context.child("sync_delayed"),
+                inner: context.child("syncing"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(
@@ -4339,7 +4327,7 @@ mod tests {
             // to leaf 30. The delayed context also parks the data sync of the `start_sync` below.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
-                inner: context.child("seed_delayed"),
+                inner: context.child("seeding"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(
@@ -4421,7 +4409,7 @@ mod tests {
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
-                inner: context.child("sync_delayed"),
+                inner: context.child("syncing"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(
@@ -4524,7 +4512,7 @@ mod tests {
             // tail is a crash shape rather than corruption.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
-                inner: context.child("seed_delayed"),
+                inner: context.child("seeding"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(
@@ -4587,7 +4575,7 @@ mod tests {
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
-                inner: context.child("sync_delayed"),
+                inner: context.child("syncing"),
                 pending: pending.clone(),
             };
             let mut merkle = drive_pending_syncs(

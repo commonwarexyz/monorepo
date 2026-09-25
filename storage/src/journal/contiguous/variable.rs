@@ -1230,7 +1230,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
     /// Returns [Error::Corruption] when the offsets watermark acknowledges items above the
     /// retained start but no data blob exists.
     #[commonware_macros::stability(ALPHA)]
-    pub(crate) async fn span(context: &E, cfg: &Config<V::Cfg>) -> Result<Range<u64>, Error> {
+    pub(crate) async fn span(context: E, cfg: &Config<V::Cfg>) -> Result<Range<u64>, Error> {
         let per_blob = cfg.items_per_section.get();
         let offsets_context = context.child("offsets");
         let offsets_cfg = cfg.offsets_config();
@@ -1241,7 +1241,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         }
         let offsets =
             fixed::Recovery::<E, u64>::span(&offsets_context, &offsets_cfg, &checkpoint).await?;
-        let names = Partition::<E>::scan_names(context, &cfg.data_partition()).await?;
+        let names = Partition::<E>::scan_names(&context, &cfg.data_partition()).await?;
         let data = Partition::<E>::indices(names)?;
         let (Some(&oldest), Some(&newest)) = (data.first(), data.last()) else {
             if checkpoint
@@ -1269,51 +1269,38 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         let Self {
             context,
             cfg,
+            partition,
             pending,
             offsets,
             ..
         } = self;
 
-        // Reopening a blob fails while a handle from this view is alive.
+        // Reopening a blob fails while a handle from this view is alive, and the reopen derives
+        // this view's children again. Release every handle and partition first.
         drop(pending);
         drop(offsets);
+        drop(partition);
         Self::open(context, cfg, None).await
     }
 
-    /// Reset to an empty journal at `size` without opening any stored blob.
+    /// An empty journal at `size` over `offsets`, which a completed reset left empty at `size`.
     ///
-    /// The caller opens `checkpoint` from `offsets_context`, and must validate the offsets
-    /// partitions when no clear is staged.
-    /// The offsets reset is staged durably, the data partition is removed, then the reset
-    /// completes. A crash after staging leaves an intent that the next open completes, so stale
-    /// data never outlives the reset.
+    /// The caller removes the data partition under the staged offsets reset, before it
+    /// completes, so stale data never outlives the reset.
     #[commonware_macros::stability(ALPHA)]
-    async fn cleared(
+    fn cleared(
         context: E,
         cfg: Config<V::Cfg>,
-        offsets_context: E,
-        checkpoint: Checkpoint<E>,
+        offsets: fixed::Recovery<E, u64>,
         size: u64,
-    ) -> Result<Self, Error> {
-        let data_partition = cfg.data_partition();
-        let data_context = context.child("data");
-
-        // Remove the data partition under the staged offsets reset, before it completes.
-        let offsets = fixed::Recovery::<E, u64>::open_cleared(
-            offsets_context,
-            cfg.offsets_config(),
-            checkpoint,
-            size,
-            || Partition::<E>::remove_all(&data_context, &data_partition),
-        )
-        .await?;
+    ) -> Self {
         let partition = Partition::new(
-            data_context,
-            data_partition,
+            context.child("data"),
+            cfg.data_partition(),
             cfg.page_cache.clone(),
             cfg.write_buffer,
         );
-        Ok(Self {
+        Self {
             context,
             cfg,
             partition,
@@ -1325,7 +1312,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
             bounded: false,
             #[cfg(test)]
             halt_after_data_removal: false,
-        })
+        }
     }
 
     /// Scan only the recovery suffix, stopping before decoding discarded frames.
@@ -1637,8 +1624,19 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         }
         let checkpoint =
             Checkpoint::open(offsets_context.child("meta"), &offsets_partition).await?;
-        Recovery::<E, V>::cleared(context, cfg, offsets_context, checkpoint, size)
-            .await?
+
+        // Remove the data partition under the staged offsets reset, before it completes. A crash
+        // after staging leaves an intent that the next open completes.
+        let data_partition = cfg.data_partition();
+        let offsets = fixed::Recovery::<E, u64>::open_cleared(
+            offsets_context,
+            cfg.offsets_config(),
+            checkpoint,
+            size,
+            || Partition::<E>::remove_all(&context, &data_partition),
+        )
+        .await?;
+        Recovery::<E, V>::cleared(context, cfg, offsets, size)
             .publish(u64::MAX)
             .await
     }
@@ -2626,7 +2624,7 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
         Recovery::open(context, cfg, max_size).await
     }
 
-    async fn span(context: &E, cfg: &Self::Config) -> Result<Range<u64>, Error> {
+    async fn span(context: E, cfg: &Self::Config) -> Result<Range<u64>, Error> {
         Recovery::<E, V>::span(context, cfg).await
     }
 
@@ -2641,7 +2639,19 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
         if checkpoint.clear_target().is_none() {
             Partition::select(&offsets_context, &offsets_partition).await?;
         }
-        Recovery::cleared(context, cfg, offsets_context, checkpoint, size).await
+
+        // Remove the data partition under the staged offsets reset, before it completes. A crash
+        // after staging leaves an intent that the next open completes.
+        let data_partition = cfg.data_partition();
+        let offsets = fixed::Recovery::<E, u64>::open_cleared(
+            offsets_context,
+            cfg.offsets_config(),
+            checkpoint,
+            size,
+            || Partition::<E>::remove_all(&context, &data_partition),
+        )
+        .await?;
+        Ok(Recovery::cleared(context, cfg, offsets, size))
     }
 
     type Config = Config<V::Cfg>;

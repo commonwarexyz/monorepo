@@ -887,12 +887,14 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             context,
             cfg,
             checkpoint,
+            partition,
             pending,
             ..
         } = *self;
 
-        // Release recovered blob handles before the reset recreates the tail.
+        // Release the recovered blob handles and their partition before the reset recreates both.
         drop(pending);
+        drop(partition);
 
         // The durable intent makes `size` authoritative across every later crash cut.
         let checkpoint = checkpoint.stage_clear(size).await?;
@@ -2063,11 +2065,11 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
         Recovery::open_cleared(context, cfg, checkpoint, size, || async { Ok(()) }).await
     }
 
-    async fn span(context: &E, cfg: &Self::Config) -> Result<Range<u64>, Error> {
+    async fn span(context: E, cfg: &Self::Config) -> Result<Range<u64>, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         match checkpoint.clear_target() {
             Some(target) => Ok(target..target),
-            None => Recovery::<E, A>::span(context, cfg, &checkpoint).await,
+            None => Recovery::<E, A>::span(&context, cfg, &checkpoint).await,
         }
     }
 

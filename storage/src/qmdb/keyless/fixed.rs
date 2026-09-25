@@ -352,20 +352,19 @@ mod tests {
     /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
     /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
     fn open_delayed_db(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let mut cfg = db_config(suffix, context, Sequential);
-        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        let mut cfg = db_config(suffix, &context, Sequential);
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
         cfg.log.items_per_blob = NZU64!(1000);
         cfg.log.page_cache = page_cache.clone();
         cfg.merkle.items_per_blob = NZU64!(1000);
         cfg.merkle.page_cache = page_cache;
         DelayedDb::init(
             DelayedSyncContext {
-                inner: context.child(label),
+                inner: context,
                 pending: pending.clone(),
             },
             cfg,
@@ -395,7 +394,7 @@ mod tests {
     fn test_keyless_fixed_start_sync_overlaps_work() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-overlap", &pending);
+            let open = open_delayed_db(ctx.child("delayed"), "start-sync-overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let value0 = U64::new(1);
             let loc0;
@@ -440,7 +439,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", "start-sync-overlap", &pending)
+            let db = open_delayed_db(ctx.child("reopen"), "start-sync-overlap", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -457,7 +456,7 @@ mod tests {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-fail", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-fail", &pending)
                 .await
                 .unwrap();
             let floor = db.inactivity_floor_loc();
@@ -492,7 +491,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-recovery", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
             let value = U64::new(1);
@@ -506,7 +505,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", "start-sync-recovery", &pending)
+            let db = open_delayed_db(ctx.child("reopen"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -630,7 +629,7 @@ mod tests {
     fn test_keyless_fixed_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-prune", &pending);
+            let open = open_delayed_db(ctx.child("delayed"), "start-sync-prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             // Two batches: the second declares floor 2 so the prune below is non-trivial.
             (db, _) = apply_append(db, U64::new(1), Location::new(0)).await;

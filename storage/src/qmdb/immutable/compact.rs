@@ -1165,19 +1165,18 @@ mod tests {
     /// Init durably persists the bootstrap witness, so while syncs park the returned future
     /// must be driven with `drive_pending_syncs` (or the mock unblocked first).
     fn open_delayed_db(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let witness_cfg = witness_config(partition, context);
+        let witness_cfg = witness_config(partition, &context);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
             commit_codec_config: (),
         };
         let context = DelayedSyncContext {
-            inner: context.child(label),
+            inner: context,
             pending: pending.clone(),
         };
         DelayedDb::init(context, cfg, None)
@@ -1203,7 +1202,7 @@ mod tests {
             let partition = "immutable-start-sync-recovery";
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", partition, &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), partition, &pending)
                 .await
                 .unwrap();
             let metadata = Sha256::fill(9u8);
@@ -1215,7 +1214,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1232,9 +1231,10 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "immutable-start-sync-fail", &pending)
-                .await
-                .unwrap();
+            let mut db =
+                open_delayed_db(ctx.child("delayed"), "immutable-start-sync-fail", &pending)
+                    .await
+                    .unwrap();
             db = apply_set(db, Sha256::fill(1u8), Sha256::fill(2u8), Sha256::fill(9u8)).await;
 
             // Arm all future syncs to resolve to an injected error.
@@ -2319,8 +2319,7 @@ mod tests {
     /// Bounded init through a delayed-sync backend, returning the db and the durability calls
     /// initialization made.
     async fn open_bounded_counting(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         witness_cfg: JournalConfig<()>,
         cap: Location<mmr::Family>,
     ) -> (DelayedDb, usize) {
@@ -2330,7 +2329,7 @@ mod tests {
         let pending = PendingSyncs::default();
         pending.arm();
         let delayed = DelayedSyncContext {
-            inner: context.child(label),
+            inner: context,
             pending: pending.clone(),
         };
         let cfg = Config {
@@ -2393,9 +2392,9 @@ mod tests {
             // Both twins recover the synced commit under the bound. They differ only in data
             // blob 2, so equal durability counts show the torn blob was not repaired.
             let (control, control_calls) =
-                open_bounded_counting(&context, "control_cap", control_cfg, size).await;
+                open_bounded_counting(context.child("control"), control_cfg, size).await;
             let (torn, torn_calls) =
-                open_bounded_counting(&context, "torn_cap", torn_cfg, size).await;
+                open_bounded_counting(context.child("torn"), torn_cfg, size).await;
             assert_eq!(control.size(), size);
             assert_eq!(control.root(), root);
             assert_eq!(torn.size(), size);
@@ -2452,9 +2451,9 @@ mod tests {
             // Section 0 lies below the bound, so both twins open it. The torn twin trims its
             // tail and republishes the journal without the lost witness.
             let (clean, clean_calls) =
-                open_bounded_counting(&context, "clean_cap", clean_cfg, size).await;
+                open_bounded_counting(context.child("clean"), clean_cfg, size).await;
             let (torn, torn_calls) =
-                open_bounded_counting(&context, "torn_cap", torn_cfg, size).await;
+                open_bounded_counting(context.child("torn"), torn_cfg, size).await;
 
             // The clean twin recovers the witness at position 1. The torn twin recovers the
             // bootstrap witness and spends extra durability calls on the repair.
@@ -2484,7 +2483,7 @@ mod tests {
             let (src_size, src_root) =
                 seed_witness_sections(context.child("src"), src_cfg.clone(), 1).await[0];
             let journal =
-                witness::Journal::<_, mmr::Family, Digest>::init(context.child("src_tip"), src_cfg)
+                witness::Journal::<_, mmr::Family, Digest>::init(context.child("tip"), src_cfg)
                     .await
                     .unwrap();
             let (_, _, src_pinned) = witness::tests::tip(&journal).await;
@@ -2634,7 +2633,7 @@ mod tests {
             // Sync acknowledged all ten witnesses (positions 0 through 9). The watermark lies above
             // the cap, so any lowering to the cap is visible below.
             let watermark = fixed::Journal::<_, u64>::persisted_watermark(
-                context.child("watermark_before"),
+                context.child("before"),
                 &offsets_partition,
             )
             .await
@@ -2655,7 +2654,7 @@ mod tests {
             // Selection fails before publication, and inspection anchored at the ceiling skips the
             // offsets truncate, so the failed attempt leaves the durable watermark at 10.
             let watermark = fixed::Journal::<_, u64>::persisted_watermark(
-                context.child("watermark_after"),
+                context.child("after"),
                 &offsets_partition,
             )
             .await

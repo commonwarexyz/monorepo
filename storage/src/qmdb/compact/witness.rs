@@ -726,7 +726,7 @@ where
     let Some(cap) = max_size else {
         return Ok(Journal::<E, F, D>::recover(context, config, None).await?);
     };
-    if variable::Recovery::<E, Witness<F, D>>::span(&context, &config)
+    if variable::Recovery::<E, Witness<F, D>>::span(context.child("span"), &config)
         .await?
         .start
         >= *cap
