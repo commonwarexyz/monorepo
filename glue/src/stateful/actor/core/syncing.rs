@@ -1183,7 +1183,7 @@ mod tests {
             drop(harness);
 
             let plan = syncer::SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("metadata"),
+                context.child("plan"),
                 "syncing-test",
             )
             .await;

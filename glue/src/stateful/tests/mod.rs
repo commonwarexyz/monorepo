@@ -1220,11 +1220,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
-        let plan = SyncPlan::init(
-            context.child("metadata"),
-            "certify-qmdb-stateful".to_string(),
-        )
-        .await;
+        let plan = SyncPlan::init(context.child("plan"), "certify-qmdb-stateful".to_string()).await;
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
@@ -1555,7 +1551,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(
-            context.child("metadata"),
+            context.child("plan"),
             "certify-multi-qmdb-stateful".to_string(),
         )
         .await;
@@ -1813,7 +1809,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             finalize_gate: finalize_gate.clone(),
         };
         let plan = SyncPlan::init(
-            context.child("metadata"),
+            context.child("plan"),
             "prune-overlap-multi-qmdb-stateful".to_string(),
         )
         .await;

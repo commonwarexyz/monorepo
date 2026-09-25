@@ -399,11 +399,8 @@ mod tests {
             )
             .await;
 
-            let plan = SyncPlan::init(
-                context.child("metadata"),
-                "pending-floor-stateful".to_string(),
-            )
-            .await;
+            let plan =
+                SyncPlan::init(context.child("plan"), "pending-floor-stateful".to_string()).await;
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -462,8 +459,7 @@ mod tests {
             .await;
 
             let (resolver, startup_started, startup_release) = NoopResolver::gated();
-            let plan =
-                SyncPlan::init(context.child("metadata"), format!("{prefix}-stateful")).await;
+            let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {

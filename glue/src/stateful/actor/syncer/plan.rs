@@ -50,8 +50,11 @@ where
     /// determine whether state sync already completed cannot safely choose a
     /// startup path.
     pub async fn init(context: E, partition_prefix: impl AsRef<str>) -> Self {
-        let sync_metadata =
-            StateSyncMetadata::<E, S, V::Commitment>::init(context, partition_prefix).await;
+        let sync_metadata = StateSyncMetadata::<E, S, V::Commitment>::init(
+            context.child("metadata"),
+            partition_prefix,
+        )
+        .await;
         let floor = sync_metadata.in_progress_floor().cloned();
         Self {
             sync_metadata,
@@ -197,7 +200,7 @@ mod tests {
             let partition_prefix = "stored_sync_height";
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("metadata"),
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
@@ -215,7 +218,7 @@ mod tests {
             metadata.set_complete(Height::new(7)).await;
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("metadata"),
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
@@ -273,7 +276,7 @@ mod tests {
             metadata.begin_sync(stored.clone()).await;
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("metadata"),
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
@@ -302,7 +305,7 @@ mod tests {
             metadata.begin_sync(stored.clone()).await;
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("metadata"),
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
@@ -318,7 +321,7 @@ mod tests {
 
             drop(plan);
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("metadata"),
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
@@ -332,7 +335,7 @@ mod tests {
             let newer = finalization(&fixture.schemes, 9, 9);
             drop(plan);
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("metadata"),
+                context.child("plan"),
                 partition_prefix,
             )
             .await;
@@ -348,7 +351,7 @@ mod tests {
             let newer = finalization(&fixture.schemes, 9, 9);
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
-                context.child("metadata"),
+                context.child("plan"),
                 "with_floor_does_not_replace_newer_selection",
             )
             .await;

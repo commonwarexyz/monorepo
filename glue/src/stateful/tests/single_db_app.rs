@@ -456,7 +456,7 @@ impl EngineDefinition for SingleDbEngine {
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(
-            stateful_startup_context.child("metadata"),
+            stateful_startup_context.child("plan"),
             partition_prefix.clone(),
         )
         .await;
