@@ -22,6 +22,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZU16, NZUsize};
 use libfuzzer_sys::fuzz_target;
+use std::sync::Arc;
 
 /// CRC record size.
 const CRC_SIZE: u64 = 12;
@@ -114,6 +115,7 @@ fn fuzz(input: FuzzInput) {
             .open("test_partition", b"integrity_test")
             .await
             .expect("cannot open blob");
+        let blob = Arc::new(blob);
 
         let mut append = Writer::new(blob.clone(), 0, BUFFER_CAPACITY, cache_ref.clone())
             .await
@@ -153,6 +155,7 @@ fn fuzz(input: FuzzInput) {
             .await
             .expect("cannot write corrupted byte");
         blob.sync().await.expect("cannot sync corruption");
+        drop(blob);
 
         // Determine which logical page was corrupted.
         let corrupted_page = corrupt_offset / physical_page_size;

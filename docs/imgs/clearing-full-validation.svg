@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1320 900" role="img" aria-labelledby="title description">
+  <title id="title">From Payments to a Certified Settlement</title>
+  <desc id="description">The operator distributes the same dealing to all 100 validators, shown as a ten-by-ten grid. A blue callout expands c's signed payer state: final sequence 2, with totals of 4 to b and 7 to d. Four cards show the operator accepting the final payer states of a, b, c, and d before aggregating those acknowledgments. Validators derive the Current Ordered QMDB state root and the two Keyless QMDB roots for activity and payouts, then bind them with the certified close context into one 32-byte commitment. An aggregate signature and signer bitmap form the attached 34-of-100 certificate.</desc>
+  <rect width="1320" height="900" fill="#fff"/>
+  <style>
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .title { font-size: 26px; font-weight: 700; fill: #111; }
+    .heading { font-size: 20px; font-weight: 700; fill: #111; }
+    .label { font-size: 18px; fill: #333; }
+    .note { font-size: 16px; fill: #666; }
+    .center { text-anchor: middle; }
+    .right { text-anchor: end; }
+    .blue { fill: #2424d4; }
+    .green { fill: #087a32; }
+    .panel { fill: #fafafa; stroke: #d6d6d6; stroke-width: 1.5; }
+    .entry { fill: #fff; stroke: #d0d0ef; stroke-width: 1.5; }
+    .binding { fill: none; stroke: #087a32; stroke-width: 1.5; }
+    .wire { fill: none; stroke-width: 2; }
+    .broadcast { stroke: #2424d4; marker-end: url(#broadcast-arrow); }
+    .vote { stroke: #087a32; marker-end: url(#vote-arrow); }
+    .signed { fill: #087a32; stroke: #087a32; }
+    .pending { fill: #fff; stroke: #bcbcbc; }
+    .leader { fill: none; stroke-width: 1.5; stroke-dasharray: 1 6; stroke-linecap: round; }
+  </style>
+  <defs>
+    <marker id="broadcast-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#2424d4" stroke-width="1.2"/>
+    </marker>
+    <marker id="vote-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M1 1 L7 4 L1 7" fill="none" stroke="#087a32" stroke-width="1.2"/>
+    </marker>
+    <circle id="validator" r="7" stroke-width="1.5"/>
+    <g id="operator-ack">
+      <path d="M4 0 H44 L56 12 V44 Q56 48 52 48 H4 Q0 48 0 44 V4 Q0 0 4 0 Z" stroke-width="1.5"/>
+      <path d="M44 0 V12 H56" fill="none" stroke-width="1.5"/>
+      <path d="M12 35 C22 14 7 54 29 31 C34 26 28 43 39 34 L44 34" fill="none" stroke="#2424d4" stroke-width="1.5" stroke-linecap="round"/>
+    </g>
+    <g id="validator-row">
+      <use href="#validator" x="0"/>
+      <use href="#validator" x="26"/>
+      <use href="#validator" x="52"/>
+      <use href="#validator" x="78"/>
+      <use href="#validator" x="104"/>
+      <use href="#validator" x="130"/>
+      <use href="#validator" x="156"/>
+      <use href="#validator" x="182"/>
+      <use href="#validator" x="208"/>
+      <use href="#validator" x="234"/>
+    </g>
+  </defs>
+
+  <text class="title" x="34" y="39">From Payments to a Certified Settlement</text>
+  <text class="note" x="34" y="66">Validators derive the balances and roots from the shared dealing and their local state</text>
+
+  <text class="heading center" x="172" y="116">Operator</text>
+  <rect x="64" y="139" width="245" height="228" rx="6" fill="#f4f4ff" stroke="#d0d0ef" stroke-width="1.5"/>
+  <rect x="56" y="147" width="245" height="228" rx="6" fill="#f4f4ff" stroke="#d0d0ef" stroke-width="1.5"/>
+  <rect x="48" y="155" width="245" height="228" rx="6" fill="#fff" stroke="#2424d4" stroke-width="1.5"/>
+  <text class="heading center blue" x="170.5" y="189">Dealing</text>
+  <path d="M68 205 H273" stroke="#dedede"/>
+  <text class="label blue" x="80" y="234">a → b</text>
+  <text class="label blue" x="80" y="264">b → c</text>
+  <text class="label blue" x="80" y="294">c → b, d</text>
+  <text class="label blue" x="80" y="324">d → a, b</text>
+  <text class="note center" x="170.5" y="363">4 payers · 6 entries</text>
+
+  <path class="wire broadcast" d="M310 260 H496"/>
+  <text class="label center blue" x="403" y="239">Same bytes</text>
+
+  <text class="heading center" x="652" y="116">100 validators</text>
+  <rect class="panel" x="503" y="147" width="300" height="256" rx="6"/>
+  <g class="signed" transform="translate(535 181)">
+    <use href="#validator-row" y="0"/>
+    <use href="#validator-row" y="22"/>
+    <use href="#validator-row" y="44"/>
+  </g>
+  <g transform="translate(535 247)">
+    <use class="signed" href="#validator" x="0"/>
+    <use class="signed" href="#validator" x="26"/>
+    <use class="signed" href="#validator" x="52"/>
+    <use class="signed" href="#validator" x="78"/>
+    <use class="pending" href="#validator" x="104"/>
+    <use class="pending" href="#validator" x="130"/>
+    <use class="pending" href="#validator" x="156"/>
+    <use class="pending" href="#validator" x="182"/>
+    <use class="pending" href="#validator" x="208"/>
+    <use class="pending" href="#validator" x="234"/>
+  </g>
+  <g class="pending" transform="translate(535 269)">
+    <use href="#validator-row" y="0"/>
+    <use href="#validator-row" y="22"/>
+    <use href="#validator-row" y="44"/>
+    <use href="#validator-row" y="66"/>
+    <use href="#validator-row" y="88"/>
+    <use href="#validator-row" y="110"/>
+  </g>
+  <text class="note center green" x="575" y="431">34 signed</text>
+  <text class="note center" x="725" y="431">66 not included</text>
+
+  <path class="wire vote" d="M809 260 H990"/>
+  <text class="label center green" x="900" y="239">Certify</text>
+
+  <path d="M1004 177 H1264 L1286 199 V337 Q1286 343 1280 343 H1004 Q998 343 998 337 V183 Q998 177 1004 177 Z" fill="#f2faf4" stroke="#087a32" stroke-width="1.5"/>
+  <path d="M1264 177 V199 H1286" fill="none" stroke="#087a32" stroke-width="1.5"/>
+  <text class="heading center green" x="1142" y="211">Certified close</text>
+  <circle cx="1046" cy="266" r="20" fill="#087a32"/>
+  <path d="M1037 266 L1044 273 L1056 259" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text class="center green" x="1172" y="277" style="font-size:32px; font-weight:700;">34 / 100</text>
+  <text class="note center" x="1142" y="316">Same commitment</text>
+
+  <path class="leader" d="M403 260 V463" stroke="#2424d4"/>
+  <circle cx="403" cy="260" r="4" fill="#fff" stroke="#2424d4" stroke-width="1.5"/>
+  <rect x="48" y="463" width="568" height="417" rx="6" fill="#f4f4ff" stroke="#2424d4" stroke-width="1.5"/>
+  <text class="heading blue" x="72" y="497">Dealing</text>
+  <text class="note right" x="592" y="497">Offchain</text>
+  <path d="M72 515 H592" stroke="#d0d0ef"/>
+  <text class="label" x="72" y="546">Account keys</text>
+  <rect class="entry" x="252" y="526" width="76" height="30" rx="4"/>
+  <text class="note" x="264" y="547">0</text>
+  <text class="label blue" x="301" y="547">a</text>
+  <rect class="entry" x="340" y="526" width="76" height="30" rx="4"/>
+  <text class="note" x="352" y="547">1</text>
+  <text class="label blue" x="389" y="547">b</text>
+  <rect class="entry" x="428" y="526" width="76" height="30" rx="4"/>
+  <text class="note" x="440" y="547">2</text>
+  <text class="label blue" x="477" y="547">c</text>
+  <rect class="entry" x="516" y="526" width="76" height="30" rx="4"/>
+  <text class="note" x="528" y="547">3</text>
+  <text class="label blue" x="565" y="547">d</text>
+  <text class="note center" x="332" y="581">Four sender records · c expanded</text>
+
+  <rect x="100" y="588" width="500" height="176" rx="5" fill="#ddddf8" stroke="#b6b6eb" stroke-width="1.5"/>
+  <rect x="92" y="596" width="500" height="176" rx="5" fill="#e5e5fb" stroke="#b6b6eb" stroke-width="1.5"/>
+  <rect x="84" y="604" width="500" height="176" rx="5" fill="#eeeefe" stroke="#b6b6eb" stroke-width="1.5"/>
+  <rect x="76" y="612" width="500" height="176" rx="5" fill="#fff" stroke="#2424d4" stroke-width="1.5"/>
+  <text class="heading blue" x="98" y="642">Sender c</text>
+  <text class="label right" x="554" y="642">Final sequence: 2</text>
+  <path d="M98 657 H554" stroke="#d0d0ef"/>
+  <rect class="entry" x="98" y="674" width="218" height="70" rx="4"/>
+  <text class="label center blue" x="207" y="698">to b</text>
+  <text class="note" x="111" y="726">total <tspan fill="#111" font-weight="700">4</tspan></text>
+  <text class="note right" x="303" y="726">count <tspan fill="#111" font-weight="700">1</tspan></text>
+  <rect class="entry" x="336" y="674" width="218" height="70" rx="4"/>
+  <text class="label center blue" x="445" y="698">to d</text>
+  <text class="note" x="349" y="726">total <tspan fill="#111" font-weight="700">7</tspan></text>
+  <text class="note right" x="541" y="726">count <tspan fill="#111" font-weight="700">1</tspan></text>
+  <path d="M116 758 C126 737 111 777 133 754 C138 749 132 766 143 757 L151 757" fill="none" stroke="#2424d4" stroke-width="2" stroke-linecap="round"/>
+  <text class="note" x="169" y="765">c's signature binds both entries</text>
+
+  <text class="note" x="72" y="810">Operator acknowledgments</text>
+  <g transform="translate(72 822)">
+    <use href="#operator-ack" fill="#fff" stroke="#b6b6eb"/>
+    <text class="label center" x="25" y="22">a</text>
+  </g>
+  <g transform="translate(138 822)">
+    <use href="#operator-ack" fill="#fff" stroke="#b6b6eb"/>
+    <text class="label center" x="25" y="22">b</text>
+  </g>
+  <g transform="translate(204 822)">
+    <use href="#operator-ack" fill="#e5e5fb" stroke="#2424d4"/>
+    <text class="heading center blue" x="25" y="22">c</text>
+  </g>
+  <g transform="translate(270 822)">
+    <use href="#operator-ack" fill="#fff" stroke="#b6b6eb"/>
+    <text class="label center" x="25" y="22">d</text>
+  </g>
+  <text class="note center" x="378" y="833">Aggregate</text>
+  <path class="wire broadcast" d="M338 847 H420"/>
+  <rect x="432" y="822" width="160" height="48" rx="5" fill="#2424d4"/>
+  <text class="label center" x="512" y="853" style="fill:#fff;">1 signature</text>
+
+  <path class="leader" d="M900 260 V463" stroke="#087a32"/>
+  <circle cx="900" cy="260" r="4" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
+  <rect x="700" y="463" width="586" height="417" rx="6" fill="#f2faf4" stroke="#087a32" stroke-width="1.5"/>
+  <text class="heading green" x="724" y="497">Certified close</text>
+  <text class="note right" x="1262" y="497">Onchain</text>
+  <path d="M724 515 H1262" stroke="#c7dfce"/>
+  <rect x="724" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
+  <text class="label center green" x="806" y="568">State root</text>
+  <text class="note center" x="806" y="594">Current Ordered</text>
+  <rect x="911" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
+  <text class="label center green" x="993" y="568">Activity root</text>
+  <text class="note center" x="993" y="594">Keyless</text>
+  <rect x="1098" y="539" width="164" height="72" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
+  <text class="label center green" x="1180" y="568">Payout root</text>
+  <text class="note center" x="1180" y="594">Keyless</text>
+  <path class="binding" d="M806 611 V629 H1180 V611 M993 611 V642"/>
+  <rect x="724" y="642" width="538" height="40" rx="4" fill="#fff" stroke="#c7dfce" stroke-width="1.5"/>
+  <text class="note center" x="993" y="668">Certified close context</text>
+  <path class="binding" d="M993 682 V704" marker-end="url(#vote-arrow)"/>
+  <rect x="796" y="704" width="394" height="62" rx="5" fill="#087a32"/>
+  <text class="heading center" x="993" y="743" style="fill:#fff;">32-byte commitment</text>
+  <path class="binding" d="M993 766 V797" marker-end="url(#vote-arrow)"/>
+  <rect x="724" y="797" width="538" height="61" rx="5" fill="#fff" stroke="#087a32" stroke-width="1.5"/>
+  <text class="heading center green" x="805" y="835">34 / 100</text>
+  <path d="M886 810 V845" stroke="#c7dfce"/>
+  <text class="label green" x="907" y="822">Certificate</text>
+  <text class="note" x="907" y="846">Aggregate signature + bitmap</text>
+</svg>

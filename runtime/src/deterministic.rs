@@ -54,10 +54,13 @@ use crate::{
     },
     prefixed_name,
     storage::{
-        audited::Storage as AuditedStorage,
-        faulty::Storage as FaultyStorage,
-        memory::{Snapshot as MemStorageSnapshot, Storage as MemStorage},
-        metered::Storage as MeteredStorage,
+        audited::{Blob as AuditedBlob, Storage as AuditedStorage},
+        faulty::{Blob as FaultyBlob, Storage as FaultyStorage},
+        memory::{
+            Blob as MemBlob, Snapshot as MemStorageSnapshot, Storage as MemStorage,
+            open::{Blob as OpenBlob, Opens},
+        },
+        metered::{Blob as MeteredBlob, Storage as MeteredStorage},
     },
     telemetry::metrics::{
         Counter, CounterFamily, GaugeFamily, Metric, Register, Registered, Registry, add_attribute,
@@ -84,7 +87,7 @@ use commonware_utils::{
 use futures::task::noop_waker;
 use futures::{
     Future,
-    task::{ArcWake, waker},
+    task::{ArcWake, AtomicWaker, waker},
 };
 use governor::clock::{Clock as GClock, ReasonablyRealtime};
 #[cfg(feature = "external")]
@@ -101,7 +104,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     pin::Pin,
     sync::{Arc, Weak},
-    task::{self, Poll, Waker},
+    task::{self, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::trace;
@@ -923,6 +926,9 @@ impl Tasks {
 type Network = MeteredNetwork<AuditedNetwork<DeterministicNetwork>>;
 type Storage = MeteredStorage<AuditedStorage<FaultyStorage<MemStorage>>>;
 
+/// A blob handle whose open stays exclusive until its final owner drops or the blob is removed.
+pub type Blob = OpenBlob<MeteredBlob<AuditedBlob<FaultyBlob<MemBlob>>>>;
+
 fn build_storage(
     inner: MemStorage,
     rng: Arc<Mutex<BoxDynRng>>,
@@ -948,6 +954,7 @@ pub struct Context {
     executor: Weak<Executor>,
     network: Arc<Network>,
     storage: Arc<Storage>,
+    opens: Arc<Opens>,
     network_buffer_pool: BufferPool,
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
@@ -1018,6 +1025,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                opens: Arc::default(),
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1095,6 +1103,7 @@ impl Context {
                 executor: Arc::downgrade(&executor),
                 network: Arc::new(network),
                 storage: Arc::new(storage),
+                opens: Arc::default(),
                 network_buffer_pool,
                 storage_buffer_pool,
                 tree: Tree::root(),
@@ -1123,6 +1132,17 @@ impl Context {
     /// Compute a [Sha256] digest of all storage contents.
     pub fn storage_audit(&self) -> Digest {
         self.storage.inner().inner().inner().audit()
+    }
+
+    /// Return a copy of a blob's durable logical contents without opening it, or `None` when
+    /// the blob is missing or its container header does not resolve.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn logical_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.storage
+            .inner()
+            .inner()
+            .inner()
+            .logical_blob(partition, name)
     }
 
     /// Access the storage fault configuration.
@@ -1291,6 +1311,7 @@ impl crate::Supervisor for Context {
             executor: self.executor.clone(),
             network: self.network.clone(),
             storage: self.storage.clone(),
+            opens: self.opens.clone(),
             network_buffer_pool: self.network_buffer_pool.clone(),
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
@@ -1352,7 +1373,7 @@ impl crate::Metrics for Context {
 struct Sleeper {
     executor: Weak<Executor>,
     time: SystemTime,
-    registered: bool,
+    waker: Option<Arc<AtomicWaker>>,
 }
 
 impl Sleeper {
@@ -1364,7 +1385,7 @@ impl Sleeper {
 
 struct Alarm {
     time: SystemTime,
-    waker: Waker,
+    waker: Arc<AtomicWaker>,
 }
 
 impl PartialEq for Alarm {
@@ -1399,12 +1420,16 @@ impl Future for Sleeper {
                 return Poll::Ready(());
             }
         }
-        if !self.registered {
-            self.registered = true;
+        if let Some(waker) = &self.waker {
+            waker.register(cx.waker());
+        } else {
+            let waker = Arc::new(AtomicWaker::new());
+            waker.register(cx.waker());
             executor.sleeping.lock().push(Alarm {
                 time: self.time,
-                waker: cx.waker().clone(),
+                waker: waker.clone(),
             });
+            self.waker = Some(waker);
         }
         Poll::Pending
     }
@@ -1415,7 +1440,7 @@ impl Clock for Context {
         *self.executor().time.lock()
     }
 
-    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static + use<> {
         let deadline = self
             .current()
             .checked_add(duration)
@@ -1423,12 +1448,15 @@ impl Clock for Context {
         self.sleep_until(deadline)
     }
 
-    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+    fn sleep_until(
+        &self,
+        deadline: SystemTime,
+    ) -> impl Future<Output = ()> + Send + 'static + use<> {
         Sleeper {
             executor: self.executor.clone(),
 
             time: deadline,
-            registered: false,
+            waker: None,
         }
     }
 }
@@ -1439,13 +1467,11 @@ impl Clock for Context {
 #[cfg(feature = "external")]
 #[pin_project]
 struct Waiter<F: Future> {
-    executor: Weak<Executor>,
-    target: SystemTime,
+    sleeper: Sleeper,
     #[pin]
     future: F,
     ready: Option<F::Output>,
     started: bool,
-    registered: bool,
 }
 
 #[cfg(feature = "external")]
@@ -1460,7 +1486,7 @@ where
 
         // Poll once with a noop waker so the future can register interest or start work
         // without being able to wake this task before the sampled delay expires. Any ready
-        // value is cached and only released after the clock reaches `self.target`.
+        // value is cached and only released after the sleeper's deadline.
         if !*this.started {
             *this.started = true;
             let waker = noop_waker();
@@ -1471,20 +1497,7 @@ where
         }
 
         // Only allow the task to progress once the sampled delay has elapsed.
-        let executor = this.executor.upgrade().expect("executor already dropped");
-        let current_time = *executor.time.lock();
-        if current_time < *this.target {
-            // Register exactly once with the deterministic sleeper queue so the executor
-            // wakes us once the clock reaches the scheduled target time.
-            if !*this.registered {
-                *this.registered = true;
-                executor.sleeping.lock().push(Alarm {
-                    time: *this.target,
-                    waker: cx.waker().clone(),
-                });
-            }
-            return Poll::Pending;
-        }
+        std::task::ready!(Pin::new(this.sleeper).poll(cx));
 
         // If the underlying future completed during the noop pre-poll, surface the cached value.
         if let Some(value) = this.ready.take() {
@@ -1523,12 +1536,14 @@ impl Pacer for Context {
             .expect("overflow when setting wake time");
 
         Waiter {
-            executor: self.executor.clone(),
-            target,
+            sleeper: Sleeper {
+                executor: self.executor.clone(),
+                time: target,
+                waker: None,
+            },
             future,
             ready: None,
             started: false,
-            registered: false,
         }
     }
 }
@@ -1609,7 +1624,7 @@ impl TryRng for Context {
 impl TryCryptoRng for Context {}
 
 impl crate::Storage for Context {
-    type Blob = <Storage as crate::Storage>::Blob;
+    type Blob = Blob;
 
     async fn open_versioned(
         &self,
@@ -1617,11 +1632,30 @@ impl crate::Storage for Context {
         name: &[u8],
         versions: std::ops::RangeInclusive<BlobVersion>,
     ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
-        self.storage.open_versioned(partition, name, versions).await
+        let opened = self.opens.open(
+            partition,
+            name,
+            self.storage.open_versioned(partition, name, versions),
+        )?;
+        let retired = self.storage.inner().inner().admit(partition, name);
+        let opened = opened.finish();
+        drop(retired);
+        Ok(opened)
     }
 
     async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
-        self.storage.remove(partition, name).await
+        let audited = self.storage.inner();
+        let retired = self.opens.remove(
+            partition,
+            name,
+            audited.remove_with(
+                partition,
+                name,
+                audited.inner().remove_retired(partition, name),
+            ),
+        )?;
+        drop(retired);
+        Ok(())
     }
 
     async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
@@ -1648,6 +1682,7 @@ mod tests {
         Blob, Metrics as _, ReadOptions, Resolver, Runner as _, Spawner as _, Storage, Strategizer,
         Supervisor as _, WriteOptions, deterministic, reschedule,
     };
+    use bytes::Bytes;
     use commonware_macros::test_traced;
     use commonware_parallel::Strategy;
     #[cfg(feature = "external")]
@@ -1659,7 +1694,364 @@ mod tests {
     use futures::future::pending;
     #[cfg(not(feature = "external"))]
     use futures::stream::StreamExt as _;
-    use futures::{FutureExt as _, stream::FuturesUnordered, task::noop_waker};
+    use futures::{FutureExt as _, stream::FuturesUnordered};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[rstest::rstest]
+    #[case::open_named(true, true)]
+    #[case::open_partition(true, false)]
+    #[case::remove_named(false, true)]
+    #[case::remove_partition(false, false)]
+    fn test_logical_open_namespace_handoff(#[case] open_first: bool, #[case] named: bool) {
+        Runner::default().start(|context| async move {
+            // Nonempty durable contents distinguish the unlinked incarnation from its replacement.
+            let (seed, _) = context.open("partition", b"blob").await.unwrap();
+            seed.write_at(0, b"saved", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(seed);
+
+            // Pause between the namespace operation and its registration update to check that
+            // a competing operation cannot observe only half of the transaction.
+            let name = named.then_some(b"blob".as_slice());
+            let worker_context = context.child("namespace");
+            let competing_context = context.child("competing");
+            let (entered, entering) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let (observed, observing) = std::sync::mpsc::channel();
+            let operation = move |context: Context, open| async move {
+                if open {
+                    Some(context.open("partition", b"blob").await.unwrap())
+                } else {
+                    context.remove("partition", name).await.unwrap();
+                    None
+                }
+            };
+
+            // Both operations run on scoped threads so the coordinator can release a held registry.
+            // The contender observes the registry only after the worker reaches its handoff.
+            let (worker, competing) = std::thread::scope(move |scope| {
+                let worker = scope.spawn(move || {
+                    worker_context.opens.pause_namespace(entered, released);
+                    operation(worker_context, open_first)
+                        .now_or_never()
+                        .unwrap()
+                });
+                entering.recv().unwrap();
+                let competing = scope.spawn(move || {
+                    competing_context.opens.watch_registry(observed);
+                    operation(competing_context, !open_first)
+                        .now_or_never()
+                        .unwrap()
+                });
+
+                // A held registry requires releasing its owner before joining the contender.
+                // At an unlocked handoff, the contender completes before the owner continues.
+                let locked = observing.recv().unwrap();
+                if locked {
+                    release.send(()).unwrap();
+                }
+                let competing = competing.join().unwrap();
+                if !locked {
+                    release.send(()).unwrap();
+                }
+                (worker.join().unwrap(), competing)
+            });
+
+            // Opening before removal preserves access to the old contents. Opening after
+            // removal must return a fresh incarnation.
+            let (old, current) = if open_first {
+                let (old, len) = worker.unwrap();
+                assert_eq!(len, 5);
+                assert_eq!(
+                    old.read_at(0, 5, ReadOptions::default())
+                        .await
+                        .unwrap()
+                        .coalesce(),
+                    b"saved"
+                );
+                let (current, len) = context.open("partition", b"blob").await.unwrap();
+                assert_eq!(len, 0);
+                (Some(old), current)
+            } else {
+                let (current, len) = competing.unwrap();
+                assert_eq!(len, 0);
+                (None, current)
+            };
+
+            // An old handle's cleanup cannot release the replacement's logical open.
+            let current = Arc::new(current);
+            let retained = current.clone();
+            drop(old);
+            drop(current);
+            assert!(matches!(
+                context.open("partition", b"blob").await,
+                Err(Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+            ));
+
+            // Dropping the replacement's last owner permits reopening its durable contents.
+            retained
+                .write_at(0, b"new", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(retained);
+            let (reopened, len) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 3);
+            assert_eq!(
+                reopened
+                    .read_at(0, 3, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"new"
+            );
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::retained(false)]
+    #[case::synced(true)]
+    fn test_logical_open_releases_retained_mutations(#[case] sync: bool) {
+        // Keep unsynced writes eligible for crash replay without injecting write failures.
+        let cfg = Config::default().with_storage_fault_config(FaultConfig::default().write(
+            WriteConfig {
+                failure_rate: probability!(0.0),
+                retention_rate: probability!(1.0),
+                mode: PartialWriteMode::Prefix,
+            },
+        ));
+        let (_, checkpoint) = Runner::new(cfg).start_and_recover(|context| async move {
+            // The range sync persists only the middle byte of the overwrite. Reopening must
+            // discard the unsynced fragments excluded from that durable snapshot.
+            let (blob, _) = context.open("partition", b"blob").await.unwrap();
+            let blob = Arc::new(blob);
+            blob.write_at(0, b"saved", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            blob.write_at(0, b"stale", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.write_at(2, b"X", WriteOptions::SYNC).await.unwrap();
+            let retained = blob.clone();
+            drop(blob);
+            drop(retained);
+
+            // Retained write fragments must not keep a logical open alive.
+            let (reopened, len) = context.open("partition", b"blob").await.unwrap();
+            let reopened = Arc::new(reopened);
+            assert_eq!(len, 5);
+            assert_eq!(
+                reopened
+                    .read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"saXed"
+            );
+            let retained = reopened.clone();
+            drop(reopened);
+
+            // Duplicate opens contribute to the runtime audit.
+            let before = context.auditor().state();
+            assert!(matches!(
+                context.open("partition", b"blob").await,
+                Err(Error::BlobAlreadyOpen(_, _))
+            ));
+            assert_ne!(before, context.auditor().state());
+
+            // Mutations on the new open must supersede the admitted snapshot.
+            if sync {
+                retained
+                    .write_at(0, b"fresh", WriteOptions::default())
+                    .await
+                    .unwrap();
+                retained.sync().await.unwrap();
+            }
+        });
+
+        // Crash replay must not restore fragments excluded by the successful reopen.
+        Runner::from(checkpoint).start(|context| async move {
+            let (blob, len) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 5);
+            assert_eq!(
+                blob.read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                if sync { b"fresh" } else { b"saXed" }
+            );
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::remove("remove")]
+    #[case::remove_partition("remove_partition")]
+    #[case::admit("admit")]
+    fn test_retired_write_owner_releases_other_blob(#[case] operation: &'static str) {
+        struct Owner<B> {
+            data: Vec<u8>,
+            _blob: B,
+            released: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl<B> AsRef<[u8]> for Owner<B> {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
+        }
+
+        impl<B> Drop for Owner<B> {
+            fn drop(&mut self) {
+                self.released.store(true, Ordering::SeqCst);
+            }
+        }
+
+        // Retain successful writes so each namespace operation has payload owners to retire.
+        let faults = FaultConfig::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        });
+        Runner::new(Config::default().with_storage_fault_config(faults)).start(
+            |context| async move {
+                // The retained payload keeps b open, making its destruction re-enter the registry.
+                let (a, _) = context.open("partition", b"a").await.unwrap();
+                let (b, _) = context.open("partition", b"b").await.unwrap();
+                let b = Arc::new(b);
+                let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let payload = Bytes::from_owner(Owner {
+                    data: b"saved".to_vec(),
+                    _blob: b.clone(),
+                    released: released.clone(),
+                });
+                a.write_at(0, payload, WriteOptions::default())
+                    .await
+                    .unwrap();
+
+                // Give partition removal evidence under both names.
+                if operation == "remove_partition" {
+                    b.write_at(0, b"second", WriteOptions::default())
+                        .await
+                        .unwrap();
+                }
+                drop(b);
+                assert!(!released.load(Ordering::SeqCst));
+
+                // Retiring a's payload must release the namespace lock before destroying it,
+                // so b can release its open.
+                if operation == "remove" {
+                    context.remove("partition", Some(b"a")).await.unwrap();
+                } else if operation == "remove_partition" {
+                    context.remove("partition", None).await.unwrap();
+                } else {
+                    assert_eq!(operation, "admit");
+                    drop(a);
+                    drop(context.open("partition", b"a").await.unwrap());
+                }
+
+                // Both payload destruction and release of b's open must finish before returning.
+                assert!(released.load(Ordering::SeqCst));
+                drop(context.open("partition", b"b").await.unwrap());
+            },
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::sync("sync")]
+    #[case::start_sync("start_sync")]
+    #[case::overwrite("overwrite")]
+    fn test_sync_retirement_progresses_with_namespace_open(#[case] operation: &'static str) {
+        /// Signals retirement before releasing another blob's open.
+        struct Owner<B> {
+            data: Vec<u8>,
+            _blob: B,
+            retiring: std::sync::mpsc::Sender<()>,
+        }
+
+        impl<B> AsRef<[u8]> for Owner<B> {
+            fn as_ref(&self) -> &[u8] {
+                &self.data
+            }
+        }
+
+        impl<B> Drop for Owner<B> {
+            fn drop(&mut self) {
+                self.retiring.send(()).unwrap();
+            }
+        }
+
+        // Keep the payload until a durability operation retires its write.
+        let faults = FaultConfig::default().write(WriteConfig {
+            failure_rate: probability!(0.0),
+            retention_rate: probability!(1.0),
+            mode: PartialWriteMode::Prefix,
+        });
+        Runner::new(Config::default().with_storage_fault_config(faults)).start(
+            |context| async move {
+                // Retiring a's write drops the last owner of b and needs the open registry.
+                let (a, _) = context.open("partition", b"a").await.unwrap();
+                let (b, _) = context.open("partition", b"b").await.unwrap();
+                let b = Arc::new(b);
+                let (retiring, retired) = std::sync::mpsc::channel();
+                a.write_at(
+                    0,
+                    Bytes::from_owner(Owner {
+                        data: b"saved".to_vec(),
+                        _blob: b.clone(),
+                        retiring,
+                    }),
+                    WriteOptions::default(),
+                )
+                .await
+                .unwrap();
+                drop(b);
+
+                // Hold the registry while opening c, before admission locks the pending mutations.
+                let (entered, entering) = std::sync::mpsc::channel();
+                let (release, released) = std::sync::mpsc::channel();
+                let namespace = context.child("namespace");
+                let opener = std::thread::spawn(move || {
+                    namespace.opens.pause_namespace(entered, released);
+                    drop(
+                        namespace
+                            .open("partition", b"c")
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap(),
+                    );
+                });
+                entering.recv().unwrap();
+
+                // Retire a's payload concurrently, forcing b's cleanup to wait for the registry.
+                let mutator = std::thread::spawn(move || {
+                    if operation == "sync" {
+                        a.sync().now_or_never().unwrap().unwrap();
+                    } else if operation == "start_sync" {
+                        a.start_sync()
+                            .now_or_never()
+                            .unwrap()
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap();
+                    } else {
+                        assert_eq!(operation, "overwrite");
+                        a.write_at(0, b"fresh", WriteOptions::SYNC)
+                            .now_or_never()
+                            .unwrap()
+                            .unwrap();
+                    }
+                });
+
+                // The signal precedes b's cleanup. Let c continue so both operations can finish
+                // only if retirement has released the pending-mutation lock.
+                retired.recv().unwrap();
+                release.send(()).unwrap();
+                mutator.join().unwrap();
+                opener.join().unwrap();
+                drop(context.open("partition", b"b").await.unwrap());
+            },
+        );
+    }
 
     async fn task(i: usize) -> usize {
         for _ in 0..5 {
@@ -1734,19 +2126,19 @@ mod tests {
         let alarms = vec![
             Alarm {
                 time: now + Duration::new(10, 0),
-                waker: noop_waker(),
+                waker: Arc::new(AtomicWaker::new()),
             },
             Alarm {
                 time: now + Duration::new(5, 0),
-                waker: noop_waker(),
+                waker: Arc::new(AtomicWaker::new()),
             },
             Alarm {
                 time: now + Duration::new(15, 0),
-                waker: noop_waker(),
+                waker: Arc::new(AtomicWaker::new()),
             },
             Alarm {
                 time: now + Duration::new(5, 0),
-                waker: noop_waker(),
+                waker: Arc::new(AtomicWaker::new()),
             },
         ];
         let mut heap = BinaryHeap::new();
@@ -1768,6 +2160,40 @@ mod tests {
                 now + Duration::new(15, 0),
             ]
         );
+    }
+
+    #[test]
+    fn test_sleep_refreshes_one_alarm_after_repolling() {
+        struct Counter(AtomicUsize);
+
+        impl ArcWake for Counter {
+            fn wake_by_ref(this: &Arc<Self>) {
+                this.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        Runner::default().start(|context| async move {
+            // Count notifications separately for the initial and final pollers.
+            let first = Arc::new(Counter(AtomicUsize::new(0)));
+            let latest = Arc::new(Counter(AtomicUsize::new(0)));
+            let mut sleep = context.sleep(Duration::from_millis(10)).boxed();
+
+            // Changing the poller's waker must reuse the existing alarm.
+            for counter in [&first, &latest].into_iter().cycle().take(100) {
+                assert!(
+                    sleep
+                        .poll_unpin(&mut task::Context::from_waker(&waker(counter.clone())))
+                        .is_pending()
+                );
+            }
+            assert_eq!(context.executor().sleeping.lock().len(), 1);
+
+            // Once due, the sleep must notify only its latest poller and resolve.
+            context.sleep(Duration::from_millis(20)).await;
+            assert_eq!(first.0.load(Ordering::Relaxed), 0);
+            assert_eq!(latest.0.load(Ordering::Relaxed), 1);
+            assert!(futures::poll!(&mut sleep).is_ready());
+        });
     }
 
     #[test]
@@ -1843,6 +2269,34 @@ mod tests {
             ..Config::default()
         };
         deterministic::Runner::new(cfg);
+    }
+
+    /// Removing a blob frees its name while the removed handle lives.
+    #[test]
+    fn test_removed_blob_reopens_while_handle_alive() {
+        deterministic::Runner::default().start(|context| async move {
+            let (old, _) = context.open("partition", b"blob").await.unwrap();
+            old.write_at(0, b"old", WriteOptions::default())
+                .await
+                .unwrap();
+            context.remove("partition", None).await.unwrap();
+            let (current, len) = context.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 0);
+
+            // Cleanup of the removed handle must not affect writes through its replacement.
+            drop(old);
+            current
+                .write_at(0, b"new", WriteOptions::default())
+                .await
+                .unwrap();
+            current.sync().await.unwrap();
+            let read = current
+                .read_at(0, 3, ReadOptions::default())
+                .await
+                .unwrap()
+                .coalesce();
+            assert_eq!(read.as_ref(), b"new");
+        });
     }
 
     #[test]
@@ -2102,7 +2556,6 @@ mod tests {
     fn test_default_time_zero() {
         // Initialize runtime
         let executor = deterministic::Runner::default();
-
         executor.start(|context| async move {
             // Check that the time is zero
             assert_eq!(
@@ -2124,7 +2577,6 @@ mod tests {
         let start_time = UNIX_EPOCH + Duration::from_secs(100);
         let cfg = Config::default().with_start_time(start_time);
         let executor = deterministic::Runner::new(cfg);
-
         executor.start(move |context| async move {
             // Check that the time matches the custom start time
             assert_eq!(context.current(), start_time);
@@ -2168,6 +2620,27 @@ mod tests {
         // Start runtime
         executor.start(|_| async move {
             rx.await.unwrap();
+        });
+    }
+
+    #[cfg(feature = "external")]
+    #[test]
+    fn test_paced_future_moves_between_tasks() {
+        Runner::timed(Duration::from_secs(1)).start(|context| async move {
+            // An immediately ready payload makes the pacing timer the only wakeup source.
+            let clock = context.child("clock");
+            let latency = Duration::from_millis(10);
+            let deadline = context.current() + latency;
+            let mut future = async move { async { 7 }.pace(&clock, latency).await }.boxed();
+
+            // Register the source task's waker before transferring the pending future.
+            // The destination must receive the timer's eventual notification.
+            assert!(futures::poll!(&mut future).is_pending());
+            let moved = context.child("moved").spawn(move |_| future);
+
+            // Changing tasks must preserve both the result and the pacing deadline.
+            assert_eq!(moved.await.unwrap(), 7);
+            assert!(context.current() >= deadline);
         });
     }
 

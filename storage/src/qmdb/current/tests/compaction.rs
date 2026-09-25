@@ -20,7 +20,9 @@ macro_rules! parity {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let config = $config(&context);
-            let db = <$db>::init(context.child("db"), config).await.unwrap();
+            let db = <$db>::init(context.child("db"), config, None)
+                .await
+                .unwrap();
             let mut seed = db.new_batch();
             for i in 0..300 {
                 seed = seed.write(key(i), Some(val(i)));
@@ -186,7 +188,7 @@ fn bounded_compaction_progresses_across_inactive_gaps_and_recovers() {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         let config = || variable_config::<OneCap>("bounded", &context);
-        let db = UnorderedVariableDb::init(context.child("first"), config())
+        let db = UnorderedVariableDb::init(context.child("first"), config(), None)
             .await
             .unwrap();
 
@@ -269,7 +271,7 @@ fn bounded_compaction_progresses_across_inactive_gaps_and_recovers() {
         let db = db.prune(boundary).await.unwrap();
         assert_eq!(db.root(), root);
         drop(db);
-        let db = UnorderedVariableDb::init(context.child("reopen"), config())
+        let db = UnorderedVariableDb::init(context.child("reopen"), config(), None)
             .await
             .unwrap();
         assert_eq!(db.root(), root);
@@ -303,6 +305,7 @@ fn bounded_compaction_does_not_recopy_moved_entries() {
         let db = UnorderedVariableDb::init(
             context.child("db"),
             variable_config::<OneCap>("exhaust", &context),
+            None,
         )
         .await
         .unwrap();

@@ -1,0 +1,23 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.36"
+evm_version = "prague"
+optimizer = true
+optimizer_runs = 1000000
+via_ir = true
+no_match_test = "test(Fuzz)?_Differential"
+
+[profile.default.fuzz]
+runs = 1024
+
+[profile.differential]
+ffi = true
+no_match_test = "test_unused"
+
+[profile.differential.fuzz]
+runs = 256
+
+[fmt]
+bracket_spacing = true

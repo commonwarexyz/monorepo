@@ -9,16 +9,16 @@ use commonware_runtime::{
     Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
     buffer::{
         Write,
-        paged::{CacheRef, Writer},
+        paged::{CHECKSUM_SIZE, CacheRef, Recovery as PagedRecovery},
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
 use futures::future::{join_all, try_join_all};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     future::Future,
     mem::take,
-    num::NonZeroUsize,
+    num::{NonZeroU16, NonZeroUsize},
 };
 use tracing::debug;
 
@@ -42,6 +42,46 @@ pub(super) fn section_from_name(name: &[u8]) -> Result<u64, Error> {
     Ok(u64::from_be_bytes(section))
 }
 
+/// Remove sections and whole pages above a ceiling before opening exclusive recovery owners.
+/// The containing page remains intact for checksum validation and exact logical truncation.
+pub(super) async fn truncate_paged_tail<E: Storage>(
+    context: &E,
+    partition: &str,
+    page_size: NonZeroU16,
+    section: u64,
+    end: u64,
+) -> Result<(), Error> {
+    let mut sections = stored_names(context, partition)
+        .await?
+        .iter()
+        .map(|name| section_from_name(name))
+        .collect::<Result<Vec<_>, _>>()?;
+    sections.sort_unstable();
+    for stored in sections.into_iter().rev() {
+        if stored > section {
+            context
+                .remove(partition, Some(&stored.to_be_bytes()))
+                .await?;
+            continue;
+        }
+        if stored == section {
+            let (blob, size) = context.open(partition, &stored.to_be_bytes()).await?;
+
+            // An unrepresentable physical ceiling excludes no representable blob bytes.
+            let page_size = u64::from(page_size.get());
+            let ceiling = end
+                .div_ceil(page_size)
+                .saturating_mul(page_size + CHECKSUM_SIZE);
+            if ceiling < size {
+                blob.resize(ceiling).await?;
+                blob.sync().await?;
+            }
+        }
+        break;
+    }
+    Ok(())
+}
+
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
@@ -60,11 +100,11 @@ pub trait SectionBuffer: Send + Sync {
     /// Wait for any started sync to complete without starting a new sync.
     fn wait_for_sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
-    /// Resize the logical size of the buffer.
-    fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+    /// Shorten the buffer. A shorter length is durable when this returns.
+    fn truncate(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
-impl<B: Blob> SectionBuffer for Writer<B> {
+impl<B: Blob> SectionBuffer for PagedRecovery<B> {
     fn size(&self) -> u64 {
         Self::size(self)
     }
@@ -81,11 +121,12 @@ impl<B: Blob> SectionBuffer for Writer<B> {
         Self::wait_for_sync(self).await
     }
 
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+    async fn truncate(&mut self, len: u64) -> Result<(), RError> {
+        Self::truncate(self, len).await
     }
 }
 
+// Glob's recovery owner controls access to truncation for uncached sections.
 impl<B: Blob> SectionBuffer for Write<B> {
     fn size(&self) -> u64 {
         Self::size(self)
@@ -103,8 +144,12 @@ impl<B: Blob> SectionBuffer for Write<B> {
         Self::wait_for_sync(self).await
     }
 
-    async fn resize(&mut self, len: u64) -> Result<(), RError> {
-        Self::resize(self, len).await
+    async fn truncate(&mut self, len: u64) -> Result<(), RError> {
+        if len < self.size() {
+            self.resize(len).await?;
+            self.sync().await?;
+        }
+        Ok(())
     }
 }
 
@@ -121,7 +166,7 @@ pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     ) -> impl Future<Output = Result<Self::Buffer, RError>> + Send;
 }
 
-/// Factory for creating [`Writer`] buffers with page caching.
+/// Factory for creating cached sections whose repair permission belongs to the journal.
 #[derive(Clone)]
 pub struct AppendFactory {
     /// The size of the write buffer.
@@ -131,10 +176,10 @@ pub struct AppendFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for AppendFactory {
-    type Buffer = Writer<B>;
+    type Buffer = PagedRecovery<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Writer::new(
+        PagedRecovery::open(
             blob,
             size,
             self.write_buffer.get(),
@@ -179,11 +224,11 @@ pub struct Config<F> {
 ///
 /// # In-flight syncs
 ///
-/// Syncs started by [Manager::start_sync] complete in the background, so every path that
-/// removes a blob from `blobs` (`prune`, `remove_section`, `rewind`, `clear`, `destroy`) must
-/// call [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared
-/// completion first, guaranteeing that caller-held sync handles always report the sync's true
-/// result and that no buffer is dropped with I/O in flight.
+/// Syncs started by [Manager::start_sync] complete in the background, so every path that removes a
+/// blob from `blobs` (`prune`, `remove_section`, `truncate_pending`, `clear`, `destroy`) must call
+/// [SectionBuffer::wait_for_sync] before dropping it. This resolves the sync's shared completion
+/// first, guaranteeing that caller-held sync handles always report the sync's true result and that
+/// no buffer is dropped with I/O in flight.
 pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     context: E,
     partition: String,
@@ -276,15 +321,16 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn get_or_create(&mut self, section: u64) -> Result<&mut F::Buffer, Error> {
         self.prune_guard(section)?;
 
-        if !self.blobs.contains_key(&section) {
-            let name = section.to_be_bytes();
-            let (blob, size) = self.context.open(&self.partition, &name).await?;
-            let buffer = self.factory.create(blob, size).await?;
-            self.tracked.inc();
-            self.blobs.insert(section, buffer);
+        match self.blobs.entry(section) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let name = section.to_be_bytes();
+                let (blob, size) = self.context.open(&self.partition, &name).await?;
+                let buffer = self.factory.create(blob, size).await?;
+                self.tracked.inc();
+                Ok(entry.insert(buffer))
+            }
         }
-
-        Ok(self.blobs.get_mut(&section).unwrap())
     }
 
     /// Sync the given `sections` to storage.
@@ -312,9 +358,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// that sync's handle rather than starting a new one.
     ///
     /// The handle is a detached observer: dropping it does not cancel the sync, and a failure of
-    /// the started sync resurfaces from the buffer on the section's next operation. A failure to
-    /// flush buffered data while starting the sync, however, is reported only through the
-    /// returned handle, so callers must observe the handle to detect it.
+    /// the started sync, or of the flush that precedes it, resurfaces from the buffer on the
+    /// section's next sync or flushing operation.
     pub async fn start_sync(
         &mut self,
         sections: impl crate::Sections,
@@ -363,12 +408,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let mut blob = self.blobs.remove(&section).unwrap();
             blob.wait_for_sync().await?;
             let size = blob.size();
-            drop(blob);
 
             // Remove blob from storage
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+            drop(blob);
             pruned = true;
 
             debug!(section, size, "pruned blob");
@@ -428,10 +473,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         if let Some(mut blob) = self.blobs.remove(&section) {
             blob.wait_for_sync().await?;
             let size = blob.size();
-            drop(blob);
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+            drop(blob);
             self.tracked.dec();
             debug!(section, size, "removed section");
             Ok(true)
@@ -445,11 +490,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Self::wait_for_syncs(self.blobs.values_mut()).await?;
         for (section, blob) in self.blobs.into_iter() {
             let size = blob.size();
-            drop(blob);
             debug!(section, size, "destroyed blob");
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+            drop(blob);
         }
         match self.context.remove(&self.partition, None).await {
             Ok(()) => {}
@@ -468,23 +513,24 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         let blobs = take(&mut self.blobs);
         for (section, blob) in blobs {
             let size = blob.size();
-            drop(blob);
             debug!(section, size, "cleared blob");
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
+            drop(blob);
         }
         let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
         Ok(())
     }
 
-    /// Rewind by removing all sections after `section` and resizing the target section.
-    pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
+    /// Truncate by removing all sections after `section` and resizing the target section. A
+    /// shorter section length is durable when this returns.
+    pub async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
         // Remove sections in descending order (newest first) to maintain a contiguous record
-        // if a crash occurs during rewind. Section `u64::MAX` has no successor, so there are
+        // if a crash occurs during truncate. Section `u64::MAX` has no successor, so there are
         // no sections above it to remove.
         let sections_to_remove: Vec<u64> = match section.checked_add(1) {
             Some(next) => self.blobs.range(next..).rev().map(|(&s, _)| s).collect(),
@@ -495,34 +541,20 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             // Remove the underlying blob from storage
             let mut blob = self.blobs.remove(&s).unwrap();
             blob.wait_for_sync().await?;
-            drop(blob);
             self.context
                 .remove(&self.partition, Some(&s.to_be_bytes()))
                 .await?;
+            drop(blob);
             self.tracked.dec();
-            debug!(section = s, "removed blob during rewind");
+            debug!(section = s, "removed blob during truncate");
         }
 
-        // If the section exists, truncate it to the given size. No explicit sync barrier is
-        // needed here: the buffer waits for any in-flight sync before mutating the blob.
-        if let Some(blob) = self.blobs.get_mut(&section) {
-            let current_size = blob.size();
-            if size < current_size {
-                blob.resize(size).await?;
-                debug!(
-                    section,
-                    old_size = current_size,
-                    new_size = size,
-                    "rewound blob"
-                );
-            }
-        }
-
-        Ok(())
+        self.truncate_pending_section(section, size).await
     }
 
-    /// Resize only the given section without affecting other sections.
-    pub async fn rewind_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
+    /// Truncate only the given section without affecting other sections. A shorter length is
+    /// durable when this returns.
+    pub async fn truncate_pending_section(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
 
         // Get the blob at the given section
@@ -530,11 +562,30 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             // Truncate the blob to the given size
             let current = blob.size();
             if size < current {
-                blob.resize(size).await?;
-                debug!(section, from = current, to = size, "rewound section");
+                blob.truncate(size).await?;
+                debug!(section, from = current, to = size, "truncated section");
             }
         }
 
+        Ok(())
+    }
+
+    /// Durably truncate independent sections to their selected upper bounds.
+    pub async fn truncate_pending_sections(
+        &mut self,
+        sizes: &BTreeMap<u64, u64>,
+    ) -> Result<(), Error> {
+        if sizes.is_empty() {
+            return Ok(());
+        }
+        for &section in sizes.keys() {
+            self.prune_guard(section)?;
+        }
+        let futures = self.blobs.iter_mut().filter_map(|(section, blob)| {
+            let &size = sizes.get(section)?;
+            (size < blob.size()).then(|| blob.truncate(size))
+        });
+        try_join_all(futures).await.map_err(Error::Runtime)?;
         Ok(())
     }
 
@@ -546,9 +597,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic};
+    use commonware_runtime::{
+        BufferPooler, ReadOptions, Runner as _, Spawner as _, Supervisor as _, WriteOptions,
+        buffer::paged::Writer, deterministic,
+    };
     use commonware_utils::{channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,
@@ -558,6 +612,78 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+
+    /// Materialize a crash that retains new page bytes but loses their checksum lengths.
+    pub(in super::super) async fn seed_torn_suffix<E: Storage + BufferPooler>(
+        context: &E,
+        partition: &str,
+        section: u64,
+        page: &[u8],
+        suffix_pages: usize,
+    ) {
+        // Seed one acknowledged page whose physical encoding can prefix the crash image.
+        let physical = page.len() + CHECKSUM_SIZE as usize;
+        let source = format!("{partition}-source");
+        let (raw, size) = context.open(&source, b"source").await.unwrap();
+        let raw = Arc::new(raw);
+        let cache = CacheRef::from_pooler(
+            context,
+            (page.len() as u16).try_into().unwrap(),
+            commonware_utils::NZUsize!(4),
+        );
+        let mut writer = Writer::new(Arc::clone(&raw), size, 2 * page.len(), cache)
+            .await
+            .unwrap();
+        writer.append(page).await.unwrap();
+        writer.sync().await.unwrap();
+        let acknowledged = raw
+            .read_at(0, physical, ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce();
+
+        // The empty tip and page-aligned direct append issue one unsynced write wholly beyond
+        // the acknowledged page. The raw handle shares the writer's open and observes those bytes.
+        writer
+            .append_owned(page.repeat(suffix_pages).into())
+            .await
+            .unwrap();
+        let mut image = raw
+            .read_at(0, physical * (suffix_pages + 1), ReadOptions::default())
+            .await
+            .unwrap()
+            .coalesce()
+            .as_ref()
+            .to_vec();
+        assert_eq!(&image[..physical], acknowledged.as_ref());
+        drop(writer);
+        drop(raw);
+
+        // Clear the unacknowledged pages' length slots to model torn checksum publication.
+        for page_index in 1..=suffix_pages {
+            let footer = page_index * physical + page.len();
+            image[footer..footer + 2].fill(0);
+            image[footer + 6..footer + 8].fill(0);
+        }
+        let (blob, _) = context
+            .open(partition, &section.to_be_bytes())
+            .await
+            .unwrap();
+        blob.write_at(0, image, WriteOptions::default())
+            .await
+            .unwrap();
+        blob.sync().await.unwrap();
+    }
+
+    impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
+        pub fn test_configuration(&self) -> (E, String, F) {
+            (
+                self.context.child("reopen_fixture"),
+                self.partition.clone(),
+                self.factory.clone(),
+            )
+        }
+    }
 
     type SyncSender = oneshot::Sender<Result<(), RError>>;
     type PendingSyncs = Arc<Mutex<Vec<SyncSender>>>;
@@ -569,15 +695,27 @@ mod tests {
     struct TestFactory {
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
+        on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
-    struct TestBuffer {
+    struct TestBuffer<B: Blob> {
+        /// Keeps the raw blob owner alive while the test buffer models an open section.
+        _blob: B,
         pending: PendingSyncs,
         wait_for_syncs: Arc<AtomicUsize>,
         syncing: Option<SharedSync>,
+        on_drop: Option<Arc<dyn Fn() + Send + Sync>>,
     }
 
-    impl SectionBuffer for TestBuffer {
+    impl<B: Blob> Drop for TestBuffer<B> {
+        fn drop(&mut self) {
+            if let Some(on_drop) = &self.on_drop {
+                on_drop();
+            }
+        }
+    }
+
+    impl<B: Blob> SectionBuffer for TestBuffer<B> {
         fn size(&self) -> u64 {
             0
         }
@@ -610,19 +748,21 @@ mod tests {
             Ok(())
         }
 
-        async fn resize(&mut self, _len: u64) -> Result<(), RError> {
+        async fn truncate(&mut self, _len: u64) -> Result<(), RError> {
             Ok(())
         }
     }
 
     impl<B: Blob> BufferFactory<B> for TestFactory {
-        type Buffer = TestBuffer;
+        type Buffer = TestBuffer<B>;
 
-        async fn create(&self, _blob: B, _size: u64) -> Result<Self::Buffer, RError> {
+        async fn create(&self, blob: B, _size: u64) -> Result<Self::Buffer, RError> {
             Ok(TestBuffer {
+                _blob: blob,
                 pending: self.pending.clone(),
                 wait_for_syncs: self.wait_for_syncs.clone(),
                 syncing: None,
+                on_drop: self.on_drop.clone(),
             })
         }
     }
@@ -633,7 +773,63 @@ mod tests {
             factory: TestFactory {
                 pending,
                 wait_for_syncs,
+                on_drop: None,
             },
+        }
+    }
+
+    #[test]
+    fn test_cleanup_drops_each_owner_after_removal() {
+        for operation in [
+            "prune",
+            "remove_section",
+            "destroy",
+            "clear",
+            "truncate_pending",
+        ] {
+            deterministic::Runner::default().start(|context| async move {
+                // Observe each buffer drop against the partition contents visible at that instant.
+                let drops = Arc::new(Mutex::new(Vec::new()));
+                let observed = drops.clone();
+                let observer = context.child("drop_observer");
+                let mut cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+                cfg.factory.on_drop = Some(Arc::new(move || {
+                    // Deterministic namespace reads complete on their first poll.
+                    let names = observer.scan("test").now_or_never().and_then(Result::ok);
+                    observed.lock().push(names);
+                }));
+                let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+                manager.get_or_create(1).await.unwrap();
+                manager.get_or_create(2).await.unwrap();
+
+                // Every cleanup path must remove persistent names before releasing their owners.
+                match operation {
+                    "prune" => assert!(manager.prune(3).await.unwrap()),
+                    "remove_section" => {
+                        assert!(manager.remove_section(1).await.unwrap());
+                        assert!(manager.remove_section(2).await.unwrap());
+                    }
+                    "destroy" => manager.destroy().await.unwrap(),
+                    "clear" => manager.clear().await.unwrap(),
+                    "truncate_pending" => manager.truncate_pending(0, 0).await.unwrap(),
+                    _ => unreachable!(),
+                }
+
+                // Each drop observes only names whose owners remain live.
+                let remaining = if operation == "truncate_pending" {
+                    1u64
+                } else {
+                    2u64
+                };
+                assert_eq!(
+                    *drops.lock(),
+                    vec![
+                        Some(vec![remaining.to_be_bytes().to_vec()]),
+                        Some(Vec::new())
+                    ],
+                    "{operation}",
+                );
+            });
         }
     }
 
@@ -734,6 +930,46 @@ mod tests {
             second.await.expect("reused sync handle should complete");
             manager.destroy().await.expect("destroy failed");
         });
+    }
+
+    #[test]
+    fn test_truncate_waits_for_in_flight_start_sync() {
+        for fails in [false, true] {
+            deterministic::Runner::default().start(|context| async move {
+                // Hold a sync on the section that truncation will remove.
+                let pending = PendingSyncs::default();
+                let wait_for_syncs = Arc::new(AtomicUsize::new(0));
+                let cfg = test_config(pending.clone(), wait_for_syncs.clone());
+                let mut manager = Manager::init(context.child("manager"), cfg).await.unwrap();
+                manager.get_or_create(1).await.unwrap();
+                manager.get_or_create(2).await.unwrap();
+                let handle = manager.start_sync(2).await.unwrap();
+
+                // Truncation must wait for that sync and surface its completion result.
+                let result = {
+                    let truncate = manager.truncate_pending(1, 0);
+                    futures::pin_mut!(truncate);
+                    assert!(futures::poll!(&mut truncate).is_pending());
+                    assert_eq!(wait_for_syncs.load(Ordering::Relaxed), 1);
+                    complete_next_pending_sync(
+                        &pending,
+                        if fails { Err(RError::Closed) } else { Ok(()) },
+                    );
+                    truncate.await
+                };
+
+                // A failed sync is fatal to this manager; success leaves only the retained section.
+                if fails {
+                    assert!(matches!(result, Err(Error::Runtime(RError::Closed))));
+                    assert!(matches!(handle.await, Err(RError::Closed)));
+                } else {
+                    result.unwrap();
+                    handle.await.unwrap();
+                    assert_eq!(manager.newest_section(), Some(1));
+                    manager.destroy().await.unwrap();
+                }
+            });
+        }
     }
 
     #[test]

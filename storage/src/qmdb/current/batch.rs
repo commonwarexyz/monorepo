@@ -263,6 +263,10 @@ impl<F: Graftable, D: Digest, S: Strategy> Readable for BatchOverMem<'_, F, D, S
     }
 }
 
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, U, const N: usize, S> =
+    Result<Arc<MerkleizedBatch<F, D, U, N, S>>, Error<F>>;
+
 /// A speculative batch of mutations whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
 ///
@@ -310,8 +314,8 @@ where
 /// is not an immutable snapshot.
 ///
 /// Internally, the batch chain terminates in the DB's committed bitmap via `BitmapBatch::Base`.
-/// That committed bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch),
-/// [`Db::prune`](super::db::Db::prune), and [`Db::rewind`](super::db::Db::rewind) update the DB.
+/// That committed bitmap evolves in place as [`Db::apply_batch`](super::db::Db::apply_batch) and
+/// [`Db::prune`](super::db::Db::prune) update the DB.
 ///
 /// Reads through this batch's chain, constructing child batches from it, and applying it later are
 /// only semantically correct while its ancestor chain is still the committed prefix of the DB. In
@@ -414,6 +418,10 @@ where
     /// Returns results in the same order as the input keys. The staged batch records updates by
     /// read index: the initial keys occupy `0..keys.len()`, and each [`expand`](Staged::expand)
     /// appends another index range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
     pub async fn stage<E, C, I>(
         self,
         keys: &[&U::Key],
@@ -456,6 +464,10 @@ where
     /// Expansion does not deduplicate against previously staged keys and does not observe values the
     /// caller has computed for earlier staged slots but not yet passed to
     /// [`merkleize`](Staged::merkleize).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain.
     pub async fn expand<E, C, I>(
         self,
         keys: &[&U::Key],
@@ -501,10 +513,14 @@ where
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
     /// is committed with the returned batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize.staged",
         level = "info",
@@ -517,7 +533,7 @@ where
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -528,25 +544,27 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
 
         // Overlap the update resolution with a committed-prefix candidate prefetch.
         // Candidates come from the speculative `bitmap_parent` (the same source the floor
         // raise scans below), clamped to the committed prefix inside the helper.
-        let (inner, staged_updates, prefetched) = inner
+        let (prepared, staged_updates, prefetched) = inner
             .resolve_updates_prefetched(updates, upserts, &db.any, |floor, tip, limit, out| {
                 fill_candidates(&bitmap_parent, floor, tip, limit, out)
             })
             .await?;
-        let inner = inner
+        let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                &db.any,
                 |stats| (stats.default_budget(), metadata),
                 staged_updates,
                 Some(prefetched),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
     }
 }
 
@@ -567,10 +585,14 @@ where
     /// set: the initial `stage` input followed by any [`expand`](Staged::expand) ranges. `metadata`
     /// is committed with the returned batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize.staged",
         level = "info",
@@ -583,7 +605,7 @@ where
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -594,16 +616,19 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
-        let inner = inner
+        let prepared = inner.prepare(&db.any)?;
+        let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                &db.any,
                 |stats| (stats.default_budget(), metadata),
                 staged_updates,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
     }
 }
 
@@ -617,7 +642,11 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize",
         level = "info",
@@ -627,7 +656,7 @@ where
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -642,7 +671,11 @@ where
     ///
     /// `plan` runs once, after mutations are resolved and before compaction. See
     /// [`crate::qmdb::compaction`] for how the budget bounds compaction work.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
     #[tracing::instrument(
         name = "qmdb.current.unordered.batch.merkleize_with_compaction_plan",
         level = "info",
@@ -652,7 +685,7 @@ where
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -661,12 +694,11 @@ where
         self.merkleize_with_plan(db, plan).await
     }
 
-    #[allow(clippy::type_complexity)]
     async fn merkleize_with_plan<E, C, I>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
@@ -677,17 +709,20 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
-        let inner = inner
+        let prepared = inner.prepare(&db.any)?;
+        let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                &db.any,
                 plan,
                 StagedUpdates::<F, update::Unordered<K, V>>::new(),
                 None,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
     }
 }
 
@@ -701,7 +736,11 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize",
         level = "info",
@@ -711,7 +750,7 @@ where
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -726,7 +765,11 @@ where
     ///
     /// `plan` runs once, after mutations are resolved and before compaction. See
     /// [`crate::qmdb::compaction`] for how the budget bounds compaction work.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
     #[tracing::instrument(
         name = "qmdb.current.ordered.batch.merkleize_with_compaction_plan",
         level = "info",
@@ -736,7 +779,7 @@ where
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -745,12 +788,11 @@ where
         self.merkleize_with_plan(db, plan).await
     }
 
-    #[allow(clippy::type_complexity)]
     async fn merkleize_with_plan<E, C, I>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
@@ -761,16 +803,19 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
+        bitmap_parent.ensure_based_on(&db.any.bitmap)?;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
-        let inner = inner
+        let prepared = inner.prepare(&db.any)?;
+        let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                &db.any,
                 plan,
                 StagedUpdates::<F, update::Ordered<K, V>>::new(),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
             .await?;
-        compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
+        let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
+        drop(retained_ancestors);
+        result
     }
 }
 
@@ -1058,6 +1103,19 @@ impl<const N: usize> BitmapBatch<N> {
         }
     }
 
+    /// Return [`Error::StaleBatch`] unless this chain terminates in `bitmap`.
+    ///
+    /// Each database instance owns one committed bitmap, so this binds a batch to the instance
+    /// that created it. Another instance with the same commitment cannot stand in for it, because
+    /// the retained chain reads the originating instance's bitmap.
+    fn ensure_based_on<F: Graftable>(&self, bitmap: &Arc<Shared<N>>) -> Result<(), Error<F>> {
+        if Arc::ptr_eq(self.shared(), bitmap) {
+            Ok(())
+        } else {
+            Err(Error::StaleBatch)
+        }
+    }
+
     /// Return a chain equivalent to `self` with any `Layer` whose overlay is now fully committed
     /// replaced by a direct reference to the committed bitmap. Since `apply_batch` commits
     /// contiguous prefixes, committed `Layer`s are always at the bottom of the chain.
@@ -1183,9 +1241,8 @@ where
 {
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// All unapplied ancestors in the chain must be kept alive until the child (or any
+    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     ///
     /// This is only valid while `self` is still on the winning branch. If a different branch has
     /// been applied since `self` was created, `self` is no longer a valid parent and must not be
@@ -1234,6 +1291,51 @@ where
         H: Hasher<Digest = D>,
     {
         self.inner.get_many(keys, &db.any).await
+    }
+}
+
+impl<F, K, V, D, const N: usize, S: Strategy> MerkleizedBatch<F, D, update::Ordered<K, V>, N, S>
+where
+    F: Graftable,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Returns the smallest active key strictly greater than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no greater key, without wrapping.
+    pub async fn get_next_key<E, C, I, H>(
+        &self,
+        key: &K,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.get_next_key(key, &db.any).await
+    }
+
+    /// Returns the largest active key strictly less than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no smaller key, without wrapping.
+    pub async fn get_prev_key<E, C, I, H>(
+        &self,
+        key: &K,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        self.inner.get_prev_key(key, &db.any).await
     }
 }
 

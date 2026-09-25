@@ -412,11 +412,7 @@ mod zkc {
                 ),
                 Self::Constant(other_constant) => Self::Constant(constant * other_constant),
                 Self::General(items) => {
-                    let mut items = items.clone();
-                    for w in items.values_mut() {
-                        *w = w.clone() * &constant;
-                    }
-                    Self::General(items)
+                    Self::General(items.map_values(|_, w| w.clone() * &constant))
                 }
             };
             Some(out)
