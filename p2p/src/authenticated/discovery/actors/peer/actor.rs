@@ -407,7 +407,7 @@ mod tests {
                 let (actor, mailbox, relay) = Actor::new(context.child("actor"), cfg);
 
                 // Queue gossip ahead of the data so every message type crosses the
-                // connection, with distinct counts per type.
+                // connection. BitVec is sent twice so its count differs from Peers.
                 for _ in 0..2 {
                     mailbox.bit_vec(types::BitVec {
                         index: 0,

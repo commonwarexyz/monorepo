@@ -212,7 +212,8 @@ impl<E: Clock + Supervisor, P: PublicKey> Inbox<E, P> {
         self.invalid.inc();
     }
 
-    /// Rate limits `data` and delivers it to its channel without blocking.
+    /// Rate limits `data` and enqueues it on its channel, dropping it if the channel is full or
+    /// closed.
     ///
     /// Returns [Error::InvalidChannel] if `data` names an unregistered channel.
     pub(crate) async fn deliver(&self, data: Data) -> Result<(), Error> {

@@ -308,8 +308,8 @@ mod tests {
     /// message would be formatted as:
     ///
     /// ```text
-    /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
-    /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="ping"} 1
+    /// peer_network_spawner_messages_rate_limited_total{index="9",peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
+    /// peer_network_spawner_messages_rate_limited_total{index="9",peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="ping"} 1
     /// ```
     fn assert_no_rate_limiting(metrics: &str) {
         let mut samples = metric_samples(metrics, "messages_rate_limited_total").peekable();
