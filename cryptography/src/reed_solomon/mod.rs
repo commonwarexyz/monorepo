@@ -7,6 +7,8 @@
 //! Decoding requires at least as many distinct shards as there were original shards.
 //! All supplied shards must belong to the same codeword: this module reconstructs
 //! missing shards and does not authenticate their contents.
+//! [`RecoveryPlan`] prepares erasure coefficients once for decoders with matching
+//! shard counts and received indices, including stripes of different byte lengths.
 //!
 //! # Basic Usage
 //!
@@ -61,6 +63,7 @@ pub use self::{
     decoder_result::{DecoderResult, Originals, Recoveries, RecoveryDecoderResult},
     encoder_result::{EncoderResult, Recovery},
     engine::SHARD_CHUNK_BYTES,
+    recovery_plan::RecoveryPlan,
     wrappers::{Decoder, Encoder},
 };
 use thiserror::Error;
@@ -74,6 +77,7 @@ pub mod fuzz;
 
 mod decoder_result;
 mod encoder_result;
+mod recovery_plan;
 mod wrappers;
 
 pub mod algorithm {
@@ -85,6 +89,9 @@ pub mod rate;
 /// Represents all possible errors that can occur in this library.
 #[derive(Clone, Copy, Debug, Error, PartialEq)]
 pub enum Error {
+    /// A prepared recovery plan does not match this decoder's counts, rate, or received shards.
+    #[error("recovery plan does not match decoder")]
+    RecoveryPlanMismatch,
     /// Given shard has different size than the configured shard size.
     #[error("different shard size: expected {shard_bytes} bytes, got {got} bytes")]
     DifferentShardSize {
@@ -216,6 +223,7 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<Encoder>();
         assert_send::<Decoder>();
+        assert_send::<RecoveryPlan>();
         assert_send::<DefaultEngine>();
         assert_send::<DefaultRate<DefaultEngine>>();
         assert_send::<DecoderResult<'_>>();
@@ -229,6 +237,7 @@ mod tests {
         fn assert_sync<T: Sync>() {}
         assert_sync::<Encoder>();
         assert_sync::<Decoder>();
+        assert_sync::<RecoveryPlan>();
         assert_sync::<DefaultEngine>();
         assert_sync::<DefaultRate<DefaultEngine>>();
         assert_sync::<DecoderResult<'_>>();
