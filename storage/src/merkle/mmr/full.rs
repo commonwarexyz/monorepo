@@ -323,9 +323,9 @@ mod tests {
     }
 
     /// Regression: init_sync's "fresh start" path (journal data entirely before sync range)
-    /// calls clear_to_size which changes the journal size, but journal_size must be re-read
-    /// afterward. Without the re-read, nodes_to_pin and the mem_mmr are initialized with a
-    /// stale size, causing incorrect pinned nodes or init failure.
+    /// resets the journal to the range start, so journal_size must reflect the reset. Otherwise
+    /// nodes_to_pin and the mem_mmr are initialized with a stale size, causing incorrect pinned
+    /// nodes or init failure.
     #[test_traced]
     fn test_init_sync_fresh_start_updates_journal_size() {
         let executor = deterministic::Runner::default();
@@ -379,7 +379,7 @@ mod tests {
             ref_mmr.destroy().await.unwrap();
 
             // init_sync with range starting beyond the existing data triggers the
-            // "fresh start" path (clear_to_size).
+            // "fresh start" path, which resets the journal without opening it.
             let sync_cfg = SyncConfig::<Digest, Sequential> {
                 config: test_config(&context),
                 range: non_empty_range!(Location::new(100), Location::new(200)),
