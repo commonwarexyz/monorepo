@@ -1,0 +1,15 @@
+# StateLens recipes. See README.md.
+
+set positional-arguments := true
+
+# Turn sources into invariants: just extract <kind> <source>...
+extract *args:
+    python3 scripts/statelens.py extract "$@"
+
+# Instrument this checkout, test and fuzz: just campaign [--agent A] [-- <libFuzzer args>]
+campaign *args:
+    python3 scripts/statelens.py campaign "$@"
+
+# Check invariant files: just check-invariants [path...]
+check-invariants *args:
+    python3 scripts/statelens.py lint "$@"

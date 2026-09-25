@@ -272,7 +272,7 @@ R-P1-5. Phase 1 does no deduplication, scoring, or approval. Its files are activ
 R-P2-1. A campaign runs in place in the operator's checkout: the operator clones the repository, where StateLens lives, and runs the campaign in that clone. StateLens does not make another clone. The checkout must have no tracked changes outside `consensus/fuzz/statelens/` and no instrumentation from an earlier campaign. The campaign instruments the checkout in place and never commits; the operator discards the checkout afterwards. Uncommitted edits to the registry are used. It takes one parameter: the agent (`claude|codex`) from a config file (`config.env`), the environment, or the CLI. There are no other campaign parameters and no seed corpus; extra libFuzzer arguments (for example `-fork=N`) may be passed through.
 
 R-P2-2. Steps, in order:
-1. **Materialize.** Copy `runtime/statelens.rs` into `consensus/src/simplex/` and register it as a module. Add `sancov` to the dependencies of `commonware-consensus`. Add the fuzz target `simplex_statelens`, from `runtime/target.rs`, to the existing `consensus/fuzz/simplex` package. Patch the twins runner in `consensus/fuzz/core` so that it publishes the compromised set to the StateLens runtime before starting nodes and checks the participant index mapping (section 8.4). Every edit is anchored on an exact line of the current code, and the campaign stops if an anchor has moved.
+1. **Materialize.** Copy `runtime/statelens.rs` into `consensus/src/simplex/` and register it as a module. Add `sancov` to the dependencies of `commonware-consensus`. Add the fuzz target `simplex_statelens`, from `runtime/target.rs`, to the existing `consensus/fuzz/simplex` package. Patch the twins runner in `consensus/fuzz/core` so that it publishes the compromised set to the StateLens runtime before starting nodes and checks the participant index mapping (section 8.4). Patch the deterministic runtime so that a fresh runtime clears StateLens ghost state (R-INS-5). Every edit is anchored on an exact line of the current code, and the campaign stops if an anchor has moved.
 2. **Instrument invariants.** Run the instrumenter agent with `prompts/instrument-invariants.md` over every invariant in the registry, in batches of 8. For each invariant it adds assertions, invariant probes, and any ghost state needed.
 3. **Instrument beacons.** Run the instrumenter agent with `prompts/instrument-beacons.md` once for each of the voter, batcher, and resolver. It adds beacon probes.
 4. **Write the instrumentation plan.** The agents record, in `consensus/fuzz/statelens/campaign/plan.md`, each invariant -> the sites and ghost fields used, and each beacon probe -> its site and what it observes. The operator uses it when investigating. If the agent could not bind an invariant, the plan says so and gives the reason. The script adds an `unbound` entry for any invariant the agent skipped, a summary, and a check that instrumentation changed no file outside `consensus/src/simplex/`.
@@ -306,7 +306,7 @@ R-INS-5. **Ghost state.**
 - Ghost fields may be added to existing structs (e.g. `voter::State`, `voter::Round`, `batcher::Round`, `resolver::State`).
 - Cross-actor and cross-restart invariants may use per-replica ghost state (`Ghost`, `with_ghost`) in `statelens.rs`, keyed by participant index and shared by the replica's voter, batcher, and resolver.
 - `protocol`-scope invariants may use ghost state shared by all honest replicas (`Global`, `with_global`).
-- Ghost state is reset before every fuzz input. This is safe because the deterministic runtime runs all tasks on the calling thread.
+- Ghost state lives for one run: it is cleared before every fuzz input and whenever a fresh deterministic runtime starts (for example each seed of a multi-seed test), and it survives a crash-restart from a checkpoint. Keeping it per thread is safe because the deterministic runtime runs all tasks on the calling thread.
 - Cross-actor assertions must allow for mailbox delivery lag. They must hold under any delivery order the implementation allows, not only when actors are in step.
 
 R-INS-6. **Cost.** Probes and assertions are O(1) or bounded by the number of tracked views. No unbounded scans on hot paths.
@@ -444,6 +444,8 @@ Twins is the best available way to put an honest replica into states that only B
 
 The fuzz target calls `statelens::reset()` before every input and `statelens::clear_compromised()` after `fuzz()` returns, not inside the runner, so compromised replicas stay guarded while the runtime shuts down.
 
+The campaign also patches the deterministic runtime: `Runner::new` calls a hook that StateLens registers, which clears ghost state. A fresh runtime therefore starts with no history (each fuzz input, each seed of a test), while a runtime resumed from a checkpoint keeps it.
+
 The guard is built into the StateLens macros and ghost-state accessors, which call `statelens::should_check(me)` with `me` from `scheme.me()`. The guard is keyed on participant identity, so it covers the compromised primary engine. The `Disrupter` secondary runs no Simplex actor code. The compromised set is thread-local, which is sound because the deterministic runtime runs every task on the thread that starts it.
 
 ### 8.5 Running continuously
@@ -492,6 +494,7 @@ AC-7. **Determinism test.** Replaying a crashing input with `just run simplex_st
 | Probes change scheduling or behavior. | R-INS-1 and R-INS-3; AC-7. |
 | Too many probe features (corpus bloat) or hash collisions. | Presence-only probes (R-FB-2); discretization rules (R-FB-5); 64K table; exclude replica index. |
 | Cross-actor assertions fire only because of mailbox lag. | R-INS-5: assertions must allow for any legal delivery order. |
+| History kept in ghost state leaks from one run into the next, for example between the seeds of one test (found by the first end-to-end campaign). | The deterministic runtime's fresh-run hook clears ghost state (R-INS-5, section 8.4). |
 | The patch anchors of the materialize step move with the code. | The campaign stops with a message that names the anchor, which is then updated in `scripts/statelens.py`. |
 | Phase 2 agents have full access to the host. | Campaigns run on a dedicated machine or container (R-AG-3). |
 | Low throughput (about 13 executions per second per process). | libFuzzer's `-fork=N`; the existing `invariants.rs` checks may be adjusted later (section 3.2). |

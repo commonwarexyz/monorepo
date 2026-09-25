@@ -4,7 +4,7 @@
 |---|---|
 | Implements | [PRD.md](PRD.md) |
 | Audience | The coding agent that implements `consensus/fuzz/statelens/`, and fuzz operators |
-| Verified against | commit `7cb6a3d58351d7545314c752f9d3f8535e8a7428` (see section 1.2) |
+| Verified against | commits `7cb6a3d583` and `2e56fa856e` (see section 1.2) |
 
 ---
 
@@ -29,7 +29,7 @@ orchestration script, and the acceptance procedures.
 
 The following were built and exercised in a scratch checkout of the commit above:
 
-- `runtime/statelens.rs` (Appendix A): 9 unit tests pass inside `commonware-consensus`
+- `runtime/statelens.rs` (Appendix A): 10 unit tests pass inside `commonware-consensus`
   with the workspace's `warnings = "deny"` on stable, and the `cfg(fuzzing)` path
   compiles on the CI-pinned nightly. The file is `rustfmt`-clean with the repository
   configuration.
@@ -44,6 +44,23 @@ The following were built and exercised in a scratch checkout of the commit above
   on 16 cores.
 - Throughput of the target with minimal instrumentation: about 13 executions per
   second per process.
+
+End-to-end campaigns at commit `2e56fa856e`, with Claude as the agent, in scratch clones:
+
+- AC-1: Claude and Codex each wrote lint-clean invariants from issue #2070.
+- AC-5: with INV-0001 and FALSE-0001, the test gate stopped the campaign with
+  `[statelens][FALSE-0001]`; every one of the 175 failing tests failed on that invariant
+  only. The agent added 143 probe sites, and none of them panicked.
+- AC-3: with the nine registry invariants (5 bound, 4 partial, 21 assertion sites, 147
+  probe sites), the first run exposed ghost state leaking between the seeds of one test:
+  26 tests raised a false INV-0001 alarm, and the `nuller` tests pass with one seed and
+  fail with two. With the fresh-run hook (D16), all 242 tests pass and a 3-minute fuzz
+  run finds no violation.
+- AC-4: after 3 minutes on empty corpora, `ft:` is 48,371 with StateLens feedback and
+  47,131 without.
+- AC-6: with real instrumentation, `STATELENS_BYZANTINE=panic` panics on the first input.
+- R-NF-3: 13 executions per second both for the instrumented target and for the stock
+  `simplex_cert_mock_twins_mutator` target (2,502 and 2,529 inputs in 3 minutes).
 
 ---
 
@@ -69,6 +86,7 @@ them; the last column names the PRD requirement.
 | D13 | No `Cargo.toml` is committed under `SL/`. `SL/runtime/*.rs` MUST stay `rustfmt`-clean, because CI's `just check-fmt` formats every `*.rs` file in the tree. | R-LAYOUT-2, R-NF-4 |
 | D14 | Prompt files are named `analyst-<kind>.md`, one per source kind (`issue`, `design`, `comment`, `spec`, `paper`), plus a shared `analyst.md`. | R-LAYOUT-1, R-P1-2 |
 | D15 | StateLens fuzz targets use only the `cert_mock` certificate scheme (`consensus/src/simplex/mocks/scheme.rs`, imported as `cert_mock` in `consensus/fuzz/core`). Every `fuzz::<P, ...>` call in a target template names a `P` whose `impl Simplex` in `consensus/fuzz/core/src/simplex.rs` sets `type Scheme = cert_mock::Scheme<...>`. At the reference commit these are `SimplexCertificateMock`, `SimplexCertificateMockAttributable`, `SimplexCertificateMockCustomRoundRobin` and `SimplexCertificateMockByzantineFirstLeader`; the committed target uses `SimplexCertificateMock`. No ed25519, BLS12-381 or secp256r1 scheme is used. The materialize step enforces this (section 7.2). The test gate is not affected. | R-P2-4 |
+| D16 | Ghost state lives for one run. The campaign patches the deterministic runtime so that `Runner::new` calls a hook that clears it; independent runs in one test thread (for example the seeds of one test) no longer share history, while a crash-restart from a checkpoint keeps it (Appendix B.4). | R-INS-5, PRD section 8.4 |
 
 ---
 
@@ -303,7 +321,9 @@ prefixed with `statelens:`.
 | `campaign` | `campaign [--agent A] [--stop-after STEP] [-- LIBFUZZER_ARGS...]` | 0 no panic, 1 usage, 2 setup or agent failure (including a checkout that is not fresh), 3 build failed, 4 test gate failed, 5 fuzzer crash |
 
 `--stop-after` accepts `materialize`, `instrument`, `build` or `test`. It exists for
-development and acceptance testing and is not a campaign parameter in the PRD sense.
+development and acceptance testing and is not a campaign parameter in the PRD sense. A
+campaign that stops this way exits with code 0 and reports the result
+`STOPPED after <step>`.
 
 Placeholders in prompt files have the form `{{NAME}}` (upper case). Rendering MUST fail
 on a placeholder without a value. Every rendered prompt is saved next to its log.
@@ -322,7 +342,8 @@ on a placeholder without a value. Every rendered prompt is saved next to its log
 | `spec` | Quint, TLA+ or Lean file, optionally `path:line` |
 | `paper` | Local PDF or text file, or URL, with an optional `#page=N` suffix |
 
-Several sources of one kind MAY be passed at once (R-P1-1).
+Several sources of one kind MAY be passed at once (R-P1-1). Local paths are relative to
+the repository root, which is the agent's working directory.
 
 ### 6.2 Procedure
 
@@ -354,17 +375,18 @@ Several sources of one kind MAY be passed at once (R-P1-1).
 A campaign runs in place in the checkout (D10); `repo` is its root
 (`git rev-parse --show-toplevel`). StateLens never makes another clone.
 
-1. Check the preconditions. Each failure exits with code 2 and a message that asks for a
-   fresh clone:
-   - `git status --porcelain --untracked-files=no` lists no path outside `SL/`;
+1. Check the preconditions, in this order. Each failure exits with code 2 and a message
+   that asks for a fresh clone:
    - neither `consensus/src/simplex/statelens.rs` nor
      `consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs` exists (an earlier
-     campaign already instrumented this checkout).
+     campaign already instrumented this checkout);
+   - `git status --porcelain --untracked-files=no` lists no path outside `SL/`.
 2. `base = git rev-parse HEAD`.
 3. Recreate `SL/campaign/` with `logs/`, `prompts/` and `meta.json`: `base`, `agent`,
    `model`, test and fuzz toolchains, start time, invariant IDs.
 4. The invariants to bind are `SL/invariants/*.md`, plus `SL/false-invariants/*.md` when
-   `STATELENS_FALSE_INVARIANTS=1`, sorted by ID. Uncommitted files are included.
+   `STATELENS_FALSE_INVARIANTS=1`, sorted by ID. Uncommitted files are included. Lint
+   them (section 4.6) and print any problem as a warning.
 5. Create `SL/campaign/plan.md` with this content, then fill in the values:
 
 ~~~markdown
@@ -407,6 +429,11 @@ file and the anchor.
 | 4 | `consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs` | Create as a copy of `SL/runtime/target.rs`. |
 | 5 | `consensus/fuzz/simplex/Cargo.toml` | Append the `[[bin]]` block of Appendix B.2. |
 | 6 | `consensus/fuzz/core/src/lib.rs` | After the line `let compromised = case.compromised.iter().copied().collect::<HashSet<_>>();` (with four leading spaces) insert the hook of Appendix B.3. |
+| 7 | `runtime/src/deterministic.rs` | Before the line `impl From<Config> for Runner {` insert the static of Appendix B.4. |
+| 8 | `runtime/src/deterministic.rs` | After the line `pub fn new(cfg: Config) -> Self {` (with four leading spaces) insert the call of Appendix B.4. |
+
+Anchors in the same file are applied from the bottom up, so earlier insertions do not
+move later anchors.
 
 Then run `git add --intent-to-add` on the two created files, so that `git diff` shows
 them, and record the baseline snapshot for the scope check (section 7.5): every path that
@@ -515,6 +542,7 @@ statelens: agent      <agent>
 statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
 statelens: result     NO PANIC | PANIC (tests) | PANIC (fuzz) | BUILD FAILED | SETUP FAILED
+statelens: reason     <why the campaign stopped, for any result other than NO PANIC>
 statelens: panic      <first [statelens][...] line, or the first panic message>
 statelens: artifact   consensus/fuzz/simplex/artifacts/simplex_statelens/<file>
 statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 just run simplex_statelens simplex/artifacts/simplex_statelens/<file>
@@ -581,8 +609,13 @@ location is the macro call site (`#[track_caller]`).
 ### 8.4 Ghost state
 
 - `Ghost`: one per replica, keyed by participant index. The voter, batcher and resolver of
-  a replica share it, and in engine-level tests it survives restarts of that replica.
+  a replica share it.
 - `Global`: one per run, shared by all honest replicas.
+- Lifetime: one run. `reset()` clears ghost state before every fuzz input, and the
+  fresh-run hook (Appendix B.4) clears it whenever a fresh deterministic runtime is
+  created, for example for each seed of a multi-seed test. A runtime resumed from a
+  checkpoint (a crash-restart) keeps it. The hook is registered on the first ghost-state
+  access.
 - `with_ghost(me, f)` and `with_global(me, f)` return `None` without calling `f` for a
   guarded replica; `with_ghost` also does so when `me` is `None`. The closures MUST NOT
   nest.
@@ -712,8 +745,15 @@ registry of the Simplex consensus implementation in this repository.
 - It uses protocol terms (views, leaders, proposals, parents, votes, certificates,
   timeouts, the finalized tip, the journal). It never names Rust types, functions,
   fields or files; those go in "Observation hints".
-- It is precise enough to decide, at any moment of an execution, whether it has been
-  violated. Do not write "eventually" properties.
+- It is precise enough to decide, at a specific moment of an execution, whether it has
+  been violated. Progress properties are welcome when they name that moment, for example
+  "When the replica times out in a view without having signed a finalize vote for it,
+  the replica shall sign a nullify vote for that view". Do not write open-ended
+  "eventually" properties.
+- When a property holds only under extra conditions (for example, the replica must first
+  have data it may still be waiting for), put those conditions into the Statement's
+  trigger or state, or into "Preconditions / assumptions", instead of dropping the
+  property. Whether and how to check it is decided later, when it is bound to the code.
 - It is narrow: one property per invariant.
 - It is justified by the source. Do not invent properties the source does not support.
   Writing zero invariants is a valid result.
@@ -807,9 +847,16 @@ Kind: `{{KIND}}`
 - Write the invariants the bug violated. Generalize beyond the specific fix so that the
   invariant also catches variants of the bug on other code paths, while staying true
   for every correct execution.
-- For a liveness bug, write the safety condition whose violation caused it, when one
-  exists (for example "the replica shall not discard a certificate for a view above
-  its finalized tip"). Do not write "eventually" properties.
+- Cover both sides of the bug where they apply: what the replica must never do (the
+  wrong action, or the state that made it crash), and what it must do instead at that
+  moment. For example, a crash on a malformed message has two sides: the replica shall
+  not panic on it, and the replica shall reject it and keep processing other messages.
+- Also write the expected outcome: what the replica should have produced in the reported
+  situation, given the inputs it had (a vote, a certificate, a state change), as an
+  event-driven statement.
+- For a liveness bug, also write the safety condition whose violation caused it, when
+  one exists (for example "the replica shall not discard a certificate for a view above
+  its finalized tip"). Do not write open-ended "eventually" properties.
 - In Evidence, describe the violating scenario in two to five sentences and cite the
   issue, the pull request and the fixing commit.
 - Write nothing for issues that are not about Simplex behavior (documentation, CI,
@@ -970,7 +1017,9 @@ probes that tell the fuzzer when an execution reached a new internal state.
   shared by its voter, batcher and resolver. `with_global(me, |g: &mut Global| ...)`
   gives one `Global` shared by all honest replicas, for `protocol` invariants. Both
   return `None` without running the closure for a skipped replica. Never nest them. Add
-  the fields you need to `Ghost` or `Global`, with `Default` types.
+  the fields you need to `Ghost` or `Global`, with `Default` types. Ghost state lives
+  for one run: it is cleared when a new run starts (every fuzz input, every seed of a
+  test) and kept across a crash-restart within the run.
 - Assertion messages start with the invariant title and include the values involved,
   for example `"no finalize after nullify: view={} nullified={}"`.
 
@@ -1170,7 +1219,9 @@ Last lines of its output:
 //! - the instrumentation macros `sl_probe!`, `sl_assert!` and `sl_implies!`,
 //!   invoked as `crate::simplex::statelens::sl_probe!(...)`;
 //! - ghost state: per replica ([Ghost], [with_ghost]) and shared by all honest
-//!   replicas ([Global], [with_global]);
+//!   replicas ([Global], [with_global]). It lives for one run: [reset] and every
+//!   fresh deterministic runtime clear it, while a runtime resumed from a
+//!   checkpoint (a crash-restart) keeps it;
 //! - discretization helpers: [bucket], [delta], [flag], [pack] and [disc].
 //!
 //! Environment switches, each read once per process:
@@ -1324,8 +1375,26 @@ pub fn reset() {
     // the fuzzing thread between inputs, when no probe writes concurrently.
     unsafe { core::ptr::write_bytes(table(), 0, COUNTERS) };
     clear_compromised();
+    forget_ghosts();
+}
+
+/// Forgets all ghost state.
+///
+/// Registered as the deterministic runtime's fresh-run hook, so history from an
+/// earlier, independent run on this thread (for example another seed of the same
+/// test) does not leak into the next run. A runtime resumed from a checkpoint (a
+/// crash-restart) keeps the history.
+fn forget_ghosts() {
     GHOSTS.with(|ghosts| ghosts.borrow_mut().clear());
     GLOBAL.with(|global| *global.borrow_mut() = Global::default());
+}
+
+/// Registers [forget_ghosts] with the deterministic runtime, once per process.
+fn register_fresh_run_hook() {
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    REGISTERED.call_once(|| {
+        let _ = commonware_runtime::deterministic::STATELENS_FRESH_RUN.set(forget_ghosts);
+    });
 }
 
 /// Hashes a probe site label at compile time (FNV-1a, 64 bits).
@@ -1448,6 +1517,7 @@ pub struct Global {}
 /// Returns `None`, without calling `f`, for a replica without a participant
 /// index or one the guard skips. `f` must not call [with_ghost] or [with_global].
 pub fn with_ghost<R>(me: Option<Participant>, f: impl FnOnce(&mut Ghost) -> R) -> Option<R> {
+    register_fresh_run_hook();
     let index = me?.get();
     if !should_check(me) {
         return None;
@@ -1460,6 +1530,7 @@ pub fn with_ghost<R>(me: Option<Participant>, f: impl FnOnce(&mut Ghost) -> R) -
 /// Returns `None`, without calling `f`, when the guard skips `me`. `f` must not
 /// call [with_ghost] or [with_global].
 pub fn with_global<R>(me: Option<Participant>, f: impl FnOnce(&mut Global) -> R) -> Option<R> {
+    register_fresh_run_hook();
     if !should_check(me) {
         return None;
     }
@@ -1647,6 +1718,15 @@ mod tests {
         assert_eq!(with_global(Some(Participant::new(3)), |_| 6), None);
         clear_compromised();
     }
+
+    #[test]
+    fn test_fresh_runtime_forgets_ghost_state() {
+        clear_compromised();
+        assert_eq!(with_ghost(Some(Participant::new(4)), |_| ()), Some(()));
+        assert!(GHOSTS.with(|ghosts| ghosts.borrow().contains_key(&4)));
+        let _runner = commonware_runtime::deterministic::Runner::seeded(0);
+        assert!(GHOSTS.with(|ghosts| ghosts.borrow().is_empty()));
+    }
 }
 ~~~
 
@@ -1712,6 +1792,32 @@ Inserted after the anchor line of section 7.2, edit 6, with this indentation:
 In `TwinsMutator`, each compromised participant runs a real engine (the primary half),
 which the guard skips, and a `Disrupter` (the secondary half), which runs no Simplex
 actor code.
+
+### B.4 Fresh-run hook in `runtime/src/deterministic.rs` (verbatim)
+
+Inserted before `impl From<Config> for Runner {`, followed by a blank line:
+
+~~~rust
+// [statelens] Fresh-run hook: `Runner::new` calls the registered function, which
+// forgets StateLens ghost state, so an independent run does not inherit history
+// from an earlier run on the same thread. A restart from a checkpoint keeps it.
+pub static STATELENS_FRESH_RUN: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+~~~
+
+Inserted after `    pub fn new(cfg: Config) -> Self {`:
+
+~~~rust
+        // [statelens] A fresh runtime starts an independent run.
+        if let Some(hook) = STATELENS_FRESH_RUN.get() {
+            hook();
+        }
+~~~
+
+Every fresh runtime goes through `Runner::new` (`From<Config>`, `seeded` and `timed` call
+it), while a crash-restart resumes through `From<Checkpoint>`. The first end-to-end
+campaign showed why this is needed: without it, a history invariant fired in tests that
+run several seeds in one thread, because the ghost state of one seed leaked into the
+next.
 
 ---
 
