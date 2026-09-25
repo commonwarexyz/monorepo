@@ -512,14 +512,16 @@ mod striped {
     /// Split a stripe `range` into the tiles that code it.
     ///
     /// The transform holds at most `2 * (k + m).next_power_of_two()` shards, so the target tile
-    /// width is the number of whole blocks whose transform storage fits in
-    /// [`MAX_TILE_WORK_BYTES`]. A stripe with fewer than twice that many whole blocks is one
-    /// tile. Otherwise its whole blocks spread over the fewest tiles within the target, with
-    /// widths that differ by at most one block, and the last tile also takes the partial final
-    /// block. Every tile but the last ends on a symbol-block boundary (see [`byte_ranges`]).
+    /// width is the number of blocks whose transform storage fits in [`MAX_TILE_WORK_BYTES`],
+    /// and at least one. A partial final block counts as a block, since the engine pads it to a
+    /// whole one. A stripe with fewer than twice the target blocks is one tile. Otherwise its
+    /// blocks spread over the fewest tiles within the target, with widths that differ by at most
+    /// one block, and the partial final block ends the last tile. Every tile but the last ends
+    /// on a symbol-block boundary (see [`byte_ranges`]).
     ///
-    /// The decoder's sixteen-shard AVX-512 derivative leaf skips shard lengths that are a
-    /// multiple of 4 KiB, so a split whose widths would hit one uses one more tile.
+    /// The decoder's sixteen-shard AVX-512 derivative leaf skips shards whose padded length is a
+    /// multiple of 4 KiB. A split into several tiles therefore adds tiles until no tile has such
+    /// a length.
     pub(super) fn tiles(
         k: usize,
         m: usize,
@@ -527,7 +529,7 @@ mod striped {
     ) -> impl Iterator<Item = Range<usize>> {
         let work_count = 2 * (k + m).next_power_of_two();
         let target = (MAX_TILE_WORK_BYTES / (work_count * SHARD_CHUNK_BYTES)).max(1);
-        let blocks = range.len() / SHARD_CHUNK_BYTES;
+        let blocks = range.len().div_ceil(SHARD_CHUNK_BYTES);
         let mut count = if blocks < 2 * target {
             1
         } else {
@@ -542,7 +544,8 @@ mod striped {
             count += 1;
         }
 
-        // Tile `i` holds `width` whole blocks, plus one more for the first `extra` tiles.
+        // Tile `i` holds `width` blocks, plus one more for the first `extra` tiles. The last tile
+        // ends at `end`, so its final block may be partial.
         let (width, extra) = (blocks / count, blocks % count);
         let (start, end) = (range.start, range.end);
         let edge = move |i: usize| start + (i * width + i.min(extra)) * SHARD_CHUNK_BYTES;
@@ -2245,6 +2248,60 @@ mod tests {
             }
         }
         assert!(tiled, "no case splits a stripe into tiles");
+    }
+
+    /// Tiles cover a stripe contiguously with balanced widths. A split into several tiles uses
+    /// the fewest tiles within the target that leave no tile whose padded length is a multiple
+    /// of 4 KiB.
+    #[test]
+    fn test_striped_tiles() {
+        let page = 4096 / SHARD_CHUNK_BYTES;
+        let start = 3 * SHARD_CHUNK_BYTES;
+        for (k, m) in [(4usize, 8usize), (32, 64), (100, 100), (512, 512)] {
+            let target =
+                MAX_TILE_WORK_BYTES / (2 * (k + m).next_power_of_two() * SHARD_CHUNK_BYTES);
+            for blocks in 1..3000 {
+                for tail in [0, 2, SHARD_CHUNK_BYTES - 2] {
+                    let range = start..start + blocks * SHARD_CHUNK_BYTES + tail;
+                    let tiles: Vec<_> = striped::tiles(k, m, range.clone()).collect();
+
+                    // Tiles run from start to end, and every inner edge is block aligned.
+                    assert_eq!(tiles[0].start, range.start);
+                    assert_eq!(tiles.last().unwrap().end, range.end);
+                    for pair in tiles.windows(2) {
+                        assert_eq!(pair[0].end, pair[1].start);
+                        assert!((pair[0].end - start).is_multiple_of(SHARD_CHUNK_BYTES));
+                    }
+
+                    // Padded widths differ by at most one block. A stripe under twice the target is
+                    // one tile, and a split keeps every width within the target and off 4 KiB.
+                    let widths: Vec<_> = tiles
+                        .iter()
+                        .map(|tile| tile.len().div_ceil(SHARD_CHUNK_BYTES))
+                        .collect();
+                    let narrow = *widths.iter().min().unwrap();
+                    let wide = *widths.iter().max().unwrap();
+                    assert!(narrow >= 1 && wide - narrow <= 1);
+                    let padded = range.len().div_ceil(SHARD_CHUNK_BYTES);
+                    if padded < 2 * target {
+                        assert_eq!(tiles.len(), 1);
+                    } else {
+                        assert!(wide <= target);
+                        assert!(widths.iter().all(|width| !width.is_multiple_of(page)));
+
+                        // Every smaller count exceeds the target or lands a width on 4 KiB.
+                        for fewer in 1..tiles.len() {
+                            let (width, extra) = (padded / fewer, padded % fewer);
+                            assert!(
+                                padded.div_ceil(fewer) > target
+                                    || width.is_multiple_of(page)
+                                    || (extra > 0 && (width + 1).is_multiple_of(page))
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Each tamper mutates a canonical codeword in place before a (malicious) commitment is
