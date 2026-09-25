@@ -21,6 +21,24 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     fn write(self, key: Self::K, value: Option<Self::V>) -> Self;
 
+    /// Disable automatic floor raising for this batch.
+    fn with_manual_floor(self) -> Self;
+
+    /// Evict the next live entry and select manual floor raising.
+    #[allow(clippy::type_complexity)]
+    fn pop_floor(
+        self,
+        db: &Db,
+    ) -> impl Future<
+        Output = Result<
+            (
+                Self,
+                Option<super::batch::Evicted<Self::Family, Self::K, Self::V>>,
+            ),
+            Error<Self::Family>,
+        >,
+    >;
+
     /// Resolve mutations, compute the new root, and return a merkleized batch.
     fn merkleize(
         self,
