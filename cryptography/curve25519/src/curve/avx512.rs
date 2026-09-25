@@ -488,3 +488,12 @@ impl GBackend for Backend {
         unsafe { self.double_points(p) }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "requires AVX-512F and IFMA, run by the emulated AVX-512 CI job"]
+    fn avx512_available() {
+        assert!(super::available());
+    }
+}
