@@ -1,9 +1,10 @@
 [test-groups]
 slow = { max-threads = "num-cpus" }
 conformance = { max-threads = "num-cpus" }
+avx512 = { max-threads = "num-cpus" }
 
 [profile.default]
-default-filter = 'not test(/(.*_slow_$|.*_conformance_$)/)'
+default-filter = 'not test(/(.*_slow_$|.*_conformance_$|.*_avx512_$)/)'
 
 [profile.slow]
 default-filter = 'test(/.*_slow_$/)'
@@ -15,7 +16,7 @@ default-filter = 'test(/.*_conformance_$/)'
 default-filter = 'test(/.*/)'
 
 # Tests that run AVX-512 code paths, ours and those our dependencies select at runtime (crc-fast
-# for CRC32C, blake3). CI runs them under Intel SDE with `--run-ignored all` so the ignored
-# `avx512_available` guards run too. The large ignored roundtrips are too slow to emulate.
+# for CRC32C, blake3), plus the avx512 group that asserts each path is available. CI runs them
+# under Intel SDE.
 [profile.avx512]
-default-filter = '(package(commonware-cryptography-curve25519) | (package(commonware-cryptography) & test(/^((reed_solomon|sha256|crc32|blake3|lthash|transcript)::|fuzz::tests::test_fuzz_(crc32|blake3)$)/)) | (package(commonware-coding) & test(/reed_solomon/))) & not test(/(.*_slow_$|.*_conformance_$|::roundtrip_[0-9]+_[0-9]+$)/)'
+default-filter = '(package(commonware-cryptography-curve25519) | (package(commonware-cryptography) & test(/^((reed_solomon|sha256|crc32|blake3|lthash|transcript)::|fuzz::tests::test_fuzz_(crc32|blake3)$)/)) | (package(commonware-coding) & test(/reed_solomon/)) | test(/.*_avx512_$/)) & not test(/(.*_slow_$|.*_conformance_$)/)'

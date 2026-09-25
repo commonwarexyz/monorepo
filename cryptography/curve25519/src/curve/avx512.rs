@@ -491,9 +491,10 @@ impl GBackend for Backend {
 
 #[cfg(test)]
 mod tests {
+    /// Requires AVX-512F and IFMA. Only the emulated AVX-512 CI job runs it.
+    #[commonware_macros::test_group("avx512")]
     #[test]
-    #[ignore = "requires AVX-512F and IFMA, run by the emulated AVX-512 CI job"]
-    fn avx512_available() {
+    fn available() {
         assert!(super::available());
     }
 }

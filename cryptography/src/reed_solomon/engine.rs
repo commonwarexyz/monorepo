@@ -353,10 +353,11 @@ mod tests {
         }
     }
 
+    /// Requires AVX-512F and GFNI. Only the emulated AVX-512 CI job runs it.
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[commonware_macros::test_group("avx512")]
     #[test]
-    #[ignore = "requires AVX-512F and GFNI, run by the emulated AVX-512 CI job"]
-    fn avx512_available() {
+    fn available() {
         assert!(cpu_features::avx512());
     }
 

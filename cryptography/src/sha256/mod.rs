@@ -529,10 +529,11 @@ mod tests {
         assert_eq!(digest, decoded);
     }
 
+    /// Requires AVX-512F, BW, and VL. Only the emulated AVX-512 CI job runs it.
     #[cfg(target_arch = "x86_64")]
+    #[commonware_macros::test_group("avx512")]
     #[test]
-    #[ignore = "requires AVX-512F, BW, and VL, run by the emulated AVX-512 CI job"]
-    fn avx512_available() {
+    fn available() {
         let messages = [[7u8; 64].as_slice(); simd::X16_LANES];
         assert!(simd::hash_x16(messages).is_some());
     }

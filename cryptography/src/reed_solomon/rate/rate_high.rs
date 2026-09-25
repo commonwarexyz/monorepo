@@ -412,6 +412,7 @@ impl<E: Engine> HighRateDecoder<E> {
 mod tests {
     use super::*;
     use crate::reed_solomon::test_util;
+    use commonware_macros::test_group;
 
     #[test]
     fn roundtrip_all_originals_missing() {
@@ -460,8 +461,8 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test]
-    #[ignore]
     fn roundtrip_3000_30000() {
         roundtrip_single!(
             HighRate,
@@ -475,8 +476,8 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
     #[test]
-    #[ignore]
     fn roundtrip_32768_32768() {
         roundtrip_single!(
             HighRate,
@@ -490,8 +491,8 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
     #[test]
-    #[ignore]
     fn roundtrip_60000_3000() {
         roundtrip_single!(
             HighRate,
