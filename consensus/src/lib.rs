@@ -107,8 +107,6 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     use commonware_utils::channel::{fallible::OneshotExt, mpsc, oneshot};
     use std::future::Future;
 
-    pub mod marshal;
-
     mod reporter;
     pub use reporter::*;
 
@@ -287,7 +285,7 @@ stability_scope!(ALPHA {
     pub mod aggregation;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::Ancestry;
+    use crate::simplex::marshal::ancestry::Ancestry;
     use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand_core::Rng;

@@ -5,8 +5,11 @@ use crate::stateful::{
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
-    marshal::{ancestry::Ancestry, standard::Standard},
-    simplex::{mocks::scheme as scheme_mocks, types::Context as SimplexContext},
+    simplex::{
+        marshal::{ancestry::Ancestry, standard::Standard},
+        mocks::scheme as scheme_mocks,
+        types::Context as SimplexContext,
+    },
     types::{Epoch, Height, View},
 };
 use commonware_cryptography::{

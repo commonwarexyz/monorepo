@@ -320,6 +320,9 @@
 //!                            +------------+          +++++++++++++++
 //! ```
 //!
+//! The [marshal] submodule disseminates proposed blocks, orders finalized blocks, delivers them
+//! at-least-once, and backfills missing blocks.
+//!
 //! ### Batched Verification
 //!
 //! Unlike other consensus constructions that verify all incoming messages received from peers, for schemes
@@ -568,6 +571,7 @@ cfg_if::cfg_if! {
         pub use config::{Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy};
         mod engine;
         pub use engine::Engine;
+        pub mod marshal;
         mod metrics;
 
         /// The window of views an actor tracks, bounded below by retention
