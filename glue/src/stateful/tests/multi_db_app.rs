@@ -518,7 +518,6 @@ impl EngineDefinition for MultiDbEngine {
         let qmdb_b_resolver_network = mux_handle.register(1).await.unwrap();
 
         // Marshal resolver
-        let limits = marshal_limits::<Standard<Block>>(self.schemes.len());
         let resolver_cfg = marshal_resolver::Config {
             public_key: public_key.clone(),
             peer_provider: oracle.manager(),
@@ -528,7 +527,6 @@ impl EngineDefinition for MultiDbEngine {
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
-            limits,
         };
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
@@ -542,7 +540,6 @@ impl EngineDefinition for MultiDbEngine {
             mailbox_size: NZUsize!(100),
             deque_size: 10,
             priority: false,
-            max_size: limits.buffer(),
             codec_config: (),
             peer_provider: oracle.manager(),
         };
@@ -614,7 +611,6 @@ impl EngineDefinition for MultiDbEngine {
             replay_buffer: IO_BUFFER_SIZE,
             key_write_buffer: IO_BUFFER_SIZE,
             value_write_buffer: IO_BUFFER_SIZE,
-            limits,
             block_codec_config: (),
             max_repair: NZUsize!(10),
             max_pending_acks,

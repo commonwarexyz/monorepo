@@ -42,29 +42,45 @@
 //!
 //! ## Message Sizes
 //!
-//! [`Limits`] bounds the blocks marshal handles and the payloads it sends. Fold it into the P2P
-//! `max_message_size` with [`commonware_p2p::max_message_size`]. Every validator must configure
-//! the same [`Limits::block`], and changing it requires a coordinated restart.
+//! Recovery sends a complete block, with a certificate when requested by round or height, in one
+//! resolver response. Marshal derives the largest block it admits from that response. The
+//! receiver returned by [`resolver::p2p::init`] carries values up to the backfill sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus
+//! [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD). In each epoch, the
+//! actor admits a [`core::Variant::Block`] that fits such a value with the widest notarization
+//! for that epoch's committee. When certificate size depends on the committee, a larger committee
+//! lowers the bound. [`core::Mailbox::max_block_size`] returns the bound for an epoch. Every
+//! validator must configure the same `max_message_size`, and changing it requires a coordinated
+//! restart.
+//!
+//! [`Limits`] is the [`Footprint`](commonware_p2p::Footprint) of a target block. Fold it into the
+//! P2P `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in
+//! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill uses a subchannel, so marshal
+//! admits that block.
 //!
 //! Marshal never admits a block above the bound:
 //!
 //! - [`standard::Inline`], [`standard::Deferred`], and [`coding::Marshaled`] skip a proposal whose
 //!   block exceeds the bound.
-//! - The actor ignores a block above the bound from the buffer, a buffer subscription, or the
-//!   resolver. A peer that delivers one is not blocked when the delivery is otherwise valid.
+//! - The actor ignores a block from the buffer, a buffer subscription, or the resolver that
+//!   exceeds the bound or whose epoch has no bound it can derive. A peer that delivers one is not
+//!   blocked when the delivery is otherwise valid.
 //! - The actor panics on a block above the bound passed to [`core::Mailbox`] or as the genesis
 //!   anchor.
-//! - [`coding::shards::Engine`] drops a shard above [`Limits::buffer`] without blocking its sender
-//!   and rejects a reconstructed block above the bound. It panics when proposing to a committee
-//!   larger than [`Limits::participants`].
 //!
 //! As a result, [`standard`] never votes for such a block. In [`coding`], a notarize vote needs
 //! only the assigned shard, so such a block can be notarized, but it is never certified or
 //! finalized.
 //!
-//! Recovery sends a complete block, with a certificate when requested by round or height, in one
-//! resolver response. [`Limits`] bounds it for committees of at most [`Limits::participants`]
-//! members.
+//! Buffers disseminate admitted blocks:
+//!
+//! - [`commonware_broadcast::buffered`] sends each block whole. Broadcast and backfill must share
+//!   a network with one `max_message_size`. An admitted block then fits the broadcast sender,
+//!   because a response adds more to the block than a
+//!   [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix.
+//! - [`coding::shards::Engine`] drops a received shard above its sender limit without blocking
+//!   the sender, and skips sending a shard above that limit. [`Limits`] includes the largest
+//!   shard of its target block.
 //!
 //! ## Storage
 //!

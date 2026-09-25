@@ -124,7 +124,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
         );
     }
 
-    let limits = types::marshal_limits();
     let resolver = marshal_resolver::init(
         context.child("marshal_resolver"),
         marshal_resolver::Config {
@@ -136,7 +135,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
-            limits,
         },
         backfill_network,
     );
@@ -148,7 +146,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             mailbox_size: MAILBOX_SIZE,
             deque_size: 16,
             priority: false,
-            max_size: limits.buffer(),
             codec_config: (),
             peer_provider: oracle.clone(),
         },
@@ -229,7 +226,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
             replay_buffer: types::IO_BUFFER_SIZE,
             key_write_buffer: types::IO_BUFFER_SIZE,
             value_write_buffer: types::IO_BUFFER_SIZE,
-            limits,
             block_codec_config: (),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),

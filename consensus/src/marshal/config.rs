@@ -1,6 +1,5 @@
 use crate::{
     Block,
-    marshal::Limits,
     simplex::types::Finalization,
     types::{Epoch, Epocher, ViewDelta},
 };
@@ -52,7 +51,9 @@ where
 {
     /// Provider for epoch-specific signing schemes.
     ///
-    /// Must cover every epoch that contains heights the marshal will sync.
+    /// Must cover every epoch that contains heights the marshal will sync. If certificate size
+    /// depends on the committee, [`Provider::scheme`] must also return a scheme for those epochs
+    /// (see [message sizes](crate::marshal#message-sizes)).
     pub provider: P,
 
     /// Configuration for epoch lengths across block height ranges.
@@ -89,13 +90,10 @@ where
     /// The size of the write buffer for the value journal of storage archives.
     pub value_write_buffer: NonZeroUsize,
 
-    /// Size limits for blocks and the payloads marshal sends. See
-    /// [message sizes](crate::marshal#message-sizes).
-    pub limits: Limits<C>,
-
     /// Codec configuration for block type.
     ///
-    /// Must decode every block within [`Limits::block`] of [`Self::limits`].
+    /// Must decode every block marshal admits. See
+    /// [message sizes](crate::marshal#message-sizes).
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of blocks to repair at once.

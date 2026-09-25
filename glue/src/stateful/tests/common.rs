@@ -36,7 +36,7 @@ pub(super) const MAX_BLOCK_SIZE: usize = 1024;
 
 /// Returns marshal limits for committees of at most `participants` and blocks of at most
 /// [`MAX_BLOCK_SIZE`].
-pub(super) fn marshal_limits<V: Variant>(participants: usize) -> marshal::Limits<V::Commitment> {
+pub(super) fn marshal_limits<V: Variant>(participants: usize) -> marshal::Limits {
     marshal::Limits::new::<V, MockScheme<ed25519::PublicKey>>(participants, MAX_BLOCK_SIZE)
 }
 

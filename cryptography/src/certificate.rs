@@ -613,6 +613,11 @@ impl<S: Scheme> Scoped<S> {
     pub fn into_scheme(self) -> Option<Arc<S>> {
         self.can_sign.then_some(self.scheme)
     }
+
+    /// Returns the participants of the scope's scheme, for verify-only scopes too.
+    pub fn participants(&self) -> &Set<S::PublicKey> {
+        self.scheme.participants()
+    }
 }
 
 impl<S: Scheme> Verifier for Scoped<S> {

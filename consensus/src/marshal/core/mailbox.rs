@@ -2,11 +2,11 @@ use super::{Variant, durability::Durable as _};
 use crate::{
     Reporter,
     marshal::{
-        Identifier, Limits,
+        Identifier,
         ancestry::{AncestorStream, Ancestry, BlockProvider},
     },
     simplex::types::{Activity, Finalization, Notarization},
-    types::{Height, Round},
+    types::{Epoch, Height, Round},
 };
 use commonware_actor::{
     Feedback,
@@ -70,6 +70,15 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         span: Span,
         /// A channel to send the latest processed height.
         response: oneshot::Sender<Option<Height>>,
+    },
+    /// A request to retrieve the largest encoded block admitted in an epoch.
+    GetMaxBlockSize {
+        /// The span carried with this request.
+        span: Span,
+        /// The epoch to query.
+        epoch: Epoch,
+        /// A channel to send the bound, if marshal can derive it.
+        response: oneshot::Sender<Option<usize>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -305,6 +314,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Finalization { span, .. }
             | Self::Certification { span, .. }
             | Self::GetProcessedHeight { span, .. }
+            | Self::GetMaxBlockSize { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -319,6 +329,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessedHeight { .. } => "get_processed_height",
+            Self::GetMaxBlockSize { .. } => "get_max_block_size",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -361,7 +372,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             }
-            | Self::GetProcessedHeight { .. } => false,
+            | Self::GetProcessedHeight { .. }
+            | Self::GetMaxBlockSize { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -383,6 +395,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessedHeight { response, .. } => response.is_closed(),
+            Self::GetMaxBlockSize { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -631,20 +644,14 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
     max_pending_acks: usize,
-    limits: Limits<V::Commitment>,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(
-        sender: Sender<Message<S, V>>,
-        max_pending_acks: NonZeroUsize,
-        limits: Limits<V::Commitment>,
-    ) -> Self {
+    pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
         Self {
             sender,
             max_pending_acks: max_pending_acks.get(),
-            limits,
         }
     }
 
@@ -652,11 +659,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// acknowledgements advance its processed floor.
     pub const fn max_pending_acks(&self) -> usize {
         self.max_pending_acks
-    }
-
-    /// Returns whether `block` fits [`Limits::block`].
-    pub fn admits(&self, block: &V::ApplicationBlock) -> bool {
-        V::block_size(block.encode_size()).is_some_and(|size| size <= self.limits.block())
     }
 
     /// Create an ancestor stream that fetches missing parents by commitment.
@@ -732,6 +734,32 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             response,
         });
         receiver.await.ok().flatten()
+    }
+
+    /// Returns the largest encoded [`Variant::Block`] marshal admits in `epoch`.
+    ///
+    /// Convert an application block's encoded size with [`Variant::block_size`] before
+    /// comparing. Returns `None` if marshal has stopped, or if the bound depends on the committee
+    /// and the provider cannot supply the scheme for `epoch`. See
+    /// [message sizes](crate::marshal#message-sizes).
+    pub async fn max_block_size(&self, epoch: Epoch) -> Option<usize> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetMaxBlockSize {
+            span: info_span!("marshal.mailbox.get_max_block_size", epoch = epoch.traced()),
+            epoch,
+            response,
+        });
+        receiver.await.ok().flatten()
+    }
+
+    /// Returns whether marshal admits the application block `block` in `epoch`.
+    ///
+    /// Returns `false` if [`Self::max_block_size`] returns `None`.
+    pub async fn admits(&self, epoch: Epoch, block: &V::ApplicationBlock) -> bool {
+        let size = V::block_size(block.encode_size());
+        self.max_block_size(epoch)
+            .await
+            .is_some_and(|bound| size.is_some_and(|size| size <= bound))
     }
 
     /// Hints that a finalized block may be available at the given height.
@@ -1329,11 +1357,7 @@ mod tests {
         runner.start(|context| async move {
             let (sender, receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(
-                sender,
-                NZUsize!(1),
-                harness::limits::<Standard<harness::B>>(),
-            );
+            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1));
             drop(receiver);
 
             let (ack, receiver) = oneshot::channel();

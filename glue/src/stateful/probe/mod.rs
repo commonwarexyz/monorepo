@@ -120,11 +120,8 @@
 //!
 //! # Message Sizes
 //!
-//! A reply carries one finalization that marshal holds, so it fits the
-//! [`Footprint`](commonware_p2p::Footprint) of the marshal
-//! [`Limits`](commonware_consensus::marshal::Limits) when every committee has at most
-//! [`Limits::participants`](commonware_consensus::marshal::Limits::participants) members. Serving
-//! skips any reply the sender cannot carry.
+//! A reply carries one finalization that marshal holds. Serving skips any reply the sender cannot
+//! carry.
 
 mod actor;
 pub use actor::{Config, Probe};
@@ -200,7 +197,6 @@ mod test {
     };
     const PROBE_CHANNEL: u64 = 0;
     const BACKFILL_CHANNEL: u64 = 1;
-    const MAX_BLOCK_SIZE: usize = 1024;
 
     type Scheme = MockScheme<ed25519::PublicKey>;
     type Variant = Standard<Block>;
@@ -628,8 +624,6 @@ mod test {
                 let partition_prefix = format!("node-{index}");
                 let page_cache = CacheRef::from_pooler(&node_ctx, NZU16!(1024), NZUsize!(10));
                 let control = oracle.control(public_key.clone());
-                let limits =
-                    marshal::Limits::new::<Variant, Scheme>(participants.len(), MAX_BLOCK_SIZE);
 
                 // Marshal backfill resolver.
                 let backfill = control
@@ -647,7 +641,6 @@ mod test {
                         fetch_retry_timeout: Duration::from_millis(100),
                         priority_requests: false,
                         priority_responses: false,
-                        limits,
                     },
                     backfill,
                 );
@@ -679,7 +672,6 @@ mod test {
                     replay_buffer: NZUsize!(2048),
                     key_write_buffer: NZUsize!(2048),
                     value_write_buffer: NZUsize!(2048),
-                    limits,
                     block_codec_config: (),
                     max_repair: NZUsize!(10),
                     max_pending_acks: NZUsize!(1),

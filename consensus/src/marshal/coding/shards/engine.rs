@@ -144,7 +144,6 @@ use super::{
 use crate::{
     Block, CertifiableBlock, Heightable,
     marshal::{
-        Limits,
         coding::{
             types::{CodedBlock, Shard},
             validation::{ReconstructionError as InvariantError, validate_reconstruction},
@@ -217,14 +216,12 @@ enum BlockSubscriptionKey<K, D> {
 }
 
 /// Configuration for the [`Engine`].
-pub struct Config<P, S, X, D, C, H, B, T>
+pub struct Config<P, S, X, D, B, T>
 where
     P: PublicKey,
     S: Provider<Scope = Epoch>,
     X: Blocker<PublicKey = P>,
     D: PeerProvider<PublicKey = P>,
-    C: CodingScheme,
-    H: Hasher,
     B: CertifiableBlock,
     T: Strategy,
 {
@@ -233,9 +230,6 @@ where
 
     /// The peer blocker.
     pub blocker: X,
-
-    /// Size limits for coded blocks and their shards.
-    pub limits: Limits<Commitment<B, C, H>>,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
     pub block_codec_cfg: B::Cfg,
@@ -255,7 +249,8 @@ where
     /// [`Mailbox::notarized`].
     ///
     /// The shard buffers hold at most `num_participants * peer_buffer_size`
-    /// shards, each decoded with [`Limits::buffer`] as its bound.
+    /// shards, each no larger than the sender's
+    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size).
     pub peer_buffer_size: NonZeroUsize,
 
     /// Capacity of the channel between the background receiver and the engine.
@@ -471,9 +466,6 @@ where
     /// The peer blocker.
     blocker: X,
 
-    /// Size limits for coded blocks and their shards.
-    limits: Limits<Commitment<B, C, H>>,
-
     /// [`commonware_codec::Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
 
@@ -542,7 +534,7 @@ where
     T: Strategy,
 {
     /// Create a new [`Engine`] with the given configuration.
-    pub fn new(context: E, config: Config<P, S, X, D, C, H, B, T>) -> (Self, Mailbox<B, C, H, P>) {
+    pub fn new(context: E, config: Config<P, S, X, D, B, T>) -> (Self, Mailbox<B, C, H, P>) {
         let metrics = ShardMetrics::new(&context);
         let (sender, mailbox) = mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -551,7 +543,6 @@ where
                 mailbox,
                 scheme_provider: config.scheme_provider,
                 blocker: config.blocker,
-                limits: config.limits,
                 block_codec_cfg: config.block_codec_cfg,
                 strategy: config.strategy,
                 records: BTreeMap::new(),
@@ -565,26 +556,18 @@ where
                 block_subscriptions: BTreeMap::new(),
                 metrics,
             },
-            Mailbox::new(sender, config.limits.buffer()),
+            Mailbox::new(sender),
         )
     }
 
     /// Start the engine.
     ///
-    /// # Panics
-    ///
-    /// Panics if [`Limits::buffer`] exceeds the sender's
+    /// The engine drops received shards and skips sending shards above the sender's
     /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size).
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
-        let limit: usize = Widen::widen(network.0.max_message_size());
-        assert!(
-            self.limits.buffer() <= limit,
-            "shard size {} exceeds sender limit {limit}",
-            self.limits.buffer()
-        );
         spawn_cell!(self.context, self.run(network))
     }
 
@@ -593,6 +576,8 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
+        // A shard whose data alone exceeds the sender limit could not be relayed
+        let maximum_shard_size = Widen::widen(sender.max_message_size());
         let mut sender = WrappedSender::<_, Shard<B, C, H>>::new(
             self.context.network_buffer_pool().clone(),
             sender,
@@ -601,9 +586,7 @@ where
             WrappedBackgroundReceiver::<_, P, X, _, Shard<B, C, H>, T>::new(
                 self.context.child("shard_ingress"),
                 receiver,
-                CodecConfig {
-                    maximum_shard_size: self.limits.buffer(),
-                },
+                CodecConfig { maximum_shard_size },
                 self.blocker.clone(),
                 self.background_channel_capacity,
                 self.strategy.clone(),
@@ -726,9 +709,10 @@ where
             return;
         }
 
-        // A size-only violation never blocks the sender
-        if shard.encode_size() > self.limits.buffer() {
-            debug!(?peer, "shard exceeds size limit");
+        // A shard above the sender limit could not be relayed, and a size-only violation never
+        // blocks its sender
+        if !Self::fits(sender, &shard) {
+            debug!(?peer, "shard exceeds sender limit");
             return;
         }
 
@@ -834,11 +818,6 @@ where
         self.metrics
             .erasure_decode_duration
             .observe_between(start, self.context.current());
-
-        // Shards within the buffer bound can still decode to a block above the block bound
-        if blob.len() > self.limits.block() {
-            return Err(CodecError::InvalidLength(blob.len()).into());
-        }
 
         // Attempt to decode the block from the encoded blob
         let (inner, config): (B, CodingConfig) =
@@ -1197,14 +1176,6 @@ where
             .shard(my_index as u16)
             .expect("proposer's shard must exist");
 
-        // Check the committee is provisioned before any shard reaches the sender
-        assert!(
-            participants.len() <= self.limits.participants(),
-            "committee of {} exceeds provisioned {}",
-            participants.len(),
-            self.limits.participants()
-        );
-
         // Broadcast each participant their corresponding shard.
         for (index, peer) in participants.iter().enumerate() {
             if index == my_index {
@@ -1219,6 +1190,10 @@ where
                 );
                 return;
             };
+            if !Self::fits(sender, &shard) {
+                warn!(%commitment, index, "skipping shard above sender limit");
+                continue;
+            }
             let _ = sender.send(Recipients::One(peer.clone()), shard, true);
         }
 
@@ -1230,7 +1205,11 @@ where
             .cloned()
             .collect();
         if !non_participants.is_empty() {
-            let _ = sender.send(Recipients::Some(non_participants), leader_shard, true);
+            if Self::fits(sender, &leader_shard) {
+                let _ = sender.send(Recipients::Some(non_participants), leader_shard, true);
+            } else {
+                warn!(%commitment, "skipping leader shard above sender limit");
+            }
         }
 
         // Cache the block so we don't have to reconstruct it again.
@@ -1248,6 +1227,14 @@ where
         debug!(?commitment, "broadcasted shards");
     }
 
+    /// Returns whether `sender` accepts the encoded `shard`.
+    fn fits<Sr: Sender<PublicKey = P>>(
+        sender: &WrappedSender<Sr, Shard<B, C, H>>,
+        shard: &Shard<B, C, H>,
+    ) -> bool {
+        shard.encode_size() <= Widen::widen(sender.max_message_size())
+    }
+
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
     fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
@@ -1255,6 +1242,10 @@ where
         shard: Shard<B, C, H>,
     ) {
         let commitment = shard.commitment();
+        if !Self::fits(sender, &shard) {
+            warn!(?commitment, "skipping shard above sender limit");
+            return;
+        }
         let peers = sender.send(Recipients::All, shard, true);
         debug!(
             ?commitment,
@@ -1930,6 +1921,7 @@ mod tests {
     use commonware_p2p::{
         Manager as _, TrackedPeers,
         simulated::{self, Control, Link, Oracle},
+        utils::mocks::Capped,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{Quota, Runner, Supervisor as _, deterministic};
@@ -1971,11 +1963,6 @@ mod tests {
 
     /// The max size of a shard sent over the wire.
     const MAX_SHARD_SIZE: usize = 1024 * 1024; // 1 MiB
-
-    /// Returns limits for every coding committee whose shard bound is [`MAX_SHARD_SIZE`].
-    fn limits<S: CodingScheme>() -> Limits<Commitment<B, S, H>> {
-        Limits::raw(usize::from(u16::MAX), MAX_SHARD_SIZE, MAX_SHARD_SIZE)
-    }
 
     /// The default link configuration for tests.
     const DEFAULT_LINK: Link = Link {
@@ -2161,10 +2148,8 @@ mod tests {
         link: Link,
         /// Per-peer capacity for shards received before leader discovery.
         peer_buffer_size: NonZeroUsize,
-        /// Size limits for every engine.
-        limits: Limits<Commitment<B, S, H>>,
-        /// Largest payload the network accepts.
-        max_size: u32,
+        /// Largest payload every engine's sender accepts.
+        cap: u32,
         /// Marker for the coding scheme type parameter.
         _marker: PhantomData<S>,
     }
@@ -2178,8 +2163,7 @@ mod tests {
                 additional_scheme_epochs: Vec::new(),
                 link: DEFAULT_LINK,
                 peer_buffer_size: NZUsize!(64),
-                limits: limits(),
-                max_size: MAX_SHARD_SIZE as u32,
+                cap: MAX_SHARD_SIZE as u32,
                 _marker: PhantomData,
             }
         }
@@ -2217,7 +2201,7 @@ mod tests {
                     simulated::Network::<deterministic::Context, P>::new_with_split_peers(
                         context.child("network"),
                         simulated::Config {
-                            max_size: self.max_size,
+                            max_size: MAX_SHARD_SIZE as u32,
                             max_peers_per_set: NZUsize!(
                                 self.num_primary_peers
                                     + self.num_secondary_peers.max(self.num_future_peers)
@@ -2286,7 +2270,6 @@ mod tests {
                     let config = Config {
                         scheme_provider,
                         blocker: control.clone(),
-                        limits: self.limits,
                         block_codec_cfg: (),
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
@@ -2295,9 +2278,9 @@ mod tests {
                         peer_provider: oracle.manager(),
                     };
 
-                    let (engine, mailbox) = ShardEngine::new(engine_context, config);
+                    let (engine, mailbox) = ShardEngine::<S>::new(engine_context, config);
                     let sender_clone = sender.clone();
-                    engine.start((sender, receiver));
+                    engine.start((Capped::new(sender, self.cap), receiver));
 
                     peers.push(Peer {
                         public_key: peer_key.clone(),
@@ -2329,7 +2312,6 @@ mod tests {
                     let config = Config {
                         scheme_provider,
                         blocker: control.clone(),
-                        limits: self.limits,
                         block_codec_cfg: (),
                         strategy: STRATEGY,
                         mailbox_size: NZUsize!(1024),
@@ -2338,9 +2320,9 @@ mod tests {
                         peer_provider: oracle.manager(),
                     };
 
-                    let (engine, mailbox) = ShardEngine::new(engine_context, config);
+                    let (engine, mailbox) = ShardEngine::<S>::new(engine_context, config);
                     let sender_clone = sender.clone();
-                    engine.start((sender, receiver));
+                    engine.start((Capped::new(sender, self.cap), receiver));
 
                     non_participants.push(NonParticipant {
                         public_key: np_key.clone(),
@@ -2363,37 +2345,17 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "shard size 1048576 exceeds sender limit 1048575")]
-    fn test_start_rejects_shard_size_above_sender_limit() {
-        let fixture = Fixture::<C> {
-            max_size: MAX_SHARD_SIZE as u32 - 1,
-            ..Default::default()
-        };
-        fixture.start(|_, _, _, _, _, _| async {});
-    }
-
-    #[test_traced]
-    fn test_oversized_shard_or_block_rejected_without_blocking() {
+    fn test_shard_above_sender_limit_dropped_without_blocking() {
         let coding_config = coding_config_for_participants(4);
         let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
         let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
-        let block = coded_block.encode_size();
         let shard = coded_block.shard(0).expect("missing shard").encode_size();
-        for (block_bound, shard_bound, verified_result, block_result) in [
-            (block, shard, Ok(()), Ok(())),
-            (
-                block,
-                shard - 1,
-                Err(TryRecvError::Empty),
-                Err(TryRecvError::Empty),
-            ),
-            (block - 1, shard, Ok(()), Err(TryRecvError::Closed)),
-        ] {
+        for (cap, result) in [(shard, Ok(())), (shard - 1, Err(TryRecvError::Empty))] {
             let coded_block = coded_block.clone();
 
-            // The network carries shards above the engine bound
+            // The network carries shards above the engine's sender limit
             let fixture = Fixture::<C> {
-                limits: Limits::raw(usize::from(u16::MAX), block_bound, shard_bound),
+                cap: u32::try_from(cap).unwrap(),
                 ..Default::default()
             };
             fixture.start(|config, context, oracle, mut peers, _, _| async move {
@@ -2427,14 +2389,10 @@ mod tests {
                     .send(Recipients::One(receiver), gossip.encode(), true);
                 context.sleep(config.link.latency * 2).await;
 
-                assert_eq!(verified.try_recv(), verified_result);
-                assert_eq!(
-                    peers[2].mailbox.get(commitment).await.is_some(),
-                    block_result.is_ok()
-                );
+                assert_eq!(verified.try_recv(), result);
                 assert_eq!(
                     subscription.try_recv().map(|block| block.commitment()),
-                    block_result.map(|()| commitment)
+                    result.map(|()| commitment)
                 );
                 assert!(
                     oracle.blocked().await.unwrap().is_empty(),
@@ -2445,23 +2403,30 @@ mod tests {
     }
 
     #[test_traced]
-    #[should_panic(expected = "committee of 4 exceeds provisioned 3")]
-    fn test_unprovisioned_proposal_panics_before_send() {
-        // The network accepts no shard of the proposal, so the check must precede every send
+    fn test_proposal_skips_shards_above_sender_limit() {
+        // The engine's sender accepts no shard of the proposal
         let fixture = Fixture::<C> {
-            limits: Limits::raw(3, MAX_SHARD_SIZE, 64),
-            max_size: 64,
+            cap: 64,
             ..Default::default()
         };
         fixture.start(|config, context, _, peers, _, coding_config| async move {
             let inner = B::new(Sha256Digest::EMPTY, Height::new(1), 100);
             let coded_block = CodedBlock::<B, C, H>::new(inner, coding_config, &STRATEGY);
             let shard = coded_block.shard(0).expect("missing shard");
-            assert!(shard.encode_size() > Widen::<usize>::widen(config.max_size));
-            peers[0]
+            assert!(shard.encode_size() > Widen::<usize>::widen(config.cap));
+            let commitment = coded_block.commitment();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let leader = peers[0].public_key.clone();
+            peers[1].mailbox.discovered(commitment, leader, round);
+            let mut verified = peers[1]
                 .mailbox
-                .proposed(Round::new(Epoch::zero(), View::new(1)), coded_block);
-            context.sleep(config.link.latency).await;
+                .subscribe_assigned_shard_verified(commitment);
+
+            // The proposer keeps its block without sending any shard
+            peers[0].mailbox.proposed(round, coded_block);
+            context.sleep(config.link.latency * 2).await;
+            assert!(peers[0].mailbox.get(commitment).await.is_some());
+            assert_eq!(verified.try_recv(), Err(TryRecvError::Empty));
         });
     }
 
@@ -5052,10 +5017,9 @@ mod tests {
             let scheme_provider =
                 MultiEpochProvider::single(scheme_epoch0).with_epoch(Epoch::new(1), scheme_epoch1);
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config = Config {
                 scheme_provider,
                 blocker: receiver_control.clone(),
-                limits: limits(),
                 block_codec_cfg: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
@@ -5064,7 +5028,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
+            let (engine, mailbox) = ShardEngine::<C>::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             // Build a coded block using epoch 1's participant set.
@@ -5180,10 +5144,9 @@ mod tests {
             // and `ingest_buffered_shards`). Leader-shard validation is the third.
             // Any additional lookup for epoch 0 churns to `None`.
             let broadcaster_provider = ChurningProvider::new(broadcaster_scheme, 3);
-            let broadcaster_config: Config<_, _, _, _, C, _, _, _> = Config {
+            let broadcaster_config = Config {
                 scheme_provider: broadcaster_provider,
                 blocker: broadcaster_control.clone(),
-                limits: limits(),
                 block_codec_cfg: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
@@ -5192,7 +5155,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
             let (broadcaster_engine, broadcaster_mailbox) =
-                ChurningShardEngine::new(context.child("broadcaster"), broadcaster_config);
+                ChurningShardEngine::<C>::new(context.child("broadcaster"), broadcaster_config);
             broadcaster_engine.start((broadcaster_sender, broadcaster_receiver));
 
             let receiver_scheme = Scheme::signer(
@@ -5201,10 +5164,9 @@ mod tests {
                 private_keys[receiver_idx].clone(),
             )
             .expect("signer scheme should be created");
-            let receiver_config: Config<_, _, _, _, C, _, _, _> = Config {
+            let receiver_config = Config {
                 scheme_provider: MultiEpochProvider::single(receiver_scheme),
                 blocker: receiver_control.clone(),
-                limits: limits(),
                 block_codec_cfg: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
@@ -5213,7 +5175,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
             let (receiver_engine, receiver_mailbox) =
-                ShardEngine::new(context.child("receiver"), receiver_config);
+                ShardEngine::<C>::new(context.child("receiver"), receiver_config);
             receiver_engine.start((receiver_sender, receiver_receiver));
 
             let coding_config = coding_config_for_participants(peer_keys.len() as u16);
@@ -6008,10 +5970,9 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
-                limits: limits(),
                 block_codec_cfg: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
@@ -6020,7 +5981,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
+            let (engine, mailbox) = ShardEngine::<C>::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             // Build a coded block and extract the shard destined for the receiver.
@@ -6110,10 +6071,9 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control,
-                limits: limits(),
                 block_codec_cfg: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(16),
@@ -6122,7 +6082,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (mut engine, _mailbox) = ShardEngine::new(context.child("engine"), config);
+            let (mut engine, _mailbox) = ShardEngine::<C>::new(context.child("engine"), config);
 
             // Only `sender_pk` is in `latest.primary`, so only that peer may retain a pre-leader
             // buffer row (`buffer_peer_shard` / `peer_buffers`).
@@ -6219,11 +6179,10 @@ mod tests {
                 Scheme::signer(SCHEME_NAMESPACE, epoch1_set.clone(), receiver_key.clone())
                     .expect("epoch 1 signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config = Config {
                 scheme_provider: MultiEpochProvider::single(scheme_epoch0)
                     .with_epoch(Epoch::new(1), scheme_epoch1),
                 blocker: receiver_control.clone(),
-                limits: limits(),
                 block_codec_cfg: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
@@ -6233,7 +6192,7 @@ mod tests {
             };
 
             // Receiver engine: schemes for both epochs so post-cutover validation can run if needed.
-            let (engine, mailbox) = ShardEngine::new(context.child("receiver"), config);
+            let (engine, mailbox) = ShardEngine::<C>::new(context.child("receiver"), config);
             engine.start((sender_handle, receiver_handle));
 
             let coding_config = coding_config_for_participants(epoch0_set.len() as u16);
@@ -6374,10 +6333,9 @@ mod tests {
             )
             .expect("signer scheme should be created");
 
-            let config: Config<_, _, _, _, C, _, _, _> = Config {
+            let config = Config {
                 scheme_provider: MultiEpochProvider::single(scheme),
                 blocker: receiver_control.clone(),
-                limits: limits(),
                 block_codec_cfg: (),
                 strategy: STRATEGY,
                 mailbox_size: NZUsize!(1024),
@@ -6386,7 +6344,7 @@ mod tests {
                 peer_provider: oracle.manager(),
             };
 
-            let (engine, mailbox) = ShardEngine::new(context.child("evicted"), config);
+            let (engine, mailbox) = ShardEngine::<C>::new(context.child("evicted"), config);
             engine.start((evicted_sender, evicted_receiver));
 
             let coding_config = coding_config_for_participants(num_peers as u16);

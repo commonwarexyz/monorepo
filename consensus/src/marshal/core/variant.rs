@@ -205,9 +205,6 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
-
-    /// Returns the largest payload, in bytes, this buffer can pass to the network.
-    fn max_message_size(&self) -> usize;
 }
 
 /// A buffer implementation that never stores, subscribes, finalizes, or sends blocks.
@@ -260,8 +257,4 @@ where
     fn retire(&self, _: Retirement<V::Commitment>) {}
 
     fn send(&self, _: Round, _: V::Block, _: Recipients<Self::PublicKey>) {}
-
-    fn max_message_size(&self) -> usize {
-        usize::MAX
-    }
 }

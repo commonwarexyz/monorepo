@@ -1,25 +1,21 @@
 //! P2P resolver plumbing reused by the standard and coding marshal variants.
 
-use crate::marshal::{
-    Limits,
-    resolver::handler::{self, Annotation, Key, Receiver as HandlerReceiver},
-};
+use crate::marshal::resolver::handler::{self, Annotation, Key, Receiver as HandlerReceiver};
 use commonware_actor::mailbox;
 use commonware_cryptography::{Digest, PublicKey};
 use commonware_p2p::{Blocker, Provider, Receiver as P2pReceiver, Sender};
-use commonware_resolver::p2p;
+use commonware_resolver::p2p::{self, MAX_MESSAGE_OVERHEAD};
 use commonware_runtime::{BufferPooler, Clock, Metrics, Spawner};
 use commonware_utils::Widen;
 use rand_core::Rng;
 use std::{num::NonZeroUsize, time::Duration};
 
 /// Configuration for the P2P [Resolver](commonware_resolver::Resolver).
-pub struct Config<P, C, B, D>
+pub struct Config<P, C, B>
 where
     P: PublicKey,
     C: Provider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
-    D: Digest,
 {
     /// The public key to identify this node.
     pub public_key: P,
@@ -46,9 +42,6 @@ where
 
     /// Whether responses are sent with priority over other network messages
     pub priority_responses: bool,
-
-    /// Size limits for the values this resolver serves.
-    pub limits: Limits<D>,
 }
 
 /// Mailbox for issuing marshal backfill requests.
@@ -56,14 +49,17 @@ pub type Mailbox<D, P> = p2p::Mailbox<Key<D>, P, Annotation>;
 
 /// Initialize a P2P resolver.
 ///
+/// The returned receiver carries the largest value the `backfill` sender can serve, from which
+/// marshal derives the blocks it admits. See [message sizes](crate::marshal#message-sizes).
+///
 /// # Panics
 ///
-/// Panics if the largest value under [`Limits`] plus
-/// [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD) exceeds the `backfill`
-/// sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size).
+/// Panics if the `backfill` sender's
+/// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) is below
+/// [`MAX_MESSAGE_OVERHEAD`].
 pub fn init<E, C, B, D, S, R, P>(
     context: E,
-    config: Config<P, C, B, D>,
+    config: Config<P, C, B>,
     backfill: (S, R),
 ) -> (HandlerReceiver<D>, Mailbox<D, P>)
 where
@@ -75,12 +71,10 @@ where
     R: P2pReceiver<PublicKey = P>,
     P: PublicKey,
 {
-    let limit: usize = Widen::widen(backfill.0.max_message_size());
-    assert!(
-        config.limits.response() <= limit,
-        "backfill size {} exceeds sender limit {limit}",
-        config.limits.response()
-    );
+    // Every response frames its value
+    let max_value_size = Widen::<usize>::widen(backfill.0.max_message_size())
+        .checked_sub(Widen::widen(MAX_MESSAGE_OVERHEAD))
+        .expect("backfill sender cannot carry resolver framing");
 
     let (sender, receiver) = mailbox::new(context.child("handler"), config.mailbox_size);
     let handler = handler::Handler::new(sender);
@@ -100,22 +94,20 @@ where
         },
     );
     resolver_engine.start(backfill);
-    (HandlerReceiver::new(receiver), resolver)
+    (HandlerReceiver::new(receiver, max_value_size), resolver)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::marshal::{
-        mocks::harness::{self, B, D, TEST_QUOTA, default_leader},
-        standard::Standard,
-    };
+    use crate::marshal::mocks::harness::{D, TEST_QUOTA, default_leader};
     use commonware_p2p::simulated::{self, Network};
     use commonware_runtime::{Runner as _, Supervisor as _, deterministic};
     use commonware_utils::NZUsize;
 
-    /// Initializes a resolver whose backfill sender accepts at most `max_size` bytes.
-    fn init_with(max_size: u32) {
+    /// Initializes a resolver whose backfill sender accepts at most `max_size` bytes and returns
+    /// the largest value its receiver carries.
+    fn init_with(max_size: u32) -> usize {
         deterministic::Runner::default().start(|context| async move {
             let me = default_leader();
             let (network, oracle) = Network::new_with_peers(
@@ -132,7 +124,7 @@ mod tests {
             network.start();
             let control = oracle.control(me.clone());
             let backfill = control.register(0, TEST_QUOTA).await.unwrap();
-            let _ = init::<_, _, _, D, _, _, _>(
+            let (receiver, _) = init::<_, _, _, D, _, _, _>(
                 context.child("resolver"),
                 Config {
                     public_key: me,
@@ -143,23 +135,26 @@ mod tests {
                     fetch_retry_timeout: Duration::from_secs(1),
                     priority_requests: false,
                     priority_responses: false,
-                    limits: harness::limits::<Standard<B>>(),
                 },
                 backfill,
             );
-        });
+            receiver.max_value_size()
+        })
     }
 
     #[test]
-    fn test_backfill_fits_sender() {
-        let response = harness::limits::<Standard<B>>().response();
-        init_with(u32::try_from(response).unwrap());
+    fn test_backfill_value_follows_sender() {
+        for max_size in [MAX_MESSAGE_OVERHEAD, 1024, 1024 * 1024] {
+            assert_eq!(
+                init_with(max_size),
+                Widen::<usize>::widen(max_size - MAX_MESSAGE_OVERHEAD)
+            );
+        }
     }
 
     #[test]
-    #[should_panic(expected = "backfill size 1292 exceeds sender limit 1291")]
-    fn test_backfill_exceeds_sender() {
-        let response = harness::limits::<Standard<B>>().response();
-        init_with(u32::try_from(response).unwrap() - 1);
+    #[should_panic(expected = "backfill sender cannot carry resolver framing")]
+    fn test_backfill_sender_below_framing() {
+        init_with(MAX_MESSAGE_OVERHEAD - 1);
     }
 }

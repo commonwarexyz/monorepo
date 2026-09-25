@@ -193,10 +193,6 @@ mod tests {
         fn retire(&self, _update: crate::marshal::core::Retirement<Digest>) {}
 
         fn send(&self, _round: Round, _block: Arc<TestBlock>, _recipients: Recipients<PublicKey>) {}
-
-        fn max_message_size(&self) -> usize {
-            usize::MAX
-        }
     }
 
     fn block(height: u64, timestamp: u64) -> TestBlock {

@@ -15,8 +15,9 @@ use super::{
 use crate::{
     Block, Epochable, Heightable, Reporter,
     marshal::{
-        Config, Identifier as BlockID, Limits, Start, Update,
+        Config, Identifier as BlockID, Start, Update,
         resolver::handler::{self, Annotation, Key, Request},
+        sizing::Bounds,
         store::{Blocks, Certificates},
     },
     simplex::{
@@ -126,8 +127,10 @@ where
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
-    // Size limits for blocks and sent payloads
-    limits: Limits<V::Commitment>,
+    // Largest blocks admitted, derived from the resolver when the actor starts
+    bounds: Bounds<V::Commitment, P::Scheme>,
+    // Encoded size of the configured genesis anchor, checked when the actor starts
+    genesis: Option<usize>,
     // Strategy for parallel operations
     strategy: T,
 
@@ -215,6 +218,7 @@ where
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
+        let mut genesis = None;
         let pending_floor_anchor = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
@@ -222,10 +226,7 @@ where
                     Height::zero(),
                     "genesis anchor must be at height zero"
                 );
-                assert!(
-                    anchor.encode_size() <= config.limits.block(),
-                    "genesis anchor exceeds size limit"
-                );
+                genesis = Some(anchor.encode_size());
                 finalized_blocks =
                     Self::ensure_genesis_anchor(finalized_blocks, anchor, last_processed_height)
                         .await;
@@ -269,7 +270,8 @@ where
                 view_retention: config.view_retention,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
-                limits: config.limits,
+                bounds: Bounds::new(0),
+                genesis,
                 strategy: config.strategy,
                 floor: floor_state,
                 stream,
@@ -286,7 +288,7 @@ where
                 finalized_height,
                 processed_height,
             },
-            Mailbox::new(sender, config.max_pending_acks, config.limits),
+            Mailbox::new(sender, config.max_pending_acks),
             floor,
         )
     }
@@ -342,11 +344,14 @@ where
 
     /// Start the actor.
     ///
+    /// The actor admits blocks that the resolver can serve with a certificate. See
+    /// [message sizes](crate::marshal#message-sizes).
+    ///
     /// # Panics
     ///
-    /// Panics if the buffer's [`Buffer::max_message_size`] is below [`Limits::buffer`].
+    /// Panics if the genesis anchor exceeds the bound for its epoch.
     pub fn start<R, Buf>(
-        self,
+        mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
         resolver: (handler::Receiver<V::Commitment>, R),
@@ -359,12 +364,13 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        assert!(
-            buffer.max_message_size() >= self.limits.buffer(),
-            "buffer size {} is below limit {}",
-            buffer.max_message_size(),
-            self.limits.buffer()
-        );
+        self.bounds = Bounds::new(resolver.0.max_value_size());
+        if let Some(size) = self.genesis.take() {
+            assert!(
+                self.bound(Height::zero()).is_none_or(|bound| size <= bound),
+                "genesis anchor exceeds size limit"
+            );
+        }
         let mut actor = Box::new(self);
         spawn_cell!(actor.context, actor.run(application, buffer, resolver))
     }
@@ -708,7 +714,7 @@ where
                 // storage tolerates multiple candidates per round (see
                 // [Mailbox::get_verified]), and the propose paths skip or
                 // reuse a recovered block on restart.
-                assert!(self.admits(&block), "proposed block exceeds size limit");
+                assert!(self.fits(&block), "proposed block exceeds size limit");
                 buffer.send(round, block.clone(), recipients);
                 self = self
                     .persist_verified(round, block, ack, buffer, application, resolver)
@@ -717,7 +723,7 @@ where
             Message::Verified {
                 round, block, ack, ..
             } => {
-                assert!(self.admits(&block), "verified block exceeds size limit");
+                assert!(self.fits(&block), "verified block exceeds size limit");
                 self = self
                     .persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
@@ -725,7 +731,7 @@ where
             Message::Certified {
                 round, block, ack, ..
             } => {
-                assert!(self.admits(&block), "certified block exceeds size limit");
+                assert!(self.fits(&block), "certified block exceeds size limit");
                 (self, _) = self
                     .ingest(block.clone(), buffer, application, resolver)
                     .await;
@@ -894,6 +900,11 @@ where
             }
             Message::GetProcessedHeight { response, .. } => {
                 response.send_lossy(self.stream.processed_height());
+            }
+            Message::GetMaxBlockSize {
+                epoch, response, ..
+            } => {
+                response.send_lossy(self.bounds.block(|| self.committee(epoch)));
             }
             Message::HintFinalized {
                 height, targets, ..
@@ -1071,7 +1082,7 @@ where
 
     /// Handle a produce request from a remote peer.
     ///
-    /// Response shapes must match the bound in [`Limits::new`].
+    /// Response shapes must match [`Bounds::block`].
     #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
@@ -1889,9 +1900,30 @@ where
         self
     }
 
-    /// Returns whether `block` fits [`Limits::block`].
+    /// Returns the size of the committee for `epoch`, if the provider supplies its scheme.
+    fn committee(&self, epoch: Epoch) -> Option<usize> {
+        Some(self.provider.scoped(epoch)?.participants().len())
+    }
+
+    /// Returns the largest encoded block admitted at `height`, or `None` if the bound depends on
+    /// a committee the epocher or provider does not cover.
+    fn bound(&self, height: Height) -> Option<usize> {
+        self.bounds.block(|| {
+            let epoch = self.epocher.containing(height)?.epoch();
+            self.committee(epoch)
+        })
+    }
+
+    /// Returns whether peer data `block` is admitted: its bound is known and it fits.
     fn admits(&self, block: &V::Block) -> bool {
-        block.encode_size() <= self.limits.block()
+        self.bound(block.height())
+            .is_some_and(|bound| block.encode_size() <= bound)
+    }
+
+    /// Returns whether local input `block` fits. An unknown bound does not reject local input.
+    fn fits(&self, block: &V::Block) -> bool {
+        self.bound(block.height())
+            .is_none_or(|bound| block.encode_size() <= bound)
     }
 
     /// Returns the epoch containing `height` and the scope that verifies its certificates.

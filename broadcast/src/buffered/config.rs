@@ -16,9 +16,6 @@ pub struct Config<P: PublicKey, MCfg, D: Provider<PublicKey = P>> {
     /// Whether messages are sent over the network as priority.
     pub priority: bool,
 
-    /// The largest encoded message, in bytes, the network sender must accept.
-    pub max_size: usize,
-
     /// The configuration for the codec item.
     pub codec_config: MCfg,
 

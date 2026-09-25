@@ -32,7 +32,7 @@ use commonware_cryptography::{
             variant::{MinPk, Variant},
         },
     },
-    certificate::{ConstantProvider, Scheme as _, Verifier as _},
+    certificate::{ConstantProvider, Verifier as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     transcript::Summary,
@@ -607,17 +607,6 @@ impl Reporter for MarshalApplication {
     }
 }
 
-/// Largest encoded block the tests build.
-pub(crate) const MAX_BLOCK_SIZE: usize = 64 * 1024;
-
-/// Returns marshal limits for committees of at most `participants` and blocks of at most
-/// [`MAX_BLOCK_SIZE`].
-pub(crate) fn marshal_limits<V: marshal::core::Variant>(
-    participants: usize,
-) -> marshal::Limits<V::Commitment> {
-    marshal::Limits::new::<V, TestScheme>(participants, MAX_BLOCK_SIZE)
-}
-
 pub(crate) struct SchemeFixture {
     pub(crate) participants: Vec<TestPublicKey>,
     pub(crate) schemes: Vec<TestScheme>,
@@ -675,7 +664,6 @@ pub(crate) async fn closed_marshal_mailbox(
     .await
     .expect("blocks archive");
 
-    let limits = marshal_limits::<TestMarshalVariant>(scheme.participants().len());
     let (actor, mailbox, _) = MarshalActor::<_, _, _, _, _, _, _, Exact>::init(
         context.child("marshal"),
         finalizations_by_height,
@@ -692,7 +680,6 @@ pub(crate) async fn closed_marshal_mailbox(
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            limits,
             block_codec_config: (),
             max_repair: NZUsize!(4),
             max_pending_acks: NZUsize!(4),

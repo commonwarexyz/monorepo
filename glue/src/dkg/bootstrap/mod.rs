@@ -12,10 +12,13 @@
 //! # Message Sizes
 //!
 //! Fold [`Limits`] into the P2P `max_message_size` with
-//! [`commonware_p2p::max_message_size`]. Each component asserts at start that
-//! its bound fits its sender. The [`marshal::Limits`] block bound is the
-//! largest one-shot [`Block`], and every participant derives the same bound
-//! from the same participants and directory.
+//! [`commonware_p2p::max_message_size`]. Simplex and the DKG assert at start
+//! that their bounds fit their senders. Marshal derives the largest block it
+//! admits from its backfill sender (see
+//! [message sizes](commonware_consensus::marshal#message-sizes)), and
+//! [`marshal::Limits`] targets the largest one-shot [`Block`], so every
+//! participant that folds the same participants and directory admits every
+//! block of the ceremony.
 //!
 //! ```
 //! use commonware_cryptography::bls12381::primitives::variant::MinSig;
@@ -260,7 +263,7 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 #[derive(Clone, Debug)]
 pub struct Limits {
     simplex: simplex::Limits,
-    marshal: marshal::Limits<sha256::Digest>,
+    marshal: marshal::Limits,
     dkg: dkg::Limits,
 }
 
@@ -442,7 +445,6 @@ where
             .expect("too many DKG participants");
         let max_participants = NZU32!(participants);
         let block_codec_config = (max_participants, self.config.max_supported_mode);
-        let limits = Limits::new::<V, D>(max_participants, &self.config.directory);
 
         let context = self.context.into_present();
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_PAGES);
@@ -471,7 +473,6 @@ where
                 mailbox_size: MAILBOX_SIZE,
                 deque_size: 16,
                 priority: false,
-                max_size: limits.marshal.buffer(),
                 codec_config: block_codec_config,
                 peer_provider: self.config.manager.clone(),
             },
@@ -489,7 +490,6 @@ where
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
-                limits: limits.marshal,
             },
             backfill,
         );
@@ -533,7 +533,6 @@ where
                 replay_buffer: IO_BUFFER_SIZE,
                 key_write_buffer: IO_BUFFER_SIZE,
                 value_write_buffer: IO_BUFFER_SIZE,
-                limits: limits.marshal,
                 block_codec_config,
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
@@ -745,7 +744,7 @@ mod tests {
     use commonware_p2p::Address;
     use std::net::SocketAddr;
 
-    /// Asserts that the block bound is the widest block without a payload plus the widest
+    /// Asserts that the marshal target is the widest block without a payload plus the widest
     /// payload.
     fn check<D: Directory<ed25519::PublicKey>>(participants: u32, directory: D) {
         let limits = Limits::new::<MinSig, D>(NZU32!(participants), &directory);
@@ -760,7 +759,13 @@ mod tests {
             payload: None,
         };
         let payload = limits.dkg.payload(directory.encode_size());
-        assert_eq!(limits.marshal.block(), block.encode().len() + payload);
+        assert_eq!(
+            limits.marshal,
+            marshal::Limits::new::<Standard<Block<MinSig, D>>, ConsensusScheme>(
+                Widen::widen(participants),
+                block.encode().len() + payload
+            )
+        );
         assert_eq!(
             limits.footprint(),
             limits

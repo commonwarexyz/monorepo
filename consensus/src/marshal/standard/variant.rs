@@ -116,10 +116,6 @@ where
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
         self.broadcast_shared(recipients, block);
     }
-
-    fn max_message_size(&self) -> usize {
-        self.max_size()
-    }
 }
 
 impl<S, B> BlockProvider for Mailbox<S, Standard<B>>

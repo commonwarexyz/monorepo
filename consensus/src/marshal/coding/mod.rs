@@ -69,7 +69,6 @@ mod tests {
     use crate::{
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
         marshal::{
-            Limits,
             ancestry::{Ancestry, BlockProvider},
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
@@ -118,7 +117,7 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
+        NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
     use futures::StreamExt;
     use std::{sync::Arc, time::Duration};
@@ -195,10 +194,6 @@ mod tests {
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
         }
-
-        fn max_message_size(&self) -> usize {
-            usize::MAX
-        }
     }
 
     /// Records the ancestry consumed by verification, accepting only after reaching genesis.
@@ -252,9 +247,17 @@ mod tests {
 
     impl RecordingResolver {
         fn holding(metrics: impl Metrics) -> (handler::Receiver<TestCommitment>, Self) {
+            Self::bounded(metrics, usize::MAX)
+        }
+
+        /// Returns a resolver whose receiver carries values of at most `max_value_size` bytes.
+        fn bounded(
+            metrics: impl Metrics,
+            max_value_size: usize,
+        ) -> (handler::Receiver<TestCommitment>, Self) {
             let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
             (
-                handler::Receiver::new(receiver),
+                handler::Receiver::new(receiver, max_value_size),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
@@ -419,7 +422,6 @@ mod tests {
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
-            limits: harness::limits::<TestCodingVariant>(),
             block_codec_config: (),
             partition_prefix: partition_prefix.to_string(),
             prunable_items_per_section: NZU64!(10),
@@ -549,10 +551,9 @@ mod tests {
             setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
                 .await;
         let control = oracle.control(me.clone());
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
-            limits: harness::limits::<TestCodingVariant>(),
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
@@ -560,8 +561,10 @@ mod tests {
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
-        let (shard_engine, shard_mailbox) =
-            shards::Engine::new(context.child("shards"), shard_config);
+        let (shard_engine, shard_mailbox) = shards::Engine::<_, _, _, _, _, Sha256, _, _, _>::new(
+            context.child("shards"),
+            shard_config,
+        );
         let network = control.register(0, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
         shard_mailbox
@@ -4765,10 +4768,10 @@ mod tests {
                 // The widest timestamp keeps genesis within the bound
                 let block =
                     make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
-                let bound = block.encode_size() - usize::from(oversized);
-                let mut config = test_config(&context, "propose-oversized", provider.clone());
-                config.limits =
-                    Limits::new::<TestCodingVariant, S>(Widen::widen(NUM_VALIDATORS), bound);
+                let bound = <TestCodingVariant as core::Variant>::block_size(block.encode_size())
+                    .unwrap()
+                    - usize::from(oversized);
+                let config = test_config(&context, "propose-oversized", provider.clone());
                 let (finalizations_by_height, finalized_blocks) =
                     immutable_finalized_stores(&context, "propose-oversized", &config).await;
                 let (actor, marshal, _) = core::Actor::init(
@@ -4778,12 +4781,16 @@ mod tests {
                     config,
                 )
                 .await;
-                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+                let (resolver_rx, resolver) = RecordingResolver::bounded(
+                    context.child("resolver"),
+                    harness::max_value_size::<TestCodingVariant>(bound),
+                );
                 let _actor_handle = actor.start(
                     Application::<CodingB>::default(),
                     RecordingCodingBuffer::default(),
                     (resolver_rx, resolver),
                 );
+                assert_eq!(marshal.max_block_size(Epoch::zero()).await, Some(bound));
                 let shards =
                     start_shard_mailbox(context.child("shards"), participants, provider.clone())
                         .await;

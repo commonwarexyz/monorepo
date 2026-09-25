@@ -847,7 +847,10 @@ where
                 build_timer.observe(&runtime_context);
 
                 // Skip before erasure coding a block marshal would not admit
-                if !marshal.admits(&built_block) {
+                if !marshal
+                    .admits(consensus_context.epoch(), &built_block)
+                    .await
+                {
                     debug!(reason = "block exceeds size limit", "skipping proposal");
                     return;
                 }

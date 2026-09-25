@@ -125,14 +125,6 @@ const QMDB_CHANNEL: u64 = 5;
 const DKG_CHANNEL: u64 = 6;
 const DKG_PROBE_CHANNEL: u64 = 7;
 
-/// Returns the marshal limits every validator configures.
-fn marshal_limits() -> marshal::Limits<sha256::Digest> {
-    marshal::Limits::new::<MarshalVariant, Scheme>(
-        Widen::widen(MAX_PARTICIPANTS.get()),
-        MAX_BLOCK_SIZE,
-    )
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Network {
     Discovery,
@@ -808,13 +800,14 @@ impl EngineDefinition for ReshareEngine {
     }
 
     fn max_message_size(&self) -> u32 {
-        let simplex =
-            simplex::Limits::new::<Scheme, sha256::Digest>(Widen::widen(MAX_PARTICIPANTS.get()));
+        let participants = Widen::widen(MAX_PARTICIPANTS.get());
+        let simplex = simplex::Limits::new::<Scheme, sha256::Digest>(participants);
+        let marshal = marshal::Limits::new::<MarshalVariant, Scheme>(participants, MAX_BLOCK_SIZE);
         let dkg = DkgLimits::new::<MinPk, ed25519::PrivateKey>(MAX_PARTICIPANTS);
         let qmdb = qmdb_resolver::boundary_size::<mmr::Family, sha256::Digest>(
             fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
         );
-        max_message_size(&[&Prefixed(simplex), &marshal_limits(), &dkg, &qmdb])
+        max_message_size(&[&Prefixed(simplex), &marshal, &dkg, &qmdb])
     }
 
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
@@ -857,7 +850,6 @@ impl EngineDefinition for ReshareEngine {
         let store = self.store(public_key);
         self.initial.register_epoch_zero(&provider, &store).await;
         let dkg_manager = self.network.manager(oracle);
-        let limits = marshal_limits();
 
         let resolver = marshal_resolver::init(
             context.child("marshal_resolver"),
@@ -870,7 +862,6 @@ impl EngineDefinition for ReshareEngine {
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
-                limits,
             },
             backfill_network,
         );
@@ -880,7 +871,6 @@ impl EngineDefinition for ReshareEngine {
             mailbox_size: NZUsize!(100),
             deque_size: 10,
             priority: false,
-            max_size: limits.buffer(),
             codec_config: (),
             peer_provider: oracle.manager(),
         };
@@ -1024,7 +1014,6 @@ impl EngineDefinition for ReshareEngine {
                 replay_buffer: IO_BUFFER_SIZE,
                 key_write_buffer: IO_BUFFER_SIZE,
                 value_write_buffer: IO_BUFFER_SIZE,
-                limits,
                 block_codec_config: (),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),

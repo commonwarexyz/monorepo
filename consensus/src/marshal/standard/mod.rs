@@ -17,9 +17,8 @@
 //!
 //! The standard variant uses the core [`crate::marshal::core::Actor`] and
 //! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter.
-//! Blocks are broadcast through [`commonware_broadcast::buffered`], whose
-//! [`max_size`](commonware_broadcast::buffered::Config::max_size) must be at least
-//! [`Limits::buffer`](crate::marshal::Limits::buffer).
+//! Blocks are broadcast through [`commonware_broadcast::buffered`] (see
+//! [message sizes](crate::marshal#message-sizes)).
 //!
 //! # When to Use
 //!
@@ -47,7 +46,7 @@ mod tests {
     use crate::{
         Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
         marshal::{
-            Identifier, Limits, Update,
+            Identifier, Update,
             ancestry::BlockProvider,
             application::gates::{GateOutcome, Gates},
             config::{Config, Start},
@@ -72,7 +71,9 @@ mod tests {
             self, Plan,
             config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+            scheme::{
+                Scheme as SimplexScheme, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+            },
             types::{
                 Certificate, Finalization, Notarization, Notarize, Nullification, Nullify,
                 Proposal, Vote,
@@ -83,7 +84,10 @@ mod tests {
     use bytes::{BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
-    use commonware_codec::{Buf, DecodeExt as _, Encode, EncodeSize, FixedSize, Read, Write};
+    use commonware_codec::{
+        Buf, DecodeExt as _, Encode, EncodeSize, FixedSize, Read, Write,
+        varint::MAX_U64_VARINT_SIZE,
+    };
     use commonware_cryptography::{
         Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
@@ -128,6 +132,19 @@ mod tests {
     fn mailbox_provides_application_blocks() {
         fn assert_provider<P: BlockProvider<Block = B>>() {}
         assert_provider::<Mailbox<S, Standard<B>>>();
+    }
+
+    /// A provider that returns one fixed scope for every epoch.
+    #[derive(Clone)]
+    struct FixedProvider<T: commonware_cryptography::certificate::Scheme>(Scoped<T>);
+
+    impl<T: commonware_cryptography::certificate::Scheme> Provider for FixedProvider<T> {
+        type Scope = Epoch;
+        type Scheme = T;
+
+        fn scoped(&self, _: Epoch) -> Option<Scoped<T>> {
+            Some(self.0.clone())
+        }
     }
 
     #[derive(Clone)]
@@ -3986,10 +4003,6 @@ mod tests {
         fn send(&self, round: Round, block: Arc<B>, recipients: Recipients<PublicKey>) {
             self.sends.lock().push((round, block, recipients));
         }
-
-        fn max_message_size(&self) -> usize {
-            usize::MAX
-        }
     }
 
     /// Recorded `fetch_targeted` call on the [`RecordingResolver`].
@@ -4015,9 +4028,14 @@ mod tests {
 
     impl RecordingResolver {
         fn holding(metrics: impl Metrics) -> (handler::Receiver<D>, Self) {
+            Self::bounded(metrics, usize::MAX)
+        }
+
+        /// Returns a resolver whose receiver carries values of at most `max_value_size` bytes.
+        fn bounded(metrics: impl Metrics, max_value_size: usize) -> (handler::Receiver<D>, Self) {
             let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
             (
-                handler::Receiver::new(receiver),
+                handler::Receiver::new(receiver, max_value_size),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     active_fetches: Arc::new(Mutex::new(Vec::new())),
@@ -4333,30 +4351,30 @@ mod tests {
             application,
             buffer,
             start,
-            harness::MAX_BLOCK_SIZE,
+            usize::MAX,
         )
         .await
     }
 
-    /// Starts a standard actor like [`start_standard_actor`], admitting blocks of at most `block`
-    /// encoded bytes.
+    /// Starts a standard actor like [`start_standard_actor`] under any scheme, with a resolver
+    /// that carries values of at most `max_value_size` bytes.
     async fn start_standard_actor_bounded<R, Buf, P>(
         context: deterministic::Context,
         partition_prefix: &str,
         provider: P,
         application: R,
         buffer: Option<Buf>,
-        start: Start<S, D, Arc<B>>,
-        block: usize,
+        start: Start<P::Scheme, D, Arc<B>>,
+        max_value_size: usize,
     ) -> (
-        Mailbox<S, Standard<B>>,
+        Mailbox<P::Scheme, Standard<B>>,
         Option<Buf>,
         RecordingResolver,
         commonware_runtime::Handle<()>,
     )
     where
         R: Reporter<Activity = Update<B>>,
-        P: Provider<Scope = Epoch, Scheme = S>,
+        P: Provider<Scope = Epoch, Scheme: SimplexScheme<D, PublicKey = PublicKey>>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
         let config = Config {
@@ -4367,7 +4385,6 @@ mod tests {
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
-            limits: Limits::new::<Standard<B>, S>(Widen::widen(NUM_VALIDATORS), block),
             block_codec_config: (),
             partition_prefix: partition_prefix.to_string(),
             prunable_items_per_section: NZU64!(10),
@@ -4398,7 +4415,7 @@ mod tests {
                 freezer_value_compression: None,
                 ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
                 items_per_section: NZU64!(10),
-                codec_config: S::certificate_codec_config_unbounded(),
+                codec_config: P::Scheme::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
                 freezer_value_write_buffer: config.value_write_buffer,
@@ -4442,7 +4459,8 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("mailbox"));
+        let (resolver_rx, resolver) =
+            RecordingResolver::bounded(context.child("mailbox"), max_value_size);
         let actor_handle = if let Some(buffer) = buffer.clone() {
             actor.start(application, buffer, (resolver_rx, resolver.clone()))
         } else {
@@ -4679,44 +4697,6 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    #[should_panic(expected = "buffer size 1023 is below limit 1024")]
-    fn test_standard_start_rejects_undersized_buffer() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            let Fixture { schemes, .. } =
-                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
-            let limits = harness::limits::<Standard<B>>();
-            let oracle = setup_network_with_participants(
-                context.child("network"),
-                NZUsize!(1),
-                [default_leader()],
-            )
-            .await;
-            let (_engine, buffer) = buffered::Engine::<_, _, B, _>::new(
-                context.child("broadcast"),
-                buffered::Config {
-                    public_key: default_leader(),
-                    mailbox_size: NZUsize!(100),
-                    deque_size: 10,
-                    priority: false,
-                    max_size: limits.buffer() - 1,
-                    codec_config: (),
-                    peer_provider: oracle.manager(),
-                },
-            );
-            start_standard_actor(
-                context.child("validator"),
-                "undersized-buffer",
-                ConstantProvider::new(schemes[0].clone()),
-                Application::<B>::default(),
-                Some(buffer),
-                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-            )
-            .await;
-        });
-    }
-
-    #[test_traced("WARN")]
     fn test_propose_skips_oversized_block() {
         for kind in wrapper_kinds() {
             for oversized in [false, true] {
@@ -4749,9 +4729,10 @@ mod tests {
                         Application::<B>::default(),
                         None::<RecordingBuffer>,
                         Start::Genesis(genesis.into()),
-                        bound,
+                        harness::max_value_size::<Standard<B>>(bound),
                     )
                     .await;
+                    assert_eq!(marshal.max_block_size(Epoch::zero()).await, Some(bound));
 
                     let app: MockVerifyingApp<B, S> =
                         MockVerifyingApp::new().with_propose_result(block.clone());
@@ -4775,6 +4756,73 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_bound_follows_committee() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Committees share one resolver, and larger ed25519 committees need wider
+            // certificates
+            let value = 64 * 1024;
+            let mut bounds = Vec::new();
+            for participants in [4u32, 16] {
+                let Fixture { schemes, .. } =
+                    ed25519::fixture(&mut context, NAMESPACE, participants);
+                let certificate =
+                    ed25519::Scheme::certificate_max_size(Widen::widen(participants)).unwrap();
+                let expected = value - (3 * MAX_U64_VARINT_SIZE + D::SIZE + certificate);
+
+                // A follower with a verify-only scope derives the same bound as a validator
+                let scheme = Arc::new(schemes[0].clone());
+                let providers = [
+                    FixedProvider(Scoped::scheme(scheme.clone())),
+                    FixedProvider(Scoped::verifier(scheme)),
+                ];
+                for (index, provider) in providers.into_iter().enumerate() {
+                    let (mailbox, ..) = start_standard_actor_bounded(
+                        context
+                            .child("validator")
+                            .with_attribute("participants", participants)
+                            .with_attribute("index", index),
+                        &format!("bound-follows-committee-{participants}-{index}"),
+                        provider,
+                        Application::<B>::default(),
+                        None::<RecordingBuffer>,
+                        Start::Genesis(StandardHarness::genesis_block(participants as u16).into()),
+                        value,
+                    )
+                    .await;
+                    let bound = mailbox.max_block_size(Epoch::zero()).await.unwrap();
+                    assert_eq!(bound, expected);
+                }
+                bounds.push(expected);
+            }
+            assert!(bounds[1] < bounds[0]);
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_constant_bound_needs_no_scheme() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            // Threshold certificates have one size, so the bound needs no scheme for the epoch
+            let value = 64 * 1024;
+            let (mailbox, ..) = start_standard_actor_bounded(
+                context.child("validator"),
+                "constant-bound",
+                EmptyProvider,
+                Application::<B>::default(),
+                None::<RecordingBuffer>,
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                value,
+            )
+            .await;
+            let bound = value - harness::max_value_size::<Standard<B>>(0);
+            for epoch in [Epoch::zero(), Epoch::new(u64::MAX)] {
+                assert_eq!(mailbox.max_block_size(epoch).await, Some(bound));
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_oversized_buffered_block_is_absent() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
@@ -4793,7 +4841,7 @@ mod tests {
                 Application::<B>::default(),
                 Some(buffer.clone()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-                fitting.encode_size(),
+                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
             )
             .await;
 
@@ -4862,7 +4910,7 @@ mod tests {
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-                fitting.encode_size(),
+                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
             )
             .await;
 
@@ -4934,7 +4982,7 @@ mod tests {
                 Application::<B>::default(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
-                fitting.encode_size(),
+                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
             )
             .await;
             let round = Round::new(Epoch::zero(), View::new(1));
@@ -4988,7 +5036,7 @@ mod tests {
                 Application::<B>::default(),
                 None::<RecordingBuffer>,
                 Start::Genesis(genesis.into()),
-                bound,
+                harness::max_value_size::<Standard<B>>(bound),
             )
             .await;
         });
@@ -7842,7 +7890,6 @@ mod tests {
                 view_retention: ViewDelta::new(10),
                 max_repair: NZUsize!(10),
                 max_pending_acks: NZUsize!(1),
-                limits: harness::limits::<Standard<B>>(),
                 block_codec_config: (),
                 partition_prefix: partition_prefix.clone(),
                 prunable_items_per_section: NZU64!(10),
@@ -7894,7 +7941,6 @@ mod tests {
                 mailbox_size: NZUsize!(100),
                 deque_size: 10,
                 priority: false,
-                max_size: config.limits.buffer(),
                 codec_config: (),
                 peer_provider: oracle.manager(),
             };
@@ -7915,7 +7961,7 @@ mod tests {
                 Application::<B>::default(),
                 buffer,
                 (
-                    handler::Receiver::new(resolver_rx),
+                    handler::Receiver::new(resolver_rx, usize::MAX),
                     RecordingResolver::default(),
                 ),
             );
@@ -8270,7 +8316,6 @@ mod tests {
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
-            limits: harness::limits::<Standard<B>>(),
             block_codec_config: (),
             partition_prefix: partition_prefix.to_string(),
             prunable_items_per_section: NZU64!(10),
@@ -8337,7 +8382,6 @@ mod tests {
                     view_retention: ViewDelta::new(10),
                     max_repair: NZUsize!(10),
                     max_pending_acks: NZUsize!(1),
-                    limits: harness::limits::<Standard<CountedBlock>>(),
                     block_codec_config: (),
                     partition_prefix: PREFIX.to_string(),
                     prunable_items_per_section: NZU64!(10),

@@ -90,17 +90,11 @@ impl<P: PublicKey, M: Digestible> Policy for Message<P, M> {
 #[derive(Clone)]
 pub struct Mailbox<P: PublicKey, M: Digestible + Codec> {
     sender: Sender<Message<P, M>>,
-    max_size: usize,
 }
 
 impl<P: PublicKey, M: Digestible + Codec> Mailbox<P, M> {
-    pub(super) const fn new(sender: Sender<Message<P, M>>, max_size: usize) -> Self {
-        Self { sender, max_size }
-    }
-
-    /// Returns [`Config::max_size`](super::Config::max_size).
-    pub const fn max_size(&self) -> usize {
-        self.max_size
+    pub(super) const fn new(sender: Sender<Message<P, M>>) -> Self {
+        Self { sender }
     }
 
     /// Subscribe to a message by digest.

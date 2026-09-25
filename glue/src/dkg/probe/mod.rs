@@ -141,11 +141,8 @@
 //!
 //! # Message Sizes
 //!
-//! When every committee has at most
-//! [`Limits::participants`](commonware_consensus::marshal::Limits::participants) members, a reply
-//! fits the [`Footprint`](commonware_p2p::Footprint) of the marshal
-//! [`Limits`](commonware_consensus::marshal::Limits), since it carries a finalization or boundary
-//! block that marshal holds. Serving skips any reply the sender cannot carry.
+//! A reply carries a finalization or boundary block that marshal holds. Serving skips any reply
+//! the sender cannot carry.
 
 use crate::dkg::{
     ReshareBlock,
@@ -578,7 +575,6 @@ mod tests {
         let public_key = participants[index].clone();
         let partition_prefix = format!("probe-node-{index}");
         let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
-        let limits = mocks::marshal_limits::<mocks::TestMarshalVariant>(participants.len());
         let control = oracle.control(public_key.clone());
         let backfill = control
             .register(BACKFILL_CHANNEL, TEST_QUOTA)
@@ -595,7 +591,6 @@ mod tests {
                 fetch_retry_timeout: Duration::from_millis(100),
                 priority_requests: false,
                 priority_responses: false,
-                limits,
             },
             backfill,
         );
@@ -639,7 +634,6 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
                 key_write_buffer: NZUsize!(1024),
                 value_write_buffer: NZUsize!(1024),
-                limits,
                 block_codec_config: (),
                 max_repair: NZUsize!(4),
                 max_pending_acks: NZUsize!(4),

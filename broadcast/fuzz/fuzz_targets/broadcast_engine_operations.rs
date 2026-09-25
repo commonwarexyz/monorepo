@@ -254,7 +254,6 @@ fn fuzz(input: FuzzInput) {
                 mailbox_size: NZUsize!(1024),
                 deque_size: input.cache_size,
                 priority: false,
-                max_size: 1024 * 1024,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
             };

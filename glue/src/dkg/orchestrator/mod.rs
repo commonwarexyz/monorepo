@@ -323,8 +323,6 @@ mod tests {
             let control = oracle.control(public_key.clone());
             let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
             let partition_prefix = format!("orchestrator-node-{index}");
-            let limits =
-                mocks::marshal_limits::<mocks::TestMarshalVariant>(fixture.participants.len());
 
             let backfill = control
                 .register(BACKFILL_CHANNEL, TEST_QUOTA)
@@ -341,7 +339,6 @@ mod tests {
                     fetch_retry_timeout: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
-                    limits,
                 },
                 backfill,
             );
@@ -383,7 +380,6 @@ mod tests {
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
-                    limits,
                     block_codec_config: (),
                     max_repair: NZUsize!(4),
                     max_pending_acks: NZUsize!(4),
@@ -757,9 +753,6 @@ mod tests {
                         replay_buffer: NZUsize!(1024),
                         key_write_buffer: NZUsize!(1024),
                         value_write_buffer: NZUsize!(1024),
-                        limits: mocks::marshal_limits::<mocks::TestMarshalVariant>(
-                            participants.len(),
-                        ),
                         block_codec_config: (),
                         max_repair: NZUsize!(4),
                         max_pending_acks: NZUsize!(4),
@@ -958,7 +951,6 @@ mod tests {
             let control = oracle.control(public_key.clone());
             let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(16));
             let partition_prefix = "orchestrator-in-band-directory".to_string();
-            let limits = mocks::marshal_limits::<AddressedVariant>(participants.len());
 
             let backfill = control
                 .register(BACKFILL_CHANNEL, TEST_QUOTA)
@@ -975,7 +967,6 @@ mod tests {
                     fetch_retry_timeout: Duration::from_millis(100),
                     priority_requests: false,
                     priority_responses: false,
-                    limits,
                 },
                 backfill,
             );
@@ -1017,7 +1008,6 @@ mod tests {
                     replay_buffer: NZUsize!(1024),
                     key_write_buffer: NZUsize!(1024),
                     value_write_buffer: NZUsize!(1024),
-                    limits,
                     block_codec_config: (),
                     max_repair: NZUsize!(4),
                     max_pending_acks: NZUsize!(4),

@@ -111,11 +111,11 @@ pub fn dkg_limits() -> dkg::Limits {
     dkg::Limits::new::<MinSig, ed25519::PrivateKey>(MAX_PARTICIPANTS)
 }
 
-/// Returns the marshal limits every validator configures.
+/// Returns the marshal limits every validator folds into [`max_message_size`].
 ///
-/// The block bound admits the largest [`Block`]: a context (round, leader, and parent), a parent
-/// digest, a height, a state root, an operation range, and an optional reshare payload.
-pub fn marshal_limits() -> marshal::Limits<sha256::Digest> {
+/// The target is the largest [`Block`]: a context (round, leader, and parent), a parent digest, a
+/// height, a state root, an operation range, and an optional reshare payload.
+pub fn marshal_limits() -> marshal::Limits {
     // Operation locations decode only up to the largest leaf count
     let range = 2 * mmr::Family::MAX_LEAVES.encode_size();
     let header = 4 * MAX_U64_VARINT_SIZE
@@ -630,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn block_bound_admits_widest_block() {
+    fn marshal_limits_target_widest_block() {
         let block = Block {
             context: Context {
                 round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
@@ -648,8 +648,11 @@ mod tests {
         };
         assert!(Block::decode(block.encode()).unwrap() == block);
         assert_eq!(
-            marshal_limits().block(),
-            block.encode_size() + dkg_limits().payload(0)
+            marshal_limits(),
+            marshal::Limits::new::<Standard<Block>, Scheme>(
+                Widen::widen(MAX_PARTICIPANTS.get()),
+                block.encode_size() + dkg_limits().payload(0)
+            )
         );
     }
 

@@ -1,4 +1,4 @@
-//! Size limits for the blocks marshal holds and the payloads it sends.
+//! Size bounds for the blocks marshal admits and the payloads it sends.
 
 use crate::marshal::core::Variant;
 use commonware_codec::varint::MAX_U64_VARINT_SIZE;
@@ -8,17 +8,22 @@ use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
 use commonware_utils::Widen;
 use std::marker::PhantomData;
 
-/// Size limits for marshal. See [message sizes](crate::marshal#message-sizes).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits<C> {
-    participants: usize,
-    block: usize,
-    response: usize,
-    buffer: usize,
-    _commitment: PhantomData<fn() -> C>,
+/// Returns the largest encoded notarization or finalization with commitment `C` and a
+/// certificate of at most `certificate` bytes: a proposal (round, parent view, and commitment)
+/// and the certificate.
+const fn notarization<C: Digest>(certificate: usize) -> Option<usize> {
+    certificate.checked_add(3 * MAX_U64_VARINT_SIZE + C::SIZE)
 }
 
-impl<C: Digest> Limits<C> {
+/// Largest payloads marshal sends for a target block size. See
+/// [message sizes](crate::marshal#message-sizes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    response: usize,
+    buffer: usize,
+}
+
+impl Limits {
     /// Returns limits for committees of at most `participants` under `S`, where `block` is the
     /// largest encoded application block.
     ///
@@ -28,75 +33,68 @@ impl<C: Digest> Limits<C> {
     /// bound its buffer payload for `participants` (coding requires `participants >= 4` and a
     /// scheme that encodes the largest block for every committee of 4 to `participants` members),
     /// or if a bound overflows `usize`.
-    pub fn new<V: Variant<Commitment = C>, S: Verifier>(participants: usize, block: usize) -> Self {
+    pub fn new<V: Variant, S: Verifier>(participants: usize, block: usize) -> Self {
         // Convert the application block bound to the variant's encoded block bound
         let block = V::block_size(block).expect("block size overflow");
 
-        // A notarization or finalization is a proposal (round, parent view, and commitment) and a
-        // certificate
-        let certificate = S::certificate_max_size(participants)
-            .expect("scheme cannot bound certificates for participants");
-        let finalization = (3 * MAX_U64_VARINT_SIZE + C::SIZE)
-            .checked_add(certificate)
-            .expect("finalization size overflow");
-
         // A notarized response is the largest: a block and a notarization. Finalized responses
         // carry the application block, and block responses carry no certificate.
-        let response = block
-            .checked_add(finalization)
+        let certificate = S::certificate_max_size(participants)
+            .expect("scheme cannot bound certificates for participants");
+        let response = notarization::<V::Commitment>(certificate)
+            .and_then(|size| size.checked_add(block))
             .and_then(|size| size.checked_add(Widen::widen(MAX_MESSAGE_OVERHEAD)))
             .expect("response size overflow");
 
         let buffer = V::buffer_size(participants, block)
             .expect("variant cannot carry blocks for participants");
 
-        Self {
-            participants,
-            block,
-            response,
-            buffer,
-            _commitment: PhantomData,
-        }
-    }
-
-    /// Returns the largest encoded [`Variant::Block`].
-    pub const fn block(&self) -> usize {
-        self.block
-    }
-
-    /// Returns the largest committee.
-    pub const fn participants(&self) -> usize {
-        self.participants
-    }
-
-    /// Returns the largest payload the variant's [`Buffer`](crate::marshal::core::Buffer) sends.
-    pub const fn buffer(&self) -> usize {
-        self.buffer
-    }
-
-    /// Returns the largest backfill response and its resolver framing.
-    pub(crate) const fn response(&self) -> usize {
-        self.response
+        Self { response, buffer }
     }
 }
 
-#[cfg(test)]
-impl<C> Limits<C> {
-    /// Returns limits with explicit bounds, for tests whose blocks cannot form a [`Variant`].
-    pub(crate) fn raw(participants: usize, block: usize, buffer: usize) -> Self {
-        Self {
-            participants,
-            block,
-            response: block,
-            buffer,
-            _commitment: PhantomData,
-        }
-    }
-}
-
-impl<C> Footprint for Limits<C> {
+impl Footprint for Limits {
     fn footprint(&self) -> usize {
         self.response.max(self.buffer)
+    }
+}
+
+/// Largest blocks marshal admits, derived from the largest value its resolver carries.
+pub(crate) struct Bounds<C, S> {
+    value: usize,
+    constant: Option<usize>,
+    _marker: PhantomData<fn() -> (C, S)>,
+}
+
+impl<C: Digest, S: Verifier> Bounds<C, S> {
+    /// Returns bounds for a resolver that carries values of at most `value` bytes.
+    pub(crate) fn new(value: usize) -> Self {
+        // A certificate bound that is equal at both extremes does not depend on the committee
+        let min = S::certificate_max_size(0);
+        let constant = if min == S::certificate_max_size(Widen::widen(u32::MAX)) {
+            min.and_then(notarization::<C>)
+        } else {
+            None
+        };
+        Self {
+            value,
+            constant,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Returns the largest encoded [`Variant::Block`] a notarized response carries for a
+    /// committee of the size `participants` returns.
+    ///
+    /// Calls `participants` only when the certificate bound depends on the committee size.
+    /// Returns `None` if `participants` returns `None` or the certificate bound overflows, and
+    /// zero if the value cannot carry the notarization.
+    pub(crate) fn block(&self, participants: impl FnOnce() -> Option<usize>) -> Option<usize> {
+        let notarization = match self.constant {
+            Some(notarization) => notarization,
+            None => notarization::<C>(S::certificate_max_size(participants()?)?)?,
+        };
+        Some(self.value.saturating_sub(notarization))
     }
 }
 
@@ -137,21 +135,32 @@ mod tests {
     type RS = ReedSolomon<Sha256Hasher>;
     type StandardVariant = Standard<EmptyBlock<Sha256Hasher>>;
     type CodingVariant = Coding<CodingB, RS, Sha256Hasher, PublicKey>;
-    type StandardLimits = Limits<Sha256>;
-    type CodingLimits = Limits<Commitment<CodingB, RS, Sha256Hasher>>;
+    type ThresholdScheme = bls12381_threshold::vrf::Scheme<PublicKey, MinSig>;
 
-    /// Asserts that the response bound equals a block with the widest notarization or
-    /// finalization.
-    fn check_encoding<V: Variant, S: Scheme<V::Commitment>>(fixture: Fixture<S>) {
+    /// Asserts that a backfill sender sized by [`Limits`] admits exactly the target block, and
+    /// that the block with the widest notarization or finalization fills the sender.
+    fn check_encoding<V: Variant, S: Scheme<V::Commitment>>(fixture: Fixture<S>, block: usize) {
         let schemes = fixture.schemes;
         let participants = schemes.len();
-        let limits = Limits::new::<V, S>(participants, 0);
-        assert_eq!(Limits::new::<V, Scoped<S>>(participants, 0), limits);
+        let limits = Limits::new::<V, S>(participants, block);
+        assert_eq!(Limits::new::<V, Scoped<S>>(participants, block), limits);
         let certificate_max_size = S::certificate_max_size(participants).unwrap();
         let scoped = Scoped::verifier(Arc::new(fixture.verifier));
 
+        // The derived bound round trips to the target block
+        let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
+        let value = limits.response - overhead;
+        let bound = Bounds::<V::Commitment, S>::new(value)
+            .block(|| Some(participants))
+            .unwrap();
+        assert_eq!(Some(bound), V::block_size(block));
+        assert_eq!(
+            Bounds::<V::Commitment, Scoped<S>>::new(value).block(|| Some(participants)),
+            Some(bound)
+        );
+
         // A response adds a block and resolver framing to a notarization or finalization
-        let extra = limits.block() + Widen::<usize>::widen(MAX_MESSAGE_OVERHEAD);
+        let extra = bound + overhead;
         for view in [1, 127, 128, u64::MAX] {
             let proposal = Proposal::new(
                 Round::new(Epoch::new(view), View::new(view)),
@@ -186,9 +195,9 @@ mod tests {
                     certificate,
                 };
                 for encoded in [notarization.encode(), finalization.encode()] {
-                    assert!(extra + encoded.len() <= limits.response());
+                    assert!(extra + encoded.len() <= limits.response);
                     if view == u64::MAX && count == schemes.len() {
-                        assert_eq!(extra + encoded.len(), limits.response());
+                        assert_eq!(extra + encoded.len(), limits.response);
                     }
                 }
             }
@@ -198,111 +207,151 @@ mod tests {
     #[test]
     fn fixed_certificate_overhead() {
         let mut rng = test_rng();
-        check_encoding::<StandardVariant, _>(bls12381_threshold::standard::fixture::<MinSig, _>(
-            &mut rng, NAMESPACE, 4,
-        ));
-        check_encoding::<StandardVariant, _>(bls12381_threshold::standard::fixture::<MinPk, _>(
-            &mut rng, NAMESPACE, 4,
-        ));
-        check_encoding::<StandardVariant, _>(bls12381_threshold::vrf::fixture::<MinSig, _>(
-            &mut rng, NAMESPACE, 4,
-        ));
-        check_encoding::<StandardVariant, _>(bls12381_threshold::vrf::fixture::<MinPk, _>(
-            &mut rng, NAMESPACE, 4,
-        ));
+        check_encoding::<StandardVariant, _>(
+            bls12381_threshold::standard::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
+            0,
+        );
+        check_encoding::<StandardVariant, _>(
+            bls12381_threshold::standard::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
+            1000,
+        );
+        check_encoding::<StandardVariant, _>(
+            bls12381_threshold::vrf::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
+            0,
+        );
+        check_encoding::<StandardVariant, _>(
+            bls12381_threshold::vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
+            1000,
+        );
     }
 
     #[test]
     fn variable_certificate_overhead() {
         let mut rng = test_rng();
         for participants in [4, 128] {
-            check_encoding::<StandardVariant, _>(ed25519::fixture(
-                &mut rng,
-                NAMESPACE,
-                participants,
-            ));
+            check_encoding::<StandardVariant, _>(
+                ed25519::fixture(&mut rng, NAMESPACE, participants),
+                1000,
+            );
         }
-        check_encoding::<StandardVariant, _>(secp256r1::fixture(&mut rng, NAMESPACE, 4));
-        check_encoding::<StandardVariant, _>(bls12381_multisig::fixture::<MinSig, _>(
-            &mut rng, NAMESPACE, 4,
-        ));
-        check_encoding::<StandardVariant, _>(bls12381_multisig::fixture::<MinPk, _>(
-            &mut rng, NAMESPACE, 4,
-        ));
+        check_encoding::<StandardVariant, _>(secp256r1::fixture(&mut rng, NAMESPACE, 4), 0);
+        check_encoding::<StandardVariant, _>(
+            bls12381_multisig::fixture::<MinSig, _>(&mut rng, NAMESPACE, 4),
+            0,
+        );
+        check_encoding::<StandardVariant, _>(
+            bls12381_multisig::fixture::<MinPk, _>(&mut rng, NAMESPACE, 4),
+            1000,
+        );
     }
 
     #[test]
     fn coding_commitment_overhead() {
-        check_encoding::<CodingVariant, _>(bls12381_threshold::vrf::fixture::<MinSig, _>(
-            &mut test_rng(),
-            NAMESPACE,
-            4,
-        ));
+        check_encoding::<CodingVariant, _>(
+            bls12381_threshold::vrf::fixture::<MinSig, _>(&mut test_rng(), NAMESPACE, 4),
+            1000,
+        );
+    }
+
+    #[test]
+    fn constant_bound_ignores_committee() {
+        let value = 64 * 1024;
+        let bounds = Bounds::<Sha256, ThresholdScheme>::new(value);
+        let notarization =
+            notarization::<Sha256>(ThresholdScheme::certificate_max_size(0).unwrap()).unwrap();
+        assert_eq!(
+            bounds.block(|| panic!("constant bound must not consult the committee")),
+            Some(value - notarization)
+        );
+    }
+
+    #[test]
+    fn bound_follows_committee() {
+        let value = 64 * 1024;
+        let bounds = Bounds::<Sha256, ed25519::Scheme>::new(value);
+        let small = bounds.block(|| Some(4)).unwrap();
+        let large = bounds.block(|| Some(128)).unwrap();
+        assert!(large < small);
+        for (participants, bound) in [(4, small), (128, large)] {
+            let certificate = ed25519::Scheme::certificate_max_size(participants).unwrap();
+            assert_eq!(bound, value - notarization::<Sha256>(certificate).unwrap());
+        }
+
+        // An unknown committee or one certificates cannot carry has no bound
+        assert_eq!(bounds.block(|| None), None);
+        let unbounded = Widen::<usize>::widen(u32::MAX) + 1;
+        assert_eq!(bounds.block(|| Some(unbounded)), None);
+    }
+
+    #[test]
+    fn bound_saturates() {
+        let bounds = Bounds::<Sha256, ed25519::Scheme>::new(1);
+        assert_eq!(bounds.block(|| Some(4)), Some(0));
+        let bounds = Bounds::<Sha256, ThresholdScheme>::new(1);
+        assert_eq!(bounds.block(|| None), Some(0));
     }
 
     #[test]
     fn standard_limits() {
-        let limits = StandardLimits::new::<StandardVariant, ed25519::Scheme>(4, 1000);
-        let empty = StandardLimits::new::<StandardVariant, ed25519::Scheme>(4, 0);
-        assert_eq!(limits.participants(), 4);
-        assert_eq!(limits.block(), 1000);
-        assert_eq!(limits.response(), empty.response() + 1000);
-        assert_eq!(limits.buffer(), 1000);
-        assert_eq!(limits.footprint(), limits.response());
+        let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, 1000);
+        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
+        assert_eq!(limits.response, empty.response + 1000);
+        assert_eq!(limits.buffer, 1000);
+        assert_eq!(limits.footprint(), limits.response);
     }
 
     #[test]
     fn largest_block() {
-        let empty = StandardLimits::new::<StandardVariant, ed25519::Scheme>(4, 0);
-        let largest = usize::MAX - empty.response();
-        let limits = StandardLimits::new::<StandardVariant, ed25519::Scheme>(4, largest);
-        assert_eq!(limits.response(), usize::MAX);
+        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
+        let largest = usize::MAX - empty.response;
+        let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, largest);
+        assert_eq!(limits.response, usize::MAX);
         assert_eq!(limits.footprint(), usize::MAX);
     }
 
     #[test]
     #[should_panic(expected = "response size overflow")]
     fn response_overflow() {
-        let empty = StandardLimits::new::<StandardVariant, ed25519::Scheme>(4, 0);
-        let largest = usize::MAX - empty.response();
-        StandardLimits::new::<StandardVariant, ed25519::Scheme>(4, largest + 1);
+        let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
+        let largest = usize::MAX - empty.response;
+        Limits::new::<StandardVariant, ed25519::Scheme>(4, largest + 1);
     }
 
     #[test]
     #[should_panic(expected = "response size overflow")]
     fn block_overflow() {
-        StandardLimits::new::<StandardVariant, ed25519::Scheme>(4, usize::MAX);
+        Limits::new::<StandardVariant, ed25519::Scheme>(4, usize::MAX);
     }
 
     #[test]
     #[should_panic(expected = "block size overflow")]
     fn coding_block_overflow() {
-        CodingLimits::new::<CodingVariant, ed25519::Scheme>(4, usize::MAX);
+        Limits::new::<CodingVariant, ed25519::Scheme>(4, usize::MAX);
     }
 
     #[test]
     #[should_panic(expected = "scheme cannot bound certificates for participants")]
     fn unbounded_certificate() {
         let participants = Widen::<usize>::widen(u32::MAX) + 1;
-        StandardLimits::new::<StandardVariant, ed25519::Scheme>(participants, 0);
+        Limits::new::<StandardVariant, ed25519::Scheme>(participants, 0);
     }
 
     #[test]
     #[should_panic(expected = "variant cannot carry blocks for participants")]
     fn coding_too_few_participants() {
-        CodingLimits::new::<CodingVariant, ed25519::Scheme>(3, 100);
+        Limits::new::<CodingVariant, ed25519::Scheme>(3, 100);
     }
 
     #[test]
     #[should_panic(expected = "variant cannot carry blocks for participants")]
     fn coding_unsupported_participants() {
-        CodingLimits::new::<CodingVariant, ed25519::Scheme>(49_154, 100);
+        Limits::new::<CodingVariant, ed25519::Scheme>(49_154, 100);
     }
 
     #[test]
     fn coding_supported_participants() {
-        let limits = CodingLimits::new::<CodingVariant, ed25519::Scheme>(49_153, 100);
-        assert_eq!(limits.participants(), 49_153);
+        let limits = Limits::new::<CodingVariant, ed25519::Scheme>(49_153, 100);
+        assert!(limits.buffer > 0);
     }
 
     /// Returns the largest encoded shard over every index and every committee of 4 to
@@ -336,13 +385,10 @@ mod tests {
         // so large blocks are widest at 5. Small blocks are widest where proofs are deepest: of 4
         // to 33 members, only 33 needs 6 siblings.
         for (participants, block, n) in [(16, 64 * 1024, 5), (33, 100, 33)] {
-            let limits = CodingLimits::new::<CodingVariant, ed25519::Scheme>(
-                usize::from(participants),
-                block,
-            );
-            assert_eq!(limits.block(), block + CodingConfig::SIZE);
-            let widest = widest_shard(participants, limits.block());
-            assert_eq!(widest, (limits.buffer(), n));
+            let limits =
+                Limits::new::<CodingVariant, ed25519::Scheme>(usize::from(participants), block);
+            let widest = widest_shard(participants, block + CodingConfig::SIZE);
+            assert_eq!(widest, (limits.buffer, n));
         }
     }
 }
