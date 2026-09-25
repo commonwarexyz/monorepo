@@ -229,7 +229,8 @@ mod tests {
     use commonware_runtime::{
         BufferPooler, Clock, IoBuf, IoBufs, Metrics, Network as RNetwork, Quota, Resolver, Runner,
         Sink, Spawner, Stream, Supervisor as _, deterministic,
-        telemetry::metrics::count_running_tasks, tokio,
+        telemetry::metrics::{count_running_tasks, metric_samples},
+        tokio,
     };
     use commonware_stream::{
         Handshake, Receiver as StreamReceiver, Sender as StreamSender,
@@ -303,15 +304,21 @@ mod tests {
 
     /// Ensure no message rate limiting occurred.
     ///
-    /// If a message is rate limited, it would be formatted as:
+    /// Each connection registers its rate-limited counters at zero. A rate-limited
+    /// message would be formatted as:
     ///
     /// ```text
-    /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
-    /// peer-9_network_spawner_messages_rate_limited_total{peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="ping"} 1
+    /// peer_network_spawner_messages_rate_limited_total{index="9",peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="data_0"} 1
+    /// peer_network_spawner_messages_rate_limited_total{index="9",peer="e2e8aa145e1ec5cb01ebfaa40e10e12f0230c832fd8135470c001cb86d77de00",message="ping"} 1
     /// ```
     fn assert_no_rate_limiting(metrics: &str) {
+        let mut samples = metric_samples(metrics, "messages_rate_limited_total").peekable();
         assert!(
-            !metrics.contains("messages_rate_limited_total{"),
+            samples.peek().is_some(),
+            "rate-limited counters should be registered: {metrics}"
+        );
+        assert!(
+            samples.all(|(_, value)| value == "0"),
             "no messages should be rate limited: {metrics}"
         );
     }

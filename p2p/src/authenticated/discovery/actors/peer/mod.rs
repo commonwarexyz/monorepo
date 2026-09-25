@@ -1,8 +1,11 @@
 //! Peer
 
-use crate::authenticated::discovery::{
-    metrics,
-    types::{self, InfoVerifier},
+use crate::authenticated::{
+    connection,
+    discovery::{
+        metrics,
+        types::{self, InfoVerifier},
+    },
 };
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
@@ -31,20 +34,16 @@ pub struct Config<C: PublicKey> {
 
 #[derive(Error, Debug)]
 pub enum Error<S, R> {
-    #[error("peer killed: {0}")]
-    PeerKilled(String),
+    #[error(transparent)]
+    Connection(#[from] connection::Error),
     #[error("send failed: {0}")]
     SendFailed(S),
-    #[error("peer disconnected")]
-    PeerDisconnected,
     #[error("receive failed: {0}")]
     ReceiveFailed(R),
     #[error("decode failed: {0}")]
     DecodeFailed(CodecError),
     #[error("unexpected failure: {0}")]
     UnexpectedFailure(commonware_runtime::Error),
-    #[error("invalid channel")]
-    InvalidChannel,
     #[error("types: {0}")]
     Types(types::Error),
     #[error("missing greeting")]
