@@ -87,7 +87,7 @@ pub(super) fn qmdb_config(prefix: &str, page_cache: CacheRef) -> FixedConfig<Two
             replay_buffer: IO_BUFFER_SIZE,
         },
         translator: TwoCap,
-        init_cache_size: Some(NZUsize!(1024)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -455,7 +455,11 @@ impl EngineDefinition for SingleDbEngine {
         let genesis_block = Block::genesis(initial_target.root, initial_target.range);
 
         let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
+        let mut plan = SyncPlan::init(
+            stateful_startup_context.child("plan"),
+            partition_prefix.clone(),
+        )
+        .await;
         let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
         let provider = ConstantProvider::new(scheme.clone());
 

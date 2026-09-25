@@ -120,7 +120,7 @@ fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequent
         },
         grafted_metadata_partition: format!("{name}-grafted"),
         translator: OneCap,
-        init_cache_size: Some(NZUsize!(3)),
+        init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -156,7 +156,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let cfg = test_config(&test_name, &context);
-        let db: Db<F> = Db::init(context.child("storage"), cfg)
+        let db: Db<F> = Db::init(context.child("storage"), cfg, None)
             .await
             .expect("init current unordered db");
 

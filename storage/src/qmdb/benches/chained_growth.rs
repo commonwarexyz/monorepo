@@ -87,7 +87,7 @@ fn cur_fix_cfg(
         journal_config: fix_log_cfg(pc),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION}"),
         translator: EightCap,
-        init_cache_size: crate::common::INIT_CACHE_SIZE,
+        init_cache: crate::common::INIT_CACHE_SIZE,
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     }
@@ -139,7 +139,7 @@ macro_rules! with_current_db {
         macro_rules! init_db {
             ($DbType:ty) => {{
                 #[allow(unused_mut)]
-                let mut $db = <$DbType>::init($ctx.child("storage"), cur_fix_cfg(&$ctx))
+                let mut $db = <$DbType>::init($ctx.child("storage"), cur_fix_cfg(&$ctx), None)
                     .await
                     .unwrap();
                 $body

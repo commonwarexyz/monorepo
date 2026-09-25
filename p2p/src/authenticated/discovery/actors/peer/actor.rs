@@ -1,27 +1,60 @@
 use super::{Config, Error, Mailbox, Message};
 use crate::authenticated::{
-    channels::{self, Channels},
+    channels::Channels,
+    connection::{self, Inbox, Outbox},
     data::EncodedData,
     discovery::{
         actors::tracker,
         metrics,
         types::{self, InfoVerifier},
     },
-    relay::{Message as RelayMessage, Prioritized, Relay, recv_prioritized, try_recv},
+    relay::{Receivers, Relay},
+    throttle::Throttle,
 };
 use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPooler, Clock, Handle, IoBufs, Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
-    iobuf::EncodeExt, telemetry::metrics::CounterFamily,
+    BufferPool, BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner,
+    iobuf::EncodeExt,
+    telemetry::metrics::{CounterFamily, raw::Counter},
 };
-use commonware_stream::encrypted::{Receiver, Sender};
+use commonware_stream::{Receiver, Sender};
 use commonware_utils::time::SYSTEM_TIME_PRECISION;
 use rand_core::CryptoRng;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{future::Future, time::Duration};
 use tracing::debug;
+
+/// Gossip channel and its send counters for one connection.
+struct Gossip<C: PublicKey> {
+    receiver: mailbox::UnreliableReceiver<Message<C>>,
+    pool: BufferPool,
+    bit_vec: Counter,
+    peers: Counter,
+}
+
+impl<C: PublicKey> connection::Control for Gossip<C> {
+    type Message = Message<C>;
+
+    fn recv(&mut self) -> impl Future<Output = Option<Message<C>>> + Send {
+        self.receiver.recv()
+    }
+
+    fn try_recv(&mut self) -> Option<Message<C>> {
+        self.receiver.try_recv().ok()
+    }
+
+    fn encode(&self, msg: Message<C>) -> Option<IoBufs> {
+        let (counter, payload) = match msg {
+            Message::BitVec(bit_vec) => (&self.bit_vec, types::Payload::BitVec(bit_vec)),
+            Message::Peers(peers) => (&self.peers, types::Payload::Peers(peers)),
+            Message::Kill => return None,
+        };
+        counter.inc();
+        Some(payload.encode_with_pool(&self.pool))
+    }
+}
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     context: E,
@@ -34,8 +67,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     max_peers: usize,
 
     control: mailbox::UnreliableReceiver<Message<C>>,
-    high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-    low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+    receivers: Receivers<EncodedData>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -56,8 +88,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 max_bit_vec: cfg.max_peer_set_size,
                 max_peers: cfg.peer_gossip_max_count,
                 control: control_receiver,
-                high: receivers.high,
-                low: receivers.low,
+                receivers,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
@@ -67,135 +98,74 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         )
     }
 
-    /// Converts a control message into an outbound metric/payload pair.
-    ///
-    /// Returns `Err` for `Kill` so the caller can terminate the connection.
-    fn prepare_control(
-        peer: &C,
-        msg: Message<C>,
-        pool: &commonware_runtime::BufferPool,
-    ) -> Result<(metrics::Message<C>, IoBufs), Error> {
-        let (metric, payload) = match msg {
-            Message::BitVec(bit_vec) => (
-                metrics::Message::new_bit_vec(peer),
-                types::Payload::BitVec(bit_vec),
-            ),
-            Message::Peers(peers) => (
-                metrics::Message::new_peers(peer),
-                types::Payload::Peers(peers),
-            ),
-            Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
-        };
-        Ok((metric, payload.encode_with_pool(pool)))
-    }
-
-    /// Converts pre-encoded data into an outbound metric/payload pair.
-    fn prepare_data<V>(
-        peer: &C,
-        msg: EncodedData,
-        rate_limits: &HashMap<u64, V>,
-    ) -> (metrics::Message<C>, IoBufs) {
-        let encoded = msg.validate_channel(rate_limits);
-        (
-            metrics::Message::new_data(peer, encoded.channel),
-            encoded.payload,
-        )
-    }
-
-    /// Records the send metric and appends the payload to the batch.
-    fn push_batched(
-        sent_messages: &CounterFamily<metrics::Message<C>>,
-        batch: &mut Vec<IoBufs>,
-        metric: metrics::Message<C>,
-        payload: IoBufs,
-    ) {
-        sent_messages.get_or_create(&metric).inc();
-        batch.push(payload);
-    }
-
-    /// Drains already-queued messages into `batch`.
-    ///
-    /// Priority order: control > high > low. Only consumes messages that are
-    /// already ready (via `try_recv`), so this reduces runtime write calls
-    /// without introducing a per-connection timer or extra buffering latency.
-    #[allow(clippy::too_many_arguments)]
-    fn extend_send_many<V>(
-        peer: &C,
-        batch_size: usize,
-        batch: &mut Vec<IoBufs>,
-        control: &mut mailbox::UnreliableReceiver<Message<C>>,
-        pool: &commonware_runtime::BufferPool,
-        high: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-        low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-        rate_limits: &HashMap<u64, V>,
-        sent_messages: &CounterFamily<metrics::Message<C>>,
-    ) -> Result<(), Error> {
-        while batch.len() < batch_size {
-            if let Ok(msg) = control.try_recv() {
-                let (metric, payload) = Self::prepare_control(peer, msg, pool)?;
-                Self::push_batched(sent_messages, batch, metric, payload);
-                continue;
-            }
-            if let Some(msg) = try_recv(high) {
-                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
-                Self::push_batched(sent_messages, batch, metric, payload);
-                continue;
-            }
-            if let Some(msg) = try_recv(low) {
-                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
-                Self::push_batched(sent_messages, batch, metric, payload);
-                continue;
-            }
-            break;
-        }
-        Ok(())
-    }
-
-    pub async fn run<O: Sink, I: Stream>(
+    pub async fn run<S: Sender, R: Receiver>(
         self,
         peer: C,
         greeting: types::Info<C>,
-        (mut conn_sender, mut conn_receiver): (Sender<O>, Receiver<I>),
+        (mut conn_sender, mut conn_receiver): (S, R),
         tracker: tracker::Mailbox<C>,
         channels: Channels<C>,
-    ) -> Result<(), Error> {
-        // Instantiate rate limiters for each message type
-        let mut rate_limits = HashMap::new();
-        let mut senders = HashMap::new();
-        for (channel, (rate, sender)) in channels.collect() {
-            let rate_limiter = RateLimiter::direct_with_clock(
-                rate,
-                self.context
-                    .child("rate_limiter")
-                    .with_attribute("channel", channel),
-            );
-            rate_limits.insert(channel, rate_limiter);
-            senders.insert(channel, sender);
-        }
-        let rate_limits = Arc::new(rate_limits);
-        let pool = self.context.network_buffer_pool().clone();
+    ) -> Result<(), Error<S::Error, R::Error>> {
+        // Create per-connection counters and rate limiters
+        let sent_messages = &self.sent_messages;
+        let (received, rate_limited) = (&self.received_messages, &self.rate_limited);
+        let sent_greeting =
+            sent_messages.get_or_create_owned(&metrics::Message::new_greeting(&peer));
+        let gossip = Gossip {
+            receiver: self.control,
+            pool: self.context.network_buffer_pool().clone(),
+            bit_vec: sent_messages.get_or_create_owned(&metrics::Message::new_bit_vec(&peer)),
+            peers: sent_messages.get_or_create_owned(&metrics::Message::new_peers(&peer)),
+        };
+        let inbox = Inbox::new(
+            &self.context,
+            peer.clone(),
+            channels,
+            received,
+            rate_limited,
+        );
+        let received_greeting =
+            received.get_or_create_owned(&metrics::Message::new_greeting(&peer));
+        let mut outbox = Outbox::new(
+            peer.clone(),
+            gossip,
+            self.receivers,
+            inbox.channels(),
+            sent_messages,
+            self.send_batch_size,
+        );
 
-        // Send greeting first before any other messages
-        self.sent_messages
-            .get_or_create(&metrics::Message::new_greeting(&peer))
-            .inc();
-        conn_sender
-            .send(types::Payload::Greeting(greeting).encode_with_pool(&pool))
-            .await
-            .map_err(Error::SendFailed)?;
+        // Use half the gossip frequency for rate limiting to allow for timing
+        // jitter at message boundaries.
+        let half = (self.gossip_bit_vec_frequency / 2).max(SYSTEM_TIME_PRECISION);
+        let rate = Quota::with_period(half).unwrap();
+        let limiter =
+            RateLimiter::direct_with_clock(rate, self.context.child("bit_vec_rate_limiter"));
+        let label = metrics::Message::new_bit_vec(&peer);
+        let bit_vec_throttle = Throttle::new(limiter, received, rate_limited, &label);
+        let limiter =
+            RateLimiter::direct_with_clock(rate, self.context.child("peers_rate_limiter"));
+        let label = metrics::Message::new_peers(&peer);
+        let peers_throttle = Throttle::new(limiter, received, rate_limited, &label);
 
         // Send/Receive messages from the peer
-        let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
+        let send_handler = self.context.child("sender").spawn({
             let peer = peer.clone();
             let tracker = tracker.clone();
-            let rate_limits = rate_limits.clone();
             move |context| async move {
+                // Send the greeting before queued messages while the receiver runs concurrently.
+                sent_greeting.inc();
+                let greeting = types::Payload::Greeting(greeting)
+                    .encode_with_pool(context.network_buffer_pool());
+                conn_sender
+                    .send(greeting)
+                    .await
+                    .map_err(Error::SendFailed)?;
+
                 // Set the initial deadline to now to start gossiping immediately
                 let mut deadline = context.current();
 
                 // Enter into the main loop
-                let mut batch = Vec::with_capacity(self.send_batch_size);
-                let (control, high, low) = &mut (self.control, self.high, self.low);
                 select_loop! {
                     context,
                     on_stopped => {},
@@ -207,30 +177,12 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         deadline = context.current() + self.gossip_bit_vec_frequency;
                     },
                     // Await any outbound message (control, high, or low), then
-                    // drain already-queued messages into a single runtime write.
-                    // Priority order: control > high > low.
-                    msg = recv_prioritized(control, high, low) => {
-                        let (metric, payload) = match msg {
-                            Prioritized::Closed => return Err(Error::PeerDisconnected),
-                            Prioritized::Control(msg) => Self::prepare_control(&peer, msg, &pool)?,
-                            Prioritized::Data(encoded) => {
-                                Self::prepare_data(&peer, encoded, &rate_limits)
-                            }
-                        };
-                        Self::push_batched(&self.sent_messages, &mut batch, metric, payload);
-                        Self::extend_send_many(
-                            &peer,
-                            self.send_batch_size,
-                            &mut batch,
-                            control,
-                            &pool,
-                            high,
-                            low,
-                            &rate_limits,
-                            &self.sent_messages,
-                        )?;
+                    // drain already-queued messages into one `send_many` call.
+                    msg = outbox.recv() => {
+                        outbox.push(msg)?;
+                        outbox.fill()?;
                         conn_sender
-                            .send_many(batch.drain(..))
+                            .send_many(outbox.drain())
                             .await
                             .map_err(Error::SendFailed)?;
                     },
@@ -239,18 +191,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 Ok(())
             }
         });
-        let mut receive_handler: Handle<Result<(), Error>> = self
+        let receive_handler = self
             .context
             .child("receiver")
             .spawn(move |context| async move {
-                // Use half the gossip frequency for rate limiting to allow for timing
-                // jitter at message boundaries.
-                let half = (self.gossip_bit_vec_frequency / 2).max(SYSTEM_TIME_PRECISION);
-                let rate = Quota::with_period(half).unwrap();
-                let bit_vec_rate_limiter =
-                    RateLimiter::direct_with_clock(rate, context.child("bit_vec_rate_limiter"));
-                let peers_rate_limiter =
-                    RateLimiter::direct_with_clock(rate, context.child("peers_rate_limiter"));
                 let mut greeting_received = false;
                 let mut first_bit_vec_received = false;
                 let mut first_peers_received = false;
@@ -268,18 +212,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         Ok(msg) => msg,
                         Err(err) => {
                             debug!(?err, ?peer, "failed to decode message");
-                            self.received_messages
-                                .get_or_create(&metrics::Message::new_invalid(&peer))
-                                .inc();
+                            inbox.invalid();
                             return Err(Error::DecodeFailed(err));
                         }
                     };
 
                     // Handle greeting messages first (they `continue` the loop).
                     if let types::Payload::Greeting(info) = msg {
-                        self.received_messages
-                            .get_or_create(&metrics::Message::new_greeting(&peer))
-                            .inc();
+                        received_greeting.inc();
                         if greeting_received {
                             debug!(?peer, "received duplicate greeting");
                             return Err(Error::DuplicateGreeting);
@@ -303,71 +243,25 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                         return Err(Error::MissingGreeting);
                     }
 
-                    // Validate channel and resolve rate limiter before emitting
-                    // any channel-labeled metrics (to avoid unbounded cardinality
-                    // from attacker-controlled channel values).
-                    //
                     // We skip rate limiting for the first BitVec and first Peers message
                     // because they are expected immediately after the greeting exchange
                     // (we send BitVec right after our greeting, and they respond with Peers).
-                    let (metric, rate_limiter) = match &msg {
-                        types::Payload::Data(data) => match rate_limits.get(&data.channel) {
-                            Some(rate_limit) => {
-                                (metrics::Message::new_data(&peer, data.channel), Some(rate_limit))
-                            }
-                            None => {
-                                debug!(?peer, channel = data.channel, "invalid channel");
-                                self.received_messages
-                                    .get_or_create(&metrics::Message::new_invalid(&peer))
-                                    .inc();
-                                return Err(Error::InvalidChannel);
-                            }
-                        },
-                        types::Payload::Greeting(_) => unreachable!(),
-                        types::Payload::BitVec(_) => {
-                            let rate_limiter = if first_bit_vec_received {
-                                Some(&bit_vec_rate_limiter)
-                            } else {
-                                first_bit_vec_received = true;
-                                None
-                            };
-                            (metrics::Message::new_bit_vec(&peer), rate_limiter)
-                        }
-                        types::Payload::Peers(_) => {
-                            let rate_limiter = if first_peers_received {
-                                Some(&peers_rate_limiter)
-                            } else {
-                                first_peers_received = true;
-                                None
-                            };
-                            (metrics::Message::new_peers(&peer), rate_limiter)
-                        }
-                    };
-                    self.received_messages.get_or_create(&metric).inc();
-                    if let Some(rate_limiter) = rate_limiter
-                        && let Err(wait_until) = rate_limiter.check() {
-                            self.rate_limited.get_or_create(&metric).inc();
-                            let wait_duration = wait_until.wait_time_from(context.now());
-                            context.sleep(wait_duration).await;
-                        }
-
                     match msg {
-                        types::Payload::Data(data) => {
-                            // Send message to application without blocking.
-                            //
-                            // We intentionally drop messages when the application buffer is
-                            // full rather than blocking. Blocking here would also block
-                            // processing of gossip messages (BitVec, Peers), causing the
-                            // peer connection to stall and potentially disconnect.
-                            let sender = senders.get_mut(&data.channel).unwrap();
-                            let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                        }
+                        types::Payload::Data(data) => inbox.deliver(data).await?,
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {
+                            // Rate limit every BitVec message after the first
+                            bit_vec_throttle.receive(first_bit_vec_received).await;
+                            first_bit_vec_received = true;
+
                             // Gather useful peers
                             tracker.bit_vec(peer.clone(), bit_vec);
                         }
                         types::Payload::Peers(peers) => {
+                            // Rate limit every Peers message after the first
+                            peers_throttle.receive(first_peers_received).await;
+                            first_peers_received = true;
+
                             // Verify all info is valid
                             self.info_verifier.validate(&context, &peers).map_err(Error::Types)?;
 
@@ -379,29 +273,19 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             });
 
         // Wait for one of the handlers to finish or shutdown
-        let mut shutdown = self.context.stopped();
-        let result = select! {
-            _ = &mut shutdown => {
-                debug!("context shutdown, stopping peer");
-                Ok(Ok(()))
-            },
-            send_result = &mut send_handler => send_result,
-            receive_result = &mut receive_handler => receive_result,
-        };
-
-        // Parse result
-        match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(Error::UnexpectedFailure(e)),
-        }
+        connection::wait(&self.context, send_handler, receive_handler)
+            .await
+            .map_err(Error::UnexpectedFailure)?
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::{discovery::actors::tracker, router};
+    use crate::{
+        Receiver as _,
+        authenticated::{discovery::actors::tracker, router},
+    };
     use commonware_codec::Encode;
     use commonware_cryptography::{
         Signer,
@@ -411,8 +295,10 @@ mod tests {
         BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::encrypted::Config as StreamConfig;
-    use commonware_utils::{NZUsize, SystemTimeExt, bitmap::BitMap};
+    use commonware_stream::{
+        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
+    };
+    use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
         time::Duration,
@@ -441,15 +327,15 @@ mod tests {
         }
     }
 
-    fn stream_config<S: Signer>(key: S) -> StreamConfig<S> {
-        StreamConfig {
-            signing_key: key,
-            namespace: STREAM_NAMESPACE.to_vec(),
-            max_message_size: MAX_MESSAGE_SIZE,
-            synchrony_bound: Duration::from_secs(10),
-            max_handshake_age: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(10),
-        }
+    fn handshake<S: Signer>(signer: S) -> Timeout<StreamHandshake<S>> {
+        Timeout::new(
+            StreamHandshake {
+                signer,
+                synchrony_bound: Duration::from_secs(10),
+                max_handshake_age: Duration::from_secs(10),
+            },
+            Duration::from_secs(10),
+        )
     }
 
     fn create_channels(context: impl BufferPooler + Metrics) -> Channels<PublicKey> {
@@ -464,49 +350,178 @@ mod tests {
     }
 
     #[test]
+    fn greeting_and_queued_data_progress_with_backpressure() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            // Complete authentication over buffers smaller than a signed greeting.
+            let signers = [PrivateKey::from_seed(1), PrivateKey::from_seed(2)];
+            let public_keys = signers.each_ref().map(Signer::public_key);
+            let (local_sink, remote_stream) = mocks::Channel::init_with_buffer_size(64);
+            let (remote_sink, local_stream) = mocks::Channel::init_with_buffer_size(64);
+            let remote_handshake = handshake(signers[1].clone());
+            let listener = context.child("listener").spawn(move |context| async move {
+                remote_handshake
+                    .listen(
+                        context,
+                        STREAM_NAMESPACE,
+                        MAX_MESSAGE_SIZE,
+                        |_| async { true },
+                        remote_stream,
+                        remote_sink,
+                    )
+                    .await
+                    .unwrap()
+            });
+            let local_connection = handshake(signers[0].clone())
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    public_keys[1].clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .unwrap();
+            let (authenticated, remote_sender, remote_receiver) = listener.await.unwrap();
+            assert_eq!(authenticated, public_keys[0]);
+
+            // Queue application data before startup so greeting ordering is exercised too.
+            let messages: [&[u8]; 2] = [b"from dialer", b"from listener"];
+            let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
+                context.child("tracker_mailbox"),
+                NZUsize!(10),
+            );
+            let tracker = tracker::Mailbox::new(tracker_mailbox);
+            let mut peer_mailboxes = Vec::new();
+            let mut families = Vec::new();
+            let mut receivers = Vec::new();
+            let mut tasks = Vec::new();
+            for (index, (signer, connection)) in signers
+                .into_iter()
+                .zip([local_connection, (remote_sender, remote_receiver)])
+                .enumerate()
+            {
+                let context = context.child(["dial_peer", "listen_peer"][index]);
+                let cfg = default_peer_config(context.child("config"), signer.public_key());
+                families.push((cfg.sent_messages.clone(), cfg.received_messages.clone()));
+                let (actor, mailbox, relay) = Actor::new(context.child("actor"), cfg);
+
+                // Queue gossip ahead of the data so every message type crosses the
+                // connection. BitVec is sent twice so its count differs from Peers.
+                for _ in 0..2 {
+                    mailbox.bit_vec(types::BitVec {
+                        index: 0,
+                        bits: BitMap::ones(10),
+                    });
+                }
+                mailbox.peers(Vec::new());
+                let greeting = types::Info::sign(
+                    signer.public_key(),
+                    IP_NAMESPACE,
+                    SocketAddr::from(([127, 0, 0, 1], 8080 + index as u16)),
+                    context.current().epoch_millis(),
+                    |namespace, message| signer.sign(namespace, message),
+                );
+                let mut channels = create_channels(context.child("channels"));
+                let (_, receiver) =
+                    channels.register(0, Quota::per_second(NZU32!(1)), context.child("channel"));
+                let message = EncodedData::new(
+                    context.network_buffer_pool(),
+                    0,
+                    IoBuf::from(messages[index]).into(),
+                );
+                assert!(relay.send(message, false).accepted());
+                peer_mailboxes.push((mailbox, relay));
+                receivers.push(receiver);
+                let peer = public_keys[1 - index].clone();
+                let tracker = tracker.clone();
+                tasks.push(
+                    context
+                        .spawn(move |_| actor.run(peer, greeting, connection, tracker, channels)),
+                );
+            }
+
+            // Each receiver accepts data only after validating its peer's greeting.
+            for (index, receiver) in receivers.iter_mut().enumerate() {
+                let (peer, message) = receiver.recv().await.unwrap();
+                assert_eq!(peer, public_keys[1 - index]);
+                assert_eq!(message, messages[1 - index]);
+            }
+
+            // Each message is counted under its own label in both directions.
+            for (index, (sent, received)) in families.iter().enumerate() {
+                let peer = &public_keys[1 - index];
+                for (label, count) in [
+                    (metrics::Message::new_greeting(peer), 1),
+                    (metrics::Message::new_bit_vec(peer), 2),
+                    (metrics::Message::new_peers(peer), 1),
+                    (metrics::Message::new_data(peer, 0), 1),
+                ] {
+                    assert_eq!(sent.get(&label).map(|c| c.get()), Some(count), "{label:?}");
+                    assert_eq!(
+                        received.get(&label).map(|c| c.get()),
+                        Some(count),
+                        "{label:?}"
+                    );
+                }
+            }
+            for task in &tasks {
+                task.abort();
+            }
+            for task in tasks {
+                assert!(task.await.is_err());
+            }
+        });
+    }
+
+    #[test]
     fn test_missing_greeting_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -522,10 +537,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -569,46 +585,50 @@ mod tests {
     fn test_duplicate_greeting_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -624,10 +644,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -675,48 +696,52 @@ mod tests {
     fn test_greeting_public_key_mismatch_returns_error() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let wrong_key = PrivateKey::from_seed(3);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
-            let wrong_pk = wrong_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let wrong_signer = PrivateKey::from_seed(3);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
+            let wrong_pk = wrong_signer.public_key();
 
             // Set up mock channels for the connection
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
             // Establish encrypted connection via handshake
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
@@ -732,10 +757,11 @@ mod tests {
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
 
             // Create tracker mailbox
@@ -749,10 +775,11 @@ mod tests {
 
             // Send greeting with wrong public key (claims to be wrong_pk instead of local_pk)
             let mut wrong_greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
             wrong_greeting.public_key = wrong_pk;
             let greeting_payload = types::Payload::<PublicKey>::Greeting(wrong_greeting);
@@ -783,71 +810,71 @@ mod tests {
     fn test_invalid_channel_no_unbounded_metric_cardinality() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let local_key = PrivateKey::from_seed(1);
-            let remote_key = PrivateKey::from_seed(2);
-            let local_pk = local_key.public_key();
-            let remote_pk = remote_key.public_key();
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
 
             // Establish an encrypted connection between local (attacker) and
             // remote (victim) peers via mock channels.
             let (local_sink, remote_stream) = mocks::Channel::init();
             let (remote_sink, local_stream) = mocks::Channel::init();
 
-            let local_config = stream_config(local_key.clone());
-            let remote_config = stream_config(remote_key.clone());
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
 
             let local_pk_clone = local_pk.clone();
             let listener_handle = context.child("listener").spawn({
                 move |ctx| async move {
-                    commonware_stream::encrypted::listen(
-                        ctx,
-                        |_| async { true },
-                        remote_config,
-                        remote_stream,
-                        remote_sink,
-                    )
-                    .await
-                    .map(|(pk, sender, receiver)| {
-                        assert_eq!(pk, local_pk_clone);
-                        (sender, receiver)
-                    })
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
                 }
             });
 
-            let (mut local_sender, _local_receiver) = commonware_stream::encrypted::dial(
-                context.child("dialer"),
-                local_config,
-                remote_pk.clone(),
-                local_stream,
-                local_sink,
-            )
-            .await
-            .expect("dial failed");
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
 
             let (remote_sender, remote_receiver) = listener_handle
                 .await
                 .expect("listen failed")
                 .expect("listen result failed");
 
-            // Clone the received_messages family so we can inspect it after
-            // the actor finishes.
-            let received_messages = context.family(
-                "received_messages_override",
-                "test received messages override",
-            );
-            let cfg = Config {
-                received_messages: received_messages.clone(),
-                ..default_peer_config(context.child("config"), remote_pk)
-            };
+            // Clone the metric families so we can inspect them after the
+            // actor finishes.
+            let cfg = default_peer_config(context.child("config"), remote_pk);
+            let (received_messages, rate_limited) =
+                (cfg.received_messages.clone(), cfg.rate_limited.clone());
             let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
             // Greeting the actor will send upon connecting to the peer.
             let greeting = types::Info::sign(
-                &local_key,
+                signer.public_key(),
                 IP_NAMESPACE,
                 SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                 context.current().epoch().as_millis() as u64,
+                |namespace, message| signer.sign(namespace, message),
             );
 
             let (tracker_mailbox, _tracker_receiver) = mailbox::new::<tracker::Message<PublicKey>>(
@@ -871,10 +898,11 @@ mod tests {
             context.child("task").spawn(move |_ctx| async move {
                 // Valid greeting so the actor accepts subsequent messages.
                 let greeting_payload = types::Payload::<PublicKey>::Greeting(types::Info::sign(
-                    &local_key,
+                    signer.public_key(),
                     IP_NAMESPACE,
                     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080),
                     0,
+                    |namespace, message| signer.sign(namespace, message),
                 ));
                 local_sender
                     .send(greeting_payload.encode())
@@ -900,24 +928,32 @@ mod tests {
                 )
                 .await;
             assert!(
-                matches!(result, Err(Error::InvalidChannel)),
+                matches!(
+                    result,
+                    Err(Error::Connection(connection::Error::InvalidChannel))
+                ),
                 "Expected InvalidChannel error, got: {result:?}"
             );
+
+            // The registered channel has a series at zero from connection start.
+            let registered_metric = metrics::Message::new_data(&local_pk_clone, 0);
+            let registered_count = received_messages.get(&registered_metric).map(|c| c.get());
+            assert_eq!(registered_count, Some(0));
 
             // The attacker-controlled channel value must NOT have created a
             // metric series. If it did, repeated reconnections with fresh
             // channel values would cause unbounded memory growth.
             let attacker_metric = metrics::Message::new_data(&local_pk_clone, 99999);
-            let attacker_count = received_messages.get_or_create(&attacker_metric).get();
-            assert_eq!(
-                attacker_count, 0,
+            assert!(
+                received_messages.get(&attacker_metric).is_none()
+                    && rate_limited.get(&attacker_metric).is_none(),
                 "metric was created for attacker-controlled channel, unbounded cardinality bug"
             );
 
             // The bounded "invalid" metric should have been incremented instead.
             let invalid_metric = metrics::Message::new_invalid(&local_pk_clone);
-            let invalid_count = received_messages.get_or_create(&invalid_metric).get();
-            assert_eq!(invalid_count, 1);
+            let invalid_count = received_messages.get(&invalid_metric).map(|c| c.get());
+            assert_eq!(invalid_count, Some(1));
         });
     }
 }

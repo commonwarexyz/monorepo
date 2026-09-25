@@ -19,7 +19,7 @@ use std::num::NonZeroUsize;
 /// # Access
 ///
 /// [Write] is a single-owner buffered handle that owns mutation ordering and durability
-/// bookkeeping for the wrapped [Blob]. Raw [Blob] handles cloned before wrapping observe only
+/// bookkeeping for the wrapped [Blob]. Raw [Blob] handles shared before wrapping observe only
 /// flushed data and may not see the latest buffered writes until [Self::sync], [Self::resize], or
 /// an overlapping [Self::write_at] flushes them. Those raw handles must not be used to write,
 /// resize, or otherwise mutate the blob while a [Write] exists. External mutations bypass the
@@ -48,7 +48,8 @@ use std::num::NonZeroUsize;
 ///     blob.write_at(11, b"!").await.expect("write failed");
 ///     blob.sync().await.expect("sync failed");
 ///
-///     // Read back the data to verify
+///     // Release the writer and read back the persisted data through a new open.
+///     drop(blob);
 ///     let (blob, size) = context.open("my_partition", b"my_data").await.expect("unable to reopen blob");
 ///     let mut reader = Read::from_pooler(&context, blob, size, NZUsize!(8));
 ///     let buf = reader.read(size as usize).await.expect("read failed");
@@ -242,7 +243,8 @@ impl<B: Blob> Write<B> {
     ///
     /// Awaiting the returned [`Handle`] waits for the same durability guarantee as [`Self::sync`]
     /// for the state flushed by this call. Later calls to [`Self::sync`] and writer methods that
-    /// mutate the blob wait before issuing blob operations.
+    /// mutate the blob wait before issuing blob operations. A flush failure is retained the same
+    /// way: the handle reports it, and so does the next such call.
     pub async fn start_sync(&mut self) -> Handle<()> {
         if let Some((buf, offset)) = self.buffer.take()
             && let Err(err) = self
@@ -250,7 +252,7 @@ impl<B: Blob> Write<B> {
                 .write_at(&self.blob, offset, buf, WriteOptions::default())
                 .await
         {
-            return Handle::ready(Err(err));
+            return self.sync_state.fail(err);
         }
 
         self.sync_state.start_sync(&self.blob).await

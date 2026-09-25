@@ -43,6 +43,7 @@ use commonware_p2p::authenticated::{self, discovery};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
+use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
@@ -74,7 +75,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
 
     let mut p2p_config = discovery::Config::local(
-        node.signing_key.clone(),
+        Handshake::new(node.signer.clone()),
         &[NAMESPACE, b"_P2P"].concat(),
         node.listen,
         node.dial,
@@ -191,7 +192,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let probe_handle = probe_actor.start(dkg_probe_network);
 
     let stateful_startup = context.child("stateful_startup");
-    let mut plan = SyncPlan::init(&stateful_startup, partition_prefix).await;
+    let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
     let should_state_sync = plan.should_state_sync(args.state_sync);
     let probe_artifact = if should_state_sync {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
@@ -278,7 +279,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let (reshare_actor, reshare_mailbox) = reshare::Actor::new(
         context.child("reshare"),
         reshare::Config {
-            signer: node.signing_key,
+            signer: node.signer,
             manager: oracle.clone(),
             blocker: oracle.clone(),
             participants_provider: participants,

@@ -1,6 +1,6 @@
 //! Peer
 
-use crate::authenticated::lookup::metrics;
+use crate::authenticated::{connection, lookup::metrics};
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::telemetry::metrics::CounterFamily;
@@ -23,19 +23,15 @@ pub struct Config<C: PublicKey> {
 }
 
 #[derive(Error, Debug)]
-pub enum Error {
-    #[error("peer killed: {0}")]
-    PeerKilled(String),
+pub enum Error<S, R> {
+    #[error(transparent)]
+    Connection(#[from] connection::Error),
     #[error("send failed: {0}")]
-    SendFailed(commonware_stream::encrypted::Error),
-    #[error("peer disconnected")]
-    PeerDisconnected,
+    SendFailed(S),
     #[error("receive failed: {0}")]
-    ReceiveFailed(commonware_stream::encrypted::Error),
+    ReceiveFailed(R),
     #[error("decode failed: {0}")]
     DecodeFailed(CodecError),
     #[error("unexpected failure: {0}")]
     UnexpectedFailure(commonware_runtime::Error),
-    #[error("invalid channel")]
-    InvalidChannel,
 }

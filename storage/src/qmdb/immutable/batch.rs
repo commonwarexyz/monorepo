@@ -8,7 +8,7 @@ use crate::{
     qmdb::{
         Error,
         any::{ValueEncoding, batch::lookup_sorted},
-        batch_chain::{self, Bounds, Commitment},
+        chain::{self, Bounds, Commitment},
         immutable::operation::Operation,
         operation::Key,
     },
@@ -32,10 +32,13 @@ pub(crate) struct DiffEntry<F: Family, V> {
     pub(crate) loc: Location<F>,
 }
 
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, K, V, S> = Result<Arc<MerkleizedBatch<F, D, K, V, S>>, Error<F>>;
+
 /// A speculative batch of operations whose root digest has not yet been computed, in contrast
 /// to [`MerkleizedBatch`].
 ///
-/// Consuming [`UnmerkleizedBatch::merkleize`] produces an `Arc<MerkleizedBatch>`.
+/// Consuming [`UnmerkleizedBatch::merkleize`] produces a merkleized batch.
 /// Methods that need the committed DB (e.g. [`get`](Self::get)) accept it as a parameter.
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>
@@ -69,7 +72,7 @@ type JournalBatch<F, D, K, V, S> = Arc<authenticated::MerkleizedBatch<F, D, Oper
 ///
 /// Reads through the chain, constructing child batches, and applying the batch later are
 /// only valid while every batch applied to the DB since this batch was merkleized is an
-/// ancestor of this batch (see [`crate::qmdb::batch_chain`] for more details).
+/// ancestor of this batch (see [`crate::qmdb::chain`] for more details).
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy> {
     /// Authenticated journal batch (Merkle state + local items).
@@ -88,7 +91,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: St
     pub(super) ancestor_diffs: Vec<Arc<DiffVec<K, F, V::Value>>>,
 
     /// Position and floor bounds for this batch chain.
-    pub(super) bounds: batch_chain::Bounds<F, D>,
+    pub(super) bounds: chain::Bounds<F, D>,
 }
 
 impl<F, H, K, V, S: Strategy> UnmerkleizedBatch<F, H, K, V, S>
@@ -235,17 +238,22 @@ where
         Ok(results)
     }
 
-    /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve mutations into operations and return a merkleized batch.
     ///
     /// `inactivity_floor` declares that all operations before this location are inactive.
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or
+    /// a live ancestor commitment (both size and root).
     #[tracing::instrument(name = "qmdb.immutable.batch.merkleize", level = "info", skip_all)]
     pub async fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
+    ) -> MerkleizeResult<F, H::Digest, K, V, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, K, V>>,
@@ -255,12 +263,28 @@ where
         let base = self.base.size;
 
         let live_ancestors: Vec<_> =
-            batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
+            chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
-        let boundary = batch_chain::effective_boundary(
+        let boundary = chain::effective_boundary(
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
+
+        // Compute the batch chain bounds.
+        let mut ancestor_diffs = Vec::new();
+        let mut ancestors = Vec::new();
+        for batch in &live_ancestors {
+            ancestor_diffs.push(Arc::clone(&batch.diff));
+            ancestors.push(chain::AncestorBounds {
+                floor: batch.bounds.inactivity_floor,
+                state: batch.commitment(),
+            });
+        }
+        chain::validate_batch_applicable(
+            db.commitment(),
+            boundary,
+            ancestors.iter().map(|ancestor| ancestor.state),
+        )?;
 
         // Build operations: one Set per key, then Commit. `self.mutations` is a BTreeMap, so
         // iteration yields keys in sorted order, which `diff` relies on for binary search.
@@ -287,30 +311,22 @@ where
             .await
             .expect("inactive_peaks computed from batch size");
 
-        // Compute the batch chain bounds.
-        let mut ancestor_diffs = Vec::new();
-        let mut ancestors = Vec::new();
-        for batch in live_ancestors {
-            ancestor_diffs.push(Arc::clone(&batch.diff));
-            ancestors.push(batch_chain::AncestorBounds {
-                floor: batch.bounds.inactivity_floor,
-                state: batch.commitment(),
-            });
-        }
+        // Keep ancestor batches alive until the journal has captured their operations and nodes.
+        drop(live_ancestors);
 
-        Arc::new(MerkleizedBatch {
+        Ok(Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),
             ancestor_diffs,
-            bounds: batch_chain::Bounds {
+            bounds: chain::Bounds {
                 base: self.base,
                 db: boundary,
                 tip: Commitment::new(total_size, root),
                 ancestors,
                 inactivity_floor,
             },
-        })
+        }))
     }
 }
 
@@ -398,7 +414,7 @@ where
 
     /// Iterate over ancestor batches (parent first, then grandparent, etc.).
     pub(super) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, K, V, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// The [`Commitment`] this batch commits to.
@@ -492,9 +508,8 @@ where
 
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// All unapplied ancestors in the chain must be kept alive until the child (or any
+    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, K, V, S>
     where
         H: Hasher<Digest = D>,
@@ -527,7 +542,7 @@ where
             diff: Arc::new(Vec::new()),
             parent: None,
             ancestor_diffs: Vec::new(),
-            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+            bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
         })
     }
 }

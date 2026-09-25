@@ -4706,6 +4706,7 @@ mod tests {
             // Abort marshal immediately after certify returns to prove the
             // block is already persisted at that point.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             drop(marshaled);
             drop(marshal);
             drop(shards);
@@ -4832,6 +4833,7 @@ mod tests {
 
             // Abort marshal after certify; the leader's own block must be durable.
             marshal_actor_handle.abort();
+            let _ = marshal_actor_handle.await;
             drop(marshaled);
             drop(marshal);
             drop(shards);

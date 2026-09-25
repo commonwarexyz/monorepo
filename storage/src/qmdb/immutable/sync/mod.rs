@@ -51,13 +51,14 @@ where
     ///   fresh Merkle structure from the provided `pinned_nodes`
     /// - If the Merkle journal has data but is incomplete (has length < range end), missing
     ///   operations from the log are applied to bring it up to the target state
-    /// - If the Merkle journal has data beyond the range end, it is rewound to match the sync
-    ///   target
+    /// - If the Merkle journal has data beyond the range end, initialization truncates it to the
+    ///   sync target
     ///
     /// # Returns
     ///
     /// A [super::Immutable] db populated with the state from the given range.
-    /// The pruning boundary is set to the range start.
+    /// Its inactivity floor comes from the final commit, while the Merkle pruning boundary is
+    /// the range start.
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
@@ -83,7 +84,7 @@ where
             merkle,
             log,
             hasher,
-            apply_batch_size.get(),
+            apply_batch_size,
         )
         .await?;
 
@@ -99,7 +100,7 @@ where
 
         // Replay the log from the inactivity floor to build the snapshot. Every retained
         // location is inserted, mirroring the live apply path, so a repeated key keeps
-        // serving one of its written values across restarts and rewinds.
+        // serving one of its written values across restarts.
         immutable::build_snapshot(
             inactivity_floor_loc,
             &journal.journal,

@@ -1,7 +1,7 @@
 use crate::Channel;
 use commonware_codec::{Buf, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write, varint::UInt};
 use commonware_runtime::{BufMut, BufferPool, IoBuf, IoBufs};
-use std::collections::HashMap;
+use commonware_stream::Handshake;
 
 /// Data is an arbitrary message sent between peers.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,8 +49,16 @@ pub(crate) const DATA_PREFIX: u8 = 0;
 /// - 5: Message length varint (lengths longer than 32 bits are forbidden by the codec)
 pub const MAX_PAYLOAD_OVERHEAD: u32 = 1 + 10 + 5;
 
-/// Maximum supported application payload size.
-pub const MAX_SIZE: u32 = commonware_stream::encrypted::MAX_SIZE - MAX_PAYLOAD_OVERHEAD;
+/// Maximum application payload size supported by the handshake's streams.
+///
+/// # Panics
+///
+/// Panics if the stream's limit cannot accommodate p2p framing overhead.
+pub const fn max_size<H: Handshake>() -> u32 {
+    H::MAX_SIZE
+        .checked_sub(MAX_PAYLOAD_OVERHEAD)
+        .expect("stream message limit too small for p2p framing")
+}
 
 /// Pre-encoded data ready for transmission.
 ///
@@ -67,15 +75,6 @@ pub struct EncodedData {
 }
 
 impl EncodedData {
-    /// Assert the outbound message's `channel` is registered.
-    pub fn validate_channel<V>(self, rate_limits: &HashMap<u64, V>) -> Self {
-        assert!(
-            rate_limits.contains_key(&self.channel),
-            "outbound message on invalid channel"
-        );
-        self
-    }
-
     /// Encode data frame bytes in-place as:
     /// `DATA_PREFIX || channel || message_len || message`.
     pub fn new(pool: &BufferPool, channel: Channel, mut message: IoBufs) -> Self {
@@ -113,13 +112,15 @@ impl arbitrary::Arbitrary<'_> for Data {
 mod tests {
     use super::*;
     use commonware_codec::{Decode as _, Encode as _, Error};
+    use commonware_cryptography::ed25519;
     use commonware_runtime::{BufferPooler as _, Runner as _, deterministic};
+    use commonware_stream::encrypted::{self, Handshake as StreamHandshake};
 
     #[test]
     fn test_max_size_bounds() {
         assert_eq!(
-            MAX_SIZE + MAX_PAYLOAD_OVERHEAD,
-            commonware_stream::encrypted::MAX_SIZE
+            max_size::<StreamHandshake<ed25519::PrivateKey>>() + MAX_PAYLOAD_OVERHEAD,
+            encrypted::MAX_SIZE
         );
     }
 

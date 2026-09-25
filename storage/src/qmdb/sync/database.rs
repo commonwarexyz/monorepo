@@ -15,7 +15,7 @@ pub trait Config {
     fn journal_config(&self) -> Self::JournalConfig;
 }
 
-impl<T: Translator, J: Clone, S: Strategy> Config for crate::qmdb::any::Config<T, J, S> {
+impl<T: Translator, J: Clone, S: Strategy, B> Config for crate::qmdb::any::Config<T, J, S, B> {
     type JournalConfig = J;
 
     fn journal_config(&self) -> Self::JournalConfig {
@@ -120,7 +120,7 @@ where
 {
     let hasher = crate::qmdb::hasher::<H>();
 
-    // A crash can persist a node-journal reset before its replacement metadata.
+    // An interrupted reset can leave durable boundary metadata ahead of the node journal.
     // Missing local pins then use a peer-authenticated boundary. Other errors still propagate.
     let merkle = match full::Merkle::<F, _, _, S>::init(context, &hasher, config).await {
         Ok(merkle) => merkle,
@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn local_pinned_nodes_treats_interrupted_reset_as_unavailable() {
+    fn local_pinned_nodes_treats_reset_journal_as_unavailable() {
         deterministic::Runner::default().start(|context| async move {
             let hasher = crate::qmdb::hasher::<Sha256>();
             let config = merkle_config(&context);
@@ -212,8 +212,7 @@ mod tests {
             let merkle = merkle.sync().await.unwrap();
             drop(merkle);
 
-            // Model a crash after an incompatible reset durably cleared the node journal but
-            // before it replaced the prior target's pinned metadata.
+            // A node journal reset below the persisted pin boundary cannot supply local pins.
             let restart = Location::new(7);
             let journal_config = fixed::Config {
                 partition: config.journal_partition.clone(),
@@ -222,14 +221,14 @@ mod tests {
                 write_buffer: config.write_buffer,
                 replay_buffer: config.replay_buffer,
             };
-            let journal = fixed::Journal::<_, Digest>::init(
+            let reset_pos = Position::<MmrFamily>::try_from(restart).unwrap();
+            let journal = fixed::Journal::<_, Digest>::init_at_size(
                 context.child("interrupted_reset"),
                 journal_config,
+                *reset_pos,
             )
             .await
             .unwrap();
-            let reset_pos = Position::<MmrFamily>::try_from(restart).unwrap();
-            let journal = journal.clear_to_size(*reset_pos).await.unwrap();
             drop(journal);
 
             let target = Target {

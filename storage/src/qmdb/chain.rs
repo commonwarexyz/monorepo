@@ -100,7 +100,7 @@ impl<F: Family, D: Digest> Bounds<F, D> {
         current: Commitment<F, D>,
         current_floor: Location<F>,
     ) -> Result<(), Error<F>> {
-        validate_batch_applicable(current, self.db, &self.ancestors)?;
+        validate_batch_applicable(current, self.db, self.ancestors.iter().map(|a| a.state))?;
         validate_commit_floors(
             current_floor,
             current.size,
@@ -184,15 +184,15 @@ pub(crate) fn effective_boundary<F: Family, D: Digest>(
 ///
 /// A batch is applicable if the database has not advanced since the batch was created, if all
 /// ancestors are already applied, or if the database has advanced to one of the batch's ancestor
-/// [`Commitment`]s.
+/// [`Commitment`]s, given by `ancestors`.
 pub(crate) fn validate_batch_applicable<F: Family, D: Digest>(
     current: Commitment<F, D>,
     batch_db: Commitment<F, D>,
-    ancestors: &[AncestorBounds<F, D>],
+    ancestors: impl IntoIterator<Item = Commitment<F, D>>,
 ) -> Result<(), Error<F>> {
     // A separate base check is unnecessary: a direct batch's base is `batch_db`, while a child
     // batch's base is its first ancestor.
-    if current == batch_db || ancestors.iter().any(|ancestor| ancestor.state == current) {
+    if current == batch_db || ancestors.into_iter().any(|state| state == current) {
         return Ok(());
     }
 
@@ -269,24 +269,24 @@ mod tests {
 
     #[test]
     fn validate_batch_applicable_accepts_valid_boundaries() {
-        let ancestors = vec![ancestor(loc(10), 12, 12), ancestor(loc(14), 16, 16)];
+        let ancestors = [state(12, 12), state(16, 16)];
         // Current matches the recorded DB state.
-        assert!(validate_batch_applicable::<F, D>(state(10, 1), state(10, 1), &ancestors).is_ok());
+        assert!(validate_batch_applicable::<F, D>(state(10, 1), state(10, 1), ancestors).is_ok());
         // Current matches one of the ancestor states.
-        assert!(validate_batch_applicable::<F, D>(state(16, 16), state(10, 1), &ancestors).is_ok());
+        assert!(validate_batch_applicable::<F, D>(state(16, 16), state(10, 1), ancestors).is_ok());
     }
 
     #[test]
     fn validate_batch_applicable_rejects_stale_batch() {
-        let ancestors = vec![ancestor(loc(10), 12, 12), ancestor(loc(14), 16, 16)];
-        let result = validate_batch_applicable::<F, D>(state(18, 18), state(10, 1), &ancestors);
+        let ancestors = [state(12, 12), state(16, 16)];
+        let result = validate_batch_applicable::<F, D>(state(18, 18), state(10, 1), ancestors);
         assert!(matches!(result, Err(Error::StaleBatch)));
     }
 
     #[test]
     fn validate_batch_applicable_rejects_equal_size_sibling() {
-        let ancestors = vec![ancestor(loc(14), 16, 16)];
-        let result = validate_batch_applicable::<F, D>(state(16, 99), state(10, 1), &ancestors);
+        let ancestors = [state(16, 16)];
+        let result = validate_batch_applicable::<F, D>(state(16, 99), state(10, 1), ancestors);
         assert!(matches!(result, Err(Error::StaleBatch)));
     }
 

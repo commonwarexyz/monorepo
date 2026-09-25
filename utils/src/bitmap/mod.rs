@@ -7,7 +7,7 @@
 use alloc::{collections::VecDeque, vec::Vec};
 use bytes::BufMut;
 use commonware_codec::{
-    Buf, EncodeSize, Error as CodecError, Read, ReadExt, Write, util::at_least,
+    Buf, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt, Write, util::at_least_items,
 };
 use core::{
     fmt::{self, Formatter, Write as _},
@@ -870,22 +870,26 @@ impl<const N: usize> Write for BitMap<N> {
 }
 
 impl<const N: usize> Read for BitMap<N> {
-    type Cfg = u64; // Max bitmap length
+    /// Accepted range for the decoded length in bits.
+    type Cfg = RangeCfg<u64>;
 
-    fn read_cfg(buf: &mut impl Buf, max_len: &Self::Cfg) -> Result<Self, CodecError> {
+    fn read_cfg(buf: &mut impl Buf, range: &Self::Cfg) -> Result<Self, CodecError> {
         // Parse length in bits
         let len = u64::read(buf)?;
-        if len > *max_len {
+        if !range.contains(&len) {
             return Err(CodecError::InvalidLength(len as usize));
         }
 
         // Calculate how many chunks we need to read
-        let num_chunks = len.div_ceil(Self::CHUNK_SIZE_BITS) as usize;
+        let num_chunks = usize::try_from(len.div_ceil(Self::CHUNK_SIZE_BITS))
+            .map_err(|_| CodecError::EndOfBuffer)?;
+
+        // Validate the full payload before allocating.
+        at_least_items(buf, num_chunks, N)?;
 
         // Parse chunks
         let mut chunks = VecDeque::with_capacity(num_chunks);
         for _ in 0..num_chunks {
-            at_least(buf, N)?;
             let mut chunk = [0u8; N];
             buf.copy_to_slice(&mut chunk);
             chunks.push_back(chunk);
@@ -1263,7 +1267,7 @@ mod tests {
         // Test after deserialization
         let original: BitMap<4> = BitMap::ones(27);
         let encoded = original.encode();
-        let decoded: BitMap<4> = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded: BitMap<4> = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         check_trailing_bits_zero(&decoded);
 
         // Test clear_trailing_bits return value
@@ -2151,14 +2155,14 @@ mod tests {
         // Test empty bitmap
         let original: BitMap<4> = BitMap::new();
         let encoded = original.encode();
-        let decoded = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(original, decoded);
 
         // Test small bitmap
         let pattern = [true, false, true, false, true];
         let original: BitMap<4> = pattern.as_ref().into();
         let encoded = original.encode();
-        let decoded = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(original, decoded);
 
         // Verify the decoded bitmap has the same bits
@@ -2173,7 +2177,7 @@ mod tests {
         }
 
         let encoded = large_original.encode();
-        let decoded = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(large_original, decoded);
 
         // Verify all bits match
@@ -2194,15 +2198,15 @@ mod tests {
 
         // Encode and decode each
         let encoded4 = bv4.encode();
-        let decoded4 = BitMap::decode_cfg(encoded4, &(usize::MAX as u64)).unwrap();
+        let decoded4 = BitMap::decode_cfg(encoded4, &(..).into()).unwrap();
         assert_eq!(bv4, decoded4);
 
         let encoded8 = bv8.encode();
-        let decoded8 = BitMap::decode_cfg(encoded8, &(usize::MAX as u64)).unwrap();
+        let decoded8 = BitMap::decode_cfg(encoded8, &(..).into()).unwrap();
         assert_eq!(bv8, decoded8);
 
         let encoded16 = bv16.encode();
-        let decoded16 = BitMap::decode_cfg(encoded16, &(usize::MAX as u64)).unwrap();
+        let decoded16 = BitMap::decode_cfg(encoded16, &(..).into()).unwrap();
         assert_eq!(bv16, decoded16);
 
         // All should have the same logical content
@@ -2223,7 +2227,7 @@ mod tests {
         }
 
         let encoded = bv.encode();
-        let decoded = BitMap::decode_cfg(encoded, &(usize::MAX as u64)).unwrap();
+        let decoded = BitMap::decode_cfg(encoded, &(..).into()).unwrap();
         assert_eq!(bv, decoded);
         assert_eq!(decoded.len(), 32);
 
@@ -2235,7 +2239,7 @@ mod tests {
         }
 
         let encoded2 = bv2.encode();
-        let decoded2 = BitMap::decode_cfg(encoded2, &(usize::MAX as u64)).unwrap();
+        let decoded2 = BitMap::decode_cfg(encoded2, &(..).into()).unwrap();
         assert_eq!(bv2, decoded2);
         assert_eq!(decoded2.len(), 35);
     }
@@ -2270,7 +2274,7 @@ mod tests {
         let bv_empty: BitMap<4> = BitMap::new();
         let encoded_empty = bv_empty.encode();
         let decoded_empty: BitMap<4> =
-            BitMap::decode_cfg(encoded_empty.clone(), &(usize::MAX as u64)).unwrap();
+            BitMap::decode_cfg(encoded_empty.clone(), &(..).into()).unwrap();
         assert_eq!(bv_empty, decoded_empty);
         assert_eq!(bv_empty.len(), decoded_empty.len());
         // Should only encode the length, no chunks
@@ -2283,7 +2287,7 @@ mod tests {
         }
         let encoded_exact = bv_exact.encode();
         let decoded_exact: BitMap<4> =
-            BitMap::decode_cfg(encoded_exact.clone(), &(usize::MAX as u64)).unwrap();
+            BitMap::decode_cfg(encoded_exact.clone(), &(..).into()).unwrap();
         assert_eq!(bv_exact, decoded_exact);
 
         // Case 3: Bitmap with partial last chunk (includes last chunk)
@@ -2293,7 +2297,7 @@ mod tests {
         }
         let encoded_partial = bv_partial.encode();
         let decoded_partial: BitMap<4> =
-            BitMap::decode_cfg(encoded_partial.clone(), &(usize::MAX as u64)).unwrap();
+            BitMap::decode_cfg(encoded_partial.clone(), &(..).into()).unwrap();
         assert_eq!(bv_partial, decoded_partial);
         assert_eq!(bv_partial.len(), decoded_partial.len());
 
@@ -2315,7 +2319,7 @@ mod tests {
         }
 
         // Test with a restricted range that excludes 100
-        let result = BitMap::<4>::decode_cfg(&mut buf, &99);
+        let result = BitMap::<4>::decode_cfg(&mut buf, &(..=99).into());
         assert!(matches!(result, Err(CodecError::InvalidLength(100))));
 
         // Test truncated buffer (not enough chunks)
@@ -2326,9 +2330,8 @@ mod tests {
         [0u8; 4].write(&mut buf);
         [0u8; 4].write(&mut buf);
 
-        let result = BitMap::<4>::decode_cfg(&mut buf, &(usize::MAX as u64));
-        // Should fail when trying to read missing chunks
-        assert!(result.is_err());
+        let result = BitMap::<4>::decode_cfg(&mut buf, &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
 
         // Test invalid trailing bits
 
@@ -2348,10 +2351,7 @@ mod tests {
         corrupted_bytes[last_byte_idx] |= 0xF0;
 
         // Read should fail
-        let result = BitMap::<4>::read_cfg(
-            &mut bytes::Bytes::from(corrupted_bytes),
-            &(usize::MAX as u64),
-        );
+        let result = BitMap::<4>::read_cfg(&mut bytes::Bytes::from(corrupted_bytes), &(..).into());
         assert!(matches!(
             result,
             Err(CodecError::Invalid(
@@ -2359,6 +2359,39 @@ mod tests {
                 "Invalid trailing bits in encoded data"
             ))
         ));
+    }
+
+    #[test]
+    fn test_codec_large_length_without_payload() {
+        let result = BitMap::<4>::decode_cfg(u64::MAX.encode(), &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
+    }
+
+    #[test]
+    fn test_codec_truncated_chunk() {
+        let mut buf = BytesMut::new();
+        33u64.write(&mut buf);
+        buf.extend_from_slice(&[0; 7]);
+        let mut buf = buf.freeze();
+
+        let result = BitMap::<4>::read_cfg(&mut buf, &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
+        // Reject incomplete payloads before consuming any chunks.
+        assert_eq!(buf.len(), 7);
+    }
+
+    #[test]
+    fn test_codec_invalid_length_without_payload() {
+        let result = BitMap::<4>::decode_cfg(100u64.encode(), &(..=99).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn test_codec_chunk_count_overflow() {
+        let len = (u64::from(u32::MAX) + 1) * BitMap::<4>::CHUNK_SIZE_BITS;
+        let result = BitMap::<4>::decode_cfg(len.encode(), &(..).into());
+        assert!(matches!(result, Err(CodecError::EndOfBuffer)));
     }
 
     #[test]
@@ -2376,18 +2409,28 @@ mod tests {
         original.write(&mut buf);
 
         // Test with max length < actual size (should fail)
-        let result = BitMap::<4>::decode_cfg(buf.clone(), &50);
+        let result = BitMap::<4>::decode_cfg(buf.clone(), &(..=50).into());
         assert!(matches!(result, Err(CodecError::InvalidLength(100))));
 
         // Test with max length == actual size (should succeed)
-        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &100).unwrap();
+        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &(..=100).into()).unwrap();
         assert_eq!(decoded.len(), 100);
         assert_eq!(decoded, original);
 
         // Test with max length > actual size (should succeed)
-        let decoded = BitMap::<4>::decode_cfg(buf, &101).unwrap();
+        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &(..=101).into()).unwrap();
         assert_eq!(decoded.len(), 100);
         assert_eq!(decoded, original);
+
+        // Test with an exact range (should succeed only at the actual size)
+        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &RangeCfg::exact(100)).unwrap();
+        assert_eq!(decoded, original);
+        let result = BitMap::<4>::decode_cfg(buf.clone(), &RangeCfg::exact(99));
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
+
+        // Test with a lower bound above the actual size (should fail)
+        let result = BitMap::<4>::decode_cfg(buf, &(101..).into());
+        assert!(matches!(result, Err(CodecError::InvalidLength(100))));
 
         // Test empty bitmap
         let empty = BitMap::<4>::new();
@@ -2395,12 +2438,12 @@ mod tests {
         empty.write(&mut buf);
 
         // Empty bitmap should work with max length 0
-        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &0).unwrap();
+        let decoded = BitMap::<4>::decode_cfg(buf.clone(), &(..=0).into()).unwrap();
         assert_eq!(decoded.len(), 0);
         assert!(decoded.is_empty());
 
         // Empty bitmap should work with max length > 0
-        let decoded = BitMap::<4>::decode_cfg(buf, &1).unwrap();
+        let decoded = BitMap::<4>::decode_cfg(buf, &(..=1).into()).unwrap();
         assert_eq!(decoded.len(), 0);
         assert!(decoded.is_empty());
     }

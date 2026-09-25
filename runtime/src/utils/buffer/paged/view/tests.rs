@@ -1,13 +1,13 @@
 use super::{
     super::{CHECKSUM_SIZE, Checksum, cache::CacheRef},
-    View,
+    Tail, View, map_misses,
 };
 use crate::{
-    Blob, Error, Handle, IoBufs, IoBufsMut, ReadOptions, Runner, Storage as _, WriteOptions,
-    buffer::paged::Writer, deterministic,
+    Blob, BufferPool, BufferPoolConfig, Error, Handle, IoBufs, IoBufsMut, ReadOptions, Runner,
+    Storage as _, WriteOptions, buffer::paged::Writer, deterministic, telemetry::metrics::Registry,
 };
 use commonware_cryptography::Crc32;
-use commonware_utils::{NZU16, NZUsize, sync::Mutex};
+use commonware_utils::{NZU16, NZU32, NZUsize, sync::Mutex};
 use futures::{FutureExt, future::pending};
 use rstest::rstest;
 use std::{
@@ -136,12 +136,12 @@ fn test_bulk_boundaries(
         let cache = CacheRef::from_pooler(&context, NZU16!(PAGE as u16), NZUsize!(capacity));
         let tail = logical(pages * PAGE, 17);
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (pages * PAGE + tail.len()) as u64,
             tail_offset: (pages * PAGE) as u64,
-            tail: &tail,
+            tail: Tail::Sealed(&tail),
         };
         let offsets: Vec<_> = (0..pages).map(|p| (p * PAGE + PAGE - 2) as u64).collect();
         let mut out = vec![0; pages * 4];
@@ -168,12 +168,12 @@ fn test_sparse_waves(#[values(7, 8, 9, 17, 65)] requested: usize) {
         let cache = CacheRef::from_pooler(&context, NZU16!(PAGE as u16), NZUsize!(requested));
         let offsets: Vec<_> = (0..requested).map(|p| (p * 2 * PAGE) as u64).collect();
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (requested * 2 * PAGE) as u64,
             tail_offset: (requested * 2 * PAGE) as u64,
-            tail: &[],
+            tail: Tail::Sealed(&[]),
         };
         let mut out = vec![0; requested * 4];
         view.read_many_into(&mut out, &offsets, NZUsize!(4))
@@ -196,12 +196,12 @@ fn test_bulk_error_cancels_pending_sibling() {
         let offsets = [0, (2 * PAGE) as u64];
         let mut out = [0; 8];
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (3 * PAGE) as u64,
             tail_offset: (3 * PAGE) as u64,
-            tail: &[],
+            tail: Tail::Sealed(&[]),
         };
         let result = view
             .read_many_into(&mut out, &offsets, NZUsize!(4))
@@ -210,12 +210,12 @@ fn test_bulk_error_cancels_pending_sibling() {
         assert_eq!(blob.active.load(Ordering::Relaxed), 0);
         blob.fail_offset = None;
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (3 * PAGE) as u64,
             tail_offset: (3 * PAGE) as u64,
-            tail: &[],
+            tail: Tail::Sealed(&[]),
         };
         view.read_many_into(&mut out, &offsets, NZUsize!(4))
             .await
@@ -232,12 +232,12 @@ fn test_bulk_cancel_then_retry() {
         let offsets = [0, (2 * PAGE) as u64];
         let mut out = [0; 8];
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (3 * PAGE) as u64,
             tail_offset: (3 * PAGE) as u64,
-            tail: &[],
+            tail: Tail::Sealed(&[]),
         };
         let mut fetch = view.read_many_into(&mut out, &offsets, NZUsize!(4)).boxed();
         assert!(futures::poll!(&mut fetch).is_pending());
@@ -259,12 +259,12 @@ fn test_later_wave_error_is_not_blocked_by_pending_read() {
         blob.fail_offset = Some((16 * PHYSICAL) as u64);
         let cache = CacheRef::from_pooler(&context, NZU16!(PAGE as u16), NZUsize!(18));
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (18 * PAGE) as u64,
             tail_offset: (18 * PAGE) as u64,
-            tail: &[],
+            tail: Tail::Sealed(&[]),
         };
         let offsets: Vec<_> = (0..9).map(|p| (p * 2 * PAGE) as u64).collect();
         let mut out = vec![0; offsets.len() * 4];
@@ -286,12 +286,12 @@ fn test_sparse_small_cache_does_not_double_io() {
         let blob = ProbeBlob::new(requested * 2);
         let cache = CacheRef::from_pooler(&context, NZU16!(PAGE as u16), NZUsize!(1));
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (requested * 2 * PAGE) as u64,
             tail_offset: (requested * 2 * PAGE) as u64,
-            tail: &[],
+            tail: Tail::Sealed(&[]),
         };
         let offsets: Vec<_> = (0..requested).map(|p| (p * 2 * PAGE) as u64).collect();
         let mut out = vec![0; requested * 4];
@@ -313,12 +313,12 @@ fn test_bulk_limits_pending_reads() {
         blob.block_all = true;
         let cache = CacheRef::from_pooler(&context, NZU16!(PAGE as u16), NZUsize!(1));
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (32 * PAGE) as u64,
             tail_offset: (32 * PAGE) as u64,
-            tail: &[],
+            tail: Tail::Sealed(&[]),
         };
         let offsets: Vec<_> = (0..16).map(|p| (p * 2 * PAGE) as u64).collect();
         let mut out = vec![0; offsets.len() * 4];
@@ -341,12 +341,12 @@ fn test_read_ranges_mixed_cache_and_tail(#[values(1, 200)] capacity: usize) {
         }
         let tail = logical(129 * PAGE, 11);
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: (129 * PAGE + tail.len()) as u64,
             tail_offset: (129 * PAGE) as u64,
-            tail: &tail,
+            tail: Tail::Sealed(&tail),
         };
         let ranges = [
             (0, 0),
@@ -376,12 +376,12 @@ fn test_read_ranges_validate_before_io() {
         let blob = ProbeBlob::new(1);
         let cache = CacheRef::from_pooler(&context, NZU16!(PAGE as u16), NZUsize!(1));
         let view = View {
-            blob: &blob,
+            blob: &Arc::new(blob.clone()),
             cache_ref: &cache,
             id: 0,
             size: PAGE as u64,
             tail_offset: PAGE as u64,
-            tail: &[],
+            tail: Tail::Sealed(&[]),
         };
         assert!(view.read_ranges(&[]).await.unwrap().coalesce().is_empty());
         assert!(
@@ -434,4 +434,131 @@ fn test_view_try_read_sync_straddles_cache_and_tail() {
         assert!(writer.try_read_sync_into(&mut buf, page_size as u64 - 2));
         assert_eq!(&buf, &[0xAA, 0xAA, b'T', b'A']);
     });
+}
+
+#[test]
+fn test_reads_cross_buffer_chunks_and_cache() {
+    deterministic::Runner::default().start(|context| async move {
+        let pool = BufferPool::new(
+            BufferPoolConfig::for_storage()
+                .with_size_classes([(NZUsize!(8), NZU32!(1))])
+                .with_alignment(NZUsize!(1))
+                .with_pool_min_size(0),
+            &mut Registry::default(),
+        );
+        let cache = super::CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
+        let (blob, size) = context
+            .open("test_partition", b"chunk_reads")
+            .await
+            .unwrap();
+        let page = PAGE_SIZE.get() as usize;
+        let mut writer = Writer::new(blob, size, page * 32, cache.clone())
+            .await
+            .unwrap();
+        let data: Vec<_> = (0..page * 20 + 13).map(|i| (i % 251) as u8).collect();
+        let persisted = page * 3 + 17;
+        writer.append(&data[..persisted]).await.unwrap();
+        writer.sync().await.unwrap();
+        for chunk in data[persisted..].chunks(97) {
+            writer.append(chunk).await.unwrap();
+        }
+
+        let mut all = vec![0; data.len()];
+        assert!(writer.try_read_sync_into(&mut all, 0));
+        assert_eq!(all, data);
+
+        let offsets = [
+            page - 8,
+            page * 3 - 8,
+            page * 4 - 8,
+            page * 8 - 8,
+            page * 16 - 8,
+        ]
+        .map(|offset| offset as u64);
+        let expected: Vec<_> = offsets
+            .iter()
+            .flat_map(|&offset| data[offset as usize..offset as usize + 17].iter().copied())
+            .collect();
+        let mut batch = vec![0; expected.len()];
+        assert!(
+            writer
+                .try_read_many_sync_into(&mut batch, &offsets, NZUsize!(17))
+                .is_empty()
+        );
+        assert_eq!(batch, expected);
+
+        let ranges = [
+            (0, 0),
+            ((page - 4) as u64, 16),
+            ((page * 3 - 4) as u64, 15),
+            ((page * 8 - 6) as u64, 19),
+            ((data.len() - 13) as u64, 13),
+            (data.len() as u64, 0),
+        ];
+        let expected_ranges: Vec<_> = ranges
+            .iter()
+            .flat_map(|&(offset, len)| data[offset as usize..offset as usize + len].iter().copied())
+            .collect();
+        let mut ranged = vec![0; expected_ranges.len()];
+        assert!(
+            writer
+                .try_read_ranges_sync_into(&mut ranged, &ranges)
+                .is_empty()
+        );
+        assert_eq!(ranged, expected_ranges);
+
+        cache.clear();
+        writer
+            .read_many_into(&mut batch, &offsets, NZUsize!(17))
+            .await
+            .unwrap();
+        assert_eq!(batch, expected);
+        assert_eq!(
+            writer
+                .read_at(0, data.len())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            data
+        );
+        writer.sync().await.unwrap();
+        drop(writer);
+        cache.clear();
+        let (blob, size) = context
+            .open("test_partition", b"chunk_reads")
+            .await
+            .unwrap();
+        let writer = Writer::new(blob, size, page * 32, cache).await.unwrap();
+        assert_eq!(
+            writer
+                .read_at(0, data.len())
+                .await
+                .unwrap()
+                .coalesce()
+                .as_ref(),
+            data
+        );
+    });
+}
+
+#[test]
+fn test_map_misses_with_cached_prefixes() {
+    let slots = [
+        (0, 4),
+        (10, 0),
+        (10, 8),
+        (18, 0),
+        (18, 5),
+        (u64::MAX - 4, 4),
+    ];
+    let mut suffix_a = [0; 2];
+    let mut suffix_b = [0; 5];
+    let mut suffix_c = [0; 1];
+    let missed = vec![
+        (suffix_a.as_mut_slice(), 16),
+        (suffix_b.as_mut_slice(), 18),
+        (suffix_c.as_mut_slice(), u64::MAX - 1),
+    ];
+    assert_eq!(map_misses(missed, |idx| slots[idx]), vec![2, 4, 5]);
 }
