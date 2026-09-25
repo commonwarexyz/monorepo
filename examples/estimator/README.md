@@ -112,7 +112,7 @@ The DSL is a plain text file where each non-empty line represents a command or c
 - Commands are case-sensitive.
 - Parameters are specified as `key=value` pairs, separated by commas.
 - Lines must not end with semicolons or other terminators.
-- Thresholds can be absolute counts (e.g., `5`) or percentages (e.g., `80%`). Percentages are relative to the total number of peers.
+- Thresholds can be absolute counts (e.g., `5`), percentages (e.g., `80%`), or fault bounds (e.g., `n-f`). See `collect` for the accepted forms.
 - Delays are optional and specified as `delay=(<message_delay>,<completion_delay>)`, where delays are floats in milliseconds (e.g., `(0.1,1)`). The message delay is incurred for each processed message and completion delay is incurred once after the threshold is met.
 - Each command must have a unique `id` (u32) for tracking messages.
 - Execution is per-peer: Proposers (current proposer) may behave differently (e.g., in `propose` or `collect`).
@@ -173,19 +173,27 @@ broadcast{2, size=200}
      - `reply{2, size=64}` (64-byte message)
    - Use case: Respond to a proposer's proposal or broadcast.
 
-4. **collect{<id>, threshold=<threshold> [, delay=(<msg_delay>,<comp_delay>)]}**
+4. **collect{<id>, threshold=<threshold> [, resilience=<R>] [, delay=(<msg_delay>,<comp_delay>)]}**
    - Description: (Proposer-only) Blocks until the threshold number of messages with the given ID are received. Records the latency from simulation start, then advances. Non-proposers skip immediately.
    - Parameters:
      - `id`: Message ID to collect.
-     - `threshold`: Count (e.g., `5`) or percentage (e.g., `80%`).
+     - `threshold`: One of:
+       - A count (e.g., `5`).
+       - A percentage of all `n` peers, rounded up (e.g., `80%`).
+       - A fault bound: `<a>f+<b>` requires `a*f+b` messages (e.g., `f+1`, `2f+1`, `5f+2`) and `n-<a>f` requires `n-a*f` messages (e.g., `n-f`, `n-2f`). `a` is 1 when omitted.
+     - `resilience` (required for fault bounds): The protocol assumes `n >= Rf+1`, so `f=floor((n-1)/R)`. Rejected with a count or percentage threshold.
      - `delay` (optional): Sleeps `msg_delay` milliseconds before checking, and `comp_delay` milliseconds after threshold met.
-   - Example: `collect{1, threshold=80%, delay=(0.1,1)}`
+   - Examples:
+     - `collect{1, threshold=80%, delay=(0.1,1)}`
+     - `collect{1, threshold=2f+1, resilience=3}` requires 7 messages with 10 peers (`f=3`).
    - Use case: Proposer waits for quorum of votes/acks.
 
-5. **wait{<id>, threshold=<threshold> [, delay=(<msg_delay>,<comp_delay>)]}**
+5. **wait{<id>, threshold=<threshold> [, resilience=<R>] [, delay=(<msg_delay>,<comp_delay>)]}**
    - Description: (All peers) Blocks until the threshold number of messages with the given ID are received. Records the latency from simulation start, then advances.
    - Parameters: Same as `collect`.
-   - Example: `wait{0, threshold=40%}`
+   - Examples:
+     - `wait{0, threshold=40%}`
+     - `wait{0, threshold=n-f, resilience=5}` requires 41 messages with 50 peers (`f=9`).
    - Use case: Peers wait for a certain fraction of the network to acknowledge or respond.
 
 ### Compound Commands with Logical Operators
@@ -226,4 +234,29 @@ cargo run -- --distribution us-west-1:5:125000000,us-east-1:5:125000000,eu-west-
 
 # With asymmetric bandwidth (varying by region to simulate different network conditions)
 cargo run -- --distribution us-west-1:5:200000000/100000000,us-east-1:5:200000000/100000000,eu-west-1:5:150000000/75000000,ap-northeast-1:5:100000000/50000000 minimmit.lazy
+```
+
+## Simulating Multimmit
+
+The 50-node Multimmit scripts model the paper's common-case transport shape with 50 producer
+chains: every producer disseminates one transaction block while the correct leader sends its leader
+block and the V-QC it references (the certificate of `n-f` votes that ended the previous view),
+then validators multicast ordinary votes and finalize after `n-f=41` votes. The small and large
+variants use 32KiB and 1MiB transaction blocks respectively.
+
+Message sizes follow the paper's estimates: an 11.5KB leader block, a 15KB good-case V-QC, and a
+conservative 3.5KB vote. Data-availability messages (the signature shares validators produce to
+certify each producer's block, and the resulting certificates) are omitted because they form in
+the background and are not on the transaction-finality critical path. The final `wait` reports when
+validators finalize the leader block while transaction blocks are still being disseminated. It
+does not measure when a specific transaction block is delivered in order.
+
+```bash
+# Two-region, 50 validators at 1Gbps per validator
+cargo run --release -- multimmit_large_block_50.lazy \
+  --distribution us-west-2:25:125000000,us-east-1:25:125000000
+
+# Global, 50 validators at 1Gbps per validator
+cargo run --release -- multimmit_large_block_50.lazy \
+  --distribution us-west-1:5:125000000,us-east-1:5:125000000,eu-west-1:5:125000000,ap-northeast-1:5:125000000,eu-north-1:5:125000000,ap-south-1:5:125000000,sa-east-1:5:125000000,eu-central-1:5:125000000,ap-northeast-2:5:125000000,ap-southeast-2:5:125000000
 ```
