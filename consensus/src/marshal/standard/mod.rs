@@ -46,7 +46,6 @@ mod tests {
         Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
-            ancestry::BlockProvider,
             application::gates::{GateOutcome, Gates},
             config::{Config, Start},
             core::{Actor, Mailbox, cache, durability::Durable as _},
@@ -119,12 +118,6 @@ mod tests {
         },
         time::Duration,
     };
-
-    #[test]
-    fn mailbox_provides_application_blocks() {
-        fn assert_provider<P: BlockProvider<Block = B>>() {}
-        assert_provider::<Mailbox<S, Standard<B>>>();
-    }
 
     #[derive(Clone)]
     struct VerifierProvider {

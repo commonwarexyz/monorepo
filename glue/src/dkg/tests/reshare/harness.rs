@@ -36,7 +36,7 @@ use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable, Reporters,
     marshal::{
         self,
-        ancestry::Ancestry,
+        blocks::Blocks,
         core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -386,11 +386,11 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Arc<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
-        let parent = ancestry.peek()?.clone();
         let height = Height::new(parent.height().get() + 1);
         // The reshare::Application wrapper selected and fetched the payload.
         let payload = input.upstream.payload;
@@ -410,12 +410,13 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage + BufferPooler> Application<E>
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        tip: Arc<Self::Block>,
+        _parent: Arc<Self::Block>,
+        _blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         // Reshare final-block payload validation is enforced by the surrounding
         // reshare::Application wrapper; this inner app only executes state.
-        let tip = ancestry.peek()?.clone();
         let merkleized = Self::execute(tip.height(), batches).await;
         Some(merkleized)
     }

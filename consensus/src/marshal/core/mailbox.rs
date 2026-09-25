@@ -16,11 +16,6 @@ use commonware_utils::channel::oneshot;
 use std::{collections::VecDeque, num::NonZeroUsize, ops::Range, sync::Arc};
 use tracing::{Span, info_span};
 
-commonware_macros::stability_scope!(ALPHA {
-    use crate::marshal::ancestry::{AncestorStream, Ancestry, BlockProvider};
-    use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
-});
-
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
 /// These messages are sent from the consensus engine and other parts of the
@@ -468,29 +463,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// acknowledgements advance its processed floor.
     pub const fn max_pending_acks(&self) -> usize {
         self.max_pending_acks
-    }
-
-    /// Create an ancestor stream that fetches missing parents by commitment.
-    ///
-    /// This stream is always a fetching stream. Callers must already have a block
-    /// that is safe to verify, certify, build on, or repair from. The stream derives
-    /// each missing parent's height and digest from its child and terminates if a
-    /// fetched block does not match that relationship.
-    ///
-    /// Do not use this to wait for pending candidate proposal data.
-    #[commonware_macros::stability(ALPHA)]
-    pub(crate) fn ancestor_stream<I, C>(
-        &self,
-        clock: Arc<C>,
-        initial: I,
-        fetch_duration: Timed,
-    ) -> impl Ancestry<V::ApplicationBlock> + use<S, V, I, C>
-    where
-        Self: BlockProvider<Block = V::ApplicationBlock>,
-        I: IntoIterator<Item = Arc<V::ApplicationBlock>>,
-        C: Clock,
-    {
-        AncestorStream::new(clock, self.clone(), initial, fetch_duration)
     }
 
     /// Retrieve `(height, digest)` for a finalized block by height, digest, or latest.

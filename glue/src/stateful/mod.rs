@@ -76,10 +76,9 @@
 //! Pending state is kept entirely in memory to avoid disk writes on the
 //! consensus hot path. After a restart the map is empty, but the actor
 //! recovers lazily: when `propose` or `verify` encounters a parent whose
-//! state is missing, the actor walks back through the block DAG (via a
-//! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider))
-//! to the nearest known ancestor or the finalized tip,
-//! then replays forward via [`Application::apply`] to fill the gap. Each
+//! state is missing, the actor selects the nearest known ancestor using
+//! the selected branch commitments and fetches the missing range in forward order,
+//! then replays via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
 //! partial progress survives timeouts. Consensus may build on a block before
 //! it is certified (for example, with stable leaders), so a replayed ancestor
@@ -97,12 +96,12 @@
 //! [`Inline`]: commonware_consensus::marshal::standard::Inline
 //! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
 
-use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
+use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::blocks::Blocks};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;
 use rand_core::Rng;
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 mod actor;
 pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
@@ -212,7 +211,7 @@ where
     /// Block used to initialize the consensus engine in the first epoch.
     fn genesis(&mut self) -> impl Future<Output = Self::Block> + Send;
 
-    /// Build a new block on top of the provided parent ancestry.
+    /// Build a new block on top of `parent`, using selected forward history from `blocks`.
     ///
     /// Returns [`None`] if the build fails.
     ///
@@ -232,12 +231,13 @@ where
     fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
         input: Input<Self::Input, Self::Provider>,
     ) -> impl Future<Output = Option<Proposed<Self, E>>> + Send;
 
-    /// Verify a block received from a peer, relative to its ancestry.
+    /// Verify `block` relative to `parent` and the selected forward history in `blocks`.
     ///
     /// Called before the node votes to finalize the block (the notarize vote
     /// may already have been cast). The implementation should execute the
@@ -284,7 +284,9 @@ where
     fn verify(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Ancestry<Self::Block>,
+        block: Arc<Self::Block>,
+        parent: Arc<Self::Block>,
+        blocks: Blocks<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = Option<<Self::Databases as DatabaseSet<E>>::Merkleized>> + Send;
 
