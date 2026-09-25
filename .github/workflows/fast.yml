@@ -187,6 +187,11 @@ jobs:
         mkdir -p "$RUNNER_TEMP/sde"
         tar -xJf "$RUNNER_TEMP/sde.tar.xz" -C "$RUNNER_TEMP/sde" --strip-components=1
         echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$RUNNER_TEMP/sde/sde64 -${{ matrix.sde }} --" >> "$GITHUB_ENV"
+    - name: Check emulated CPU features
+      if: ${{ matrix.sde }}
+      run: |
+        rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
+        $CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER "$RUNNER_TEMP/check_cpu_features" avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq
     - name: Run no-std tests
       if: ${{ matrix.no-std }}
       run: just test-no-std --verbose
@@ -196,7 +201,10 @@ jobs:
     # Without VPCLMULQDQ (Skylake and Cascade Lake servers), crc-fast runs a different AVX-512 kernel.
     - name: Run CRC32 tests on an emulated Skylake server
       if: ${{ matrix.sde }}
-      run: CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$RUNNER_TEMP/sde/sde64 -skx --" just test ${{ matrix.flags }} -p ${{ matrix.package }} -E 'test(/^crc32::/) & not test(/_avx512_$/)' --verbose
+      run: |
+        runner="$RUNNER_TEMP/sde/sde64 -skx --"
+        $runner "$RUNNER_TEMP/check_cpu_features" avx512vl '!vpclmulqdq'
+        CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$runner" just test ${{ matrix.flags }} -p ${{ matrix.package }} -E 'test(/^crc32::/)' --verbose
     - name: Run subset doc tests
       if: ${{ !matrix.sde && !matrix.no-std }}
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}

@@ -489,21 +489,6 @@ mod tests {
         assert_eq!(checksum, expected);
     }
 
-    /// Requires AVX-512VL and VPCLMULQDQ. Only the emulated AVX-512 CI job runs it.
-    #[cfg(target_arch = "x86_64")]
-    #[commonware_macros::test_group("avx512")]
-    #[test]
-    fn available() {
-        // crc-fast selects its AVX-512 VPCLMULQDQ kernel only when all of these are detected.
-        assert!(
-            std::arch::is_x86_feature_detected!("sse4.1")
-                && std::arch::is_x86_feature_detected!("sse4.2")
-                && std::arch::is_x86_feature_detected!("pclmulqdq")
-                && std::arch::is_x86_feature_detected!("avx512vl")
-                && std::arch::is_x86_feature_detected!("vpclmulqdq")
-        );
-    }
-
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;

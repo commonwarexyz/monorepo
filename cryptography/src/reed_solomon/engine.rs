@@ -353,14 +353,6 @@ mod tests {
         }
     }
 
-    /// Requires AVX-512F and GFNI. Only the emulated AVX-512 CI job runs it.
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[commonware_macros::test_group("avx512")]
-    #[test]
-    fn available() {
-        assert!(cpu_features::avx512());
-    }
-
     #[test]
     #[should_panic]
     fn eval_poly_truncation_out_of_bounds() {

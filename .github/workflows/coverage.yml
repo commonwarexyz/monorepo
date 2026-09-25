@@ -72,7 +72,7 @@ jobs:
         name="${name//\//-}"
         echo "flags=${name:-default}" >> "$GITHUB_OUTPUT"
     - name: Generate coverage report
-      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --workspace ${{ matrix.flags }} --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/20 --profile all -E 'not test(/_avx512_$/)'
+      run: cargo +${{ env.NIGHTLY_VERSION }} llvm-cov nextest --branch --workspace ${{ matrix.flags }} --lcov --output-path lcov-${{ steps.path-normalization.outputs.flags }}-${{ matrix.partition }}.info --partition hash:${{ matrix.partition }}/20 --profile all
     - name: Store coverage report
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
       with:
