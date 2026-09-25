@@ -478,6 +478,7 @@ mod tests {
         assert_eq!(tc.transform(b"test"), tc.transform(b"test"));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_hashed_random_seed() {
         // Two instances with random seeds should (with overwhelming probability)

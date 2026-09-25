@@ -5,26 +5,20 @@ use crate::reed_solomon::engine::{
 };
 use core::iter::zip;
 
-// ======================================================================
-// NoSimd - PUBLIC
-
-/// Optimized [`Engine`] without SIMD.
+/// Portable [`Engine`] without SIMD.
 ///
-/// [`NoSimd`] is a basic optimized engine which works on all CPUs.
+/// [`Scalar`] works on all CPUs. It multiplies one field element at a time with four lookups in
+/// the nibble tables of [`Mul16`].
 #[derive(Clone, Copy)]
-pub struct NoSimd {
+pub struct Scalar {
     mul16: &'static Mul16,
     skew: &'static Skew,
 }
 
-impl NoSimd {
-    /// Creates new [`NoSimd`], initializing all [tables]
-    /// needed for encoding or decoding.
+impl Scalar {
+    /// Creates a new [`Scalar`] and initializes its multiplication and skew [tables].
     ///
-    /// Currently only difference between encoding/decoding is
-    /// [`LogWalsh`] (128 kiB) which is only needed for decoding.
-    ///
-    /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
+    /// Decoding builds its Walsh transform tables on first use.
     pub fn new() -> Self {
         let mul16 = tables::get_mul16();
         let skew = tables::get_skew();
@@ -33,7 +27,7 @@ impl NoSimd {
     }
 }
 
-impl Engine for NoSimd {
+impl Engine for Scalar {
     fn fft(
         &self,
         data: &mut ShardsRefMut<'_>,
@@ -42,6 +36,7 @@ impl Engine for NoSimd {
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
         self.fft_private(data, pos, size, truncated_size, skew_delta);
     }
 
@@ -53,6 +48,7 @@ impl Engine for NoSimd {
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        super::validate_transform(data, pos, size, truncated_size, skew_delta);
         self.ifft_private(data, pos, size, truncated_size, skew_delta);
     }
 
@@ -76,20 +72,17 @@ impl Engine for NoSimd {
     }
 }
 
-// ======================================================================
-// NoSimd - IMPL Default
-
-impl Default for NoSimd {
+impl Default for Scalar {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// ======================================================================
-// NoSimd - PRIVATE
-
-impl NoSimd {
-    /// `x[] ^= y[] * log_m`
+impl Scalar {
+    /// Computes `x ^= y * m` for each chunk, where `m` is the field element with logarithm
+    /// `log_m`.
+    ///
+    /// Processes `min(x.len(), y.len())` chunks.
     fn mul_add(
         &self,
         x: &mut [[u8; SHARD_CHUNK_BYTES]],
@@ -116,11 +109,8 @@ impl NoSimd {
     }
 }
 
-// ======================================================================
-// NoSimd - PRIVATE - FFT (fast Fourier transform)
-
-impl NoSimd {
-    // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
+impl Scalar {
+    /// Partial butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn fft_butterfly_partial(
         &self,
@@ -132,6 +122,10 @@ impl NoSimd {
         utils::xor(y, x);
     }
 
+    /// Applies two FFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
     #[inline(always)]
     fn fft_butterfly_two_layers(
         &self,
@@ -144,8 +138,7 @@ impl NoSimd {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
-        // FIRST LAYER
-
+        // First layer: (s0, s2) and (s1, s3).
         if log_m02 == GF_MODULUS {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
@@ -154,14 +147,12 @@ impl NoSimd {
             self.fft_butterfly_partial(s1, s3, log_m02);
         }
 
-        // SECOND LAYER
-
+        // Second layer: (s0, s1) and (s2, s3).
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
             self.fft_butterfly_partial(s0, s1, log_m01);
         }
-
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
@@ -169,6 +160,7 @@ impl NoSimd {
         }
     }
 
+    /// In-place FFT of `data[pos..pos + size]`, as specified by [`Engine::fft`].
     #[inline(always)]
     fn fft_private(
         &self,
@@ -178,8 +170,7 @@ impl NoSimd {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // TWO LAYERS AT TIME
-
+        // Apply two butterfly layers per pass.
         let mut dist4 = size;
         let mut dist = size >> 2;
         while dist != 0 {
@@ -201,8 +192,7 @@ impl NoSimd {
             dist >>= 2;
         }
 
-        // FINAL ODD LAYER
-
+        // An odd log2(size) leaves one final layer.
         if dist4 == 2 {
             let mut r = 0;
             while r < truncated_size {
@@ -222,11 +212,8 @@ impl NoSimd {
     }
 }
 
-// ======================================================================
-// NoSimd - PRIVATE - IFFT (inverse fast Fourier transform)
-
-impl NoSimd {
-    // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
+impl Scalar {
+    /// Partial IFFT butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn ifft_butterfly_partial(
         &self,
@@ -238,6 +225,10 @@ impl NoSimd {
         self.mul_add(x, y, log_m);
     }
 
+    /// Applies two IFFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
     #[inline(always)]
     fn ifft_butterfly_two_layers(
         &self,
@@ -250,22 +241,19 @@ impl NoSimd {
     ) {
         let (s0, s1, s2, s3) = data.dist4_mut(pos, dist);
 
-        // FIRST LAYER
-
+        // First layer: (s0, s1) and (s2, s3).
         if log_m01 == GF_MODULUS {
             utils::xor(s1, s0);
         } else {
             self.ifft_butterfly_partial(s0, s1, log_m01);
         }
-
         if log_m23 == GF_MODULUS {
             utils::xor(s3, s2);
         } else {
             self.ifft_butterfly_partial(s2, s3, log_m23);
         }
 
-        // SECOND LAYER
-
+        // Second layer: (s0, s2) and (s1, s3).
         if log_m02 == GF_MODULUS {
             utils::xor(s2, s0);
             utils::xor(s3, s1);
@@ -275,6 +263,7 @@ impl NoSimd {
         }
     }
 
+    /// In-place IFFT of `data[pos..pos + size]`, as specified by [`Engine::ifft`].
     #[inline(always)]
     fn ifft_private(
         &self,
@@ -284,8 +273,7 @@ impl NoSimd {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // TWO LAYERS AT TIME
-
+        // Apply two butterfly layers per pass.
         let mut dist = 1;
         let mut dist4 = 4;
         while dist4 <= size {
@@ -307,8 +295,7 @@ impl NoSimd {
             dist4 <<= 2;
         }
 
-        // FINAL ODD LAYER
-
+        // An odd log2(size) leaves one final layer.
         if dist < size {
             let log_m = self.skew[dist + skew_delta - 1];
             if log_m == GF_MODULUS {
@@ -327,14 +314,9 @@ impl NoSimd {
     }
 }
 
-// ======================================================================
-// TESTS
-
-// Engines are tested indirectly via roundtrip tests of HighRate and LowRate.
-
 #[cfg(test)]
 mod tests {
-    use crate::reed_solomon::engine::{Engine, Naive, NoSimd, SHARD_CHUNK_BYTES};
+    use crate::reed_solomon::engine::{Engine, Naive, SHARD_CHUNK_BYTES, Scalar};
     #[cfg(not(feature = "std"))]
     use alloc::vec;
     use rand::{Rng, RngExt as _, SeedableRng};
@@ -343,21 +325,21 @@ mod tests {
     #[test]
     fn mul() {
         let naive = Naive::default();
-        let nosimd = NoSimd::default();
+        let scalar = Scalar::default();
 
         let mut rng = ChaCha8Rng::from_seed([0; 32]);
 
         for shard_chunks in 0..6 {
-            let mut data_nosimd = vec![[0; SHARD_CHUNK_BYTES]; shard_chunks];
-            rng.fill_bytes(data_nosimd.as_flattened_mut());
-            let mut data_naive = data_nosimd.clone();
+            let mut data_scalar = vec![[0; SHARD_CHUNK_BYTES]; shard_chunks];
+            rng.fill_bytes(data_scalar.as_flattened_mut());
+            let mut data_naive = data_scalar.clone();
 
             let log_m = rng.random();
 
-            nosimd.mul(&mut data_nosimd, log_m);
+            scalar.mul(&mut data_scalar, log_m);
             naive.mul(&mut data_naive, log_m);
 
-            assert_eq!(data_nosimd, data_naive);
+            assert_eq!(data_scalar, data_naive);
         }
     }
 }

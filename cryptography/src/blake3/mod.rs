@@ -214,6 +214,40 @@ mod tests {
         assert_eq!(hash.as_ref(), HELLO_DIGEST);
     }
 
+    /// Official BLAKE3 test vectors. Hashing 16 KiB or more in one update reaches the 16-way
+    /// AVX-512 chunk kernel, and 32 KiB or more also reaches the 16-way parent kernel.
+    #[test]
+    fn test_official_vectors() {
+        const VECTORS: [(usize, [u8; DIGEST_LENGTH]); 3] = [
+            (
+                16384,
+                commonware_formatting::hex!(
+                    "f875d6646de28985646f34ee13be9a576fd515f76b5b0a26bb324735041ddde4"
+                ),
+            ),
+            (
+                31744,
+                commonware_formatting::hex!(
+                    "62b6960e1a44bcc1eb1a611a8d6235b6b4b78f32e7abc4fb4c6cdcce94895c47"
+                ),
+            ),
+            (
+                102400,
+                commonware_formatting::hex!(
+                    "bc3e3d41a1146b069abffad3c0d44860cf664390afce4d9661f7902e7943e085"
+                ),
+            ),
+        ];
+        for (len, expected) in VECTORS {
+            // The official input repeats the bytes 0 through 250.
+            let input: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let mut hasher = Blake3::default();
+            hasher.update(&input);
+            let (_, digest) = hasher.finalize();
+            assert_eq!(digest.as_ref(), expected, "len {len}");
+        }
+    }
+
     #[test]
     fn test_blake3_len() {
         assert_eq!(Digest::SIZE, DIGEST_LENGTH);
