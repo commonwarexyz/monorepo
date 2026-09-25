@@ -26,6 +26,9 @@ commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 /// by available parallelism.
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
 
+/// Target transform storage per tile within a scheduled stripe.
+const MAX_TILE_WORK_BYTES: usize = 2 * 1024 * 1024;
+
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
 pub enum Error {
@@ -500,6 +503,24 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 mod striped {
     use super::*;
 
+    // The transform has at most twice the rounded total shard count. Keep a
+    // stripe intact unless it contains at least two full cache-sized tiles.
+    fn tile_width(k: usize, m: usize, stripe_len: usize) -> usize {
+        let work_count = 2 * (k + m).next_power_of_two();
+        let chunks = (MAX_TILE_WORK_BYTES / (work_count * SHARD_CHUNK_BYTES)).max(1);
+        if stripe_len / SHARD_CHUNK_BYTES < 2 * chunks {
+            return stripe_len.max(1);
+        }
+        chunks * SHARD_CHUNK_BYTES
+    }
+
+    fn tiles(range: Range<usize>, width: usize) -> impl Iterator<Item = Range<usize>> {
+        let end = range.end;
+        (range.start..end)
+            .step_by(width)
+            .map(move |start| start..start.saturating_add(width).min(end))
+    }
+
     /// Split a shard-major buffer (`num_shards * shard_len`) into one group of mutable column
     /// slices per stripe range: `groups[s][shard]` is bytes `ranges[s]` of shard `shard`. Using
     /// `chunks_mut` + `split_at_mut` hands each parallel stripe task genuine, provably-disjoint
@@ -571,38 +592,49 @@ mod striped {
         missing: Missing<'_>,
         mut out: StripeOut<'_>,
     ) -> Result<(), Error> {
-        let shard_len = range.len();
+        if range.is_empty() {
+            return Ok(());
+        }
+        let offset = range.start;
+        let width = tile_width(k, m, range.len());
         let mut decoder = Cached::take(
             &CACHED_DECODER,
-            || Decoder::new(k, m, shard_len),
-            |dec| dec.reset(k, m, shard_len),
+            || Decoder::new(k, m, width),
+            |dec| dec.reset(k, m, width),
         )
         .map_err(Error::ReedSolomon)?;
+        for range in tiles(range, width) {
+            let local = range.start - offset..range.end - offset;
+            if range.len() != width {
+                decoder
+                    .reset(k, m, range.len())
+                    .map_err(Error::ReedSolomon)?;
+            }
 
-        for (idx, shard) in provided_originals {
-            decoder
-                .add_original_shard(*idx, &shard[range.clone()])
-                .map_err(Error::ReedSolomon)?;
-        }
-        for (idx, shard) in provided_recoveries {
-            decoder
-                .add_recovery_shard(*idx, &shard[range.clone()])
-                .map_err(Error::ReedSolomon)?;
-        }
-        let decoding = decoder
-            .decode_with_recovery_plan(plan)
-            .map_err(Error::ReedSolomon)?
-            .expect("decode runs only when an original is missing");
+            for (idx, shard) in provided_originals {
+                decoder
+                    .add_original_shard(*idx, &shard[range.clone()])
+                    .map_err(Error::ReedSolomon)?;
+            }
+            for (idx, shard) in provided_recoveries {
+                decoder
+                    .add_recovery_shard(*idx, &shard[range.clone()])
+                    .map_err(Error::ReedSolomon)?;
+            }
+            let decoding = decoder
+                .decode_with_recovery_plan(plan)
+                .map_err(Error::ReedSolomon)?
+                .expect("decode runs only when an original is missing");
 
-        for (slot, &idx) in out.originals.iter_mut().zip(missing.originals) {
-            let shard = decoding.original(idx).ok_or(Error::Inconsistent)?;
-            slot.copy_from_slice(shard);
+            for (slot, &idx) in out.originals.iter_mut().zip(missing.originals) {
+                let shard = decoding.original(idx).ok_or(Error::Inconsistent)?;
+                slot[local.clone()].copy_from_slice(shard);
+            }
+            for (slot, &idx) in out.recoveries.iter_mut().zip(missing.recoveries) {
+                let shard = decoding.recovery(idx).ok_or(Error::Inconsistent)?;
+                slot[local.clone()].copy_from_slice(shard);
+            }
         }
-        for (slot, &idx) in out.recoveries.iter_mut().zip(missing.recoveries) {
-            let shard = decoding.recovery(idx).ok_or(Error::Inconsistent)?;
-            slot.copy_from_slice(shard);
-        }
-
         Ok(())
     }
 
@@ -615,25 +647,36 @@ mod striped {
         originals: &[impl AsRef<[u8]>],
         mut out: Vec<&mut [u8]>,
     ) -> Result<(), Error> {
-        let shard_len = range.len();
+        if range.is_empty() {
+            return Ok(());
+        }
+        let offset = range.start;
+        let width = tile_width(k, m, range.len());
         let mut encoder = Cached::take(
             &CACHED_ENCODER,
-            || Encoder::new(k, m, shard_len),
-            |enc| enc.reset(k, m, shard_len),
+            || Encoder::new(k, m, width),
+            |enc| enc.reset(k, m, width),
         )
         .map_err(Error::ReedSolomon)?;
+        for range in tiles(range, width) {
+            let local = range.start - offset..range.end - offset;
+            if range.len() != width {
+                encoder
+                    .reset(k, m, range.len())
+                    .map_err(Error::ReedSolomon)?;
+            }
 
-        for shard in originals.iter().take(k) {
-            let shard = shard.as_ref();
-            encoder
-                .add_original_shard(&shard[range.clone()])
-                .map_err(Error::ReedSolomon)?;
+            for shard in originals.iter().take(k) {
+                let shard = shard.as_ref();
+                encoder
+                    .add_original_shard(&shard[range.clone()])
+                    .map_err(Error::ReedSolomon)?;
+            }
+            let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+            for (slot, shard) in out.iter_mut().zip(encoding.recovery_iter()) {
+                slot[local.clone()].copy_from_slice(shard);
+            }
         }
-        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-        for (slot, shard) in out.iter_mut().zip(encoding.recovery_iter()) {
-            slot.copy_from_slice(shard);
-        }
-
         Ok(())
     }
 
@@ -2021,7 +2064,13 @@ mod tests {
     /// against the original data on both the sequential and parallel paths.
     #[test]
     fn test_striped_recovery_matches_sequential() {
-        for &data_len in &[128 * 1024usize, 257 * 1024, 512 * 1024, 1024 * 1024] {
+        for &data_len in &[
+            128 * 1024usize,
+            257 * 1024,
+            512 * 1024,
+            1024 * 1024,
+            4 * 1024 * 1024 + 14,
+        ] {
             for &(total, min) in &[(12u16, 4u16), (24, 8), (33, 11), (20, 13)] {
                 let data: Vec<u8> = (0..data_len)
                     .map(|i| (i as u8) ^ ((i >> 7) as u8))
@@ -2087,56 +2136,63 @@ mod tests {
     /// encode byte-for-byte.
     #[test]
     fn test_striped_encode_into_matches_full_width() {
-        let k = 2usize;
-        let m = 2usize;
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();
-        for shard_len in [
-            2 * MIN_STRIPE_BYTES,
-            2 * MIN_STRIPE_BYTES + 2,
-            3 * MIN_STRIPE_BYTES + 62,
-            5 * MIN_STRIPE_BYTES + 64,
-        ] {
-            let mut originals_buf = vec![0u8; k * shard_len];
-            for (i, byte) in originals_buf.iter_mut().enumerate() {
-                *byte = (i % 251) as u8;
+        for (k, m) in [(2usize, 2usize), (32, 64)] {
+            for shard_len in [
+                2 * MIN_STRIPE_BYTES,
+                2 * MIN_STRIPE_BYTES + 2,
+                3 * MIN_STRIPE_BYTES + 62,
+                5 * MIN_STRIPE_BYTES + 64,
+                17 * MIN_STRIPE_BYTES + 2,
+            ] {
+                let mut originals_buf = vec![0u8; k * shard_len];
+                for (i, byte) in originals_buf.iter_mut().enumerate() {
+                    *byte = (i % 251) as u8;
+                }
+                let originals: Vec<&[u8]> = originals_buf.chunks(shard_len).collect();
+
+                // Encode each stripe into its column slices of the shared buffer.
+                let mut striped_recovery = vec![0u8; m * shard_len];
+                let results = strategy
+                    .try_run_batches(
+                        shard_len / SHARD_CHUNK_BYTES,
+                        NZUsize!(MIN_STRIPE_BYTES / SHARD_CHUNK_BYTES),
+                        SHARD_CHUNK_BYTES * (k + m),
+                        |batches| {
+                            batches
+                                .expect("must split into stripes")
+                                .try_map_collect_vec(
+                                    |ranges| {
+                                        let ranges = striped::byte_ranges(shard_len, ranges);
+                                        let groups = striped::stripe_columns(
+                                            &mut striped_recovery,
+                                            shard_len,
+                                            &ranges,
+                                        );
+                                        ranges.into_iter().zip(groups)
+                                    },
+                                    |(range, out)| {
+                                        striped::encode_recovery_into(k, m, range, &originals, out)
+                                    },
+                                )
+                        },
+                    )
+                    .unwrap();
+                assert!(results.len() >= 2);
+
+                // A single full-width encode must produce the identical recovery buffer.
+                let mut encoder = Encoder::new(k, m, shard_len).unwrap();
+                for original in &originals {
+                    encoder.add_original_shard(original).unwrap();
+                }
+                let encoding = encoder.encode().unwrap();
+                for (actual, expected) in striped_recovery
+                    .chunks_exact(shard_len)
+                    .zip(encoding.recovery_iter())
+                {
+                    assert_eq!(actual, expected);
+                }
             }
-            let originals: Vec<&[u8]> = originals_buf.chunks(shard_len).collect();
-
-            // Encode each stripe into its column slices of the shared buffer.
-            let mut striped_recovery = vec![0u8; m * shard_len];
-            let results = strategy
-                .try_run_batches(
-                    shard_len / SHARD_CHUNK_BYTES,
-                    NZUsize!(MIN_STRIPE_BYTES / SHARD_CHUNK_BYTES),
-                    SHARD_CHUNK_BYTES * (k + m),
-                    |batches| {
-                        batches
-                            .expect("must split into stripes")
-                            .try_map_collect_vec(
-                                |ranges| {
-                                    let ranges = striped::byte_ranges(shard_len, ranges);
-                                    let groups = striped::stripe_columns(
-                                        &mut striped_recovery,
-                                        shard_len,
-                                        &ranges,
-                                    );
-                                    ranges.into_iter().zip(groups)
-                                },
-                                |(range, out)| {
-                                    striped::encode_recovery_into(k, m, range, &originals, out)
-                                },
-                            )
-                    },
-                )
-                .unwrap();
-            assert!(results.len() >= 2);
-
-            // A single full-width encode must produce the identical recovery buffer.
-            let mut full_recovery = vec![0u8; m * shard_len];
-            let full_out: Vec<&mut [u8]> = full_recovery.chunks_mut(shard_len).collect();
-            striped::encode_recovery_into(k, m, 0..shard_len, &originals, full_out).unwrap();
-
-            assert_eq!(striped_recovery, full_recovery);
         }
     }
 
