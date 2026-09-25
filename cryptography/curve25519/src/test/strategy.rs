@@ -8,7 +8,11 @@ use std::{panic::panic_any, sync::Arc};
 /// Sequential implementations of the [`Strategy`] methods neither probe observes.
 macro_rules! sequential_operations {
     () => {
-        fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static
+        fn spawn<F, T>(
+            &self,
+            len: usize,
+            f: F,
+        ) -> impl Future<Output = T> + Send + 'static + use<F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
