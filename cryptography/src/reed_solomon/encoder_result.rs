@@ -29,6 +29,9 @@ impl EncoderResult<'_> {
 }
 
 impl<'a> EncoderResult<'a> {
+    /// Wraps `work` after an encode that wrote the recovery shards.
+    ///
+    /// Dropping the result clears the received original count in `work`.
     pub(crate) const fn new(work: &'a mut EncoderWork) -> Self {
         Self { work }
     }
@@ -44,7 +47,9 @@ impl Drop for EncoderResult<'_> {
 ///
 /// This struct is created by [`EncoderResult::recovery_iter`].
 pub struct Recovery<'a> {
+    /// Set once `next` has returned `None`.
     ended: bool,
+    /// Index of the next recovery shard to yield.
     next_index: usize,
     work: &'a EncoderWork,
 }
@@ -72,6 +77,7 @@ impl<'a> Iterator for Recovery<'a> {
 impl ExactSizeIterator for Recovery<'_> {}
 
 impl<'a> Recovery<'a> {
+    /// Creates an iterator over all recovery shards in `work`, starting at index 0.
     pub(crate) const fn new(work: &'a EncoderWork) -> Self {
         Self {
             ended: false,

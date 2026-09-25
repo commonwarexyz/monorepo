@@ -1,3 +1,5 @@
+//! Roundtrip helpers, error-test macros, and recovery-hash fixtures for the rate tests.
+
 use crate::reed_solomon::{
     engine::Engine,
     rate::{Rate, RateDecoder, RateEncoder},
@@ -9,13 +11,19 @@ use rand_chacha::ChaCha8Rng;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+/// Selects which shard indices a roundtrip hands to the decoder.
+///
+/// Indices past the shard count are ignored.
 #[derive(Debug)]
 pub(crate) enum ShardSelection {
+    /// A single shard index.
     Index(usize),
+    /// A half-open range of shard indices. An empty or reversed range selects nothing.
     Range(Range<usize>),
 }
 
 impl ShardSelection {
+    /// Returns the selected indices as a half-open range.
     fn indices(&self) -> Range<usize> {
         match self {
             Self::Index(index) => *index..*index + 1,
@@ -24,24 +32,38 @@ impl ShardSelection {
     }
 }
 
+/// Returns a selection of the single shard `index`.
 pub(crate) const fn index(index: usize) -> ShardSelection {
     ShardSelection::Index(index)
 }
 
+/// Returns a selection of shards `start..end`.
 pub(crate) const fn range(start: usize, end: usize) -> ShardSelection {
     ShardSelection::Range(start..end)
 }
 
+/// Parameters for one encode and decode roundtrip, consumed by [`roundtrip`].
 pub(crate) struct Roundtrip<'a> {
     pub(crate) original_count: usize,
     pub(crate) recovery_count: usize,
     pub(crate) shard_bytes: usize,
+    /// Expected hex SHA256 of the recovery shards, checked with [`assert_hash`].
     pub(crate) recovery_hash: &'a str,
+    /// Original shard indices given to the decoder.
     pub(crate) decoder_original: &'a [ShardSelection],
+    /// Recovery shard indices given to the decoder.
     pub(crate) decoder_recovery: &'a [ShardSelection],
+    /// Seed passed to [`generate_original`].
     pub(crate) seed: u8,
 }
 
+/// Asserts that the SHA256 of `shards`, concatenated in order, equals the hex digest `expected`.
+///
+/// On a digest mismatch with the `std` feature, prints both digests before panicking.
+///
+/// # Panics
+///
+/// Panics if `expected` is not valid hex or the digests differ.
 pub(crate) fn assert_hash<T>(shards: T, expected: &str)
 where
     T: IntoIterator,
@@ -67,6 +89,9 @@ where
     }
 }
 
+/// Returns `original_count` shards of `shard_bytes` random bytes each.
+///
+/// The bytes come from a `ChaCha8Rng` seeded with `[seed; 32]`, so the output is deterministic.
 pub(crate) fn generate_original(
     original_count: usize,
     shard_bytes: usize,
@@ -80,6 +105,17 @@ pub(crate) fn generate_original(
     original
 }
 
+/// Encodes shards from [`generate_original`], checks the recovery hash, then decodes from the
+/// selected shards and checks every original the decoder did not receive.
+///
+/// `encoder` and `decoder` must be configured with the counts and shard size in `cfg`. The
+/// decoder runs without computing missing recovery shards. If it reports nothing to reconstruct,
+/// no originals are checked.
+///
+/// # Panics
+///
+/// Panics if encoding or decoding fails, the recovery hash differs, or a missing original is
+/// not restored exactly.
 pub(crate) fn roundtrip<R: Rate<E>, E: Engine>(
     encoder: &mut R::RateEncoder,
     decoder: &mut R::RateDecoder,
@@ -137,6 +173,12 @@ pub(crate) fn roundtrip<R: Rate<E>, E: Engine>(
     }
 }
 
+/// Runs [`roundtrip`] once on a fresh encoder and decoder of rate `R`, each with its own engine
+/// from `new_engine`.
+///
+/// # Panics
+///
+/// Panics if `R` rejects the configuration or [`roundtrip`] panics.
 pub(crate) fn roundtrip_single<R: Rate<E>, E: Engine>(new_engine: fn() -> E, cfg: &Roundtrip<'_>) {
     let mut encoder = R::encoder(
         cfg.original_count,
@@ -159,6 +201,10 @@ pub(crate) fn roundtrip_single<R: Rate<E>, E: Engine>(new_engine: fn() -> E, cfg
     roundtrip::<R, E>(&mut encoder, &mut decoder, cfg);
 }
 
+/// Runs [`roundtrip_single()`] for rate `$Rate` with the `Naive`, `NoSimd`, and `DefaultEngine`
+/// engines.
+///
+/// The remaining arguments are the [`Roundtrip`] fields in declaration order.
 macro_rules! roundtrip_single {
     ($Rate: ident,
      $original_count: expr,
@@ -196,6 +242,10 @@ macro_rules! roundtrip_single {
     };
 }
 
+/// Runs [`roundtrip_two_rounds_inner!`] for rate `$Rate` with the `Naive`, `NoSimd`, and
+/// `DefaultEngine` engines.
+///
+/// The caller must have the names that [`roundtrip_two_rounds_inner!`] requires in scope.
 macro_rules! roundtrip_two_rounds {
     (
         $Rate: ident,
@@ -211,6 +261,15 @@ macro_rules! roundtrip_two_rounds {
     };
 }
 
+/// Runs two [`roundtrip`] rounds on one encoder and decoder of rate `$Rate` with engine `$Engine`.
+///
+/// Each round is a tuple of [`Roundtrip`] fields in declaration order. The encoder and decoder
+/// are built with round A's counts and shard size. If `$explicit_reset` is true, both are reset
+/// to round B's counts and shard size between rounds. Otherwise round B reuses them as left by
+/// round A and must match round A's counts and shard size.
+///
+/// The caller must have `test_util` and the `Rate`, `RateEncoder`, and `RateDecoder` traits in
+/// scope.
 macro_rules! roundtrip_two_rounds_inner {
     (
         $Rate: ident,
@@ -289,6 +348,10 @@ macro_rules! roundtrip_two_rounds_inner {
     };
 }
 
+/// Generates `#[test]` fns checking the errors that `$Encoder::new`, `add_original_shard`,
+/// `encode`, and `reset` report.
+///
+/// The caller must have `$Encoder`, `Error`, `NoSimd`, and the `RateEncoder` trait in scope.
 macro_rules! test_rate_encoder_errors {
     ($Encoder:ident) => {
         #[test]
@@ -411,6 +474,10 @@ macro_rules! test_rate_encoder_errors {
     };
 }
 
+/// Generates `#[test]` fns checking the errors that `$Decoder::new`, `add_original_shard`,
+/// `add_recovery_shard`, `decode`, and `reset` report.
+///
+/// The caller must have `$Decoder`, `Error`, `NoSimd`, and the `RateDecoder` trait in scope.
 macro_rules! test_rate_decoder_errors {
     ($Decoder:ident) => {
         #[test]

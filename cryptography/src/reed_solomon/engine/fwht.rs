@@ -1,3 +1,5 @@
+//! Fast Walsh-Hadamard transform modulo `GF_MODULUS`, used by `eval_poly` and the Walsh tables.
+
 use crate::reed_solomon::engine::{GF_ORDER, GfElement, utils};
 
 /// Decimation in time (DIT) Fast Walsh-Hadamard Transform modulo `GF_MODULUS`.
@@ -38,6 +40,7 @@ pub(crate) fn fwht(data: &mut [GfElement], m_truncated: usize) {
     }
 }
 
+/// Returns `(a + b, a - b)` modulo `GF_MODULUS`.
 #[inline(always)]
 fn fwht_2(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
     let sum = utils::add_mod(a, b);
@@ -45,6 +48,10 @@ fn fwht_2(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
     (sum, dif)
 }
 
+/// Applies the radix-2 layers at distances `dist` and `2 * dist` to the four entries
+/// `data[offset + k * dist]` for `k` in `0..4`.
+///
+/// `offset + 3 * dist` must fit in a `u16`.
 #[inline(always)]
 fn fwht_4(data: &mut [GfElement], offset: u16, dist: u16) {
     // Indices. u16 arithmetic keeps each index below GF_ORDER (u16::MAX + 1), so bounds
@@ -91,6 +98,7 @@ mod tests {
         }
     }
 
+    /// Reference `fwht_2` built on wrapping `u16` arithmetic.
     fn fwht_2_naive(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
         let (mut sum, sum_overflow) = a.overflowing_add(b);
         if sum_overflow {

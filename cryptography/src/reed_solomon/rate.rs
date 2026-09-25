@@ -45,6 +45,12 @@ pub(crate) mod rate_default;
 pub(crate) mod rate_high;
 pub(crate) mod rate_low;
 
+/// Returns [`Error::InvalidShardSize`] if `work_count` shards of `shard_bytes` bytes, each
+/// rounded up to whole `SHARD_CHUNK_BYTES` chunks, exceed `isize::MAX` bytes in total.
+///
+/// # Panics
+///
+/// Panics if `work_count` is zero.
 const fn validate_work_size(shard_bytes: usize, work_count: usize) -> Result<(), Error> {
     // The chunk array must fit within Vec's maximum allocation size.
     let max_chunks = isize::MAX as usize / SHARD_CHUNK_BYTES;
@@ -247,6 +253,8 @@ mod tests {
     use super::*;
     use crate::reed_solomon::{engine::NoSimd, test_util};
 
+    /// Checks that `validate` accepts the largest whole-chunk shard size for `work_count` work
+    /// shards and rejects that size plus 2 bytes, which needs one more chunk per shard.
     fn check_capacity(validate: impl Fn(usize) -> Result<(), Error>, work_count: usize) {
         let shard_bytes =
             (isize::MAX as usize / SHARD_CHUNK_BYTES / work_count) * SHARD_CHUNK_BYTES;

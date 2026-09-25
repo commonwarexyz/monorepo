@@ -114,7 +114,12 @@ impl Default for Naive {
 }
 
 impl Naive {
-    /// Computes `x[] ^= y[] * log_m`.
+    /// Computes `x ^= y * m` for each chunk, where `m` is the field element with logarithm
+    /// `log_m`.
+    ///
+    /// # Panics
+    ///
+    /// If `x` and `y` have different lengths.
     fn mul_add(
         &self,
         x: &mut [[u8; SHARD_CHUNK_BYTES]],

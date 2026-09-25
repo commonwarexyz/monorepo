@@ -139,9 +139,9 @@ impl Decoder {
 
     /// Like [`decode`](Decoder::decode), but also reconstructs the missing recovery shards,
     /// returning `Some(`[`RecoveryDecoderResult`]`)` that additionally exposes them via
-    /// [`RecoveryDecoderResult::recovery`] / [`recovery_iter`]. This costs up to `recovery_count`
-    /// extra field multiplications, so prefer [`decode`](Decoder::decode) when only the original
-    /// data is needed.
+    /// [`RecoveryDecoderResult::recovery`] / [`recovery_iter`]. This adds a multiplication of each
+    /// missing recovery shard by a field element, so prefer [`decode`](Decoder::decode) when only
+    /// the original data is needed.
     ///
     /// [`recovery_iter`]: RecoveryDecoderResult::recovery_iter
     pub fn decode_with_recovery(&mut self) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
@@ -213,6 +213,8 @@ mod tests {
     use fixedbitset::FixedBitSet;
     use std::collections::BTreeMap;
 
+    /// Encodes `original_count` 1024-byte originals, checks the recovery hash, decodes from the
+    /// given original and recovery indices, and checks every original not given to the decoder.
     fn roundtrip(
         encoder: &mut Encoder,
         decoder: &mut Decoder,

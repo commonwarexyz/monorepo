@@ -53,6 +53,8 @@ impl<E: Engine> Rate<E> for HighRate<E> {
 /// Reed-Solomon encoder using only high rate.
 pub struct HighRateEncoder<E: Engine> {
     engine: E,
+    /// Originals at `0..original_count`. Encoding leaves the recovery shards at
+    /// `0..recovery_count`.
     work: EncoderWork,
 }
 
@@ -137,6 +139,9 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
 }
 
 impl<E: Engine> HighRateEncoder<E> {
+    /// Validates the parameters, then resets `work` for them with [`Self::work_count`] shards.
+    ///
+    /// Returns the error from [`RateEncoder::validate`] and leaves `work` unchanged on failure.
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -153,6 +158,15 @@ impl<E: Engine> HighRateEncoder<E> {
         Ok(())
     }
 
+    /// Returns the number of shards in the working space.
+    ///
+    /// This is `original_count` rounded up to a multiple of the chunk size
+    /// `recovery_count.next_power_of_two()`, so every chunk of originals, including a
+    /// zero-padded final chunk, has room for its IFFT.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counts are not supported by [`HighRate`].
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
         assert!(Self::supports(original_count, recovery_count));
 
@@ -165,6 +179,8 @@ impl<E: Engine> HighRateEncoder<E> {
 /// Reed-Solomon decoder using only high rate.
 pub struct HighRateDecoder<E: Engine> {
     engine: E,
+    /// Recovery shards at `0..recovery_count`. Originals start at
+    /// `recovery_count.next_power_of_two()`.
     work: DecoderWork,
 }
 
@@ -230,6 +246,11 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
 }
 
 impl<E: Engine> HighRateDecoder<E> {
+    /// Decodes like [`RateDecoder::decode`], taking the erasure locators from `plan` instead of
+    /// evaluating them.
+    ///
+    /// Returns [`Error::PlanMismatch`] unless `plan` was built for these counts, high rate, and
+    /// the received shard indices.
     pub(crate) fn decode_with_plan(
         &mut self,
         compute_recovery: bool,
@@ -240,6 +261,10 @@ impl<E: Engine> HighRateDecoder<E> {
 }
 
 impl<E: Engine> HighRateDecoder<E> {
+    /// Reconstructs the missing originals, and the missing recovery shards when
+    /// `compute_recovery` is set, taking the erasure locators from `plan` when given.
+    ///
+    /// Returns `Ok(None)` and clears the received state when every original was provided.
     fn decode_impl(
         &mut self,
         compute_recovery: bool,
@@ -337,6 +362,9 @@ impl<E: Engine> HighRateDecoder<E> {
         Ok(Some(DecoderResult::new(&mut self.work)))
     }
 
+    /// Validates the parameters, then resets `work` for them with [`Self::work_count`] shards.
+    ///
+    /// Returns the error from [`RateDecoder::validate`] and leaves `work` unchanged on failure.
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -359,6 +387,14 @@ impl<E: Engine> HighRateDecoder<E> {
         Ok(())
     }
 
+    /// Returns the number of shards in the working space.
+    ///
+    /// This is `recovery_count.next_power_of_two() + original_count` rounded up to a power of two,
+    /// the size of the decoding transforms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counts are not supported by [`HighRate`].
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
         assert!(Self::supports(original_count, recovery_count));
 

@@ -78,7 +78,10 @@ impl Default for NoSimd {
 }
 
 impl NoSimd {
-    /// Computes `x[] ^= y[] * log_m`.
+    /// Computes `x ^= y * m` for each chunk, where `m` is the field element with logarithm
+    /// `log_m`.
+    ///
+    /// Processes `min(x.len(), y.len())` chunks.
     fn mul_add(
         &self,
         x: &mut [[u8; SHARD_CHUNK_BYTES]],
@@ -118,6 +121,10 @@ impl NoSimd {
         utils::xor(y, x);
     }
 
+    /// Applies two FFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
     #[inline(always)]
     fn fft_butterfly_two_layers(
         &self,
@@ -152,6 +159,7 @@ impl NoSimd {
         }
     }
 
+    /// In-place FFT of `data[pos..pos + size]`, as specified by [`Engine::fft`].
     #[inline(always)]
     fn fft_private(
         &self,
@@ -204,7 +212,7 @@ impl NoSimd {
 }
 
 impl NoSimd {
-    /// Partial butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
+    /// Partial IFFT butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn ifft_butterfly_partial(
         &self,
@@ -216,6 +224,10 @@ impl NoSimd {
         self.mul_add(x, y, log_m);
     }
 
+    /// Applies two IFFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
     #[inline(always)]
     fn ifft_butterfly_two_layers(
         &self,
@@ -250,6 +262,7 @@ impl NoSimd {
         }
     }
 
+    /// In-place IFFT of `data[pos..pos + size]`, as specified by [`Engine::ifft`].
     #[inline(always)]
     fn ifft_private(
         &self,

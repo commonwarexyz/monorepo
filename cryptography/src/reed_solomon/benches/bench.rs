@@ -1,3 +1,5 @@
+//! Benchmarks for the Reed-Solomon encoder, decoder, rates, and engines.
+
 #[cfg(target_arch = "aarch64")]
 use commonware_cryptography::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -14,8 +16,12 @@ use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
 
+/// Shard size in bytes used by every benchmark.
 const SHARD_BYTES: usize = 1024;
 
+/// Returns `shard_count` shards of `chunk_count` random `SHARD_CHUNK_BYTES`-byte chunks each.
+///
+/// The bytes come from a `ChaCha8Rng` seeded with `[seed; 32]`, so the output is deterministic.
 fn generate_shard_chunks(
     shard_count: usize,
     chunk_count: usize,
@@ -29,6 +35,12 @@ fn generate_shard_chunks(
     shards
 }
 
+/// Returns `shard_count` random shards of `shard_bytes` bytes each, as [`generate_shard_chunks`]
+/// flattened.
+///
+/// # Panics
+///
+/// Panics if `shard_bytes` is not a multiple of `SHARD_CHUNK_BYTES`.
 fn generate_shards(shard_count: usize, shard_bytes: usize, seed: u8) -> Vec<Vec<u8>> {
     assert_eq!(shard_bytes % SHARD_CHUNK_BYTES, 0);
     generate_shard_chunks(shard_count, shard_bytes / SHARD_CHUNK_BYTES, seed)
@@ -37,6 +49,9 @@ fn generate_shards(shard_count: usize, shard_bytes: usize, seed: u8) -> Vec<Vec<
         .collect()
 }
 
+/// Returns the recovery shards for `original`, encoded with the default [`Encoder`].
+///
+/// Each shard in `original` must be `SHARD_BYTES` long.
 fn encode_recovery(
     original_count: usize,
     recovery_count: usize,
@@ -55,6 +70,11 @@ fn encode_recovery(
         .collect()
 }
 
+/// Benchmarks the default [`Encoder`] and [`Decoder`] over a fixed set of shard counts.
+///
+/// Decoding runs at 1% and 100% loss. A loss of N% drops N% of
+/// `min(original_count, recovery_count)` originals, rounded up, and replaces each with a
+/// recovery shard.
 fn benchmarks_main(c: &mut Criterion) {
     let cases = [
         // Powers of two with equal original and recovery counts.
@@ -176,10 +196,16 @@ fn benchmarks_main(c: &mut Criterion) {
     }
 }
 
+/// Benchmarks the high and low rate encoders and decoders with `DefaultEngine`.
 fn benchmarks_rate(c: &mut Criterion) {
     benchmarks_rate_one(c, "rate", DefaultEngine::new);
 }
 
+/// Benchmarks the high and low rate encoders and decoders with engines from `new_engine`,
+/// labeling each benchmark with `name`.
+///
+/// Each decoder benchmark loses `min(original_count, recovery_count)` originals and replaces
+/// each with a recovery shard from [`encode_recovery`].
 fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn() -> E) {
     let cases = [
         (1024, 1024),
@@ -348,6 +374,7 @@ fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn(
     }
 }
 
+/// Benchmarks every engine available on the target and detected at runtime.
 fn benchmarks_engine(c: &mut Criterion) {
     benchmarks_engine_one(c, "naive", Naive::new());
     benchmarks_engine_one(c, "nosimd", NoSimd::new());
@@ -373,6 +400,8 @@ fn benchmarks_engine(c: &mut Criterion) {
     }
 }
 
+/// Benchmarks `eval_poly`, `mul`, and 128-shard `fft` and `ifft` for `engine`, labeling each
+/// benchmark with `engine_name`.
 fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine: E) {
     let shard_chunk_count = SHARD_BYTES / SHARD_CHUNK_BYTES;
 

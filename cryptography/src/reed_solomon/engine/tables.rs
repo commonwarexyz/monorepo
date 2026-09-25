@@ -39,6 +39,8 @@ use std::sync::{LazyLock, OnceLock};
 /// Used by [`Naive`] engine for multiplications
 /// and by all [`Engine`] implementations to initialize other tables.
 ///
+/// Maps a logarithm to its field element. Entries `0` and `GF_MODULUS` both hold one.
+///
 /// [`Naive`]: crate::reed_solomon::engine::Naive
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Exp = [GfElement; GF_ORDER];
@@ -46,11 +48,16 @@ pub type Exp = [GfElement; GF_ORDER];
 /// Used by [`Naive`] engine for multiplications
 /// and by all [`Engine`] implementations to initialize other tables.
 ///
+/// Maps a field element to its logarithm in `0..GF_MODULUS`. Zero has no logarithm and maps
+/// to `GF_MODULUS`.
+///
 /// [`Naive`]: crate::reed_solomon::engine::Naive
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Log = [GfElement; GF_ORDER];
 
 /// Used by `Neon`, `Avx2`, and `Ssse3` engines for multiplications.
+///
+/// Indexed by multiplier logarithm.
 pub type Mul128 = [Multiply128lutT; GF_ORDER];
 
 /// GFNI affine matrices indexed by multiplier logarithm.
@@ -97,10 +104,16 @@ pub type LogWalsh = [GfElement; GF_ORDER];
 
 /// Used by [`NoSimd`] engine for multiplications.
 ///
+/// Entry `[log_m][i][x]` is the product of `x << (4 * i)` and the element with logarithm
+/// `log_m`.
+///
 /// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
 pub type Mul16 = [[[GfElement; 16]; 4]; GF_ORDER];
 
 /// Used by all [`Engine`] implementations for FFT and IFFT.
+///
+/// Holds the logarithms of the butterfly coefficients. A `GF_MODULUS` entry encodes a zero
+/// coefficient.
 ///
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Skew = [GfElement; GF_MODULUS as usize];
@@ -232,6 +245,7 @@ pub fn mul(x: GfElement, log_m: GfElement, exp: &Exp, log: &Log) -> GfElement {
     }
 }
 
+/// Builds the [`Exp`] and [`Log`] tables for elements expressed in the [`CANTOR_BASIS`].
 fn initialize_exp_log() -> ExpLog {
     let mut exp = Box::new([0; GF_ORDER]);
     let mut log = Box::new([0; GF_ORDER]);
@@ -267,6 +281,7 @@ fn initialize_exp_log() -> ExpLog {
     ExpLog { exp, log }
 }
 
+/// Builds [`LogWalsh`], the FWHT of [`Log`] with entry zero replaced by zero.
 fn initialize_log_walsh() -> Box<LogWalsh> {
     let log = get_exp_log().log.as_slice();
 
@@ -279,6 +294,10 @@ fn initialize_log_walsh() -> Box<LogWalsh> {
     log_walsh
 }
 
+/// Builds the kernel for [`get_short_log_walsh`], the FWHT of `log[..n]` with entry zero
+/// replaced by zero, scaled by `n^-1` modulo `GF_MODULUS`.
+///
+/// `n` must be a power of two no larger than `GF_ORDER`.
 fn initialize_short_log_walsh(n: usize) -> Vec<GfElement> {
     let log = &get_exp_log().log;
     let mut kernel = log[..n].to_vec();
@@ -293,6 +312,7 @@ fn initialize_short_log_walsh(n: usize) -> Vec<GfElement> {
     kernel
 }
 
+/// Builds [`Mul16`] from [`Exp`] and [`Log`].
 fn initialize_mul16() -> Box<Mul16> {
     let exp = &get_exp_log().exp;
     let log = &get_exp_log().log;
@@ -318,6 +338,7 @@ fn initialize_mul16() -> Box<Mul16> {
     mul16.into_boxed_slice().try_into().unwrap()
 }
 
+/// Builds [`Mul128`] with the byte layout described on [`Multiply128lutT`].
 fn initialize_mul128() -> Box<Mul128> {
     // Based on:
     // https://github.com/catid/leopard/blob/22ddc7804998d31c8f1a2617ee720e063b1fa6cd/LeopardFF16.cpp#L375
@@ -349,6 +370,7 @@ fn initialize_mul128() -> Box<Mul128> {
     mul128.into_boxed_slice().try_into().unwrap()
 }
 
+/// Builds [`MulGfni`] by combining one matrix per coefficient bit along a Gray code.
 #[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
 fn initialize_mul_gfni() -> Box<MulGfni> {
     let exp = &get_exp_log().exp;
@@ -409,6 +431,9 @@ fn initialize_mul_gfni() -> Box<MulGfni> {
     table.into_boxed_slice().try_into().unwrap()
 }
 
+/// Builds [`Skew`], the logarithms of the FFT butterfly coefficients.
+///
+/// A zero coefficient is stored as `GF_MODULUS`, the logarithm [`Log`] assigns to zero.
 fn initialize_skew() -> Box<Skew> {
     let exp = &get_exp_log().exp;
     let log = &get_exp_log().log;
@@ -469,6 +494,7 @@ mod tests {
         }
     }
 
+    /// Reference GF2P8AFFINEQB on one byte, without the affine constant.
     fn affine(matrix: u64, input: u8) -> u8 {
         let matrix = matrix.to_le_bytes();
         let mut output = 0;

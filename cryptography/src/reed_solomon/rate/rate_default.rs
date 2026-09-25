@@ -8,6 +8,14 @@ use crate::reed_solomon::{
 };
 use core::{cmp::Ordering, marker::PhantomData};
 
+/// Returns `true` if high rate should encode and decode these shard counts, `false` for low rate.
+///
+/// When the counts round up to different powers of two, picks high rate if `original_count` has
+/// the larger one. When they round up to the same power of two, picks high rate if
+/// `original_count <= recovery_count`.
+///
+/// Returns [`Error::UnsupportedShardCount`] if either count is zero, or if the smaller count
+/// rounded up to a power of two plus the larger count exceeds `GF_ORDER`.
 pub(crate) fn use_high_rate(original_count: usize, recovery_count: usize) -> Result<bool, Error> {
     if original_count > GF_ORDER || recovery_count > GF_ORDER {
         return Err(Error::UnsupportedShardCount {
@@ -68,6 +76,7 @@ impl<E: Engine> Rate<E> for DefaultRate<E> {
     }
 }
 
+/// Rate-specific encoder wrapped by [`DefaultRateEncoder`].
 #[derive(Default)]
 enum InnerEncoder<E: Engine> {
     High(HighRateEncoder<E>),
@@ -209,6 +218,7 @@ impl<E: Engine> RateEncoder<E> for DefaultRateEncoder<E> {
     }
 }
 
+/// Rate-specific decoder wrapped by [`DefaultRateDecoder`].
 #[derive(Default)]
 enum InnerDecoder<E: Engine> {
     High(HighRateDecoder<E>),
@@ -367,6 +377,11 @@ impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
 }
 
 impl<E: Engine> DefaultRateDecoder<E> {
+    /// Decodes like [`RateDecoder::decode`], taking the erasure locators from `plan` instead of
+    /// evaluating them.
+    ///
+    /// Returns [`Error::PlanMismatch`] unless `plan` was built for these shard counts, the rate
+    /// this decoder uses, and the received shard indices.
     pub(crate) fn decode_with_plan(
         &mut self,
         compute_recovery: bool,

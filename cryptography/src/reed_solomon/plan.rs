@@ -39,8 +39,13 @@ use fixedbitset::FixedBitSet;
 pub struct Plan {
     original_count: usize,
     recovery_count: usize,
+    /// Whether the high-rate layout applies, which places originals after the recovery block.
     high_rate: bool,
+    /// Received flags indexed by work position, in the layout `DecoderWork` uses for this rate.
     received: FixedBitSet,
+    /// Log erasure locators indexed by work position, one per bit of `received`.
+    ///
+    /// Empty when every original was received.
     coefficients: Vec<GfElement>,
 }
 
@@ -138,6 +143,10 @@ impl Plan {
         })
     }
 
+    /// Returns the log erasure locators indexed by work position.
+    ///
+    /// The slice is empty when every original was received, since decoding then returns before
+    /// reading it.
     pub(crate) fn coefficients(&self) -> &[GfElement] {
         &self.coefficients
     }

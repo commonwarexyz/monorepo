@@ -32,6 +32,9 @@ pub(crate) fn with_erasures<E: Engine, T>(
 
 /// Compute log erasure factors directly from the known positions in a small decoding domain.
 /// This avoids the zeroed `GF_ORDER` buffer and the Walsh transforms of `eval_walsh`.
+///
+/// `erasures.len()` is the domain end `original_count.next_power_of_two() + recovery_count` and
+/// must not exceed [`DIRECT_EVALUATION_LIMIT`].
 fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &FixedBitSet) {
     let chunk_size = original_count.next_power_of_two();
     let mut known = [0; DIRECT_EVALUATION_LIMIT];
@@ -105,6 +108,8 @@ impl<E: Engine> Rate<E> for LowRate<E> {
 /// Reed-Solomon encoder using only low rate.
 pub struct LowRateEncoder<E: Engine> {
     engine: E,
+    /// Originals at `0..original_count`. Encoding leaves the recovery shards at
+    /// `0..recovery_count`.
     work: EncoderWork,
 }
 
@@ -188,6 +193,9 @@ impl<E: Engine> RateEncoder<E> for LowRateEncoder<E> {
 }
 
 impl<E: Engine> LowRateEncoder<E> {
+    /// Validates the parameters, then resets `work` for them with [`Self::work_count`] shards.
+    ///
+    /// Returns the error from [`RateEncoder::validate`] and leaves `work` unchanged on failure.
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -204,6 +212,16 @@ impl<E: Engine> LowRateEncoder<E> {
         Ok(())
     }
 
+    /// Returns the number of shards in the working space.
+    ///
+    /// This is `recovery_count` rounded up to a multiple of the chunk size
+    /// `original_count.next_power_of_two()`. This leaves room for the zero-padded originals in
+    /// the first chunk and for the FFT of every chunk of recovery shards, including a partial
+    /// final chunk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counts are not supported by [`LowRate`].
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
         assert!(Self::supports(original_count, recovery_count));
 
@@ -216,6 +234,8 @@ impl<E: Engine> LowRateEncoder<E> {
 /// Reed-Solomon decoder using only low rate.
 pub struct LowRateDecoder<E: Engine> {
     engine: E,
+    /// Originals at `0..original_count`. Recovery shards start at
+    /// `original_count.next_power_of_two()`.
     work: DecoderWork,
 }
 
@@ -281,6 +301,11 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
 }
 
 impl<E: Engine> LowRateDecoder<E> {
+    /// Decodes like [`RateDecoder::decode`], taking the erasure locators from `plan` instead of
+    /// evaluating them.
+    ///
+    /// Returns [`Error::PlanMismatch`] unless `plan` was built for these counts, low rate, and
+    /// the received shard indices.
     pub(crate) fn decode_with_plan(
         &mut self,
         compute_recovery: bool,
@@ -291,6 +316,10 @@ impl<E: Engine> LowRateDecoder<E> {
 }
 
 impl<E: Engine> LowRateDecoder<E> {
+    /// Reconstructs the missing originals, and the missing recovery shards when
+    /// `compute_recovery` is set, taking the erasure locators from `plan` when given.
+    ///
+    /// Returns `Ok(None)` and clears the received state when every original was provided.
     fn decode_impl(
         &mut self,
         compute_recovery: bool,
@@ -378,6 +407,9 @@ impl<E: Engine> LowRateDecoder<E> {
         Ok(Some(DecoderResult::new(&mut self.work)))
     }
 
+    /// Validates the parameters, then resets `work` for them with [`Self::work_count`] shards.
+    ///
+    /// Returns the error from [`RateDecoder::validate`] and leaves `work` unchanged on failure.
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -400,6 +432,14 @@ impl<E: Engine> LowRateDecoder<E> {
         Ok(())
     }
 
+    /// Returns the number of shards in the working space.
+    ///
+    /// This is `original_count.next_power_of_two() + recovery_count` rounded up to a power of two,
+    /// the size of the decoding transforms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counts are not supported by [`LowRate`].
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
         assert!(Self::supports(original_count, recovery_count));
 

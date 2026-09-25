@@ -93,6 +93,11 @@ impl Default for Neon {
 }
 
 impl Neon {
+    /// Multiplies every element of `x` by the field element with logarithm `log_m`.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support NEON.
     #[target_feature(enable = "neon")]
     unsafe fn mul_neon(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         let lut = &self.mul128[log_m as usize];
@@ -119,6 +124,9 @@ impl Neon {
         }
     }
 
+    /// Multiplies the elements whose low and high bytes are in `value_lo` and `value_hi` by
+    /// the multiplier of `lut`, and returns the low and high product bytes.
+    ///
     /// Implementation of LEO_MUL_128.
     #[inline(always)]
     fn mul_128(
@@ -164,7 +172,7 @@ impl Neon {
         (prod_lo, prod_hi)
     }
 
-    /// Computes `{x_lo, x_hi} ^= {y_lo, y_hi} * log_m`.
+    /// Returns `{x_lo, x_hi} ^ {y_lo, y_hi} * m`, where `m` is the multiplier of `lut`.
     ///
     /// Implementation of LEO_MULADD_128.
     #[inline(always)]
@@ -188,7 +196,8 @@ impl Neon {
 }
 
 impl Neon {
-    /// Implementation of LEO_FFTB_128.
+    /// Implementation of LEO_FFTB_128. Computes `x ^= y * m`, then `y ^= x`, where `m` is
+    /// the field element with logarithm `log_m`.
     #[inline(always)]
     fn fftb_128(
         &self,
@@ -246,6 +255,10 @@ impl Neon {
         }
     }
 
+    /// Applies two FFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
     #[inline(always)]
     fn fft_butterfly_two_layers(
         &self,
@@ -280,6 +293,11 @@ impl Neon {
         }
     }
 
+    /// Runs [`Self::fft_private`] compiled with NEON enabled.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support NEON.
     #[target_feature(enable = "neon")]
     unsafe fn fft_private_neon(
         &self,
@@ -292,6 +310,7 @@ impl Neon {
         self.fft_private(data, pos, size, truncated_size, skew_delta);
     }
 
+    /// In-place FFT of `data[pos..pos + size]`, as specified by [`Engine::fft`].
     #[inline(always)]
     fn fft_private(
         &self,
@@ -344,7 +363,8 @@ impl Neon {
 }
 
 impl Neon {
-    /// Implementation of LEO_IFFTB_128.
+    /// Implementation of LEO_IFFTB_128. Computes `y ^= x`, then `x ^= y * m`, where `m` is
+    /// the field element with logarithm `log_m`.
     #[inline(always)]
     fn ifftb_128(
         &self,
@@ -389,6 +409,7 @@ impl Neon {
         }
     }
 
+    /// Partial IFFT butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn ifft_butterfly_partial(
         &self,
@@ -401,6 +422,10 @@ impl Neon {
         }
     }
 
+    /// Applies two IFFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
     #[inline(always)]
     fn ifft_butterfly_two_layers(
         &self,
@@ -435,6 +460,11 @@ impl Neon {
         }
     }
 
+    /// Runs [`Self::ifft_private`] compiled with NEON enabled.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support NEON.
     #[target_feature(enable = "neon")]
     unsafe fn ifft_private_neon(
         &self,
@@ -447,6 +477,7 @@ impl Neon {
         self.ifft_private(data, pos, size, truncated_size, skew_delta);
     }
 
+    /// In-place IFFT of `data[pos..pos + size]`, as specified by [`Engine::ifft`].
     #[inline(always)]
     fn ifft_private(
         &self,
@@ -498,6 +529,11 @@ impl Neon {
 }
 
 impl Neon {
+    /// Runs [`utils::eval_poly`] compiled with NEON enabled.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support NEON.
     #[target_feature(enable = "neon")]
     unsafe fn eval_poly_neon(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         utils::eval_poly(erasures, truncated_size);

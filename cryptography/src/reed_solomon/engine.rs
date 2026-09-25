@@ -33,6 +33,9 @@
 //! [`Decoder`]: crate::reed_solomon::Decoder
 //! [`rate`]: crate::reed_solomon::rate
 
+/// Runtime CPU feature detection used to select and guard SIMD engines.
+///
+/// Each function returns whether the current CPU supports the named engine's features.
 // TODO(https://github.com/commonwarexyz/monorepo/issues/4414): Bump cpufeatures and remove this workaround.
 #[allow(
     unfulfilled_lint_expectations,
@@ -240,6 +243,8 @@ mod tests {
         engines
     }
 
+    /// Asserts that every engine panics on an FFT and an IFFT with the given arguments
+    /// over `shard_count` zero-length shards.
     fn invalid_transform(
         shard_count: usize,
         pos: usize,

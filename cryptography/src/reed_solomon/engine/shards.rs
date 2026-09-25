@@ -1,8 +1,13 @@
+//! Owned shard storage and mutable shard views, laid out as flat arrays of chunks.
+
 use crate::reed_solomon::engine::SHARD_CHUNK_BYTES;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::ops::{Bound, Index, IndexMut, Range, RangeBounds};
 
+/// Owned work buffer of `shard_count` shards, each `shard_chunk_count` chunks long.
+///
+/// Shard `i` occupies chunks `i * shard_chunk_count..(i + 1) * shard_chunk_count` of `data`.
 pub(crate) struct Shards {
     shard_count: usize,
     /// Shard length in `SHARD_CHUNK_BYTES` chunks.
@@ -13,10 +18,12 @@ pub(crate) struct Shards {
 }
 
 impl Shards {
+    /// Returns a [`ShardsRefMut`] view of all shards.
     pub(crate) fn as_ref_mut(&mut self) -> ShardsRefMut<'_> {
         ShardsRefMut::new(self.shard_count, self.shard_chunk_count, self.data.as_mut())
     }
 
+    /// Creates an empty buffer with zero shards and no allocation.
     pub(crate) const fn new() -> Self {
         Self {
             shard_count: 0,
@@ -25,6 +32,10 @@ impl Shards {
         }
     }
 
+    /// Sets the dimensions to `shard_count` shards of `shard_chunk_count` chunks each.
+    ///
+    /// Existing chunks keep their bytes at the same flat positions and chunks added by growth
+    /// are zeroed. A change in `shard_chunk_count` moves shard boundaries across old data.
     pub(crate) fn resize(&mut self, shard_count: usize, shard_chunk_count: usize) {
         self.shard_count = shard_count;
         self.shard_chunk_count = shard_chunk_count;
@@ -35,6 +46,17 @@ impl Shards {
         );
     }
 
+    /// Copies `shard` into shard `index` using the last-chunk encoding.
+    ///
+    /// Whole chunks are copied verbatim. A partial tail of `2 * n` bytes places `n` low bytes at
+    /// offset 0 and `n` high bytes at offset `SHARD_CHUNK_BYTES / 2` of the final chunk.
+    /// Bytes of shard `index` past the copied data keep their previous values.
+    ///
+    /// `shard` must fit in shard `index`.
+    ///
+    /// # Panics
+    ///
+    /// If `shard.len()` is odd.
     pub(crate) fn insert(&mut self, index: usize, shard: &[u8]) {
         assert_eq!(shard.len() % 2, 0);
 
@@ -95,11 +117,15 @@ impl IndexMut<usize> for Shards {
 /// Mutable reference to a shard array.
 pub struct ShardsRefMut<'a> {
     shard_count: usize,
+    /// Shard length in `SHARD_CHUNK_BYTES` chunks.
     shard_chunk_count: usize,
 
+    /// Exactly `shard_count * shard_chunk_count` chunks. Shard `i` starts at chunk
+    /// `i * shard_chunk_count`.
     data: &'a mut [[u8; SHARD_CHUNK_BYTES]],
 }
 
+/// Four mutable shards returned by [`ShardsRefMut::dist4_mut`].
 type FourShardsMut<'a> = (
     &'a mut [[u8; SHARD_CHUNK_BYTES]],
     &'a mut [[u8; SHARD_CHUNK_BYTES]],
@@ -254,6 +280,9 @@ impl IndexMut<usize> for ShardsRefMut<'_> {
 }
 
 impl ShardsRefMut<'_> {
+    /// Copies shards `src..src + count` to `dest..dest + count`.
+    ///
+    /// The ranges may overlap. Both must lie within `0..self.len()`.
     pub(crate) fn copy_within(&mut self, mut src: usize, mut dest: usize, mut count: usize) {
         src *= self.shard_chunk_count;
         dest *= self.shard_chunk_count;

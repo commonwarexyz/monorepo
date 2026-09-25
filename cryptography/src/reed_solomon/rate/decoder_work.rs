@@ -12,13 +12,21 @@ pub struct DecoderWork {
     recovery_count: usize,
     shard_bytes: usize,
 
+    /// Index in `shards` of original shard 0.
     original_base_pos: usize,
+
+    /// Index in `shards` of recovery shard 0.
     recovery_base_pos: usize,
 
     original_received_count: usize,
     recovery_received_count: usize,
+
+    /// Received flags indexed by position in `shards`, not by shard index.
+    ///
     /// May contain extra zero bits.
     received: FixedBitSet,
+
+    /// Decoding workspace. Original and recovery shard `i` sit at their base position plus `i`.
     shards: Shards,
 }
 
@@ -63,6 +71,10 @@ impl DecoderWork {
         }
     }
 
+    /// Stores original shard `index` at `original_base_pos + index` and marks it received.
+    ///
+    /// Returns an error if `index` is out of range or already received, or if the shard is not
+    /// `shard_bytes` long.
     pub(crate) fn add_original_shard<T: AsRef<[u8]>>(
         &mut self,
         index: usize,
@@ -94,6 +106,10 @@ impl DecoderWork {
         }
     }
 
+    /// Stores recovery shard `index` at `recovery_base_pos + index` and marks it received.
+    ///
+    /// Returns an error if `index` is out of range or already received, or if the shard is not
+    /// `shard_bytes` long.
     pub(crate) fn add_recovery_shard<T: AsRef<[u8]>>(
         &mut self,
         index: usize,
@@ -127,6 +143,10 @@ impl DecoderWork {
 
     /// Begins a decode.
     ///
+    /// Returns the work shards, the original and recovery counts, and the received flags. Returns
+    /// `Ok(None)` if every original was received, or [`Error::NotEnoughShards`] if fewer than
+    /// `original_count` shards were received.
+    ///
     /// The returned `FixedBitSet` may contain extra zero bits.
     pub(crate) fn decode_begin(
         &mut self,
@@ -149,10 +169,20 @@ impl DecoderWork {
         }
     }
 
+    /// Returns the number of original shards.
     pub(crate) const fn original_count(&self) -> usize {
         self.original_count
     }
 
+    /// Configures this work for new shard counts, clears the received state, and resizes
+    /// `shards` to `work_count` shards.
+    ///
+    /// Original shard `i` is stored at `original_base_pos + i` and recovery shard `i` at
+    /// `recovery_base_pos + i`. Retained shard contents are not zeroed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `shard_bytes` is odd.
     pub(crate) fn reset(
         &mut self,
         original_count: usize,
@@ -189,12 +219,16 @@ impl DecoderWork {
             .resize(work_count, shard_bytes.div_ceil(SHARD_CHUNK_BYTES));
     }
 
+    /// Clears the received shards so new ones can be added under the same configuration.
     pub(crate) fn reset_received(&mut self) {
         self.original_received_count = 0;
         self.recovery_received_count = 0;
         self.received.clear();
     }
 
+    /// Returns a restored original shard, or `None` if `index` is out of range or the shard was
+    /// received.
+    ///
     /// This must only be called by `DecoderResult`.
     pub(crate) fn original(&self, index: usize) -> Option<&[u8]> {
         if index >= self.original_count {
@@ -228,6 +262,7 @@ impl DecoderWork {
         }
     }
 
+    /// Undoes the last-chunk encoding of every original shard position.
     pub(crate) fn undo_last_chunk_encoding(&mut self) {
         self.shards.undo_last_chunk_encoding(
             self.shard_bytes,
@@ -235,6 +270,9 @@ impl DecoderWork {
         );
     }
 
+    /// Undoes the last-chunk encoding of every recovery shard position.
+    ///
+    /// Call only after a decode that reconstructed the recovery shards.
     pub(crate) fn undo_last_chunk_encoding_recovery(&mut self) {
         self.shards.undo_last_chunk_encoding(
             self.shard_bytes,
@@ -242,14 +280,17 @@ impl DecoderWork {
         );
     }
 
+    /// Returns the number of original shards not received.
     pub(crate) const fn missing_original_count(&self) -> usize {
         self.original_count - self.original_received_count
     }
 
+    /// Returns the number of recovery shards.
     pub(crate) const fn recovery_count(&self) -> usize {
         self.recovery_count
     }
 
+    /// Returns the number of recovery shards not received.
     pub(crate) const fn missing_recovery_count(&self) -> usize {
         self.recovery_count - self.recovery_received_count
     }

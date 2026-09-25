@@ -39,6 +39,10 @@ pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
 }
 
 /// `x[] ^= y[]`
+///
+/// # Panics
+///
+/// If `xs.len() != ys.len()`.
 #[inline(always)]
 pub fn xor(xs: &mut [[u8; SHARD_CHUNK_BYTES]], ys: &[[u8; SHARD_CHUNK_BYTES]]) {
     assert_eq!(xs.len(), ys.len());
@@ -203,6 +207,10 @@ pub(crate) fn formal_derivative(data: &mut ShardsRefMut<'_>) {
 ///
 /// Output `k` is input `k` XOR input `k + 2^b` for each clear bit `b < 4` of `k`. Shard 15
 /// has no clear bit and is not stored. All 16 inputs are loaded before the first store.
+///
+/// # Panics
+///
+/// If `base + 16 > data.len()`.
 ///
 /// # Safety
 ///

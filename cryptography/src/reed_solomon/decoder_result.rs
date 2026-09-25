@@ -24,6 +24,9 @@ impl DecoderResult<'_> {
 }
 
 impl<'a> DecoderResult<'a> {
+    /// Wraps `work` after a decode that restored at least one missing original.
+    ///
+    /// Dropping the result clears the received-shard state in `work`.
     pub(crate) const fn new(work: &'a mut DecoderWork) -> Self {
         Self { work }
     }
@@ -72,6 +75,10 @@ impl RecoveryDecoderResult<'_> {
 }
 
 impl<'a> RecoveryDecoderResult<'a> {
+    /// Wraps `inner`, which must come from a decode run with `compute_recovery` set.
+    ///
+    /// Otherwise the missing recovery positions hold intermediate transform values, and
+    /// [`Self::recovery`] returns them as if they were shards.
     pub(crate) const fn new(inner: DecoderResult<'a>) -> Self {
         Self { inner }
     }
@@ -81,7 +88,9 @@ impl<'a> RecoveryDecoderResult<'a> {
 ///
 /// This struct is created by [`DecoderResult::original_iter`].
 pub struct Originals<'a> {
+    /// Number of restored originals not yet yielded.
     remaining: usize,
+    /// Original index at which the next scan starts.
     next_index: usize,
     work: &'a DecoderWork,
 }
@@ -114,6 +123,7 @@ impl<'a> Iterator for Originals<'a> {
 impl ExactSizeIterator for Originals<'_> {}
 
 impl<'a> Originals<'a> {
+    /// Creates an iterator over the missing originals in `work`, starting at index 0.
     pub(crate) const fn new(work: &'a DecoderWork) -> Self {
         Self {
             remaining: work.missing_original_count(),
@@ -127,7 +137,9 @@ impl<'a> Originals<'a> {
 ///
 /// This struct is created by [`RecoveryDecoderResult::recovery_iter`].
 pub struct Recoveries<'a> {
+    /// Number of restored recovery shards not yet yielded.
     remaining: usize,
+    /// Recovery index at which the next scan starts.
     next_index: usize,
     work: &'a DecoderWork,
 }
@@ -160,6 +172,10 @@ impl<'a> Iterator for Recoveries<'a> {
 impl ExactSizeIterator for Recoveries<'_> {}
 
 impl<'a> Recoveries<'a> {
+    /// Creates an iterator over the missing recovery shards in `work`, starting at index 0.
+    ///
+    /// `work` must hold a decode that restored at least one original. Otherwise `next` panics
+    /// if any recovery shard is missing.
     pub(crate) const fn new(work: &'a DecoderWork) -> Self {
         Self {
             remaining: work.missing_recovery_count(),
@@ -178,6 +194,8 @@ mod tests {
     use commonware_utils::test_rng;
     use rand::seq::SliceRandom as _;
 
+    /// Encodes three originals into two recovery shards, decodes from original 1 and both
+    /// recovery shards, and checks the restored originals 0 and 2.
     fn simple_roundtrip(shard_size: usize) {
         let original = test_util::generate_original(3, shard_size, 0);
 

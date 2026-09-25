@@ -15,6 +15,8 @@ use super::{
 use arbitrary::Unstructured;
 use fixedbitset::FixedBitSet;
 
+/// Shard lengths in bytes for rate cases: one 2-byte element, one 64-byte chunk, and one element
+/// either side of one and two chunks.
 const SHARD_SIZES: [usize; 6] = [2, 62, 64, 66, 126, 130];
 
 /// Instantiate each supported engine, including implementations below the default CPU priority.
@@ -71,6 +73,10 @@ impl EnginePlan {
     }
 }
 
+/// Checks multiplication on fuzzed chunks with `compare_mul`.
+///
+/// Draws `log_m` from logarithm edge cases, including `GF_MODULUS`, or at random. Draws 0, 1,
+/// 2, 3, or 65 chunks, or 4 to 16.
 fn fuzz_mul(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let log_m = match u.int_in_range(0..=7)? {
         0 => 0,
@@ -97,6 +103,10 @@ fn fuzz_mul(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     Ok(())
 }
 
+/// Checks FFT and IFFT on a fuzzed block with `compare_transform`.
+///
+/// The block of `size = 2^k` shards, `k` in `0..=6`, starts at shard `pos` and is followed by up
+/// to three suffix shards. `skew_delta` is an edge value or random in `0..=GF_ORDER - size`.
 fn fuzz_transform(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let size = 1usize << u.int_in_range(0..=6)?;
     let pos = u.int_in_range(0..=5)?;
@@ -135,6 +145,8 @@ fn fuzz_transform(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     Ok(())
 }
 
+/// Checks the short Walsh locator on a fuzzed power-of-two domain `n <= 2^15` and truncation
+/// `end` in `1..=n`.
 fn fuzz_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let n = 1usize << u.int_in_range(0..=15)?;
     let end = u.int_in_range(1..=n)?;
@@ -142,6 +154,11 @@ fn fuzz_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     Ok(())
 }
 
+/// Checks that `eval_poly_short` on `n` entries matches `Naive::eval_poly` modulo `GF_MODULUS`
+/// on the first `n` outputs and never writes entry `n`.
+///
+/// Entries `0..end` hold values derived from `seed`, and the rest are zero. `n` must be a power
+/// of two below `GF_ORDER`, and `end <= n`.
 fn compare_short_locator(n: usize, end: usize, seed: u16) {
     // The convolution is linear modulo GF_MODULUS, so inputs need not be 0/1 flags. Mix zero,
     // GF_MODULUS (the other encoding of zero), and seeded residues.
@@ -169,13 +186,20 @@ fn compare_short_locator(n: usize, end: usize, seed: u16) {
     assert_eq!(short[n], 0xa5a5, "n={n} end={end} wrote past the domain");
 }
 
-/// Counts bracket the four- and sixteen-shard leaf blocks and each pass width. Chunk counts
-/// bracket the AVX-512 leaf's 8-chunk (512-byte) minimum and its 64-chunk (4 KiB) exclusion.
+/// Shard counts for derivative cases. They bracket the four- and sixteen-shard leaf blocks and
+/// each pass width.
 const DERIVATIVE_COUNTS: [usize; 21] = [
     0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
 ];
+/// Chunks per shard for derivative cases. They bracket the AVX-512 leaf's 8-chunk (512-byte)
+/// minimum and its 64-chunk (4 KiB) exclusion.
 const DERIVATIVE_CHUNKS: [usize; 10] = [0, 1, 3, 7, 8, 9, 17, 63, 64, 65];
 
+/// Checks `formal_derivative` with `compare_derivative` on a fuzzed shard count and chunks per
+/// shard.
+///
+/// The count comes from `DERIVATIVE_COUNTS` or from `0..=129`. The chunks per shard come from
+/// `DERIVATIVE_CHUNKS`.
 fn fuzz_derivative(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let count = if u.arbitrary::<bool>()? {
         DERIVATIVE_COUNTS[u.int_in_range(0..=20)?]
@@ -189,6 +213,10 @@ fn fuzz_derivative(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     Ok(())
 }
 
+/// Checks `formal_derivative` on `count` shards of `chunks` chunks each against the reference
+/// pass schedule.
+///
+/// `input` holds the shards back to back, so its length must be `count * chunks`.
 fn compare_derivative(input: &[[u8; SHARD_CHUNK_BYTES]], count: usize, chunks: usize) {
     // The reference runs the unclamped pass schedule over a zero-padded power-of-two block.
     // Padding shards only absorb higher padding shards and stay zero, so the first `count`
@@ -278,6 +306,8 @@ impl RatePlan {
     }
 }
 
+/// Checks a rate's shortened erasure locator with `compare_rate_locator` on fuzzed counts in
+/// `1..=64`, a fuzzed rate, and a fuzzed received mask over the decoding domain.
 fn fuzz_rate_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let high = u.arbitrary::<bool>()?;
     let original_count = u.int_in_range(1usize..=64)?;
@@ -294,6 +324,13 @@ fn fuzz_rate_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     Ok(())
 }
 
+/// Checks a rate's shortened erasure locator against `Naive::eval_poly` over the full field.
+///
+/// `high` selects the high-rate layout (`rate_high::eval_erasures`) or the low-rate layout
+/// (`rate_low::eval_walsh`). The decoding domain `0..end` places recovery shards (high rate) or
+/// originals (low rate) from 0 and the other kind from `chunk`, the next power of two of the
+/// first kind's count. `received` marks received positions in `0..end`. Only outputs below `end`
+/// are compared, modulo `GF_MODULUS`.
 fn compare_rate_locator(
     high: bool,
     original_count: usize,
@@ -352,15 +389,21 @@ fn compare_rate_locator(
 
 /// Cyclic byte source over fuzz input. Reads zeros when the input is empty.
 struct Input<'a> {
+    /// Fuzz bytes to cycle through.
     bytes: &'a [u8],
+    /// Number of bytes read. The next read takes index `offset % bytes.len()`.
     offset: usize,
 }
 
 impl<'a> Input<'a> {
+    /// Creates a source that starts at the first byte of `bytes`.
     const fn new(bytes: &'a [u8]) -> Self {
         Self { bytes, offset: 0 }
     }
 
+    /// Returns the next byte, wrapping to the start after the last.
+    ///
+    /// Returns 0 if the input is empty.
     const fn byte(&mut self) -> u8 {
         if self.bytes.is_empty() {
             return 0;
@@ -371,7 +414,8 @@ impl<'a> Input<'a> {
     }
 }
 
-/// Chunk and lane offsets vary the bytes when a short input repeats.
+/// Fills every chunk from `input`, adding chunk and lane offsets so the bytes still vary when a
+/// short input repeats.
 fn fill_chunks(chunks: &mut [[u8; SHARD_CHUNK_BYTES]], input: &mut Input<'_>) {
     for (chunk_index, chunk) in chunks.iter_mut().enumerate() {
         let (low, high) = chunk.split_at_mut(SHARD_CHUNK_BYTES / 2);
@@ -388,6 +432,10 @@ fn fill_chunks(chunks: &mut [[u8; SHARD_CHUNK_BYTES]], input: &mut Input<'_>) {
     }
 }
 
+/// Checks `Naive` multiplication by the element with logarithm `log_m` against
+/// `independent_mul`, then checks every engine against `Naive`.
+///
+/// Each chunk holds 32 elements, with low bytes in its first half and high bytes in its second.
 fn compare_mul(input: &[[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
     let mut expected = input.to_vec();
     for chunk in &mut expected {
@@ -407,6 +455,8 @@ fn compare_mul(input: &[[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
     each_engine!(check_mul(input, log_m, &naive));
 }
 
+/// Checks that engine `E` multiplies `input` by the element with logarithm `log_m` to give
+/// `expected`.
 fn check_mul<E: Engine>(
     input: &[[u8; SHARD_CHUNK_BYTES]],
     log_m: GfElement,
@@ -447,6 +497,8 @@ fn independent_mul_coefficient(value: GfElement, coefficient: GfElement) -> GfEl
     polynomial_to_cantor(polynomial_mul(cantor_to_polynomial(value), coefficient))
 }
 
+/// Converts Cantor-basis coordinates `value` to the polynomial basis.
+///
 /// Bit `i` of `value` selects `CANTOR_BASIS[i]`, written in the polynomial basis.
 fn cantor_to_polynomial(value: GfElement) -> GfElement {
     let mut polynomial = 0;
@@ -458,6 +510,8 @@ fn cantor_to_polynomial(value: GfElement) -> GfElement {
     polynomial
 }
 
+/// Converts polynomial-basis `value` to Cantor-basis coordinates, inverting
+/// `cantor_to_polynomial`.
 fn polynomial_to_cantor(value: GfElement) -> GfElement {
     // Invert the basis change by Gauss-Jordan elimination over GF(2). Row `r` keeps
     // `values[r]` equal to the XOR of `CANTOR_BASIS[j]` over the set bits `j` of
@@ -509,6 +563,16 @@ fn polynomial_mul(left: GfElement, right: GfElement) -> GfElement {
     product as GfElement
 }
 
+/// Checks every engine's FFT and IFFT against `Naive` on shards `pos..pos + size` of `input`.
+///
+/// `input` holds `shard_count` shards of `shard_chunks` chunks each. Shards outside the block
+/// must stay unchanged. FFT compares the first `truncated_size` block outputs. IFFT first zeroes
+/// the block's input shards from `pos + truncated_size`, then compares the whole block.
+///
+/// # Panics
+///
+/// Panics if `size` is not a power of two at most `GF_ORDER`, `truncated_size > size`, the block
+/// extends past `shard_count`, or `size > 1` and `skew_delta > GF_ORDER - size`.
 fn compare_transform(
     input: &[[u8; SHARD_CHUNK_BYTES]],
     shard_count: usize,
@@ -571,6 +635,11 @@ fn compare_transform(
     }
 }
 
+/// Checks one FFT or IFFT of `operation_input` on engine `E` against `expected`.
+///
+/// `operation_input` is `input`, with the block's input suffix zeroed for IFFT. Shards outside the
+/// block must match `input`. Block shards are compared where the transform specifies them, which
+/// is the first `truncated_size` for FFT and the whole block for IFFT.
 #[allow(clippy::too_many_arguments)]
 fn check_transform<E: Engine>(
     operation_input: &[[u8; SHARD_CHUNK_BYTES]],
@@ -619,6 +688,9 @@ fn check_transform<E: Engine>(
     }
 }
 
+/// Runs the FFT of `engine`, or the IFFT if `inverse` is set, on shards `pos..pos + size`.
+///
+/// `data` holds `shard_count` shards of `shard_chunks` chunks each.
 #[allow(clippy::too_many_arguments)]
 fn apply_transform<E: Engine>(
     engine: &E,
@@ -639,17 +711,24 @@ fn apply_transform<E: Engine>(
     }
 }
 
+/// Rate encoding and decoding case with fuzzed shard contents and erasure offsets.
 #[derive(Clone)]
 struct RateCase {
     original_count: usize,
     recovery_count: usize,
     shard_bytes: usize,
+    /// `original_count` original shards of `shard_bytes` bytes each.
     originals: Vec<Vec<u8>>,
+    /// First original index dropped in the round with `start_delta` 0.
     original_start: usize,
+    /// First recovery index provided in the round with `start_delta` 0.
     recovery_start: usize,
 }
 
 impl RateCase {
+    /// Creates a case, drawing the erasure offsets and then the shard bytes from `input`.
+    ///
+    /// Both counts must be nonzero.
     fn new(
         original_count: usize,
         recovery_count: usize,
@@ -684,6 +763,8 @@ impl RateCase {
         self.original_count.min(self.recovery_count - 1).max(1)
     }
 
+    /// Returns a mask over originals that marks `missing_count()` consecutive indices as missing,
+    /// starting at `original_start + start_delta` and wrapping at `original_count`.
     fn missing_originals(&self, start_delta: usize) -> Vec<bool> {
         let mut missing = vec![false; self.original_count];
         for offset in 0..self.missing_count() {
@@ -692,6 +773,8 @@ impl RateCase {
         missing
     }
 
+    /// Returns a mask over recovery shards that marks `missing_count()` consecutive indices as
+    /// provided, starting at `recovery_start + start_delta` and wrapping at `recovery_count`.
     fn provided_recoveries(&self, start_delta: usize) -> Vec<bool> {
         let mut provided = vec![false; self.recovery_count];
         for offset in 0..self.missing_count() {
@@ -701,6 +784,7 @@ impl RateCase {
     }
 }
 
+/// Encodes `case` with rate `R` on `engine` and returns the recovery shards.
 fn encode<R, E>(case: &RateCase, engine: E) -> Vec<Vec<u8>>
 where
     R: Rate<E>,
@@ -717,6 +801,9 @@ where
     encode_with::<R, E>(&mut encoder, case)
 }
 
+/// Adds every original of `case` to `encoder`, encodes, and returns the recovery shards.
+///
+/// `encoder` must be configured for the counts and shard size of `case`.
 fn encode_with<R, E>(encoder: &mut R::RateEncoder, case: &RateCase) -> Vec<Vec<u8>>
 where
     R: Rate<E>,
@@ -733,6 +820,10 @@ where
         .collect()
 }
 
+/// Runs one decode round and checks that the result holds exactly the missing originals.
+///
+/// Provides the originals and recovery shards selected by `start_delta`. `decoder` must be
+/// configured for `case`, and `recovery` holds the recovery shards encoded from it.
 fn decode_with<R, E>(
     decoder: &mut R::RateDecoder,
     case: &RateCase,
@@ -765,6 +856,10 @@ fn decode_with<R, E>(
     }
 }
 
+/// Checks encode and decode roundtrips with rate `R` on one engine, including reuse and reset.
+///
+/// The encoder encodes `case_a`, resets, and encodes `case_b`. The decoder decodes two rounds of
+/// `case_a` without a reset, then resets and decodes two rounds of `case_b`.
 fn check_rate_contract<R, E>(case_a: &RateCase, case_b: &RateCase, new_engine: fn() -> E)
 where
     R: Rate<E>,
@@ -809,6 +904,8 @@ where
     decode_with::<R, E>(&mut decoder, case_b, &recovery_b, 0);
 }
 
+/// Checks that rate `R` decodes `case_a` from the reference recovery shards `expected_a`, then
+/// resets and decodes `case_b` from `expected_b`.
 fn decode_reference<R, E>(
     case_a: &RateCase,
     case_b: &RateCase,
@@ -838,6 +935,7 @@ fn decode_reference<R, E>(
     decode_with::<R, E>(&mut decoder, case_b, expected_b, 1);
 }
 
+/// Runs `check_rate_contract` on engine `E` with the rate selected by `kind`.
 fn rate_contract<E: Engine>(
     kind: RateKind,
     case_a: &RateCase,
@@ -851,6 +949,7 @@ fn rate_contract<E: Engine>(
     }
 }
 
+/// Runs `compare_rate` on engine `E` with the rate selected by `kind`.
 fn rate_matches_naive<E: Engine>(
     kind: RateKind,
     case_a: &RateCase,
@@ -868,6 +967,8 @@ fn rate_matches_naive<E: Engine>(
     }
 }
 
+/// Checks that rate `R` on engine `E` encodes `case_a` and, after a reset, `case_b` to the same
+/// recovery shards as `Reference` on `Naive`, then decodes both with `decode_reference`.
 fn compare_rate<R, Reference, E>(case_a: &RateCase, case_b: &RateCase, new_engine: fn() -> E)
 where
     R: Rate<E>,
@@ -896,6 +997,10 @@ where
     decode_reference::<R, E>(case_a, case_b, &expected_a, &expected_b, new_engine);
 }
 
+/// Runs one `decode_with_recovery` round on the public `Decoder` and checks that it restores
+/// exactly the missing originals and the unprovided recovery shards.
+///
+/// `start_delta` selects the round's erasures. `recovery` holds the recovery shards of `case`.
 fn recovery_round(
     decoder: &mut Decoder,
     case: &RateCase,
@@ -926,6 +1031,8 @@ fn recovery_round(
     }
 }
 
+/// Checks the public `Decoder` over two rounds of `case_a` without a reset, then one round of
+/// `case_b` after a reset.
 fn exercise_recovery_reuse(case_a: &RateCase, case_b: &RateCase) {
     let expected_a = encode::<DefaultRate<Naive>, _>(case_a, Naive::new());
     let expected_b = encode::<DefaultRate<Naive>, _>(case_b, Naive::new());
@@ -948,6 +1055,8 @@ fn exercise_recovery_reuse(case_a: &RateCase, case_b: &RateCase) {
     recovery_round(&mut decoder, case_b, &expected_b, 0);
 }
 
+/// Builds the `Plan` for the erasures of round `start_delta` and runs
+/// `prepared_round_with_plan` with it.
 fn prepared_round(
     decoder: &mut Decoder,
     case: &RateCase,
@@ -968,6 +1077,12 @@ fn prepared_round(
     prepared_round_with_plan(decoder, case, recovery, start_delta, &plan);
 }
 
+/// Runs one prepared decode round with `plan` and checks it against ordinary decoding of the
+/// same shards.
+///
+/// First checks that a plan with a different original count and a plan with one more recovery
+/// index both return `Error::PlanMismatch` and leave the submitted shards usable. `case` must have
+/// at least two recovery shards, so one stays unprovided for the second plan.
 fn prepared_round_with_plan(
     decoder: &mut Decoder,
     case: &RateCase,
@@ -1034,6 +1149,8 @@ fn prepared_round_with_plan(
     }
 }
 
+/// Checks prepared recovery across decoder reuse: two rounds of `case_a`, a plan reused for
+/// 2-byte shards, a plan with every original present, and two rounds of `case_b` after a reset.
 fn exercise_prepared_reuse(case_a: &RateCase, case_b: &RateCase) {
     let recovery_a = encode::<DefaultRate<Naive>, _>(case_a, Naive::new());
     let recovery_b = encode::<DefaultRate<Naive>, _>(case_b, Naive::new());
@@ -1107,6 +1224,7 @@ mod tests {
     use crate::reed_solomon::{engine::GF_BITS, rate::rate_low::DIRECT_EVALUATION_LIMIT};
     use commonware_invariants::minifuzz;
 
+    /// Builds a `RateCase` whose shard bytes and erasure offsets derive from `seed`.
     fn fixed_case(
         original_count: usize,
         recovery_count: usize,
@@ -1121,6 +1239,9 @@ mod tests {
         )
     }
 
+    /// Checks that `E::eval_poly` matches `Naive` on `input` truncated at `truncated_size`.
+    ///
+    /// `_new_engine` only fits the `each_engine!` calling convention.
     fn compare_eval_poly<E: Engine>(
         input: &[GfElement; GF_ORDER],
         truncated_size: usize,

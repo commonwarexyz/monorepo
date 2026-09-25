@@ -96,6 +96,11 @@ impl Default for Avx2 {
     }
 }
 
+/// Nibble lookup tables for multiplying by one field element, loaded from a [`Multiply128lutT`].
+///
+/// `t{i}_lo` and `t{i}_hi` hold the low and high product bytes for nibble `i` of the input
+/// element. Each 128-bit table is broadcast to both 128-bit lanes because
+/// `_mm256_shuffle_epi8` looks up bytes within each lane.
 #[derive(Copy, Clone)]
 struct LutAvx2 {
     t0_lo: __m256i,
@@ -145,6 +150,11 @@ impl From<&Multiply128lutT> for LutAvx2 {
 }
 
 impl Avx2 {
+    /// Multiplies every element of `x` by the field element with logarithm `log_m`.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     unsafe fn mul_avx2(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         let lut = &self.mul128[log_m as usize];
@@ -165,6 +175,9 @@ impl Avx2 {
         }
     }
 
+    /// Multiplies the elements whose low and high bytes are in `value_lo` and `value_hi` by
+    /// the multiplier of `lut_avx2`, and returns the low and high product bytes.
+    ///
     /// Implementation of LEO_MUL_256.
     #[inline(always)]
     fn mul_256(value_lo: __m256i, value_hi: __m256i, lut_avx2: LutAvx2) -> (__m256i, __m256i) {
@@ -196,7 +209,7 @@ impl Avx2 {
         (prod_lo, prod_hi)
     }
 
-    /// Computes `{x_lo, x_hi} ^= {y_lo, y_hi} * log_m`.
+    /// Returns `{x_lo, x_hi} ^ {y_lo, y_hi} * m`, where `m` is the multiplier of `lut_avx2`.
     ///
     /// Implementation of LEO_MULADD_256.
     #[inline(always)]
@@ -220,7 +233,8 @@ impl Avx2 {
 }
 
 impl Avx2 {
-    /// Implementation of LEO_FFTB_256.
+    /// Implementation of LEO_FFTB_256. Computes `x ^= y * m`, then `y ^= x`, where `m` is
+    /// the multiplier of `lut_avx2`.
     #[inline(always)]
     fn fftb_256(
         x: &mut [u8; SHARD_CHUNK_BYTES],
@@ -268,6 +282,10 @@ impl Avx2 {
         }
     }
 
+    /// Applies two FFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
     #[inline(always)]
     fn fft_butterfly_two_layers(
         &self,
@@ -302,6 +320,11 @@ impl Avx2 {
         }
     }
 
+    /// Runs [`Self::fft_private`] compiled with AVX2 enabled.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     unsafe fn fft_private_avx2(
         &self,
@@ -314,6 +337,7 @@ impl Avx2 {
         self.fft_private(data, pos, size, truncated_size, skew_delta);
     }
 
+    /// In-place FFT of `data[pos..pos + size]`, as specified by [`Engine::fft`].
     #[inline(always)]
     fn fft_private(
         &self,
@@ -366,7 +390,8 @@ impl Avx2 {
 }
 
 impl Avx2 {
-    /// Implementation of LEO_IFFTB_256.
+    /// Implementation of LEO_IFFTB_256. Computes `y ^= x`, then `x ^= y * m`, where `m` is
+    /// the multiplier of `lut_avx2`.
     #[inline(always)]
     fn ifftb_256(
         x: &mut [u8; SHARD_CHUNK_BYTES],
@@ -398,6 +423,7 @@ impl Avx2 {
         }
     }
 
+    /// Partial IFFT butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
     #[inline(always)]
     fn ifft_butterfly_partial(
         &self,
@@ -413,6 +439,10 @@ impl Avx2 {
         }
     }
 
+    /// Applies two IFFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
     #[inline(always)]
     fn ifft_butterfly_two_layers(
         &self,
@@ -447,6 +477,11 @@ impl Avx2 {
         }
     }
 
+    /// Runs [`Self::ifft_private`] compiled with AVX2 enabled.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     unsafe fn ifft_private_avx2(
         &self,
@@ -459,6 +494,7 @@ impl Avx2 {
         self.ifft_private(data, pos, size, truncated_size, skew_delta);
     }
 
+    /// In-place IFFT of `data[pos..pos + size]`, as specified by [`Engine::ifft`].
     #[inline(always)]
     fn ifft_private(
         &self,
@@ -510,6 +546,11 @@ impl Avx2 {
 }
 
 impl Avx2 {
+    /// Runs [`utils::eval_poly`] compiled with AVX2 enabled.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX2.
     #[target_feature(enable = "avx2")]
     unsafe fn eval_poly_avx2(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         utils::eval_poly(erasures, truncated_size);

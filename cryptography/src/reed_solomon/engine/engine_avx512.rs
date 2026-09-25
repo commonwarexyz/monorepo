@@ -120,6 +120,11 @@ impl From<&MultiplyGfni> for LutGfni {
 }
 
 impl Avx512 {
+    /// Multiplies every element of `x` by the field element with logarithm `log_m`.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[target_feature(enable = "avx512f,gfni")]
     unsafe fn mul_private(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         let lut = LutGfni::from(&self.multiply[log_m as usize]);
@@ -141,6 +146,10 @@ impl Avx512 {
     /// `direct` maps each half into the same output half. Shuffle immediate `0x4e` selects
     /// 128-bit lanes 2, 3, 0, 1, which swaps the halves, so `cross` maps each half into the
     /// other output half. Their XOR is the product.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[inline(always)]
     unsafe fn multiply_512(value: __m512i, lut: LutGfni) -> __m512i {
         // SAFETY: The caller executes within the AVX-512 and GFNI target-feature boundary.
@@ -153,6 +162,10 @@ impl Avx512 {
     }
 
     /// AVX-512 counterpart of LEO_MULADD_256. Returns `x ^ y * m`, where `lut` encodes `m`.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[inline(always)]
     unsafe fn muladd_512(x: __m512i, y: __m512i, lut: LutGfni) -> __m512i {
         // SAFETY: The caller executes within the AVX-512 and GFNI target-feature boundary.
@@ -164,9 +177,14 @@ impl Avx512 {
 }
 
 impl Avx512 {
-    /// AVX-512 counterpart of LEO_FFTB_256. Computes `x ^= y * m`, then `y ^= x`.
+    /// AVX-512 counterpart of LEO_FFTB_256. Computes `x ^= y * m`, then `y ^= x`, where `m` is
+    /// the field element with logarithm `log_m`.
     ///
     /// Partial butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[inline(always)]
     unsafe fn fft_butterfly_partial(
         &self,
@@ -194,6 +212,14 @@ impl Avx512 {
         }
     }
 
+    /// Applies two FFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[inline(always)]
     unsafe fn fft_butterfly_two_layers(
         &self,
@@ -279,6 +305,11 @@ impl Avx512 {
         }
     }
 
+    /// In-place FFT of `data[pos..pos + size]`, as specified by [`Engine::fft`].
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[target_feature(enable = "avx512f,gfni")]
     unsafe fn fft_private(
         &self,
@@ -342,7 +373,14 @@ impl Avx512 {
 }
 
 impl Avx512 {
-    /// AVX-512 counterpart of LEO_IFFTB_256. Computes `y ^= x`, then `x ^= y * m`.
+    /// AVX-512 counterpart of LEO_IFFTB_256. Computes `y ^= x`, then `x ^= y * m`, where `m` is
+    /// the field element with logarithm `log_m`.
+    ///
+    /// Partial IFFT butterfly. The caller handles a `GF_MODULUS` coefficient with `xor`.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[inline(always)]
     unsafe fn ifft_butterfly_partial(
         &self,
@@ -370,6 +408,14 @@ impl Avx512 {
         }
     }
 
+    /// Applies two IFFT layers to shards `pos`, `pos + dist`, `pos + 2 * dist`, and
+    /// `pos + 3 * dist`.
+    ///
+    /// A `GF_MODULUS` coefficient encodes zero, so its butterfly reduces to an XOR.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[inline(always)]
     unsafe fn ifft_butterfly_two_layers(
         &self,
@@ -455,6 +501,11 @@ impl Avx512 {
         }
     }
 
+    /// In-place IFFT of `data[pos..pos + size]`, as specified by [`Engine::ifft`].
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[target_feature(enable = "avx512f,gfni")]
     unsafe fn ifft_private(
         &self,
@@ -519,6 +570,11 @@ impl Avx512 {
 }
 
 impl Avx512 {
+    /// Runs [`utils::eval_poly`] compiled with AVX-512F and GFNI enabled.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support AVX-512F and GFNI.
     #[target_feature(enable = "avx512f,gfni")]
     unsafe fn eval_poly_avx512(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         utils::eval_poly(erasures, truncated_size);
