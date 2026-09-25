@@ -226,6 +226,38 @@ pub(crate) mod test {
         AnyTest::init(context, config, None).await.unwrap()
     }
 
+    #[test_traced]
+    fn test_foreign_db_merkleize_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let db_a = create_test_db(context.child("a")).await;
+            let db_b = create_test_db(context.child("b")).await;
+
+            let seed_a = db_a
+                .new_batch()
+                .write(Sha256::hash(&[b"a"]), Some(vec![1]))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let seed_b = db_b
+                .new_batch()
+                .write(Sha256::hash(&[b"b"]), Some(vec![2]))
+                .merkleize(&db_b, None)
+                .await
+                .unwrap();
+            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+
+            assert_eq!(db_a.bounds().end, db_b.bounds().end);
+            assert_ne!(db_a.root(), db_b.root());
+
+            let batch = db_a.new_batch().write(Sha256::hash(&[b"a"]), Some(vec![3]));
+            assert!(matches!(
+                batch.merkleize(&db_b, None).await,
+                Err(Error::StaleBatch)
+            ));
+        });
+    }
+
     /// Serial-vs-parallel init equivalence for the variable-value partitioned db. The parallel
     /// build streams variable-size ops through the shared log, which the fixed-value equivalence
     /// tests cannot cover.
