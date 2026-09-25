@@ -7,7 +7,7 @@ use core::marker::PhantomData;
 use fixedbitset::FixedBitSet;
 
 // Bound the quadratic calculation and its stack storage.
-pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 512;
+pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 128;
 
 /// Evaluate the erasure coefficients and borrow them for the supplied operation.
 pub(crate) fn with_erasures<E: Engine, T>(
@@ -464,14 +464,9 @@ mod tests {
     #[test]
     fn direct_matches_transform() {
         let mut rng = test_rng();
-        for (original_count, recovery_count) in [
-            (1usize, 1),
-            (3, 5),
-            (7, 13),
-            (34, 66),
-            (84, 166),
-            (128, 384),
-        ] {
+        for (original_count, recovery_count) in
+            [(1usize, 1), (3, 5), (7, 13), (16, 32), (31, 95), (32, 96)]
+        {
             let chunk_size = original_count.next_power_of_two();
             let end = chunk_size + recovery_count;
             for pattern in 0..18 {
