@@ -1,15 +1,19 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryPlan,
+    DecoderResult, EncoderResult, Error, Plan,
     engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, tables},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use core::marker::PhantomData;
 use fixedbitset::FixedBitSet;
 
-// Bound the quadratic calculation and its stack storage.
-pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 128;
+/// Largest decoding domain that `with_erasures` evaluates directly, bounding the quadratic
+/// calculation and its stack storage.
+pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 32;
 
-/// Evaluate the erasure coefficients and borrow them for the supplied operation.
+/// Evaluate the log erasure locator for each position below `end` and pass those entries to
+/// `f`, where `end = original_count.next_power_of_two() + recovery_count`.
 pub(crate) fn with_erasures<E: Engine, T>(
     original_count: usize,
     recovery_count: usize,
@@ -22,19 +26,18 @@ pub(crate) fn with_erasures<E: Engine, T>(
         eval_direct(&mut erasures[..end], original_count, received);
         f(&erasures[..end])
     } else {
-        let mut erasures = [0; GF_ORDER];
-        eval_full::<E>(&mut erasures, original_count, recovery_count, received);
+        let mut erasures = vec![0; end.next_power_of_two()];
+        eval_walsh::<E>(&mut erasures, original_count, recovery_count, received);
         f(&erasures[..end])
     }
 }
 
 /// Compute log erasure factors directly from the known positions in a small decoding domain.
-/// This avoids evaluating the erasure polynomial over the entire field.
-pub(crate) fn eval_direct(
-    erasures: &mut [GfElement],
-    original_count: usize,
-    received: &FixedBitSet,
-) {
+/// This avoids the zeroed buffer and the Walsh transforms of `eval_walsh`.
+///
+/// `erasures.len()` is the domain end `original_count.next_power_of_two() + recovery_count` and
+/// must not exceed [`DIRECT_EVALUATION_LIMIT`].
+fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &FixedBitSet) {
     let chunk_size = original_count.next_power_of_two();
     let mut known = [0; DIRECT_EVALUATION_LIMIT];
     let mut count = 0;
@@ -60,46 +63,37 @@ pub(crate) fn eval_direct(
     }
 }
 
-// The caller supplies a zeroed GF_ORDER buffer.
-pub(crate) fn eval_full<E: Engine>(
-    erasures: &mut [GfElement; GF_ORDER],
+/// Write the log erasure locator for each position in `erasures[..end]` with Walsh
+/// transforms, where `end = original_count.next_power_of_two() + recovery_count`.
+///
+/// Missing shards and every position at and after `end` are erased. `erasures` must hold
+/// `end.next_power_of_two()` zeroed entries. Entries at and after `end` are unspecified.
+///
+/// # Panics
+///
+/// If `erasures.len() != end.next_power_of_two()`.
+pub(crate) fn eval_walsh<E: Engine>(
+    erasures: &mut [GfElement],
     original_count: usize,
     recovery_count: usize,
     received: &FixedBitSet,
 ) {
     let chunk_size = original_count.next_power_of_two();
     let end = chunk_size + recovery_count;
-    let n = end.next_power_of_two();
-    if n < GF_ORDER {
-        // The product of all nonzero field elements is one, so the erased
-        // locator is the reciprocal of the product over known positions.
-        for i in 0..end {
-            if received[i] || (original_count..chunk_size).contains(&i) {
-                erasures[i] = 1;
-            }
-        }
-        engine::utils::eval_poly_short(erasures, end, n);
-        for value in &mut erasures[..end] {
-            *value = GF_MODULUS - *value;
-        }
-        return;
-    }
-    for i in 0..original_count {
-        if !received[i] {
-            erasures[i] = 1;
-        }
-    }
-    for i in chunk_size..end {
-        if !received[i] {
-            erasures[i] = 1;
-        }
-    }
-    erasures[end..].fill(1);
-    E::eval_poly(erasures, GF_ORDER);
-}
 
-// ======================================================================
-// LowRate - PUBLIC
+    // Every position at and after `end` is erased. For each `i`, the values `i ^ j` with
+    // `j != i` cover every nonzero field element, whose product is one. So evaluate the
+    // known positions, which lie below `end`, and negate the logarithm.
+    for i in 0..end {
+        if received[i] || (original_count..chunk_size).contains(&i) {
+            erasures[i] = 1;
+        }
+    }
+    super::eval_locator::<E>(erasures, end);
+    for value in &mut erasures[..end] {
+        *value = GF_MODULUS - *value;
+    }
+}
 
 /// Reed-Solomon encoder/decoder generator using only low rate.
 pub struct LowRate<E: Engine>(PhantomData<E>);
@@ -117,12 +111,11 @@ impl<E: Engine> Rate<E> for LowRate<E> {
     }
 }
 
-// ======================================================================
-// LowRateEncoder - PUBLIC
-
 /// Reed-Solomon encoder using only low rate.
 pub struct LowRateEncoder<E: Engine> {
     engine: E,
+    /// Originals at `0..original_count`. Encoding leaves the recovery shards at
+    /// `0..recovery_count`.
     work: EncoderWork,
 }
 
@@ -150,42 +143,31 @@ impl<E: Engine> RateEncoder<E> for LowRateEncoder<E> {
         let chunk_size = original_count.next_power_of_two();
         let engine = &self.engine;
 
-        // ZEROPAD ORIGINAL
-
+        // Zero-pad the originals to `chunk_size` and IFFT them.
         work.zero(original_count..chunk_size);
-
-        // IFFT - ORIGINAL
-
         engine.ifft(&mut work, 0, chunk_size, original_count, 0);
 
-        // COPY IFFT RESULT TO OTHER CHUNKS
-
+        // Copy the IFFT result into each remaining chunk.
         let mut chunk_start = chunk_size;
         while chunk_start < recovery_count {
             work.copy_within(0, chunk_start, chunk_size);
             chunk_start += chunk_size;
         }
 
-        // FFT - FULL CHUNKS
-
+        // FFT each full chunk.
         let mut chunk_start = 0;
         while chunk_start + chunk_size <= recovery_count {
             engine::fft_skew_end(engine, &mut work, chunk_start, chunk_size, chunk_size);
             chunk_start += chunk_size;
         }
 
-        // FFT - FINAL PARTIAL CHUNK
-
+        // FFT the final partial chunk.
         let last_count = recovery_count % chunk_size;
         if last_count > 0 {
             engine::fft_skew_end(engine, &mut work, chunk_start, chunk_size, last_count);
         }
 
-        // UNDO LAST CHUNK ENCODING
-
         self.work.undo_last_chunk_encoding();
-
-        // DONE
 
         Ok(EncoderResult::new(&mut self.work))
     }
@@ -216,10 +198,10 @@ impl<E: Engine> RateEncoder<E> for LowRateEncoder<E> {
     }
 }
 
-// ======================================================================
-// LowRateEncoder - PRIVATE
-
 impl<E: Engine> LowRateEncoder<E> {
+    /// Validates the parameters, then resets `work` for them with [`Self::work_count`] shards.
+    ///
+    /// Returns the error from [`RateEncoder::validate`] and leaves `work` unchanged on failure.
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -236,6 +218,16 @@ impl<E: Engine> LowRateEncoder<E> {
         Ok(())
     }
 
+    /// Returns the number of shards in the working space.
+    ///
+    /// This is `recovery_count` rounded up to a multiple of the chunk size
+    /// `original_count.next_power_of_two()`. This leaves room for the zero-padded originals in
+    /// the first chunk and for the FFT of every chunk of recovery shards, including a partial
+    /// final chunk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counts are not supported by [`LowRate`].
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
         assert!(Self::supports(original_count, recovery_count));
 
@@ -245,12 +237,11 @@ impl<E: Engine> LowRateEncoder<E> {
     }
 }
 
-// ======================================================================
-// LowRateDecoder - PUBLIC
-
 /// Reed-Solomon decoder using only low rate.
 pub struct LowRateDecoder<E: Engine> {
     engine: E,
+    /// Originals at `0..original_count`. Recovery shards start at
+    /// `original_count.next_power_of_two()`.
     work: DecoderWork,
 }
 
@@ -315,22 +306,30 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// LowRateDecoder - PRIVATE
-
 impl<E: Engine> LowRateDecoder<E> {
+    /// Decodes like [`RateDecoder::decode`], taking the erasure locators from `plan` instead of
+    /// evaluating them.
+    ///
+    /// Returns [`Error::PlanMismatch`] unless `plan` was built for these counts, low rate, and
+    /// the received shard indices.
     pub(crate) fn decode_with_plan(
         &mut self,
         compute_recovery: bool,
-        plan: &RecoveryPlan,
+        plan: &Plan,
     ) -> Result<Option<DecoderResult<'_>>, Error> {
         self.decode_impl(compute_recovery, Some(plan))
     }
+}
 
+impl<E: Engine> LowRateDecoder<E> {
+    /// Reconstructs the missing originals, and the missing recovery shards when
+    /// `compute_recovery` is set, taking the erasure locators from `plan` when given.
+    ///
+    /// Returns `Ok(None)` and clears the received state when every original was provided.
     fn decode_impl(
         &mut self,
         compute_recovery: bool,
-        plan: Option<&RecoveryPlan>,
+        plan: Option<&Plan>,
     ) -> Result<Option<DecoderResult<'_>>, Error> {
         if let Some(plan) = plan {
             self.work.validate_plan(plan, false)?;
@@ -348,14 +347,16 @@ impl<E: Engine> LowRateDecoder<E> {
         let recovery_end = chunk_size + recovery_count;
         let work_count = work.len();
 
+        // Take the erasure locators from the plan, or evaluate them with `with_erasures`.
+        // `with_erasures` lends coefficients from its own scratch buffer, so the rest of decoding
+        // is a closure over either those or the plan's coefficients.
         let mut decode = |erasures: &[GfElement]| {
-            // MULTIPLY SHARDS
-
+            // Multiply received shards by their erasure locators and zero everything else:
+            //
             // work[               .. original_count] = original * erasures
             // work[original_count .. chunk_size    ] = 0
-            // work[chunk_size     .. original_end  ] = recovery * erasures
+            // work[chunk_size     .. recovery_end  ] = recovery * erasures
             // work[recovery_end   ..               ] = 0
-
             for i in 0..original_count {
                 if received[i] {
                     self.engine.mul(&mut work[i], erasures[i]);
@@ -363,9 +364,7 @@ impl<E: Engine> LowRateDecoder<E> {
                     work[i].fill([0; SHARD_CHUNK_BYTES]);
                 }
             }
-
             work.zero(original_count..chunk_size);
-
             for i in chunk_size..recovery_end {
                 if received[i] {
                     self.engine.mul(&mut work[i], erasures[i]);
@@ -373,30 +372,25 @@ impl<E: Engine> LowRateDecoder<E> {
                     work[i].fill([0; SHARD_CHUNK_BYTES]);
                 }
             }
-
             work.zero(recovery_end..);
 
-            // IFFT / FORMAL DERIVATIVE / FFT
-
+            // Take the formal derivative between an IFFT and an FFT.
             self.engine.ifft(&mut work, 0, work_count, recovery_end, 0);
             engine::formal_derivative(&mut work);
             self.engine.fft(&mut work, 0, work_count, recovery_end, 0);
 
-            // REVEAL ERASURES
-
+            // Reveal the missing originals by scaling them by the inverse locator.
             for i in 0..original_count {
                 if !received[i] {
                     self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
                 }
             }
 
-            // REVEAL ERASURES (RECOVERY)
-            //
-            // Only when the caller passed `compute_recovery = true` to `decode`. Recovery shards
-            // live at `work[chunk_size..recovery_end]`. Un-scale the missing ones by the inverse
-            // locator so they hold the canonical recovery values, mirroring the original reveal above.
-            // This lets `DecoderResult::recovery` return them without a separate re-encode.
-
+            // When the caller passed `compute_recovery = true` to `decode`, reveal the missing
+            // recovery shards at `work[chunk_size..recovery_end]`. Scale them by the inverse
+            // locator so they hold the canonical recovery values, mirroring the reveal of the
+            // originals above. This lets `DecoderResult::recovery` return them without a separate
+            // re-encode.
             if compute_recovery {
                 for i in chunk_size..recovery_end {
                     if !received[i] {
@@ -410,18 +404,18 @@ impl<E: Engine> LowRateDecoder<E> {
             None => with_erasures::<E, _>(original_count, recovery_count, received, decode),
         }
 
-        // UNDO LAST CHUNK ENCODING
-
+        // Undo the last chunk encoding of the originals, and of the recovery shards if computed.
         self.work.undo_last_chunk_encoding();
         if compute_recovery {
             self.work.undo_last_chunk_encoding_recovery();
         }
 
-        // DONE
-
         Ok(Some(DecoderResult::new(&mut self.work)))
     }
 
+    /// Validates the parameters, then resets `work` for them with [`Self::work_count`] shards.
+    ///
+    /// Returns the error from [`RateDecoder::validate`] and leaves `work` unchanged on failure.
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -444,6 +438,14 @@ impl<E: Engine> LowRateDecoder<E> {
         Ok(())
     }
 
+    /// Returns the number of shards in the working space.
+    ///
+    /// This is `original_count.next_power_of_two() + recovery_count` rounded up to a power of two,
+    /// the size of the decoding transforms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counts are not supported by [`LowRate`].
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
         assert!(Self::supports(original_count, recovery_count));
 
@@ -451,22 +453,27 @@ impl<E: Engine> LowRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{engine::NoSimd, test_util};
+    use crate::reed_solomon::{engine::Scalar, test_util};
     use commonware_utils::test_rng;
     use rand::RngExt as _;
 
     #[test]
     fn direct_matches_transform() {
         let mut rng = test_rng();
-        for (original_count, recovery_count) in
-            [(1usize, 1), (3, 5), (7, 13), (16, 32), (31, 95), (32, 96)]
-        {
+
+        // The last two domains end one short of and exactly at DIRECT_EVALUATION_LIMIT.
+        let quarter = DIRECT_EVALUATION_LIMIT / 4;
+        for (original_count, recovery_count) in [
+            (1usize, 1),
+            (3, 5),
+            (7, 13),
+            (quarter / 2, quarter),
+            (quarter - 1, 3 * quarter - 1),
+            (quarter, 3 * quarter),
+        ] {
             let chunk_size = original_count.next_power_of_two();
             let end = chunk_size + recovery_count;
             for pattern in 0..18 {
@@ -480,7 +487,7 @@ mod tests {
                         expected[i] = 0;
                     }
                 }
-                NoSimd::eval_poly(&mut expected, GF_ORDER);
+                Scalar::eval_poly(&mut expected, GF_ORDER);
                 let mut actual = [0; DIRECT_EVALUATION_LIMIT];
                 eval_direct(&mut actual[..end], original_count, &received);
                 for i in 0..end {
@@ -494,9 +501,6 @@ mod tests {
             }
         }
     }
-
-    // ============================================================
-    // ROUNDTRIPS - SINGLE ROUND
 
     #[test]
     fn roundtrip_all_originals_missing() {
@@ -604,9 +608,6 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // ROUNDTRIPS - TWO ROUNDS
-
     #[test]
     fn two_rounds_implicit_reset() {
         roundtrip_two_rounds!(
@@ -659,25 +660,22 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // LowRate
-
     mod low_rate {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{LowRate, Rate},
         };
 
         #[test]
         fn decoder() {
             assert!(
-                LowRate::<NoSimd>::decoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                LowRate::<Scalar>::decoder(4096, 61440, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .is_ok()
             );
 
             assert_eq!(
-                LowRate::<NoSimd>::decoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                LowRate::<Scalar>::decoder(61440, 4096, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
@@ -689,12 +687,12 @@ mod tests {
         #[test]
         fn encoder() {
             assert!(
-                LowRate::<NoSimd>::encoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                LowRate::<Scalar>::encoder(4096, 61440, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .is_ok()
             );
 
             assert_eq!(
-                LowRate::<NoSimd>::encoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                LowRate::<Scalar>::encoder(61440, 4096, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
@@ -705,29 +703,29 @@ mod tests {
 
         #[test]
         fn supports() {
-            assert!(!LowRate::<NoSimd>::supports(0, 1));
-            assert!(!LowRate::<NoSimd>::supports(1, 0));
+            assert!(!LowRate::<Scalar>::supports(0, 1));
+            assert!(!LowRate::<Scalar>::supports(1, 0));
 
-            assert!(LowRate::<NoSimd>::supports(4096, 61440));
-            assert!(!LowRate::<NoSimd>::supports(4096, 61441));
-            assert!(!LowRate::<NoSimd>::supports(4097, 61440));
+            assert!(LowRate::<Scalar>::supports(4096, 61440));
+            assert!(!LowRate::<Scalar>::supports(4096, 61441));
+            assert!(!LowRate::<Scalar>::supports(4097, 61440));
 
-            assert!(!LowRate::<NoSimd>::supports(61440, 4096));
+            assert!(!LowRate::<Scalar>::supports(61440, 4096));
 
-            assert!(!LowRate::<NoSimd>::supports(usize::MAX, usize::MAX));
+            assert!(!LowRate::<Scalar>::supports(usize::MAX, usize::MAX));
         }
 
         #[test]
         fn validate() {
             assert_eq!(
-                LowRate::<NoSimd>::validate(1, 1, 123).err(),
+                LowRate::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRate::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
+            assert!(LowRate::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRate::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
+                LowRate::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -735,45 +733,33 @@ mod tests {
             );
         }
     }
-
-    // ============================================================
-    // LowRateEncoder
 
     mod low_rate_encoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{LowRateEncoder, RateEncoder},
         };
 
-        // ==================================================
-        // ERRORS
-
         test_rate_encoder_errors! {LowRateEncoder}
-
-        // ==================================================
-        // supports
 
         #[test]
         fn supports() {
-            assert!(LowRateEncoder::<NoSimd>::supports(4096, 61440));
-            assert!(!LowRateEncoder::<NoSimd>::supports(61440, 4096));
+            assert!(LowRateEncoder::<Scalar>::supports(4096, 61440));
+            assert!(!LowRateEncoder::<Scalar>::supports(61440, 4096));
         }
-
-        // ==================================================
-        // validate
 
         #[test]
         fn validate() {
             assert_eq!(
-                LowRateEncoder::<NoSimd>::validate(1, 1, 123).err(),
+                LowRateEncoder::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRateEncoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
+            assert!(LowRateEncoder::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRateEncoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
+                LowRateEncoder::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -781,57 +767,42 @@ mod tests {
             );
         }
 
-        // ==================================================
-        // work_count
-
         #[test]
         fn work_count() {
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(1, 1), 1);
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(1024, 4096), 4096);
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(1024, 4097), 5120);
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(1025, 4097), 6144);
-            assert_eq!(LowRateEncoder::<NoSimd>::work_count(32768, 32768), 32768);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(1, 1), 1);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(1024, 4096), 4096);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(1024, 4097), 5120);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(1025, 4097), 6144);
+            assert_eq!(LowRateEncoder::<Scalar>::work_count(32768, 32768), 32768);
         }
     }
-
-    // ============================================================
-    // LowRateDecoder
 
     mod low_rate_decoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{LowRateDecoder, RateDecoder},
         };
 
-        // ==================================================
-        // ERRORS
-
         test_rate_decoder_errors! {LowRateDecoder}
-
-        // ==================================================
-        // supports
 
         #[test]
         fn supports() {
-            assert!(LowRateDecoder::<NoSimd>::supports(4096, 61440));
-            assert!(!LowRateDecoder::<NoSimd>::supports(61440, 4096));
+            assert!(LowRateDecoder::<Scalar>::supports(4096, 61440));
+            assert!(!LowRateDecoder::<Scalar>::supports(61440, 4096));
         }
-
-        // ==================================================
-        // validate
 
         #[test]
         fn validate() {
             assert_eq!(
-                LowRateDecoder::<NoSimd>::validate(1, 1, 123).err(),
+                LowRateDecoder::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRateDecoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
+            assert!(LowRateDecoder::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRateDecoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
+                LowRateDecoder::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -839,17 +810,14 @@ mod tests {
             );
         }
 
-        // ==================================================
-        // work_count
-
         #[test]
         fn work_count() {
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1, 1), 2);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1024, 3072), 4096);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1024, 3073), 8192);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1025, 2048), 4096);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(1025, 2049), 8192);
-            assert_eq!(LowRateDecoder::<NoSimd>::work_count(32768, 32768), 65536);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1, 1), 2);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1024, 3072), 4096);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1024, 3073), 8192);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1025, 2048), 4096);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(1025, 2049), 8192);
+            assert_eq!(LowRateDecoder::<Scalar>::work_count(32768, 32768), 65536);
         }
     }
 }

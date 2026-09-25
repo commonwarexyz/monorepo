@@ -1,14 +1,25 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryPlan,
+    DecoderResult, EncoderResult, Error, Plan,
     engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use core::marker::PhantomData;
 use fixedbitset::FixedBitSet;
 
-// The caller supplies a zeroed GF_ORDER buffer.
+/// Write the log erasure locator for each position in `erasures[..end]`, where
+/// `end = recovery_count.next_power_of_two() + original_count`.
+///
+/// Missing recovery shards, the padding in `recovery_count..recovery_count.next_power_of_two()`,
+/// and missing originals are erased. `erasures` must hold `end.next_power_of_two()` zeroed
+/// entries. Entries at and after `end` are unspecified.
+///
+/// # Panics
+///
+/// If `erasures.len() != end.next_power_of_two()`.
 pub(crate) fn eval_erasures<E: Engine>(
-    erasures: &mut [GfElement; GF_ORDER],
+    erasures: &mut [GfElement],
     original_count: usize,
     recovery_count: usize,
     received: &FixedBitSet,
@@ -26,16 +37,8 @@ pub(crate) fn eval_erasures<E: Engine>(
             erasures[i] = 1;
         }
     }
-    let n = end.next_power_of_two();
-    if n == GF_ORDER {
-        E::eval_poly(erasures, end);
-    } else {
-        engine::utils::eval_poly_short(erasures, end, n);
-    }
+    super::eval_locator::<E>(erasures, end);
 }
-
-// ======================================================================
-// HighRate - PUBLIC
 
 /// Reed-Solomon encoder/decoder generator using only high rate.
 pub struct HighRate<E: Engine>(PhantomData<E>);
@@ -53,12 +56,11 @@ impl<E: Engine> Rate<E> for HighRate<E> {
     }
 }
 
-// ======================================================================
-// HighRateEncoder - PUBLIC
-
 /// Reed-Solomon encoder using only high rate.
 pub struct HighRateEncoder<E: Engine> {
     engine: E,
+    /// Originals at `0..original_count`. Encoding leaves the recovery shards at
+    /// `0..recovery_count`.
     work: EncoderWork,
 }
 
@@ -86,16 +88,13 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
         let chunk_size = recovery_count.next_power_of_two();
         let engine = &self.engine;
 
-        // FIRST CHUNK
-
+        // Zero-pad the first chunk past `first_count` and IFFT it.
         let first_count = core::cmp::min(original_count, chunk_size);
-
         work.zero(first_count..chunk_size);
         engine::ifft_skew_end(engine, &mut work, 0, chunk_size, first_count);
 
         if original_count > chunk_size {
-            // FULL CHUNKS
-
+            // IFFT each full chunk and XOR it into the first chunk.
             let mut chunk_start = chunk_size;
             while chunk_start + chunk_size <= original_count {
                 engine::ifft_skew_end(engine, &mut work, chunk_start, chunk_size, chunk_size);
@@ -103,8 +102,7 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
                 chunk_start += chunk_size;
             }
 
-            // FINAL PARTIAL CHUNK
-
+            // Zero-pad the final partial chunk, IFFT it, and XOR it into the first chunk.
             let last_count = original_count % chunk_size;
             if last_count > 0 {
                 work.zero(chunk_start + last_count..);
@@ -113,15 +111,9 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
             }
         }
 
-        // FFT
-
         engine.fft(&mut work, 0, chunk_size, recovery_count, 0);
 
-        // UNDO LAST CHUNK ENCODING
-
         self.work.undo_last_chunk_encoding();
-
-        // DONE
 
         Ok(EncoderResult::new(&mut self.work))
     }
@@ -152,10 +144,10 @@ impl<E: Engine> RateEncoder<E> for HighRateEncoder<E> {
     }
 }
 
-// ======================================================================
-// HighRateEncoder - PRIVATE
-
 impl<E: Engine> HighRateEncoder<E> {
+    /// Validates the parameters, then resets `work` for them with [`Self::work_count`] shards.
+    ///
+    /// Returns the error from [`RateEncoder::validate`] and leaves `work` unchanged on failure.
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -172,6 +164,15 @@ impl<E: Engine> HighRateEncoder<E> {
         Ok(())
     }
 
+    /// Returns the number of shards in the working space.
+    ///
+    /// This is `original_count` rounded up to a multiple of the chunk size
+    /// `recovery_count.next_power_of_two()`, so every chunk of originals, including a
+    /// zero-padded final chunk, has room for its IFFT.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counts are not supported by [`HighRate`].
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
         assert!(Self::supports(original_count, recovery_count));
 
@@ -181,12 +182,11 @@ impl<E: Engine> HighRateEncoder<E> {
     }
 }
 
-// ======================================================================
-// HighRateDecoder - PUBLIC
-
 /// Reed-Solomon decoder using only high rate.
 pub struct HighRateDecoder<E: Engine> {
     engine: E,
+    /// Recovery shards at `0..recovery_count`. Originals start at
+    /// `recovery_count.next_power_of_two()`.
     work: DecoderWork,
 }
 
@@ -251,22 +251,30 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// HighRateDecoder - PRIVATE
-
 impl<E: Engine> HighRateDecoder<E> {
+    /// Decodes like [`RateDecoder::decode`], taking the erasure locators from `plan` instead of
+    /// evaluating them.
+    ///
+    /// Returns [`Error::PlanMismatch`] unless `plan` was built for these counts, high rate, and
+    /// the received shard indices.
     pub(crate) fn decode_with_plan(
         &mut self,
         compute_recovery: bool,
-        plan: &RecoveryPlan,
+        plan: &Plan,
     ) -> Result<Option<DecoderResult<'_>>, Error> {
         self.decode_impl(compute_recovery, Some(plan))
     }
+}
 
+impl<E: Engine> HighRateDecoder<E> {
+    /// Reconstructs the missing originals, and the missing recovery shards when
+    /// `compute_recovery` is set, taking the erasure locators from `plan` when given.
+    ///
+    /// Returns `Ok(None)` and clears the received state when every original was provided.
     fn decode_impl(
         &mut self,
         compute_recovery: bool,
-        plan: Option<&RecoveryPlan>,
+        plan: Option<&Plan>,
     ) -> Result<Option<DecoderResult<'_>>, Error> {
         if let Some(plan) = plan {
             self.work.validate_plan(plan, true)?;
@@ -284,6 +292,7 @@ impl<E: Engine> HighRateDecoder<E> {
         let original_end = chunk_size + original_count;
         let work_count = work.len();
 
+        // Take the erasure locators from the plan, or evaluate them from the received shards.
         let mut owned_erasures;
         #[expect(
             clippy::option_if_let_else,
@@ -292,7 +301,7 @@ impl<E: Engine> HighRateDecoder<E> {
         let erasures: &[GfElement] = match plan {
             Some(plan) => plan.coefficients(),
             None => {
-                owned_erasures = [0; GF_ORDER];
+                owned_erasures = vec![0; original_end.next_power_of_two()];
                 eval_erasures::<E>(
                     &mut owned_erasures,
                     original_count,
@@ -303,13 +312,12 @@ impl<E: Engine> HighRateDecoder<E> {
             }
         };
 
-        // MULTIPLY SHARDS
-
+        // Multiply received shards by their erasure locators and zero everything else:
+        //
         // work[               .. recovery_count] = recovery * erasures
         // work[recovery_count .. chunk_size    ] = 0
         // work[chunk_size     .. original_end  ] = original * erasures
         // work[original_end   ..               ] = 0
-
         for i in 0..recovery_count {
             if received[i] {
                 self.engine.mul(&mut work[i], erasures[i]);
@@ -317,9 +325,7 @@ impl<E: Engine> HighRateDecoder<E> {
                 work[i].fill([0; SHARD_CHUNK_BYTES]);
             }
         }
-
         work.zero(recovery_count..chunk_size);
-
         for i in chunk_size..original_end {
             if received[i] {
                 self.engine.mul(&mut work[i], erasures[i]);
@@ -327,30 +333,24 @@ impl<E: Engine> HighRateDecoder<E> {
                 work[i].fill([0; SHARD_CHUNK_BYTES]);
             }
         }
-
         work.zero(original_end..);
 
-        // IFFT / FORMAL DERIVATIVE / FFT
-
+        // Take the formal derivative between an IFFT and an FFT.
         self.engine.ifft(&mut work, 0, work_count, original_end, 0);
         engine::formal_derivative(&mut work);
         self.engine.fft(&mut work, 0, work_count, original_end, 0);
 
-        // REVEAL ERASURES
-
+        // Reveal the missing originals by scaling them by the inverse locator.
         for i in chunk_size..original_end {
             if !received[i] {
                 self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
             }
         }
 
-        // REVEAL ERASURES (RECOVERY)
-        //
-        // Only when the caller passed `compute_recovery = true` to `decode`. Recovery shards
-        // live at `work[0..recovery_count]`. Un-scale the missing ones by the inverse locator so
-        // they hold the canonical recovery values, mirroring the original reveal above. This lets
-        // `DecoderResult::recovery` return them without a separate re-encode.
-
+        // When the caller passed `compute_recovery = true` to `decode`, reveal the missing
+        // recovery shards at `work[0..recovery_count]`. Scale them by the inverse locator so they
+        // hold the canonical recovery values, mirroring the reveal of the originals above. This
+        // lets `DecoderResult::recovery` return them without a separate re-encode.
         if compute_recovery {
             for i in 0..recovery_count {
                 if !received[i] {
@@ -359,18 +359,18 @@ impl<E: Engine> HighRateDecoder<E> {
             }
         }
 
-        // UNDO LAST CHUNK ENCODING
-
+        // Undo the last chunk encoding of the originals, and of the recovery shards if computed.
         self.work.undo_last_chunk_encoding();
         if compute_recovery {
             self.work.undo_last_chunk_encoding_recovery();
         }
 
-        // DONE
-
         Ok(Some(DecoderResult::new(&mut self.work)))
     }
 
+    /// Validates the parameters, then resets `work` for them with [`Self::work_count`] shards.
+    ///
+    /// Returns the error from [`RateDecoder::validate`] and leaves `work` unchanged on failure.
     fn reset_work(
         original_count: usize,
         recovery_count: usize,
@@ -393,6 +393,14 @@ impl<E: Engine> HighRateDecoder<E> {
         Ok(())
     }
 
+    /// Returns the number of shards in the working space.
+    ///
+    /// This is `recovery_count.next_power_of_two() + original_count` rounded up to a power of two,
+    /// the size of the decoding transforms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counts are not supported by [`HighRate`].
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
         assert!(Self::supports(original_count, recovery_count));
 
@@ -400,16 +408,10 @@ impl<E: Engine> HighRateDecoder<E> {
     }
 }
 
-// ======================================================================
-// TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::reed_solomon::test_util;
-
-    // ============================================================
-    // ROUNDTRIPS - SINGLE ROUND
 
     #[test]
     fn roundtrip_all_originals_missing() {
@@ -517,9 +519,6 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // ROUNDTRIPS - TWO ROUNDS
-
     #[test]
     fn two_rounds_implicit_reset() {
         roundtrip_two_rounds!(
@@ -576,20 +575,17 @@ mod tests {
         );
     }
 
-    // ============================================================
-    // HighRate
-
     mod high_rate {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{HighRate, Rate},
         };
 
         #[test]
         fn decoder() {
             assert_eq!(
-                HighRate::<NoSimd>::decoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                HighRate::<Scalar>::decoder(4096, 61440, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
@@ -598,7 +594,7 @@ mod tests {
             );
 
             assert!(
-                HighRate::<NoSimd>::decoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                HighRate::<Scalar>::decoder(61440, 4096, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .is_ok()
             );
         }
@@ -606,7 +602,7 @@ mod tests {
         #[test]
         fn encoder() {
             assert_eq!(
-                HighRate::<NoSimd>::encoder(4096, 61440, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                HighRate::<Scalar>::encoder(4096, 61440, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
@@ -615,158 +611,128 @@ mod tests {
             );
 
             assert!(
-                HighRate::<NoSimd>::encoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                HighRate::<Scalar>::encoder(61440, 4096, SHARD_CHUNK_BYTES, Scalar::new(), None)
                     .is_ok()
             );
         }
 
         #[test]
         fn supports() {
-            assert!(!HighRate::<NoSimd>::supports(0, 1));
-            assert!(!HighRate::<NoSimd>::supports(1, 0));
+            assert!(!HighRate::<Scalar>::supports(0, 1));
+            assert!(!HighRate::<Scalar>::supports(1, 0));
 
-            assert!(!HighRate::<NoSimd>::supports(4096, 61440));
+            assert!(!HighRate::<Scalar>::supports(4096, 61440));
 
-            assert!(HighRate::<NoSimd>::supports(61440, 4096));
-            assert!(!HighRate::<NoSimd>::supports(61440, 4097));
-            assert!(!HighRate::<NoSimd>::supports(61441, 4096));
+            assert!(HighRate::<Scalar>::supports(61440, 4096));
+            assert!(!HighRate::<Scalar>::supports(61440, 4097));
+            assert!(!HighRate::<Scalar>::supports(61441, 4096));
 
-            assert!(!HighRate::<NoSimd>::supports(usize::MAX, usize::MAX));
+            assert!(!HighRate::<Scalar>::supports(usize::MAX, usize::MAX));
         }
 
         #[test]
         fn validate() {
             assert_eq!(
-                HighRate::<NoSimd>::validate(1, 1, 123).err(),
+                HighRate::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
             assert_eq!(
-                HighRate::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
+                HighRate::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
                     recovery_count: 61440,
                 })
             );
 
-            assert!(HighRate::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
+            assert!(HighRate::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
         }
     }
-
-    // ============================================================
-    // HighRateEncoder
 
     mod high_rate_encoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{HighRateEncoder, RateEncoder},
         };
 
-        // ==================================================
-        // ERRORS
-
         test_rate_encoder_errors! {HighRateEncoder}
-
-        // ==================================================
-        // supports
 
         #[test]
         fn supports() {
-            assert!(!HighRateEncoder::<NoSimd>::supports(4096, 61440));
-            assert!(HighRateEncoder::<NoSimd>::supports(61440, 4096));
+            assert!(!HighRateEncoder::<Scalar>::supports(4096, 61440));
+            assert!(HighRateEncoder::<Scalar>::supports(61440, 4096));
         }
-
-        // ==================================================
-        // validate
 
         #[test]
         fn validate() {
             assert_eq!(
-                HighRateEncoder::<NoSimd>::validate(1, 1, 123).err(),
+                HighRateEncoder::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
             assert_eq!(
-                HighRateEncoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
+                HighRateEncoder::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
                     recovery_count: 61440,
                 })
             );
 
-            assert!(HighRateEncoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
+            assert!(HighRateEncoder::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
         }
-
-        // ==================================================
-        // work_count
 
         #[test]
         fn work_count() {
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(1, 1), 1);
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(4096, 1024), 4096);
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(4097, 1024), 5120);
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(4097, 1025), 6144);
-            assert_eq!(HighRateEncoder::<NoSimd>::work_count(32768, 32768), 32768);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(1, 1), 1);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(4096, 1024), 4096);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(4097, 1024), 5120);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(4097, 1025), 6144);
+            assert_eq!(HighRateEncoder::<Scalar>::work_count(32768, 32768), 32768);
         }
     }
-
-    // ============================================================
-    // HighRateDecoder
 
     mod high_rate_decoder {
         use crate::reed_solomon::{
             Error, SHARD_CHUNK_BYTES,
-            engine::NoSimd,
+            engine::Scalar,
             rate::{HighRateDecoder, RateDecoder},
         };
 
-        // ==================================================
-        // ERRORS
-
         test_rate_decoder_errors! {HighRateDecoder}
-
-        // ==================================================
-        // supports
 
         #[test]
         fn supports() {
-            assert!(!HighRateDecoder::<NoSimd>::supports(4096, 61440));
-            assert!(HighRateDecoder::<NoSimd>::supports(61440, 4096));
+            assert!(!HighRateDecoder::<Scalar>::supports(4096, 61440));
+            assert!(HighRateDecoder::<Scalar>::supports(61440, 4096));
         }
-
-        // ==================================================
-        // validate
 
         #[test]
         fn validate() {
             assert_eq!(
-                HighRateDecoder::<NoSimd>::validate(1, 1, 123).err(),
+                HighRateDecoder::<Scalar>::validate(1, 1, 123).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
             assert_eq!(
-                HighRateDecoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
+                HighRateDecoder::<Scalar>::validate(4096, 61440, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 4096,
                     recovery_count: 61440,
                 })
             );
 
-            assert!(HighRateDecoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
+            assert!(HighRateDecoder::<Scalar>::validate(61440, 4096, SHARD_CHUNK_BYTES).is_ok());
         }
-
-        // ==================================================
-        // work_count
 
         #[test]
         fn work_count() {
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(1, 1), 2);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(2048, 1025), 4096);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(2049, 1025), 8192);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(3072, 1024), 4096);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(3073, 1024), 8192);
-            assert_eq!(HighRateDecoder::<NoSimd>::work_count(32768, 32768), 65536);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(1, 1), 2);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(2048, 1025), 4096);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(2049, 1025), 8192);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(3072, 1024), 4096);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(3073, 1024), 8192);
+            assert_eq!(HighRateDecoder::<Scalar>::work_count(32768, 32768), 65536);
         }
     }
 }

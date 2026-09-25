@@ -1,11 +1,8 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryDecoderResult, RecoveryPlan,
+    DecoderResult, EncoderResult, Error, Plan, RecoveryDecoderResult,
     engine::DefaultEngine,
     rate::{DefaultRate, DefaultRateDecoder, DefaultRateEncoder, Rate, RateDecoder, RateEncoder},
 };
-
-// ======================================================================
-// Encoder - PUBLIC
 
 /// Reed-Solomon encoder using [`DefaultEngine`] and [`DefaultRate`].
 ///
@@ -15,19 +12,19 @@ pub struct Encoder(DefaultRateEncoder<DefaultEngine>);
 impl Encoder {
     /// Adds one original shard to the encoder.
     ///
-    /// Original shards have indexes `0..original_count` corresponding to the order
-    /// in which they are added and these same indexes must be used when decoding.
+    /// Original shards have indexes `0..original_count` corresponding to the order in which they
+    /// are added, and these same indexes must be used when decoding.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn add_original_shard<T: AsRef<[u8]>>(&mut self, original_shard: T) -> Result<(), Error> {
         self.0.add_original_shard(original_shard)
     }
 
-    /// Encodes the added original shards returning [`EncoderResult`]
-    /// which contains the generated recovery shards.
+    /// Encodes the added original shards, returning [`EncoderResult`] which contains the
+    /// generated recovery shards.
     ///
-    /// When returned [`EncoderResult`] is dropped the encoder is
-    /// automatically [`reset`] and ready for new round of encoding.
+    /// When the returned [`EncoderResult`] is dropped the encoder is automatically [`reset`] and
+    /// ready for a new round of encoding.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     ///
@@ -36,8 +33,8 @@ impl Encoder {
         self.0.encode()
     }
 
-    /// Creates new encoder with given configuration
-    /// and allocates required working space.
+    /// Creates a new encoder with the given configuration and allocates the required working
+    /// space.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn new(
@@ -54,11 +51,10 @@ impl Encoder {
         )?))
     }
 
-    /// Resets encoder to given configuration.
+    /// Resets the encoder to the given configuration.
     ///
     /// - Added original shards are forgotten.
-    /// - Existing working space is re-used if it's large enough
-    ///   or re-allocated otherwise.
+    /// - Existing working space is reused if it is large enough, or reallocated otherwise.
     pub fn reset(
         &mut self,
         original_count: usize,
@@ -68,8 +64,7 @@ impl Encoder {
         self.0.reset(original_count, recovery_count, shard_bytes)
     }
 
-    /// Returns `true` if given `original_count` / `recovery_count`
-    /// combination is supported.
+    /// Returns `true` if the given `original_count` / `recovery_count` combination is supported.
     ///
     /// # Examples
     ///
@@ -84,9 +79,6 @@ impl Encoder {
     }
 }
 
-// ======================================================================
-// Decoder - PUBLIC
-
 /// Reed-Solomon decoder using [`DefaultEngine`] and [`DefaultRate`].
 ///
 /// [`DefaultEngine`]: crate::reed_solomon::engine::DefaultEngine
@@ -96,7 +88,7 @@ impl Decoder {
     /// Adds one original shard to the decoder.
     ///
     /// - Shards can be added in any order.
-    /// - Index must be the same that was used in encoding.
+    /// - The index must be the same one used in encoding.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn add_original_shard<T: AsRef<[u8]>>(
@@ -110,7 +102,7 @@ impl Decoder {
     /// Adds one recovery shard to the decoder.
     ///
     /// - Shards can be added in any order.
-    /// - Index must be the same that was used in encoding.
+    /// - The index must be the same one used in encoding.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn add_recovery_shard<T: AsRef<[u8]>>(
@@ -134,35 +126,33 @@ impl Decoder {
         self.0.decode(false)
     }
 
-    /// Decode using coefficients prepared for the exact received indices.
+    /// Like [`decode`](Decoder::decode), but reads erasure coefficients from `plan` instead of
+    /// computing them.
     ///
-    /// The plan can be shared between decoders with different valid shard byte lengths.
-    /// A mismatched plan returns [`Error::RecoveryPlanMismatch`] before changing shard data;
-    /// the decoder may then be used with the correct plan or regular [`decode`](Self::decode).
-    pub fn decode_with_plan(
-        &mut self,
-        plan: &RecoveryPlan,
-    ) -> Result<Option<DecoderResult<'_>>, Error> {
+    /// `plan` must match this decoder's shard counts and received shard indices. Shard byte
+    /// length is not part of the plan. A mismatched plan returns
+    /// [`Error::PlanMismatch`] and leaves the added shards in place, so the decoder can
+    /// retry with the matching plan or [`decode`](Decoder::decode).
+    pub fn decode_with_plan(&mut self, plan: &Plan) -> Result<Option<DecoderResult<'_>>, Error> {
         self.0.decode_with_plan(false, plan)
     }
 
-    /// Like [`decode`](Decoder::decode), but also reconstructs the missing recovery shards, returning
-    /// `Some(`[`RecoveryDecoderResult`]`)` that additionally exposes them via
-    /// [`RecoveryDecoderResult::recovery`] / [`recovery_iter`]. This costs up to `recovery_count`
-    /// extra field multiplications, so prefer [`decode`](Decoder::decode) when only the original data
-    /// is needed.
+    /// Like [`decode`](Decoder::decode), but also reconstructs the missing recovery shards,
+    /// returning `Some(`[`RecoveryDecoderResult`]`)` that additionally exposes them via
+    /// [`RecoveryDecoderResult::recovery`] / [`recovery_iter`]. This adds a multiplication of each
+    /// missing recovery shard by a field element, so prefer [`decode`](Decoder::decode) when only
+    /// the original data is needed.
     ///
     /// [`recovery_iter`]: RecoveryDecoderResult::recovery_iter
     pub fn decode_with_recovery(&mut self) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
         Ok(self.0.decode(true)?.map(RecoveryDecoderResult::new))
     }
 
-    /// Decode and reconstruct missing recovery shards using a matching prepared plan.
-    ///
-    /// A mismatched plan returns [`Error::RecoveryPlanMismatch`] before changing shard data.
+    /// Like [`decode_with_recovery`](Decoder::decode_with_recovery), but reads erasure
+    /// coefficients from `plan` as [`decode_with_plan`](Decoder::decode_with_plan) does.
     pub fn decode_with_recovery_plan(
         &mut self,
-        plan: &RecoveryPlan,
+        plan: &Plan,
     ) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
         Ok(self
             .0
@@ -170,8 +160,8 @@ impl Decoder {
             .map(RecoveryDecoderResult::new))
     }
 
-    /// Creates new decoder with given configuration
-    /// and allocates required working space.
+    /// Creates a new decoder with the given configuration and allocates the required working
+    /// space.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     pub fn new(
@@ -188,11 +178,10 @@ impl Decoder {
         )?))
     }
 
-    /// Resets decoder to given configuration.
+    /// Resets the decoder to the given configuration.
     ///
     /// - Added shards are forgotten.
-    /// - Existing working space is re-used if it's large enough
-    ///   or re-allocated otherwise.
+    /// - Existing working space is reused if it is large enough, or reallocated otherwise.
     pub fn reset(
         &mut self,
         original_count: usize,
@@ -202,8 +191,7 @@ impl Decoder {
         self.0.reset(original_count, recovery_count, shard_bytes)
     }
 
-    /// Returns `true` if given `original_count` / `recovery_count`
-    /// combination is supported.
+    /// Returns `true` if the given `original_count` / `recovery_count` combination is supported.
     ///
     /// # Examples
     ///
@@ -218,9 +206,6 @@ impl Decoder {
     }
 }
 
-// ======================================================================
-// TESTS
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,9 +213,8 @@ mod tests {
     use fixedbitset::FixedBitSet;
     use std::collections::BTreeMap;
 
-    // ============================================================
-    // HELPERS
-
+    /// Encodes `original_count` 1024-byte originals, checks the recovery hash, decodes from the
+    /// given original and recovery indices, and checks every original not given to the decoder.
     fn roundtrip(
         encoder: &mut Encoder,
         decoder: &mut Decoder,
@@ -275,9 +259,6 @@ mod tests {
             }
         }
     }
-
-    // ============================================================
-    // ROUNDTRIP - TWO ROUNDS
 
     #[test]
     fn maximum_decoder_indices() {
@@ -418,9 +399,6 @@ mod tests {
         assert_eq!(restored[&0], original[0]);
         assert_eq!(restored[&1], original[1]);
     }
-
-    // ==================================================
-    // supports
 
     #[test]
     fn supports() {

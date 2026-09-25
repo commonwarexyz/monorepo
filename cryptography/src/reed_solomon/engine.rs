@@ -14,13 +14,12 @@
 //!
 //! - [`Naive`]
 //!     - Simple reference implementation.
-//! - [`NoSimd`]
-//!     - Basic optimized engine without SIMD so that it works on all CPUs.
+//! - [`Scalar`]
+//!     - Portable engine without SIMD that works on all CPUs.
 //! - `Avx2`
 //!     - Optimized engine that takes advantage of the x86(-64) AVX2 SIMD instructions.
 //! - `Avx512`
-//!     - Optimized engine that takes advantage of AVX-512F, AVX-512VL, and AVX-512BW.
-//!       Requires GFNI for field multiplication.
+//!     - Optimized engine that takes advantage of the x86(-64) AVX-512F and GFNI instructions.
 //! - `Ssse3`
 //!     - Optimized engine that takes advantage of the x86(-64) SSSE3 SIMD instructions.
 //! - `Neon`
@@ -34,6 +33,9 @@
 //! [`Decoder`]: crate::reed_solomon::Decoder
 //! [`rate`]: crate::reed_solomon::rate
 
+/// Runtime CPU feature detection used to select and guard SIMD engines.
+///
+/// Each function returns whether the current CPU supports the named engine's features.
 // TODO(https://github.com/commonwarexyz/monorepo/issues/4414): Bump cpufeatures and remove this workaround.
 #[allow(
     unfulfilled_lint_expectations,
@@ -45,7 +47,7 @@
 )]
 mod cpu_features {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    cpufeatures::new!(has_avx512, "avx512f", "avx512vl", "avx512bw", "gfni");
+    cpufeatures::new!(has_avx512, "avx512f", "gfni");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_avx2, "avx2");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -67,13 +69,13 @@ pub(crate) use self::shards::Shards;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub use self::{engine_avx2::Avx2, engine_avx512::Avx512, engine_ssse3::Ssse3};
 pub use self::{
-    engine_default::DefaultEngine, engine_naive::Naive, engine_nosimd::NoSimd, shards::ShardsRefMut,
+    engine_default::DefaultEngine, engine_naive::Naive, engine_scalar::Scalar, shards::ShardsRefMut,
 };
 pub(crate) use utils::{fft_skew_end, formal_derivative, ifft_skew_end, xor_within};
 
 mod engine_default;
 mod engine_naive;
-mod engine_nosimd;
+mod engine_scalar;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 mod engine_avx2;
@@ -91,9 +93,6 @@ mod shards;
 pub mod tables;
 pub mod utils;
 
-// ======================================================================
-// CONST - PUBLIC
-
 /// Size of Galois field element [`GfElement`] in bits.
 pub const GF_BITS: usize = 16;
 
@@ -109,7 +108,7 @@ pub const GF_POLYNOMIAL: usize = 0x1002D;
 /// Byte width of a shard chunk.
 ///
 /// [`Engine`] methods process shard buffers as arrays of this size.
-/// Input shards may span multiple chunks; any partial final chunk is padded
+/// Input shards may span multiple chunks. Any partial final chunk is padded
 /// during processing and returned at the original shard length.
 pub const SHARD_CHUNK_BYTES: usize = 64;
 
@@ -119,14 +118,8 @@ pub const CANTOR_BASIS: [GfElement; GF_BITS] = [
     0xFDB8, 0xFB34, 0xFF38, 0x991E,
 ];
 
-// ======================================================================
-// TYPE ALIASES - PUBLIC
-
 /// Galois field element expressed in the [`CANTOR_BASIS`].
 pub type GfElement = u16;
-
-// ======================================================================
-// Engine - PUBLIC
 
 /// Trait for compute-intensive low-level algorithms needed
 /// for Reed-Solomon encoding/decoding.
@@ -137,9 +130,6 @@ pub type GfElement = u16;
 /// [`Naive`] engine is provided for those who want to
 /// study the source code to understand [`Engine`].
 pub trait Engine {
-    // ============================================================
-    // REQUIRED
-
     /// In-place decimation-in-time FFT (fast Fourier transform).
     ///
     /// Transforms `data[pos..pos + size]`, producing the requested output prefix in
@@ -188,10 +178,13 @@ pub trait Engine {
     /// Exponents `0` and [`GF_MODULUS`] both represent the multiplicative identity.
     fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement);
 
-    // ============================================================
-    // PROVIDED
-
-    /// Evaluate a polynomial whose entries at and after `truncated_size` are zero.
+    /// Replace `erasures` with its XOR convolution against the field logarithm table.
+    ///
+    /// On return, `erasures[i]` is congruent modulo [`GF_MODULUS`] to the sum over `j != i`
+    /// of `erasures[j] * log(i ^ j)`. For a 0/1 erasure indicator, this is the logarithm of
+    /// the product of `i ^ j` over erased `j != i`.
+    ///
+    /// Entries at and after `truncated_size` must be zero.
     ///
     /// # Panics
     ///
@@ -204,6 +197,7 @@ pub trait Engine {
     }
 }
 
+/// Assert the [`Engine::fft`] and [`Engine::ifft`] preconditions.
 #[inline]
 fn validate_transform(
     data: &ShardsRefMut<'_>,
@@ -215,17 +209,42 @@ fn validate_transform(
     assert!(size.is_power_of_two() && size <= GF_ORDER);
     assert!(truncated_size <= size);
     assert!(pos <= data.len() && size <= data.len() - pos);
+
+    // Butterflies read skew entries up to `size + skew_delta - 2`, and `Skew` has
+    // `GF_ORDER - 1` entries. A size-one transform has no butterflies.
     assert!(size == 1 || skew_delta <= GF_ORDER - size);
 }
-
-// ======================================================================
-// TESTS
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
+    /// Every engine the host supports.
+    fn engines() -> Vec<Box<dyn Engine>> {
+        let mut engines: Vec<Box<dyn Engine>> =
+            vec![Box::new(Scalar::new()), Box::new(Naive::new())];
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if cpu_features::avx512() {
+                engines.push(Box::new(Avx512::new()));
+            }
+            if cpu_features::avx2() {
+                engines.push(Box::new(Avx2::new()));
+            }
+            if cpu_features::ssse3() {
+                engines.push(Box::new(Ssse3::new()));
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        if cpu_features::neon() {
+            engines.push(Box::new(Neon::new()));
+        }
+        engines
+    }
+
+    /// Asserts that every engine panics on an FFT and an IFFT with the given arguments
+    /// over `shard_count` zero-length shards.
     fn invalid_transform(
         shard_count: usize,
         pos: usize,
@@ -233,8 +252,7 @@ mod tests {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        let engines: [&dyn Engine; 2] = [&NoSimd::new(), &Naive::new()];
-        for engine in engines {
+        for engine in engines() {
             for inverse in [false, true] {
                 let mut shards = ShardsRefMut::new(shard_count, 0, &mut []);
                 let result = catch_unwind(AssertUnwindSafe(|| {
@@ -288,8 +306,7 @@ mod tests {
 
     #[test]
     fn transform_empty_shards_and_identity() {
-        let engines: [&dyn Engine; 2] = [&NoSimd::new(), &Naive::new()];
-        for engine in engines {
+        for engine in engines() {
             let mut empty = ShardsRefMut::new(GF_ORDER + 3, 0, &mut []);
             engine.fft(&mut empty, 3, GF_ORDER, 0, 0);
             engine.ifft(&mut empty, 3, GF_ORDER, 0, 0);
@@ -309,7 +326,7 @@ mod tests {
         let mut input = Box::new([0; GF_ORDER]);
         input[..4].copy_from_slice(&[1, 0, 1, 1]);
         let mut expected = input.clone();
-        NoSimd::eval_poly(&mut expected, 4);
+        Scalar::eval_poly(&mut expected, 4);
 
         type Evaluate = fn(&mut [GfElement; GF_ORDER], usize);
         let evaluators: &[(Evaluate, bool)] = &[
@@ -334,6 +351,13 @@ mod tests {
                 assert_eq!(actual, input);
             }
         }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[test]
+    #[ignore = "requires AVX-512F and GFNI, run by the emulated AVX-512 CI job"]
+    fn avx512_available() {
+        assert!(cpu_features::avx512());
     }
 
     #[test]

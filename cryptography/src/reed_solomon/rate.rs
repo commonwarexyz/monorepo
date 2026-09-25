@@ -36,7 +36,7 @@ pub use self::{
 };
 use crate::reed_solomon::{
     DecoderResult, EncoderResult, Error,
-    engine::{Engine, SHARD_CHUNK_BYTES},
+    engine::{self, Engine, GF_ORDER, GfElement, SHARD_CHUNK_BYTES},
 };
 
 mod decoder_work;
@@ -45,6 +45,12 @@ pub(crate) mod rate_default;
 pub(crate) mod rate_high;
 pub(crate) mod rate_low;
 
+/// Returns [`Error::InvalidShardSize`] if `work_count` shards of `shard_bytes` bytes, each
+/// rounded up to whole `SHARD_CHUNK_BYTES` chunks, exceed `isize::MAX` bytes in total.
+///
+/// # Panics
+///
+/// Panics if `work_count` is zero.
 const fn validate_work_size(shard_bytes: usize, work_count: usize) -> Result<(), Error> {
     // The chunk array must fit within Vec's maximum allocation size.
     let max_chunks = isize::MAX as usize / SHARD_CHUNK_BYTES;
@@ -54,14 +60,27 @@ const fn validate_work_size(shard_bytes: usize, work_count: usize) -> Result<(),
     Ok(())
 }
 
-// ======================================================================
-// Rate - PUBLIC
+/// XOR-convolve `erasures` with the field logarithm table.
+///
+/// `erasures` holds `n = end.next_power_of_two()` entries, and entries at and after `end` must
+/// be zero. Because `i ^ j < n` for all `i, j < n`, the `n`-point transform matches the first
+/// `n` outputs of the full-field one.
+///
+/// # Panics
+///
+/// If `erasures.len() != end.next_power_of_two()` or `end > GF_ORDER`.
+fn eval_locator<E: Engine>(erasures: &mut [GfElement], end: usize) {
+    let n = erasures.len();
+    assert_eq!(n, end.next_power_of_two());
+    if n == GF_ORDER {
+        E::eval_poly(erasures.try_into().expect("length is GF_ORDER"), end);
+    } else {
+        engine::utils::eval_poly_short(erasures, end);
+    }
+}
 
 /// Reed-Solomon encoder/decoder generator using specific rate.
 pub trait Rate<E: Engine> {
-    // ============================================================
-    // REQUIRED
-
     /// Encoder of this rate.
     type RateEncoder: RateEncoder<E>;
     /// Decoder of this rate.
@@ -70,9 +89,6 @@ pub trait Rate<E: Engine> {
     /// Returns `true` if given `original_count` / `recovery_count`
     /// combination is supported.
     fn supports(original_count: usize, recovery_count: usize) -> bool;
-
-    // ============================================================
-    // PROVIDED
 
     /// Creates new encoder. This is same as [`RateEncoder::new`].
     fn encoder(
@@ -118,17 +134,11 @@ pub trait Rate<E: Engine> {
     }
 }
 
-// ======================================================================
-// RateEncoder - PUBLIC
-
 /// Reed-Solomon encoder using specific rate.
 pub trait RateEncoder<E: Engine>
 where
     Self: Sized,
 {
-    // ============================================================
-    // REQUIRED
-
     /// Rate of this encoder.
     type Rate: Rate<E>;
 
@@ -160,8 +170,13 @@ where
         shard_bytes: usize,
     ) -> Result<(), Error>;
 
-    // ============================================================
-    // PROVIDED
+    /// Checks that the shard counts are supported, the shard size is nonzero and even, and
+    /// this encoder's working space fits in a single allocation.
+    fn validate(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error>;
 
     /// Returns `true` if given `original_count` / `recovery_count`
     /// combination is supported.
@@ -170,29 +185,13 @@ where
     fn supports(original_count: usize, recovery_count: usize) -> bool {
         Self::Rate::supports(original_count, recovery_count)
     }
-
-    /// Returns `Ok(())` if given `original_count` / `recovery_count`
-    /// combination is supported and given `shard_bytes` is valid.
-    fn validate(
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-    ) -> Result<(), Error> {
-        Self::Rate::validate(original_count, recovery_count, shard_bytes)
-    }
 }
-
-// ======================================================================
-// RateDecoder - PUBLIC
 
 /// Reed-Solomon decoder using specific rate.
 pub trait RateDecoder<E: Engine>
 where
     Self: Sized,
 {
-    // ============================================================
-    // REQUIRED
-
     /// Rate of this decoder.
     type Rate: Rate<E>;
 
@@ -211,8 +210,9 @@ where
     ) -> Result<(), Error>;
 
     /// Like [`Decoder::decode`](crate::reed_solomon::Decoder::decode): reconstructs the missing
-    /// shards, or returns `Ok(None)` if every original was already provided (nothing to reconstruct).
-    /// When `compute_recovery` is set, the missing recovery shards are also reconstructed.
+    /// shards, or returns `Ok(None)` if every original was already provided (nothing to
+    /// reconstruct). When `compute_recovery` is set, the missing recovery shards are also
+    /// reconstructed.
     fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error>;
 
     /// Consumes this decoder returning its [`Engine`] and [`DecoderWork`]
@@ -237,8 +237,13 @@ where
         shard_bytes: usize,
     ) -> Result<(), Error>;
 
-    // ============================================================
-    // PROVIDED
+    /// Checks that the shard counts are supported, the shard size is nonzero and even, and
+    /// this decoder's working space fits in a single allocation.
+    fn validate(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error>;
 
     /// Returns `true` if given `original_count` / `recovery_count`
     /// combination is supported.
@@ -247,23 +252,15 @@ where
     fn supports(original_count: usize, recovery_count: usize) -> bool {
         Self::Rate::supports(original_count, recovery_count)
     }
-
-    /// Returns `Ok(())` if given `original_count` / `recovery_count`
-    /// combination is supported and given `shard_bytes` is valid.
-    fn validate(
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-    ) -> Result<(), Error> {
-        Self::Rate::validate(original_count, recovery_count, shard_bytes)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{engine::NoSimd, test_util};
+    use crate::reed_solomon::{engine::Scalar, test_util};
 
+    /// Checks that `validate` accepts the largest whole-chunk shard size for `work_count` work
+    /// shards and rejects that size plus 2 bytes, which needs one more chunk per shard.
     fn check_capacity(validate: impl Fn(usize) -> Result<(), Error>, work_count: usize) {
         let shard_bytes =
             (isize::MAX as usize / SHARD_CHUNK_BYTES / work_count) * SHARD_CHUNK_BYTES;
@@ -276,7 +273,10 @@ mod tests {
         );
     }
 
-    fn check_rate_capacity<R: Rate<NoSimd>>(original_count: usize, recovery_count: usize) {
+    /// Checks the shard size limit for counts such as (9, 3) and (3, 9), which encode with 12
+    /// work shards (9 rounded up to a multiple of the chunk of 4) and decode with 16 (4 + 9
+    /// rounded up to a power of two).
+    fn check_rate_capacity<R: Rate<Scalar>>(original_count: usize, recovery_count: usize) {
         check_capacity(
             |shard_bytes| R::RateEncoder::validate(original_count, recovery_count, shard_bytes),
             12,
@@ -289,10 +289,10 @@ mod tests {
 
     #[test]
     fn working_space_capacity() {
-        check_rate_capacity::<HighRate<NoSimd>>(9, 3);
-        check_rate_capacity::<LowRate<NoSimd>>(3, 9);
-        check_rate_capacity::<DefaultRate<NoSimd>>(9, 3);
-        check_rate_capacity::<DefaultRate<NoSimd>>(3, 9);
+        check_rate_capacity::<HighRate<Scalar>>(9, 3);
+        check_rate_capacity::<LowRate<Scalar>>(3, 9);
+        check_rate_capacity::<DefaultRate<Scalar>>(9, 3);
+        check_rate_capacity::<DefaultRate<Scalar>>(3, 9);
     }
 
     #[test]
@@ -304,19 +304,19 @@ mod tests {
                 .into_iter()
                 .enumerate()
         {
-            let mut encoder = DefaultRate::<NoSimd>::encoder(
+            let mut encoder = DefaultRate::<Scalar>::encoder(
                 original_count,
                 recovery_count,
                 shard_bytes,
-                NoSimd::new(),
+                Scalar::new(),
                 encoder_work,
             )
             .unwrap();
-            let mut decoder = DefaultRate::<NoSimd>::decoder(
+            let mut decoder = DefaultRate::<Scalar>::decoder(
                 original_count,
                 recovery_count,
                 shard_bytes,
-                NoSimd::new(),
+                Scalar::new(),
                 decoder_work,
             )
             .unwrap();
@@ -326,11 +326,11 @@ mod tests {
                     shard_bytes,
                     (phase * 2 + round) as u8,
                 );
-                let mut fresh = DefaultRate::<NoSimd>::encoder(
+                let mut fresh = DefaultRate::<Scalar>::encoder(
                     original_count,
                     recovery_count,
                     shard_bytes,
-                    NoSimd::new(),
+                    Scalar::new(),
                     None,
                 )
                 .unwrap();
@@ -393,6 +393,8 @@ mod tests {
                 ));
             }
 
+            // Hand the next phase work with a shard still pending. Reuse must drop the stale
+            // received state and keep the stale bytes out of its results.
             let pending = vec![255; shard_bytes];
             encoder.add_original_shard(&pending).unwrap();
             decoder.add_original_shard(0, &pending).unwrap();

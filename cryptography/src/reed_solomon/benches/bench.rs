@@ -1,10 +1,12 @@
+//! Benchmarks for the Reed-Solomon encoder, decoder, rates, and engines.
+
 #[cfg(target_arch = "aarch64")]
 use commonware_cryptography::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use commonware_cryptography::reed_solomon::engine::{Avx2, Avx512, Ssse3};
 use commonware_cryptography::reed_solomon::{
     Decoder, Encoder, SHARD_CHUNK_BYTES,
-    engine::{DefaultEngine, Engine, GF_ORDER, Naive, NoSimd, ShardsRefMut},
+    engine::{DefaultEngine, Engine, GF_ORDER, Naive, Scalar, ShardsRefMut},
     rate::{
         HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder, RateDecoder, RateEncoder,
     },
@@ -14,14 +16,12 @@ use rand::{Rng, RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use std::hint::black_box;
 
-// ======================================================================
-// CONST
-
+/// Shard size in bytes used by every benchmark.
 const SHARD_BYTES: usize = 1024;
 
-// ======================================================================
-// UTIL
-
+/// Returns `shard_count` shards of `chunk_count` random `SHARD_CHUNK_BYTES`-byte chunks each.
+///
+/// The bytes come from a `ChaCha8Rng` seeded with `[seed; 32]`, so the output is deterministic.
 fn generate_shard_chunks(
     shard_count: usize,
     chunk_count: usize,
@@ -35,6 +35,12 @@ fn generate_shard_chunks(
     shards
 }
 
+/// Returns `shard_count` random shards of `shard_bytes` bytes each, as [`generate_shard_chunks`]
+/// flattened.
+///
+/// # Panics
+///
+/// Panics if `shard_bytes` is not a multiple of `SHARD_CHUNK_BYTES`.
 fn generate_shards(shard_count: usize, shard_bytes: usize, seed: u8) -> Vec<Vec<u8>> {
     assert_eq!(shard_bytes % SHARD_CHUNK_BYTES, 0);
     generate_shard_chunks(shard_count, shard_bytes / SHARD_CHUNK_BYTES, seed)
@@ -43,6 +49,9 @@ fn generate_shards(shard_count: usize, shard_bytes: usize, seed: u8) -> Vec<Vec<
         .collect()
 }
 
+/// Returns the recovery shards for `original`, encoded with the default [`Encoder`].
+///
+/// Each shard in `original` must be `SHARD_BYTES` long.
 fn encode_recovery(
     original_count: usize,
     recovery_count: usize,
@@ -61,12 +70,14 @@ fn encode_recovery(
         .collect()
 }
 
-// ======================================================================
-// BENCHMARKS - MAIN
-
+/// Benchmarks the default [`Encoder`] and [`Decoder`] over a fixed set of shard counts.
+///
+/// Decoding runs at 1% and 100% loss. A loss of N% drops N% of
+/// `min(original_count, recovery_count)` originals, rounded up, and replaces each with a
+/// recovery shard.
 fn benchmarks_main(c: &mut Criterion) {
     let cases = [
-        // 2^n. original_count == recovery_count
+        // Powers of two with equal original and recovery counts.
         (32, 32),
         (64, 64),
         (128, 128),
@@ -78,7 +89,7 @@ fn benchmarks_main(c: &mut Criterion) {
         (8192, 8192),
         (16384, 16384),
         (32768, 32768),
-        // And some other combinations
+        // Unequal counts and counts that are not powers of two.
         (128, 1024),
         (1000, 100),
         (1000, 10000),
@@ -144,7 +155,7 @@ fn benchmarks_main(c: &mut Criterion) {
             let max_original_loss_count = std::cmp::min(original_count, recovery_count);
 
             for loss_percent in [1, 100] {
-                // We round up to make sure at least one shard is lost for low shard counts.
+                // Round up so at least one shard is lost for low shard counts.
                 let original_loss_count = (max_original_loss_count * loss_percent).div_ceil(100);
                 let original_provided_count = original_count - original_loss_count;
                 let recovery_provided_count = original_loss_count;
@@ -185,13 +196,16 @@ fn benchmarks_main(c: &mut Criterion) {
     }
 }
 
-// ======================================================================
-// BENCHMARKS - RATE
-
+/// Benchmarks the high and low rate encoders and decoders with `DefaultEngine`.
 fn benchmarks_rate(c: &mut Criterion) {
     benchmarks_rate_one(c, "rate", DefaultEngine::new);
 }
 
+/// Benchmarks the high and low rate encoders and decoders with engines from `new_engine`,
+/// labeling each benchmark with `name`.
+///
+/// Each decoder benchmark loses `min(original_count, recovery_count)` originals and replaces
+/// each with a recovery shard from [`encode_recovery`].
 fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn() -> E) {
     let cases = [
         (1024, 1024),
@@ -360,12 +374,10 @@ fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn(
     }
 }
 
-// ======================================================================
-// BENCHMARKS - ENGINES
-
+/// Benchmarks every engine available on the target and detected at runtime.
 fn benchmarks_engine(c: &mut Criterion) {
     benchmarks_engine_one(c, "naive", Naive::new());
-    benchmarks_engine_one(c, "nosimd", NoSimd::new());
+    benchmarks_engine_one(c, "scalar", Scalar::new());
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -375,11 +387,7 @@ fn benchmarks_engine(c: &mut Criterion) {
         if is_x86_feature_detected!("avx2") {
             benchmarks_engine_one(c, "avx2", Avx2::new());
         }
-        if is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512vl")
-            && is_x86_feature_detected!("avx512bw")
-            && is_x86_feature_detected!("gfni")
-        {
+        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("gfni") {
             benchmarks_engine_one(c, "avx512", Avx512::new());
         }
     }
@@ -392,6 +400,8 @@ fn benchmarks_engine(c: &mut Criterion) {
     }
 }
 
+/// Benchmarks `eval_poly`, `mul`, and 128-shard `fft` and `ifft` for `engine`, labeling each
+/// benchmark with `engine_name`.
 fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine: E) {
     let shard_chunk_count = SHARD_BYTES / SHARD_CHUNK_BYTES;
 
@@ -453,9 +463,6 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
         },
     );
 }
-
-// ======================================================================
-// MAIN
 
 criterion_group!(benches_main, benchmarks_main);
 criterion_group!(benches_rate, benchmarks_rate);
