@@ -83,7 +83,7 @@ where
             merkle,
             log,
             hasher,
-            apply_batch_size.get(),
+            apply_batch_size,
         )
         .await?;
 
