@@ -1005,9 +1005,8 @@ mod tests {
             // metric series. If it did, repeated reconnections with fresh
             // channel values would cause unbounded memory growth.
             let attacker_metric = metrics::Message::new_data(&local_pk_clone, 99999);
-            let attacker_count = received_messages.get_or_create(&attacker_metric).get();
-            assert_eq!(
-                attacker_count, 0,
+            assert!(
+                received_messages.get(&attacker_metric).is_none(),
                 "metric was created for attacker-controlled channel, unbounded cardinality bug"
             );
 
