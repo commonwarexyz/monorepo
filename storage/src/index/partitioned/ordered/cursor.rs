@@ -7,12 +7,13 @@
 //! is written once here; [Backing] holds the only thing that differs: the positional store
 //! operations.
 
-use super::partition::Partition;
+use super::{partition::Partition, pool::Pool};
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
 use std::{
     collections::{BTreeMap, HashMap, btree_map, hash_map},
     ops::Range,
+    sync::Arc,
 };
 
 const MUST_CALL_NEXT: &str = "must call Cursor::next()";
@@ -39,6 +40,7 @@ enum Backing<'a, K: Ord + Copy, V> {
     /// run. `run.end` is adjusted by one on each insert/remove to stay aligned with the array.
     Soa {
         partition: &'a mut Partition<K, V>,
+        pool: &'a Arc<Pool>,
         key: K,
         run: Range<usize>,
     },
@@ -104,12 +106,13 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
         match self {
             Self::Soa {
                 partition,
+                pool,
                 key,
                 run,
             } => {
                 #[allow(unstable_name_collisions)]
                 let created = run.is_empty(); // empty run => key absent => this creates it
-                partition.insert_at(run.start + off, *key, value);
+                partition.insert_at(run.start + off, *key, value, pool);
                 run.end += 1;
                 created
             }
@@ -183,6 +186,7 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
     /// index range of `key`'s values within the partition.
     pub(super) const fn soa(
         partition: &'a mut Partition<K, V>,
+        pool: &'a Arc<Pool>,
         key: K,
         run: Range<usize>,
         keys: &'a Gauge,
@@ -192,6 +196,7 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
         Self {
             backing: Backing::Soa {
                 partition,
+                pool,
                 key,
                 run,
             },
