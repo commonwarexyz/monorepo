@@ -232,17 +232,16 @@ pub(crate) mod test {
     /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
     /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
     fn open_delayed_db(
-        context: &Context,
-        label: &'static str,
+        context: Context,
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedTest, crate::qmdb::Error<mmr::Family>>> {
-        let mut cfg = fixed_db_config::<TwoCap>(suffix, context);
+        let mut cfg = fixed_db_config::<TwoCap>(suffix, &context);
         cfg.journal_config.items_per_blob = NZU64!(1000);
-        cfg.journal_config.page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        cfg.journal_config.page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
         DelayedTest::init(
             DelayedSyncContext {
-                inner: context.child(label),
+                inner: context,
                 pending: pending.clone(),
             },
             cfg,
@@ -268,7 +267,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&context, "delayed", "start_sync_overlap", &pending);
+            let open = open_delayed_db(context.child("delayed"), "start_sync_overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);
@@ -312,7 +311,7 @@ pub(crate) mod test {
             let size = db.bounds().end;
             drop(db);
 
-            let db = open_delayed_db(&context, "reopen", "start_sync_overlap", &pending)
+            let db = open_delayed_db(context.child("reopen"), "start_sync_overlap", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -331,7 +330,7 @@ pub(crate) mod test {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&context, "delayed", "start_sync_fail", &pending)
+            let mut db = open_delayed_db(context.child("delayed"), "start_sync_fail", &pending)
                 .await
                 .unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
@@ -372,7 +371,7 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&context, "delayed", "start_sync_prune", &pending);
+            let open = open_delayed_db(context.child("delayed"), "start_sync_prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let key0 = Sha256::hash(&[&0u64.to_be_bytes()]);
             let value0 = Sha256::hash(&[&100u64.to_be_bytes()]);

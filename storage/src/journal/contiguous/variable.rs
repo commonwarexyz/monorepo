@@ -11,6 +11,8 @@
 //! interior fsync holes (skipping any wholly covered by the acknowledged floor), and the
 //! offsets journal only advances after the data it indexes is durable.
 
+#[commonware_macros::stability(ALPHA)]
+use super::checkpoint::Checkpoint;
 use super::{
     Contiguous, Many, Mutable, blob_first_position,
     blobs::{Blob, Blobs, Partition, Replay as BlobReplay, Writable},
@@ -393,6 +395,17 @@ impl<C> Config<C> {
     /// Returns the partition name for the offsets journal.
     fn offsets_partition(&self) -> String {
         format!("{}{}", self.partition, OFFSETS_SUFFIX)
+    }
+
+    /// Configuration of the offsets journal.
+    fn offsets_config(&self) -> fixed::Config {
+        fixed::Config {
+            partition: self.offsets_partition(),
+            items_per_blob: self.items_per_section,
+            page_cache: self.page_cache.clone(),
+            write_buffer: self.write_buffer,
+            replay_buffer: self.replay_buffer,
+        }
     }
 }
 
@@ -1117,13 +1130,7 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         // that reset so stale data is never replayed past the reset size.
         let offsets = fixed::Recovery::<E, u64>::init_cleared(
             context.child("offsets"),
-            fixed::Config {
-                partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
-                page_cache: cfg.page_cache.clone(),
-                write_buffer: cfg.write_buffer,
-                replay_buffer: cfg.replay_buffer,
-            },
+            cfg.offsets_config(),
             max_size,
             || Partition::<E>::remove_all(&data_context, &data_partition),
         )
@@ -1212,6 +1219,102 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         .await
     }
 
+    /// Positions stored items may occupy, from the offsets checkpoint and blob names without
+    /// opening data or offsets blobs.
+    ///
+    /// When a data blob exists, the start matches the one inspection derives from the offsets
+    /// boundary and the oldest data blob, and the end is one past the newest data blob's last
+    /// possible position, so inspection may recover less. Otherwise the range is empty at the
+    /// offsets start. A staged clear yields an empty range at its target.
+    ///
+    /// Returns [Error::Corruption] when the offsets watermark acknowledges items above the
+    /// retained start but no data blob exists.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn span(context: E, cfg: &Config<V::Cfg>) -> Result<Range<u64>, Error> {
+        let per_blob = cfg.items_per_section.get();
+        let offsets_context = context.child("offsets");
+        let offsets_cfg = cfg.offsets_config();
+        let checkpoint =
+            Checkpoint::open(offsets_context.child("meta"), &offsets_cfg.partition).await?;
+        if let Some(target) = checkpoint.clear_target() {
+            return Ok(target..target);
+        }
+        let offsets =
+            fixed::Recovery::<E, u64>::span(&offsets_context, &offsets_cfg, &checkpoint).await?;
+        let names = Partition::<E>::scan_names(&context, &cfg.data_partition()).await?;
+        let data = Partition::<E>::indices(names)?;
+        let (Some(&oldest), Some(&newest)) = (data.first(), data.last()) else {
+            if checkpoint
+                .watermark()
+                .is_some_and(|watermark| watermark > offsets.start)
+            {
+                return Err(Error::Corruption(
+                    "retained offsets have no data blobs".into(),
+                ));
+            }
+            return Ok(offsets.start..offsets.start);
+        };
+        let start = offsets.start.max(blob_first_position(oldest, per_blob)?);
+        let end = blob_first_position(newest, per_blob)?.saturating_add(per_blob);
+        Ok(start..end)
+    }
+
+    /// Reopen the journal without an initialization bound.
+    ///
+    /// A bounded open removes no data blob and defers logical data truncation to publication,
+    /// except when it completes a staged clear. It only trims invalid physical tails, so the
+    /// reopen recovers every retained item.
+    #[commonware_macros::stability(ALPHA)]
+    pub(crate) async fn unbounded(self) -> Result<Self, Error> {
+        let Self {
+            context,
+            cfg,
+            partition,
+            pending,
+            offsets,
+            ..
+        } = self;
+
+        // Reopening a blob fails while a handle from this view is alive, and the reopen derives
+        // this view's children again. Release every handle and partition first.
+        drop(pending);
+        drop(offsets);
+        drop(partition);
+        Self::open(context, cfg, None).await
+    }
+
+    /// An empty journal at `size` over `offsets`, which a completed reset left empty at `size`.
+    ///
+    /// The caller removes the data partition under the staged offsets reset, before it
+    /// completes, so stale data never outlives the reset.
+    #[commonware_macros::stability(ALPHA)]
+    fn cleared(
+        context: E,
+        cfg: Config<V::Cfg>,
+        offsets: fixed::Recovery<E, u64>,
+        size: u64,
+    ) -> Self {
+        let partition = Partition::new(
+            context.child("data"),
+            cfg.data_partition(),
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+        Self {
+            context,
+            cfg,
+            partition,
+            pending: BTreeMap::new(),
+            discarded: Vec::new(),
+            recovered_scans: BTreeMap::new(),
+            offsets: Box::new(offsets),
+            bounds: size..size,
+            bounded: false,
+            #[cfg(test)]
+            halt_after_data_removal: false,
+        }
+    }
+
     /// Scan only the recovery suffix, stopping before decoding discarded frames.
     async fn inspect(
         mut self,
@@ -1279,9 +1382,13 @@ impl<E: Context, V: CodecShared> Recovery<E, V> {
         }
 
         // Data owns the derived suffix. Rebuild it without advancing the watermark so an
-        // interrupted inspection can replay the same source frames on its next attempt.
+        // interrupted inspection can replay the same source frames on its next attempt. An
+        // anchor at the ceiling appends nothing, so publication alone trims the offsets. The
+        // offsets open clamps the watermark to the ceiling, so the anchor never exceeds it.
         let offsets_end = self.offsets.size();
-        self.offsets = self.offsets.truncate(anchor).await?;
+        if anchor < ceiling {
+            self.offsets = self.offsets.truncate(anchor).await?;
+        }
         let mut end = anchor;
         while let Some(writer) = self.pending.get_mut(&blob) {
             // Scan one capacity-bounded blob from its retained start and rebuild every derived
@@ -1504,62 +1611,34 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
         cfg: Config<V::Cfg>,
         size: u64,
     ) -> Result<Self, Error> {
-        let items_per_blob = cfg.items_per_section.get();
-        let data_partition = cfg.data_partition();
-        let data_context = context.child("data");
         let offsets_partition = cfg.offsets_partition();
         let offsets_context = context.child("offsets");
 
         // Fail before writing intent if the offsets blob partitions are already inconsistent.
         Partition::select(&offsets_context, &offsets_partition).await?;
 
-        // `init_at_size_cleared` durably stages the offsets reset, clears the data partition,
-        // then completes the reset. A crash at any point leaves a staged clear that the next
-        // `init` (via `init_cleared`) finishes, so stale data can never outlive the reset.
-        let offsets = Box::new(
-            fixed::Inner::<E, u64>::init_at_size_cleared(
-                offsets_context,
-                fixed::Config {
-                    partition: offsets_partition,
-                    items_per_blob: cfg.items_per_section,
-                    page_cache: cfg.page_cache.clone(),
-                    write_buffer: cfg.write_buffer,
-                    replay_buffer: cfg.replay_buffer,
-                },
-                size,
-                || Partition::<E>::remove_all(&data_context, &data_partition),
-            )
-            .await?,
-        );
+        // A journal sized at `u64::MAX` can never accept an append (the successor size
+        // overflows), so reject it before opening the checkpoint.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        let checkpoint =
+            Checkpoint::open(offsets_context.child("meta"), &offsets_partition).await?;
 
-        let partition = Partition::new(
-            data_context,
-            data_partition,
-            cfg.page_cache,
-            cfg.write_buffer,
-        );
-        let blobs = Writable::recover(
-            partition,
-            BTreeMap::new(),
-            position_to_blob(size, items_per_blob),
+        // Remove the data partition under the staged offsets reset, before it completes. A crash
+        // after staging leaves an intent that the next open completes.
+        let data_partition = cfg.data_partition();
+        let offsets = fixed::Recovery::<E, u64>::open_cleared(
+            offsets_context,
+            cfg.offsets_config(),
+            checkpoint,
+            size,
+            || Partition::<E>::remove_all(&context, &data_partition),
         )
         .await?;
-
-        let metrics = Metrics::new(context);
-        metrics.update(size, size, items_per_blob);
-
-        Ok(Self {
-            blobs,
-            offsets,
-            bounds: size..size,
-            #[cfg(test)]
-            halt_before_offsets_prune: false,
-            items_per_blob: cfg.items_per_section,
-            compression: cfg.compression,
-            codec_config: cfg.codec_config,
-            metrics: Arc::new(metrics),
-            barrier: Barrier::new(size),
-        })
+        Recovery::<E, V>::cleared(context, cfg, offsets, size)
+            .publish(u64::MAX)
+            .await
     }
 
     /// See [Journal::append].
@@ -2514,9 +2593,6 @@ impl<E: Context, V: CodecShared> authenticated::BackingRecovery for Recovery<E, 
     }
 
     async fn reset(mut self, size: u64) -> Result<Self, Error> {
-        if size == u64::MAX {
-            return Err(Error::SizeOverflow);
-        }
         self.pending.clear();
         let partition = self.cfg.data_partition();
         self.offsets = self
@@ -2546,6 +2622,36 @@ impl<E: Context, V: CodecShared> authenticated::Backing<E> for Journal<E, V> {
         max_size: Option<u64>,
     ) -> Result<Self::Recovery, Error> {
         Recovery::open(context, cfg, max_size).await
+    }
+
+    async fn span(context: E, cfg: &Self::Config) -> Result<Range<u64>, Error> {
+        Recovery::<E, V>::span(context, cfg).await
+    }
+
+    async fn clear(context: E, cfg: Self::Config, size: u64) -> Result<Self::Recovery, Error> {
+        let offsets_partition = cfg.offsets_partition();
+        let offsets_context = context.child("offsets");
+        let checkpoint =
+            Checkpoint::open(offsets_context.child("meta"), &offsets_partition).await?;
+
+        // A staged clear already owns the offsets blob partitions. Otherwise fail before writing
+        // intent if they are inconsistent.
+        if checkpoint.clear_target().is_none() {
+            Partition::select(&offsets_context, &offsets_partition).await?;
+        }
+
+        // Remove the data partition under the staged offsets reset, before it completes. A crash
+        // after staging leaves an intent that the next open completes.
+        let data_partition = cfg.data_partition();
+        let offsets = fixed::Recovery::<E, u64>::open_cleared(
+            offsets_context,
+            cfg.offsets_config(),
+            checkpoint,
+            size,
+            || Partition::<E>::remove_all(&context, &data_partition),
+        )
+        .await?;
+        Ok(Recovery::cleared(context, cfg, offsets, size))
     }
 
     type Config = Config<V::Cfg>;
@@ -2725,6 +2831,171 @@ mod tests {
     }
 
     #[test]
+    fn test_bounded_inspection_preserves_acknowledged_offsets_until_publication() {
+        deterministic::Runner::default().start(|context| async move {
+            // Acknowledge 20 items across four full sections, so the offsets watermark is 20.
+            let cfg = initialization_cfg(&context, "inspection-preserves-offsets", 5);
+            let offsets_partition = cfg.offsets_partition();
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for item in 0..20u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("synced"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(20)
+            );
+
+            // The cap clamps the recovery anchor to the ceiling, below the watermark, so inspection
+            // rebuilds no offsets. It must leave the acknowledged offsets and their watermark for
+            // publication to trim. Comparing offsets blob names before and after the open detects
+            // any blob it removed.
+            let offsets_blobs = format!("{offsets_partition}-blobs");
+            let offsets = context.scan(&offsets_blobs).await.unwrap();
+            let pending = Recovery::<_, u64>::open(context.child("bounded"), cfg.clone(), Some(10))
+                .await
+                .unwrap();
+            assert_eq!(pending.bounds, 0..10);
+            drop(pending);
+            assert_eq!(context.scan(&offsets_blobs).await.unwrap(), offsets);
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("inspected"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(20)
+            );
+
+            // Abandoning the unpublished view leaves the full acknowledged history to the next
+            // ordinary open.
+            let journal = Journal::<_, u64>::init(context.child("retry"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..20);
+            for item in 0..20 {
+                assert_eq!(journal.read(item).await.unwrap(), item);
+            }
+            drop(journal);
+
+            // Publishing the full history keeps the offsets watermark at the acknowledged end.
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("reopened"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(20)
+            );
+        });
+    }
+
+    #[test]
+    fn test_bounded_inspection_preserves_data_above_watermark_until_publication() {
+        deterministic::Runner::default().start(|context| async move {
+            // Acknowledge 7 items with a full sync, so the offsets watermark is 7.
+            let cfg = initialization_cfg(&context, "inspection-preserves-data", 5);
+            let offsets_partition = cfg.offsets_partition();
+            let data_partition = cfg.data_partition();
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for item in 0..7u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Make 13 more items durable through start_sync, then crash before the next sync.
+            // The watermark only advances to the previously proven size, so it stays at 7 while
+            // data and offsets reach 20 across four full sections and an empty tail.
+            for item in 7..20u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            handle.await.unwrap();
+            drop(journal);
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("lagged"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(7)
+            );
+
+            // Record every data blob with its size. Comparing them after the open detects a
+            // removed blob or a cut that drops a physical page, and the reads after the retry
+            // catch any lost item.
+            let mut data = Vec::new();
+            for name in context.scan(&data_partition).await.unwrap() {
+                let (_, size) = context.open(&data_partition, &name).await.unwrap();
+                data.push((name, size));
+            }
+            data.sort();
+            assert_eq!(data.len(), 5);
+
+            // The cap lies above the watermark, so inspection rebuilds offsets 7..12 from data.
+            // Blobs 3 and 4 start past the cap and blob 2 holds items past it. Publication owns
+            // removing and truncating that data, so an open that never publishes must leave it.
+            // Inspection also keeps the watermark at 7, so a retry replays the same frames.
+            let pending = Recovery::<_, u64>::open(context.child("bounded"), cfg.clone(), Some(12))
+                .await
+                .unwrap();
+            assert_eq!(pending.bounds, 0..12);
+            assert_eq!(pending.discarded, vec![3, 4]);
+            drop(pending);
+            let mut inspected = Vec::new();
+            for name in context.scan(&data_partition).await.unwrap() {
+                let (_, size) = context.open(&data_partition, &name).await.unwrap();
+                inspected.push((name, size));
+            }
+            inspected.sort();
+            assert_eq!(inspected, data);
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("inspected"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(7)
+            );
+
+            // Abandoning the unpublished view leaves every durable item to the next ordinary
+            // open.
+            let journal = Journal::<_, u64>::init(context.child("retry"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..20);
+            for item in 0..20 {
+                assert_eq!(journal.read(item).await.unwrap(), item);
+            }
+            drop(journal);
+
+            // Publishing the full history advances the offsets watermark to the recovered end.
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("reopened"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(20)
+            );
+        });
+    }
+
+    #[test]
     fn test_recovery_failure_must_not_clear_durable_data() {
         deterministic::Runner::default().start(|context| async move {
             let config = initialization_cfg(&context, "initialization-recovery-clear", 20);
@@ -2803,6 +3074,62 @@ mod tests {
             assert!(
                 matches!(error, Error::Corruption(_)),
                 "must reject missing data instead of authorizing a reset: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_init_sync_rejects_acknowledged_offsets_without_data() {
+        deterministic::Runner::default().start(|context| async move {
+            // Acknowledge 20 items so the offsets watermark exceeds the retained start.
+            let config = initialization_cfg(&context, "initialization-offsets-without-data", 5);
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), config.clone())
+                .await
+                .unwrap();
+            for value in 0..20u64 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+
+            // Record the offsets blob names to show below that nothing is cleared.
+            let offsets_blobs = format!("{}-blobs", config.offsets_partition());
+            let offsets = context.scan(&offsets_blobs).await.unwrap();
+
+            // Remove every data blob with no clear staged. No crash cut reaches this state, so
+            // this covers the corruption policy for external damage.
+            context
+                .remove(&config.data_partition(), None)
+                .await
+                .unwrap();
+
+            // Without data blobs the span would collapse to the offsets start 0. Start 7 lies
+            // inside the acknowledged range but an empty span at 0 does not cover it, so init_sync
+            // would clear the acknowledged items. The span must report corruption instead.
+            let result = authenticated::init_sync::<_, Journal<_, u64>>(
+                context.child("sync"),
+                config.clone(),
+                7..27,
+            )
+            .await;
+            assert!(
+                matches!(
+                    &result,
+                    Err(Error::Corruption(message))
+                        if message == "retained offsets have no data blobs"
+                ),
+                "{result:?}"
+            );
+
+            // Nothing was cleared. The offsets blobs and the acknowledged watermark remain.
+            assert_eq!(context.scan(&offsets_blobs).await.unwrap(), offsets);
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("checkpoint"),
+                    &config.offsets_partition()
+                )
+                .await
+                .unwrap(),
+                Some(20)
             );
         });
     }
@@ -4190,7 +4517,7 @@ mod tests {
                 replay_buffer: NZUsize!(1024),
             };
 
-            // The internal offsets journal rejects a maximal size, so init_at_size propagates it.
+            // init_at_size rejects a maximal size before opening the offsets checkpoint.
             assert!(matches!(
                 Journal::<_, u64>::init_at_size(context.child("max"), cfg, u64::MAX).await,
                 Err(Error::SizeOverflow)
@@ -8877,6 +9204,97 @@ mod tests {
             let bounds = journal.bounds();
             assert!(bounds.is_empty());
             assert_eq!(bounds.start, lower_bound);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test `init_sync` as the first open after a clear crashed with its intent staged.
+    #[rstest::rstest]
+    fn test_init_sync_after_interrupted_clear(
+        #[values(7, 50, 60)] start: u64,
+        #[values(false, true)] removed: bool,
+    ) {
+        deterministic::Runner::default().start(|context| async move {
+            let cfg = Config {
+                partition: "test-interrupted-clear".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                write_buffer: NZUsize!(1024),
+                replay_buffer: NZUsize!(1024),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            };
+
+            // Persist 30 items across six sections.
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for value in 0..30u64 {
+                (journal, _) = journal.append(&value).await.unwrap();
+            }
+            drop(journal.sync().await.unwrap());
+
+            // Crash a clear to 50 after it durably staged its intent, either before or after it
+            // removed the data partition. Staging writes only the offsets checkpoint, so the
+            // offsets blobs survive in both cuts.
+            fixed::Journal::<_, u64>::test_stage_clear(
+                context.child("intent"),
+                &cfg.offsets_partition(),
+                50,
+            )
+            .await
+            .unwrap();
+            if removed {
+                context.remove(&cfg.data_partition(), None).await.unwrap();
+            }
+
+            // No ordinary open consumes the intent first. The span of a staged clear is empty at
+            // its target, so only a start of 50 calls `recover`, which completes the staged clear.
+            // Starts 7 and 60 call `clear`, which replaces the intent with a clear to the start.
+            let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
+                context.child("sync"),
+                cfg.clone(),
+                start..start + 20,
+            )
+            .await
+            .unwrap();
+            assert_eq!(journal.bounds(), start..start);
+
+            // The reset journal appends from the sync start. Values from 1000 differ from every
+            // stale value, so the reads below tell new items from stale ones.
+            for value in 0..3u64 {
+                let pos;
+                (journal, pos) = journal.append(&(1000 + value)).await.unwrap();
+                assert_eq!(pos, start + value);
+            }
+            drop(journal.sync().await.unwrap());
+
+            // Reopening retains only the new items.
+            let journal = Journal::<_, u64>::init(context.child("reopen"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), start..start + 3);
+            for value in 0..3u64 {
+                assert_eq!(journal.read(start + value).await.unwrap(), 1000 + value);
+            }
+
+            // Positions below the start are pruned and positions past the new items are out of
+            // range, so no stale item from before the clear is readable.
+            for pos in 0..30 {
+                let result = journal.read(pos).await;
+                if pos < start {
+                    assert!(
+                        matches!(result, Err(Error::ItemPruned(_))),
+                        "{pos}: {result:?}"
+                    );
+                } else if pos >= start + 3 {
+                    assert!(
+                        matches!(result, Err(Error::ItemOutOfRange(_))),
+                        "{pos}: {result:?}"
+                    );
+                }
+            }
 
             journal.destroy().await.unwrap();
         });

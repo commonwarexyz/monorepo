@@ -237,6 +237,12 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     /// One blob per section.
     pub(crate) blobs: BTreeMap<u64, F::Buffer>,
 
+    /// Sections above this ceiling remain unopened until truncation or clear removes them.
+    ceiling: u64,
+
+    /// Unopened sections above `ceiling` in ascending order, so removal can run newest-first.
+    discarded: Vec<u64>,
+
     /// A section number before which all sections have been pruned during
     /// the current execution. Not persisted across restarts.
     oldest_retained_section: u64,
@@ -264,17 +270,26 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Scans the partition for existing blobs and opens them.
     pub async fn init(context: E, cfg: Config<F>) -> Result<Self, Error> {
-        // Open each canonical section in storage order.
-        let mut blobs = BTreeMap::new();
-        let stored_blobs = stored_names(&context, &cfg.partition).await?;
+        Self::init_bounded(context, cfg, u64::MAX).await
+    }
 
-        for name in stored_blobs {
-            let (blob, size) = context.open(&cfg.partition, &name).await?;
+    /// Open only sections through `ceiling`. [Self::truncate_pending] or [Self::clear] removes the
+    /// remaining sections and must run before the caller publishes the manager.
+    pub async fn init_bounded(context: E, cfg: Config<F>, ceiling: u64) -> Result<Self, Error> {
+        let mut blobs = BTreeMap::new();
+        let mut discarded = Vec::new();
+        for name in stored_names(&context, &cfg.partition).await? {
             let section = section_from_name(&name)?;
+            if section > ceiling {
+                discarded.push(section);
+                continue;
+            }
+            let (blob, size) = context.open(&cfg.partition, &name).await?;
             debug!(section, blob = hex(&name), size, "loaded section");
             let buffer = cfg.factory.create(blob, size).await?;
             blobs.insert(section, buffer);
         }
+        discarded.sort_unstable();
 
         // Initialize metrics
         let tracked = context.gauge("tracked", "Number of blobs");
@@ -287,6 +302,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             partition: cfg.partition,
             factory: cfg.factory,
             blobs,
+            ceiling,
+            discarded,
             oldest_retained_section: 0,
             tracked,
             synced,
@@ -320,6 +337,10 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// Get a mutable reference to a blob, creating it if it doesn't exist.
     pub async fn get_or_create(&mut self, section: u64) -> Result<&mut F::Buffer, Error> {
         self.prune_guard(section)?;
+        assert!(
+            section <= self.ceiling,
+            "sections above the initialization ceiling must be truncated before creation"
+        );
 
         match self.blobs.entry(section) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
@@ -509,6 +530,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     ///
     /// Unlike `destroy`, this keeps the manager alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
+        self.remove_discarded().await?;
         Self::wait_for_syncs(self.blobs.values_mut()).await?;
         let blobs = take(&mut self.blobs);
         for (section, blob) in blobs {
@@ -528,6 +550,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// shorter section length is durable when this returns.
     pub async fn truncate_pending(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
+        assert!(
+            section <= self.ceiling,
+            "truncation must remove every section above the initialization ceiling"
+        );
+        self.remove_discarded().await?;
 
         // Remove sections in descending order (newest first) to maintain a contiguous record
         // if a crash occurs during truncate. Section `u64::MAX` has no successor, so there are
@@ -550,6 +577,19 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
 
         self.truncate_pending_section(section, size).await
+    }
+
+    /// Remove unopened suffix sections newest-first and lift the ceiling that held them. Callers
+    /// run this before shortening or clearing the opened prefix.
+    async fn remove_discarded(&mut self) -> Result<(), Error> {
+        for section in take(&mut self.discarded).into_iter().rev() {
+            self.context
+                .remove(&self.partition, Some(&section.to_be_bytes()))
+                .await?;
+            debug!(section, "removed unopened blob");
+        }
+        self.ceiling = u64::MAX;
+        Ok(())
     }
 
     /// Truncate only the given section without affecting other sections. A shorter length is
@@ -600,17 +640,23 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 pub(super) mod tests {
     use super::*;
     use commonware_runtime::{
-        BufferPooler, ReadOptions, Runner as _, Spawner as _, Supervisor as _, WriteOptions,
-        buffer::paged::Writer, deterministic,
+        BlobVersion, BufferPooler, Name, ReadOptions, Runner as _, Spawner as _, Supervisor,
+        WriteOptions,
+        buffer::paged::Writer,
+        deterministic,
+        telemetry::metrics::{Metric, Registered},
     };
-    use commonware_utils::{channel::oneshot, sync::Mutex};
+    use commonware_utils::{NZU16, channel::oneshot, sync::Mutex};
     use futures::{
         FutureExt as _,
         future::{BoxFuture, Shared},
     };
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        ops::RangeInclusive,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     /// Materialize a crash that retains new page bytes but loses their checksum lengths.
@@ -776,6 +822,294 @@ pub(super) mod tests {
                 on_drop: None,
             },
         }
+    }
+
+    /// Blob removals observed by a [Reversed] context as (partition, name) pairs, in call order.
+    type Removals = Arc<Mutex<Vec<(String, Option<Vec<u8>>)>>>;
+
+    /// Deterministic context that lists blob names in reverse order and records every removal.
+    ///
+    /// The deterministic runtime lists names in ascending order, which hides removal loops that
+    /// rely on listing order instead of sorting.
+    struct Reversed {
+        inner: deterministic::Context,
+        removals: Removals,
+    }
+
+    impl Supervisor for Reversed {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                removals: self.removals.clone(),
+            }
+        }
+
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            Self {
+                inner: self.inner.with_attribute(key, value),
+                removals: self.removals,
+            }
+        }
+    }
+
+    impl Metrics for Reversed {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl Storage for Reversed {
+        type Blob = <deterministic::Context as Storage>::Blob;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: RangeInclusive<BlobVersion>,
+        ) -> Result<(Self::Blob, u64, BlobVersion), RError> {
+            self.inner.open_versioned(partition, name, versions).await
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
+            self.inner.remove(partition, name).await?;
+            self.removals
+                .lock()
+                .push((partition.into(), name.map(<[u8]>::to_vec)));
+            Ok(())
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            let mut names = self.inner.scan(partition).await?;
+            names.reverse();
+            Ok(names)
+        }
+    }
+
+    /// Expected [Removals] of `sections` from the test partition, in order.
+    fn removed(sections: &[u64]) -> Vec<(String, Option<Vec<u8>>)> {
+        sections
+            .iter()
+            .map(|section| ("test".into(), Some(section.to_be_bytes().to_vec())))
+            .collect()
+    }
+
+    #[test]
+    fn test_init_bounded_leaves_later_sections_unopened() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed empty blobs for sections 1, 2 and 5 with an unbounded manager. The drop hook is
+            // installed only after seeding, so `dropped` counts only drops of buffers built by the
+            // bounded managers below.
+            let dropped = Arc::new(AtomicUsize::new(0));
+            let mut cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for section in [1, 2, 5] {
+                manager.get_or_create(section).await.unwrap();
+            }
+            drop(manager);
+
+            // Only sections up to the ceiling are opened. The rest stay in storage until
+            // truncation removes them by name.
+            let observed = dropped.clone();
+            cfg.factory.on_drop = Some(Arc::new(move || {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }));
+            let mut manager = Manager::init_bounded(context.child("bounded"), cfg.clone(), 2)
+                .await
+                .unwrap();
+            assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
+            assert_eq!(manager.newest_section(), Some(2));
+            assert_eq!(context.scan("test").await.unwrap().len(), 3);
+
+            // Truncating to the ceiling removes the unopened section 5 and keeps both opened ones.
+            manager.truncate_pending(2, 0).await.unwrap();
+            assert_eq!(
+                context.scan("test").await.unwrap(),
+                vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()]
+            );
+
+            // Dropping the manager releases every buffer it built. A count of two means the factory
+            // built buffers only for sections 1 and 2.
+            drop(manager);
+            assert_eq!(
+                dropped.load(Ordering::Relaxed),
+                2,
+                "section 5 must never be opened"
+            );
+
+            // A ceiling below every stored section opens nothing and truncation removes them all.
+            // Section 0 has no blob, and truncating to it does not create one.
+            let mut manager = Manager::init_bounded(context.child("empty"), cfg, 0)
+                .await
+                .unwrap();
+            assert!(manager.sections().next().is_none());
+            assert_eq!(manager.newest_section(), None);
+            manager.truncate_pending(0, 0).await.unwrap();
+            assert!(context.scan("test").await.unwrap().is_empty());
+
+            // This manager built no buffers, so the drop count is unchanged.
+            drop(manager);
+            assert_eq!(dropped.load(Ordering::Relaxed), 2);
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "truncation must remove every section above the initialization ceiling"
+    )]
+    fn test_truncate_pending_above_ceiling_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed section 1 for the bounded manager to open and section 5 for it to leave
+            // unopened. No section is stored at 3 or 4.
+            let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            manager.get_or_create(1).await.unwrap();
+            manager.get_or_create(5).await.unwrap();
+            drop(manager);
+
+            // The ceiling bounds the target even when a gap separates it from the first unopened
+            // section. Truncation removes every unopened section, so it cannot retain one.
+            let mut manager = Manager::init_bounded(context.child("bounded"), cfg, 2)
+                .await
+                .unwrap();
+            manager.truncate_pending(4, 0).await.unwrap();
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "sections above the initialization ceiling must be truncated before creation"
+    )]
+    fn test_get_or_create_above_ceiling_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed only section 5, which the ceiling of 2 below leaves unopened.
+            let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            manager.get_or_create(5).await.unwrap();
+            drop(manager);
+
+            // Creating a section above the ceiling would adopt the stored bytes of a section
+            // awaiting removal.
+            let mut manager = Manager::init_bounded(context.child("bounded"), cfg, 2)
+                .await
+                .unwrap();
+            manager.get_or_create(5).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_truncate_pending_removes_unopened_sections_newest_first() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed two sections at or below the ceiling of 2 and three above it.
+            let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for section in [1, 2, 5, 6, 7] {
+                manager.get_or_create(section).await.unwrap();
+            }
+            drop(manager);
+
+            // Reopen with names listed newest-first. The unopened sections above the ceiling are
+            // then collected in descending order and only a sort restores ascending order.
+            let removals = Removals::default();
+            let reversed = Reversed {
+                inner: context.child("bounded"),
+                removals: removals.clone(),
+            };
+            let mut manager = Manager::init_bounded(reversed, cfg, 2).await.unwrap();
+            assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
+
+            // Truncation removes unopened sections newest-first, so a crash mid-removal leaves a
+            // prefix of the stored sections. No opened section lies above target 2, so the log
+            // holds only unopened-section removals. Without the sort they would run 5, 6, 7.
+            manager.truncate_pending(2, 0).await.unwrap();
+            assert_eq!(*removals.lock(), removed(&[7, 6, 5]));
+
+            // Both opened sections survive in the manager and in storage. The plain context lists
+            // names in ascending order.
+            assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
+            assert_eq!(
+                context.scan("test").await.unwrap(),
+                vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()]
+            );
+        });
+    }
+
+    #[test]
+    fn test_truncate_paged_tail_removes_sections_newest_first() {
+        deterministic::Runner::default().start(|context| async move {
+            // Create empty stored sections on both sides of the target.
+            for section in [1u64, 2, 5, 6, 7] {
+                context.open("test", &section.to_be_bytes()).await.unwrap();
+            }
+
+            // List names newest-first. Walking this listing backward without a sort would reach
+            // section 1 first and stop before removing anything above the target.
+            let removals = Removals::default();
+            let reversed = Reversed {
+                inner: context.child("reversed"),
+                removals: removals.clone(),
+            };
+
+            // End 0 gives a physical ceiling of zero bytes for any page size and target section 2
+            // is empty, so no resize runs. The call changes storage only by removing sections.
+            truncate_paged_tail(&reversed, "test", NZU16!(64), 2, 0)
+                .await
+                .unwrap();
+
+            // Every section above the target is removed newest-first and the rest are retained.
+            assert_eq!(*removals.lock(), removed(&[7, 6, 5]));
+            assert_eq!(
+                context.scan("test").await.unwrap(),
+                vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()]
+            );
+        });
+    }
+
+    #[test]
+    fn test_clear_removes_unopened_sections_and_lifts_ceiling() {
+        deterministic::Runner::default().start(|context| async move {
+            // Seed section 1 for the bounded manager to open and section 5 for it to leave
+            // unopened.
+            let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
+            let mut manager = Manager::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            manager.get_or_create(1).await.unwrap();
+            manager.get_or_create(5).await.unwrap();
+            drop(manager);
+
+            // Clearing a bounded manager removes the unopened section along with the opened one.
+            let mut manager = Manager::init_bounded(context.child("bounded"), cfg, 2)
+                .await
+                .unwrap();
+            manager.clear().await.unwrap();
+            assert!(context.scan("test").await.unwrap().is_empty());
+
+            // No stored section remains above the ceiling, so it no longer restricts creation. The
+            // stored section 5 was removed, so creating it opens a fresh empty blob.
+            manager.get_or_create(5).await.unwrap();
+            assert_eq!(manager.sections().collect::<Vec<_>>(), vec![5]);
+        });
     }
 
     #[test]

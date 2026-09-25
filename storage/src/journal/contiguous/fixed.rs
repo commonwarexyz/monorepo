@@ -423,43 +423,21 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         max_size: Option<u64>,
     ) -> Result<Self, Error> {
         let ceiling = max_size.unwrap_or(u64::MAX);
-        let items_per_blob = cfg.items_per_blob.get();
         if let Some(target) = checkpoint.clear_target() {
             warn!(
                 clear_target = target,
                 "crash repair: completing interrupted clear"
             );
+            let recovery = Self::complete_clear(context, cfg, checkpoint, target).await?;
 
-            // A persisted reset is authoritative even when an open requests another cap.
-            let new_partition = format!("{}-blobs", cfg.partition);
-            Partition::<E>::remove_all(&context, &cfg.partition).await?;
-            Partition::<E>::remove_all(&context, &new_partition).await?;
-            let partition = Partition::new(
-                context.child("blobs"),
-                new_partition,
-                cfg.page_cache.clone(),
-                cfg.write_buffer,
-            );
-            let tail = super::position_to_blob(target, items_per_blob);
-            let mut pending = BTreeMap::new();
-            pending.insert(tail, partition.open_recovery(tail).await?);
-            let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
+            // A persisted reset is authoritative even when the open requests another cap. The cap
+            // is only checked against the reset size afterwards.
             if ceiling < target {
                 return Err(Error::ItemPruned(ceiling));
             }
-            return Ok(Self {
-                context,
-                cfg,
-                checkpoint,
-                partition,
-                pending,
-                discarded: Vec::new(),
-                bounds: target..target,
-                watermark: target,
-                bounded: max_size.is_some(),
-                _marker: PhantomData,
-            });
+            return Ok(recovery);
         }
+        let items_per_blob = cfg.items_per_blob.get();
 
         // Select the active partition and reconcile its oldest blob with the checkpoint's retained
         // start before excluding any suffix.
@@ -588,6 +566,71 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         })
     }
 
+    /// Complete the reset to `target` staged in `checkpoint` without opening any stored blob.
+    async fn complete_clear(
+        context: E,
+        cfg: Config,
+        checkpoint: Checkpoint<E>,
+        target: u64,
+    ) -> Result<Self, Error> {
+        let items_per_blob = cfg.items_per_blob.get();
+        let new_partition = format!("{}-blobs", cfg.partition);
+        Partition::<E>::remove_all(&context, &cfg.partition).await?;
+        Partition::<E>::remove_all(&context, &new_partition).await?;
+        let partition = Partition::new(
+            context.child("blobs"),
+            new_partition,
+            cfg.page_cache.clone(),
+            cfg.write_buffer,
+        );
+
+        // Recreate the target tail before the checkpoint publishes reset completion.
+        let tail = super::position_to_blob(target, items_per_blob);
+        let mut pending = BTreeMap::new();
+        pending.insert(tail, partition.open_recovery(tail).await?);
+        let checkpoint = checkpoint.finish_clear(items_per_blob, target).await?;
+        Ok(Self {
+            context,
+            cfg,
+            checkpoint,
+            partition,
+            pending,
+            discarded: Vec::new(),
+            bounds: target..target,
+            watermark: target,
+
+            // finish_clear persisted `target` as the watermark, so publication has no selected end
+            // to raise.
+            bounded: false,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Stage a reset to `size` in `checkpoint`, await `clear_dependents`, then complete the reset
+    /// without opening any stored blob. A crash after staging leaves an intent that the next open
+    /// completes.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn open_cleared<F, Fut>(
+        context: E,
+        cfg: Config,
+        checkpoint: Checkpoint<E>,
+        size: u64,
+        clear_dependents: F,
+    ) -> Result<Self, Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<(), Error>>,
+    {
+        // A journal sized at `u64::MAX` can never accept an append (the successor size
+        // overflows), so reject it before staging any reset intent.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        let checkpoint = checkpoint.stage_clear(size).await?;
+        clear_dependents().await?;
+        Self::complete_clear(context, cfg, checkpoint, size).await
+    }
+
     /// Open recovery while completing any previously staged reset callback.
     pub(super) async fn init_cleared<F, Fut>(
         context: E,
@@ -604,6 +647,30 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
             clear_dependents().await?;
         }
         Self::open(context, cfg, checkpoint, max_size).await
+    }
+
+    /// Positions the stored blobs may hold, from blob names and the checkpoint without opening
+    /// their contents. The end is an upper bound based on the newest blob's capacity. A staged
+    /// clear has not yet been applied.
+    #[commonware_macros::stability(ALPHA)]
+    pub(super) async fn span(
+        context: &E,
+        cfg: &Config,
+        checkpoint: &Checkpoint<E>,
+    ) -> Result<Range<u64>, Error> {
+        let per_blob = cfg.items_per_blob.get();
+        let (_, names) = Partition::select(context, &cfg.partition).await?;
+        let indices = Partition::<E>::indices(names)?;
+        let start = Inner::<E, A>::recover_pruning_boundary(
+            checkpoint.boundary_hint(),
+            indices.first().copied(),
+            per_blob,
+        )?;
+        let end = match indices.last() {
+            Some(&newest) => super::blob_first_position(newest, per_blob)?.saturating_add(per_blob),
+            None => start,
+        };
+        Ok(start..end)
     }
 
     /// Exclusive recovered item end.
@@ -797,16 +864,13 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
 
     /// Complete a reset while recovery owns the blobs.
     pub(crate) async fn clear_to_size(self: Box<Self>, size: u64) -> Result<Box<Self>, Error> {
-        if size == u64::MAX {
-            return Err(Error::SizeOverflow);
-        }
         self.clear_to_size_cleared(size, || async { Ok(()) }).await
     }
 
     /// Stage one durable reset intent, run the reset callback, and replace all journal blobs.
     /// Recovery may preserve an exhausted journal at `u64::MAX`. Explicit resets reject it.
     pub(super) async fn clear_to_size_cleared<F, Fut>(
-        mut self: Box<Self>,
+        self: Box<Self>,
         size: u64,
         clear_dependents: F,
     ) -> Result<Box<Self>, Error>
@@ -814,34 +878,33 @@ impl<E: Context, A: CodecFixedShared> Recovery<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
+        // A journal sized at `u64::MAX` can never accept an append, so reject it before staging
+        // any reset intent.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+        let Self {
+            context,
+            cfg,
+            checkpoint,
+            partition,
+            pending,
+            ..
+        } = *self;
+
+        // Release the recovered blob handles and their partition before the reset recreates both.
+        drop(pending);
+        drop(partition);
+
         // The durable intent makes `size` authoritative across every later crash cut.
-        self.checkpoint = self.checkpoint.stage_clear(size).await?;
+        let checkpoint = checkpoint.stage_clear(size).await?;
 
         // Dependent state is cleared under the same intent before either journal partition is
         // removed.
         clear_dependents().await?;
-        Partition::<E>::remove_all(&self.context, &self.cfg.partition).await?;
-        Partition::<E>::remove_all(&self.context, &format!("{}-blobs", self.cfg.partition)).await?;
-        self.pending.clear();
-
-        // Recreate the target tail before the checkpoint publishes reset completion.
-        self.partition = Partition::new(
-            self.context.child("blobs"),
-            format!("{}-blobs", self.cfg.partition),
-            self.cfg.page_cache.clone(),
-            self.cfg.write_buffer,
-        );
-        let blob = super::position_to_blob(size, self.cfg.items_per_blob.get());
-        self.pending
-            .insert(blob, self.partition.open_recovery(blob).await?);
-        self.discarded.clear();
-        self.bounds = size..size;
-        self.watermark = size;
-        self.checkpoint = self
-            .checkpoint
-            .finish_clear(self.cfg.items_per_blob.get(), size)
-            .await?;
-        Ok(self)
+        Ok(Box::new(
+            Self::complete_clear(context, cfg, checkpoint, size).await?,
+        ))
     }
 
     /// Select a retained prefix and finish it before creating a live journal.
@@ -916,15 +979,6 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     /// See [Journal::init].
     pub(crate) async fn init(context: E, cfg: Config) -> Result<Self, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
-        Self::init_with_checkpoint(context, cfg, checkpoint).await
-    }
-
-    /// Finish initialization using an already-open checkpoint.
-    async fn init_with_checkpoint(
-        context: E,
-        cfg: Config,
-        checkpoint: Checkpoint<E>,
-    ) -> Result<Self, Error> {
         Recovery::<E, A>::open(context, cfg, checkpoint, None)
             .await?
             .publish(u64::MAX)
@@ -1104,38 +1158,17 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     pub(crate) async fn init_at_size(context: E, cfg: Config, size: u64) -> Result<Self, Error> {
         // Fail before writing intent if existing blob partitions are already inconsistent.
         Partition::select(&context, &cfg.partition).await?;
-        Self::init_at_size_cleared(context, cfg, size, || async { Ok(()) }).await
-    }
 
-    /// Like [Self::init_at_size], but awaits `clear_dependents` after the reset intent is durably
-    /// staged and before it completes.
-    ///
-    /// Callers that key dependent state off this journal use this to discard that state atomically
-    /// with the reset. A crash at any point leaves a durable intent that the next `init` (or
-    /// [Recovery::init_cleared]) finishes.
-    #[commonware_macros::stability(ALPHA)]
-    pub(in crate::journal::contiguous) async fn init_at_size_cleared<F, Fut>(
-        context: E,
-        cfg: Config,
-        size: u64,
-        clear_dependents: F,
-    ) -> Result<Self, Error>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<(), Error>>,
-    {
         // A journal sized at `u64::MAX` can never accept an append (the successor size
-        // overflows), so reject it before staging any reset intent.
+        // overflows), so reject it before opening the checkpoint.
         if size == u64::MAX {
             return Err(Error::SizeOverflow);
         }
-
-        // Stage the reset intent durably. `init_with_checkpoint` will detect the intent and
-        // complete the clear before recovering bounds.
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
-        let checkpoint = checkpoint.stage_clear(size).await?;
-        clear_dependents().await?;
-        Self::init_with_checkpoint(context, cfg, checkpoint).await
+        Recovery::<E, A>::open_cleared(context, cfg, checkpoint, size, || async { Ok(()) })
+            .await?
+            .publish(u64::MAX)
+            .await
     }
 
     /// Begin durably persisting the data blobs.
@@ -2019,6 +2052,25 @@ impl<E: Context, A: CodecFixedShared> authenticated::Backing<E> for Journal<E, A
     ) -> Result<Self::Recovery, Error> {
         let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
         Recovery::open(context, cfg, checkpoint, max_size).await
+    }
+
+    async fn clear(context: E, cfg: Self::Config, size: u64) -> Result<Self::Recovery, Error> {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+
+        // A staged clear already owns both blob partitions. Otherwise fail before writing intent
+        // if they are inconsistent.
+        if checkpoint.clear_target().is_none() {
+            Partition::select(&context, &cfg.partition).await?;
+        }
+        Recovery::open_cleared(context, cfg, checkpoint, size, || async { Ok(()) }).await
+    }
+
+    async fn span(context: E, cfg: &Self::Config) -> Result<Range<u64>, Error> {
+        let checkpoint = Checkpoint::open(context.child("meta"), &cfg.partition).await?;
+        match checkpoint.clear_target() {
+            Some(target) => Ok(target..target),
+            None => Recovery::<E, A>::span(&context, cfg, &checkpoint).await,
+        }
     }
 
     type Config = Config;
@@ -3851,9 +3903,9 @@ mod tests {
             let mut journal = journal.sync().await.unwrap();
             assert_eq!(journal.0.recovery_watermark(), 15);
 
-            // Persist the recovered metadata (watermark=9) as init_with_checkpoint does before
-            // applying the truncate repair. This simulates a crash after metadata sync but before
-            // the repair removes stale blobs.
+            // Persist the recovered metadata (watermark=9) as init does before applying the
+            // truncate repair. This simulates a crash after metadata sync but before the repair
+            // removes stale blobs.
             journal.0.checkpoint = journal
                 .0
                 .checkpoint
@@ -7030,6 +7082,74 @@ mod tests {
             (journal, pos) = journal.append(&test_digest(100)).await.unwrap();
             assert_eq!(pos, 15);
             assert_eq!(journal.read(15).await.unwrap(), test_digest(100));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[rstest::rstest]
+    #[case::lower(7)]
+    #[case::same(50)]
+    #[case::higher(60)]
+    #[test_traced]
+    fn test_fixed_journal_init_sync_after_interrupted_clear(#[case] start: u64) {
+        // State sync is the first open after a clear crashed with its intent staged. The cases
+        // start below, at, and above the staged target 50.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+
+            // Sync 30 items across three blobs.
+            let mut journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..30u64 {
+                (journal, _) = journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Stage a clear to 50 and crash before any blob is removed. The blobs still hold all
+            // 30 synced items.
+            Journal::<_, Digest>::test_stage_clear(context.child("intent"), &cfg.partition, 50)
+                .await
+                .unwrap();
+
+            // A staged clear spans only its target. Any other start replaces the intent without
+            // recovering the stale blobs. A start at 50 completes it.
+            let mut journal = authenticated::init_sync::<_, Journal<_, Digest>>(
+                context.child("sync"),
+                cfg.clone(),
+                start..start + 20,
+            )
+            .await
+            .expect("init_sync must complete or replace the staged clear");
+            assert_eq!(journal.bounds(), start..start);
+
+            // Appends begin at the sync start. Digests of 100 onward differ from every stale item,
+            // so the reads below tell new items from stale ones.
+            for i in 0..3u64 {
+                let pos;
+                (journal, pos) = journal.append(&test_digest(100 + i)).await.unwrap();
+                assert_eq!(pos, start + i);
+            }
+            journal = journal.sync().await.unwrap();
+            drop(journal);
+
+            // Reopen with an ordinary init. A surviving intent would clear the new items, and stale
+            // blobs would surface below the start or in place of the new items.
+            let journal = Journal::<_, Digest>::init(context.child("reopen"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), start..start + 3);
+
+            // For start 7, the pruned position 6 held a stale item before the clear.
+            assert!(matches!(
+                journal.read(start - 1).await,
+                Err(Error::ItemPruned(pos)) if pos == start - 1
+            ));
+            for i in 0..3u64 {
+                assert_eq!(journal.read(start + i).await.unwrap(), test_digest(100 + i));
+            }
             journal.destroy().await.unwrap();
         });
     }

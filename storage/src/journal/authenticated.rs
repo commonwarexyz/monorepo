@@ -1198,7 +1198,7 @@ pub trait BackingRecovery: Send + Sync + Sized {
 /// A [Mutable] journal that can back an authenticated [Journal].
 pub trait Backing<E: Context>: Mutable {
     /// The configuration needed to initialize this journal.
-    type Config: Clone + Send;
+    type Config: Clone + Send + Sync;
 
     /// Initialization-owned storage used to select and validate the retained prefix.
     type Recovery: BackingRecovery<Journal = Self>;
@@ -1211,6 +1211,54 @@ pub trait Backing<E: Context>: Mutable {
         cfg: Self::Config,
         max_size: Option<u64>,
     ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Open recovery storage reset to an empty journal at `size`, discarding stored items
+    /// without reading them. Returns [JournalError::SizeOverflow] for `u64::MAX`.
+    fn clear(
+        context: E,
+        cfg: Self::Config,
+        size: u64,
+    ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Positions stored items may occupy, determined without reading them.
+    ///
+    /// The start is the retained start and the end bounds every stored item. A pending reset
+    /// yields an empty span at its target.
+    fn span(
+        context: E,
+        cfg: &Self::Config,
+    ) -> impl Future<Output = Result<Range<u64>, JournalError>> + Send;
+}
+
+/// Whether `span` contains `position` or is empty exactly at it.
+fn covers(span: &Range<u64>, position: u64) -> bool {
+    position == span.start || span.contains(&position)
+}
+
+/// A [Backing] journal's storage, as [Stored::open] leaves it.
+pub(crate) enum Stored<E: Context, J: Backing<E>> {
+    /// Recovery opened bounded at the requested end.
+    Opened(J::Recovery),
+
+    /// Storage whose span cannot hold the requested position, left unopened.
+    Unopened { context: E, cfg: J::Config },
+}
+
+impl<E: Context, J: Backing<E>> Stored<E, J> {
+    /// Open recovery bounded at `max_size` when [Backing::span] contains `position` or is empty
+    /// exactly at it. Otherwise return the storage unopened.
+    pub(crate) async fn open(
+        context: E,
+        cfg: J::Config,
+        position: u64,
+        max_size: u64,
+    ) -> Result<Self, JournalError> {
+        if !covers(&J::span(context.child("span"), &cfg).await?, position) {
+            return Ok(Self::Unopened { context, cfg });
+        }
+        let recovery = J::recover(context, cfg, Some(max_size)).await?;
+        Ok(Self::Opened(recovery))
+    }
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
@@ -1221,20 +1269,14 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 ) -> Result<J, JournalError> {
     assert!(!range.is_empty(), "range must not be empty");
 
-    // Sync targets describe the same append-only log. Recover local history before choosing the
-    // prefix to reuse for this target.
-    let pending = J::recover(context, cfg, None).await?;
-    let bounds = pending.bounds();
-
-    // A fresh journal already aligned with the sync start needs no reset.
-    if bounds == (0..0) && range.start == 0 {
-        return pending.finish(0).await;
-    }
-
-    // Fetch the range anew when its start is pruned or local progress does not reach it.
-    if bounds.start > range.start || bounds.end <= range.start {
-        return pending.reset(range.start).await?.finish(range.start).await;
-    }
+    // Storage whose span cannot hold the sync start is cleared without reading stored items.
+    // The span end reflects blob capacity, which can overstate the recovered end when the tail
+    // is short or has a gap, so an opened prefix that does not cover the sync start is reset.
+    let pending = match Stored::<E, J>::open(context, cfg, range.start, range.end).await? {
+        Stored::Opened(pending) if covers(&pending.bounds(), range.start) => pending,
+        Stored::Opened(pending) => pending.reset(range.start).await?,
+        Stored::Unopened { context, cfg } => J::clear(context, cfg, range.start).await?,
+    };
 
     // Publish the retained prefix before pruning complete sections below the sync start.
     let journal = pending.finish(range.end).await?;

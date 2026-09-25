@@ -1220,7 +1220,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
             (resolver_receiver, fixtures::IgnoreResolver),
         );
 
-        let plan = SyncPlan::init(&context, "certify-qmdb-stateful".to_string()).await;
+        let plan = SyncPlan::init(context.child("plan"), "certify-qmdb-stateful".to_string()).await;
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
@@ -1363,7 +1363,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 DelayedContext,
                 scheme_mocks::Scheme<ed25519::PublicKey>,
                 Standard<Block>,
-            >::init(&delayed, "stable-leader-qmdb-stateful"),
+            >::init(delayed.child("metadata"), "stable-leader-qmdb-stateful"),
         )
         .await;
         let mut db_config = qmdb_config("stable-leader-qmdb-stateful", page_cache);
@@ -1550,7 +1550,11 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             verify_gates: verify_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
-        let plan = SyncPlan::init(&context, "certify-multi-qmdb-stateful".to_string()).await;
+        let plan = SyncPlan::init(
+            context.child("plan"),
+            "certify-multi-qmdb-stateful".to_string(),
+        )
+        .await;
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
@@ -1804,7 +1808,11 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             verify_gates: verify_gates.clone(),
             finalize_gate: finalize_gate.clone(),
         };
-        let plan = SyncPlan::init(&context, "prune-overlap-multi-qmdb-stateful".to_string()).await;
+        let plan = SyncPlan::init(
+            context.child("plan"),
+            "prune-overlap-multi-qmdb-stateful".to_string(),
+        )
+        .await;
         let (stateful, stateful_mailbox) = StatefulActor::init(
             context.child("stateful"),
             StatefulConfig {
