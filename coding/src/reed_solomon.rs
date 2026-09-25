@@ -511,7 +511,13 @@ mod striped {
         if stripe_len / SHARD_CHUNK_BYTES < 2 * chunks {
             return stripe_len.max(1);
         }
-        chunks * SHARD_CHUNK_BYTES
+        let width = chunks * SHARD_CHUNK_BYTES;
+        // Avoid page-multiple strides in the sixteen-way derivative.
+        if width.is_multiple_of(4096) {
+            width - 128
+        } else {
+            width
+        }
     }
 
     fn tiles(range: Range<usize>, width: usize) -> impl Iterator<Item = Range<usize>> {

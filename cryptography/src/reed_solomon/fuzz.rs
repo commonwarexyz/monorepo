@@ -1099,8 +1099,14 @@ mod tests {
 
     #[test]
     fn derivative_boundary_schedule() {
+        // Keep the same shard boundaries under Miri with a smaller width sweep.
+        let chunk_counts: &[usize] = if cfg!(miri) {
+            &[0, 1, 8]
+        } else {
+            &[0, 1, 7, 8, 9, 63, 64, 65]
+        };
         for count in [0, 1, 3, 4, 5, 15, 16, 17, 31, 32, 33, 64, 65] {
-            for chunks in [0, 1, 7, 8, 9, 63, 64, 65] {
+            for &chunks in chunk_counts {
                 let mut input = vec![[0; SHARD_CHUNK_BYTES]; count * chunks];
                 fill_chunks(&mut input, &mut Input::new(&[3, 0xff, 19, 0x80]));
                 compare_derivative(&input, count, chunks);
