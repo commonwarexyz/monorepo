@@ -385,9 +385,6 @@ cfg_if::cfg_if! {
         /// Port on monitoring where profiles are pushed
         const PROFILES_PORT: u16 = 4040;
 
-        /// Port on monitoring where traces are pushed
-        const TRACES_PORT: u16 = 4318;
-
         /// Maximum instances to manipulate at one time
         pub const DEFAULT_CONCURRENCY: &str = "128";
 
@@ -605,6 +602,9 @@ cfg_if::cfg_if! {
 
 /// Port on binary where metrics are exposed
 pub const METRICS_PORT: u16 = 9090;
+
+/// Port on monitoring where traces are pushed
+pub const TRACES_PORT: u16 = 4318;
 
 /// Host deployment information
 #[derive(Serialize, Deserialize, Clone)]
