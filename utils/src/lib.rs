@@ -6,7 +6,7 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
-commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
+commonware_macros::stability_scope!(ALPHA, cfg(any(feature = "std", test)) {
     pub use rng::{Entropy, FuzzRng, ScriptedRng, TestRng, test_rng};
 });
 commonware_macros::stability_scope!(BETA {
@@ -243,10 +243,11 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 });
-commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
+commonware_macros::stability_scope!(BETA, cfg(any(feature = "std", test)) {
     pub mod rng;
     pub use rng::sys_rng;
-
+});
+commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod acknowledgement;
     pub use acknowledgement::Acknowledgement;
 
