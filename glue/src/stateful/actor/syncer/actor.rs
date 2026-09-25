@@ -447,6 +447,8 @@ mod tests {
         });
     }
 
+    /// Resuming state sync after a floor install resolves to the retained floor block only when
+    /// it is the selected finalization.
     #[rstest::rstest]
     #[case::selected_successor_within_section(3, 3, 3)]
     #[case::selected_successor_at_section_boundary(4, 4, 4)]
@@ -469,6 +471,7 @@ mod tests {
                 ));
             }
 
+            // Acknowledge blocks 1 through F-1 in prunable archives.
             let first = fixtures::prunable_marshal_fixture(
                 context.child("first"),
                 "retained-floor-anchor",
@@ -490,6 +493,7 @@ mod tests {
             first.abort().await;
             drop(marshal);
 
+            // Restart with F as the floor. Marshal records F-1 as processed and prunes below it.
             let block = blocks.last().unwrap();
             let installed = fixtures::finalization(&fixture, height, block.digest());
             let predecessor = Height::new(height - 1);
@@ -509,6 +513,7 @@ mod tests {
             );
             second.abort().await;
 
+            // Restart again and confirm F-1, its finalization, and F are all retained.
             let third = fixtures::prunable_marshal_fixture(
                 context.child("third"),
                 "retained-floor-anchor",
@@ -525,6 +530,7 @@ mod tests {
             assert!(third.mailbox.get_finalization(predecessor).await.is_some());
             assert!(third.mailbox.get_block(block.height()).await.is_some());
 
+            // A selection at F is read back from persisted metadata, as a resumed sync reads it.
             let selected_block = &blocks[selected_height as usize];
             let selected =
                 fixtures::finalization(&fixture, selected_height, selected_block.digest());
@@ -548,6 +554,7 @@ mod tests {
                 selected
             };
 
+            // Only a selection of F resolves to F. Older selections resolve to F-1.
             let resolved = resolve_state_sync_floor::<
                 deterministic::Context,
                 WedgeApp,

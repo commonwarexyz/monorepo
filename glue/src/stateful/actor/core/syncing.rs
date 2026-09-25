@@ -888,6 +888,8 @@ mod tests {
         });
     }
 
+    /// A live floor during state sync redelivers receipts. The handoff applies each block once
+    /// and releases every receipt only after its flush.
     #[rstest::rstest]
     #[case::success(true)]
     #[case::failure(false)]
@@ -906,6 +908,8 @@ mod tests {
                 reporter.clone(),
             )
             .await;
+
+            // Blocks 1 through 3 extend genesis, and block 2 becomes the live floor.
             let mut ingress = marshal.mailbox.clone();
             let genesis = TestBlock::new(0, 0);
             let first = TestBlock::child(&genesis, 1);
@@ -914,6 +918,7 @@ mod tests {
             let first_finalization = fixtures::finalization(&fixture, 1, first.digest());
             let floor_finalization = fixtures::finalization(&fixture, 2, second.digest());
 
+            // Acknowledge genesis and block 1 so marshal's processed height is 1.
             let Some(Message::Finalized {
                 block,
                 acknowledgement,
@@ -945,6 +950,7 @@ mod tests {
                 Some(Height::new(1))
             );
 
+            // Start syncing from block 1.
             let (mut harness, _mailbox, mut coordinator, _complete) =
                 TestHarness::new_syncing(context.child("harness"), marshal.mailbox.clone()).await;
             harness.syncing.sync_metadata = harness
@@ -961,6 +967,8 @@ mod tests {
                 databases: Shared::new("test", TestDb::gated(control.clone())),
                 anchor: anchor(1, 1),
             };
+
+            // Report blocks 2 and 3. Glue retains both receipts because the window is not full.
             for block in [&second, &third] {
                 assert!(
                     ingress
@@ -988,6 +996,9 @@ mod tests {
                 assert!(handoff.is_none());
                 harness.syncing = syncing;
             }
+
+            // Installing block 2 keeps processed height 1 and redelivers blocks 2 and 3 with
+            // fresh receipts.
             marshal.mailbox.set_floor(floor_finalization);
             assert_eq!(
                 marshal.mailbox.get_processed_height().await,
@@ -1009,6 +1020,9 @@ mod tests {
             assert!(handoff.is_none());
             harness.syncing = syncing;
             assert!(coordinator.try_recv().is_err());
+
+            // The redelivered block 3 is the fourth retained receipt. It fills the window, and the
+            // coordinator answers the retarget with the completed artifact.
             let Some(Message::Finalized {
                 block,
                 acknowledgement,
@@ -1030,6 +1044,9 @@ mod tests {
             assert!(response.send(Some(artifact)).is_ok());
             drop(update);
             let (syncing, handoffs) = process.await.unwrap();
+
+            // The handoff applies blocks 2 and 3 once and holds all four receipts behind one
+            // flush.
             let transition = context.child("transition").spawn(move |_| {
                 syncing.transition(handoffs.expect("completed artifact must hand off reports"))
             });
@@ -1044,6 +1061,8 @@ mod tests {
             );
             let release = control.flushes.lock().remove(0);
             if !succeeds {
+                // A failed flush stops the handoff. After restart, marshal is still at block 1
+                // and state sync is still in progress.
                 drop(release);
                 transition.await.expect("failed durability stops handoff");
                 marshal.abort().await;
@@ -1066,6 +1085,8 @@ mod tests {
                 restarted.abort().await;
                 return;
             }
+
+            // The flush releases every receipt, advancing marshal to block 3.
             release.send(Ok(())).unwrap();
             drop(reporter.subscribe_databases().await);
             assert_eq!(

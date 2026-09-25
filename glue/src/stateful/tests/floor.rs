@@ -45,6 +45,7 @@ impl<R: Reporter<Activity = marshal::Update<Block>>> Reporter for HoldBlock<R> {
     }
 }
 
+/// A live floor keeps the predecessor needed to reopen application state after each crash.
 #[rstest::rstest]
 #[case::within_section(3)]
 #[case::section_boundary(4)]
@@ -73,6 +74,8 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     (genesis, blocks, fixture)
                 }
             };
+
+            // F-1 and F commit different targets, so reopening at the wrong block fails startup.
             let floor_height = Height::new(floor_height);
             let predecessor = floor_height.previous().unwrap();
             let predecessor_target = <App as Application<deterministic::Context>>::sync_targets(
@@ -83,6 +86,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 <App as Application<deterministic::Context>>::sync_targets(floor_block);
             assert_ne!(predecessor_target, floor_target);
 
+            // Four-item sections put F=4 on a section boundary, where pruning below F removes F-1.
             let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
             let mut certificates =
                 archive_config("floor-marshal", "finalizations", page_cache.clone(), ());
@@ -97,6 +101,8 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 prunable::Archive::init(context.child("finalized_blocks"), archived)
                     .await
                     .unwrap();
+
+            // Every boot recovers from marshal. No state sync floor is configured.
             let plan = SyncPlan::init(context.child("plan"), "floor-stateful").await;
             if boot > 0 {
                 assert!(!plan.should_state_sync(true));
@@ -146,6 +152,8 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     prune_config: None,
                 },
             );
+
+            // Divert F so the test decides when the application sees it.
             let (held, mut floor_reports) = ring::channel(NZUsize!(1));
             let (resolver, _handler) = handler::init(context.child("resolver"), NZUsize!(8));
             let _marshal_actor = marshal_actor.start_unbuffered(
@@ -159,6 +167,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
             let _stateful_actor = stateful.start();
             let databases = application.subscribe_databases().await;
 
+            // The first boot waits for genesis and finalizes blocks 1 through F.
             if boot == 0 {
                 while marshal.get_processed_height().await != Some(Height::zero()) {}
                 for block in &blocks {

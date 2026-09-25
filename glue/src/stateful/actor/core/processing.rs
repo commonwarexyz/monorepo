@@ -3016,6 +3016,7 @@ mod tests {
         });
     }
 
+    /// A redelivered receipt for an applied height waits for the flush that covers it.
     #[rstest::rstest]
     #[case::success(true)]
     #[case::failure(false)]
@@ -3023,6 +3024,8 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
             let (mut mailbox, control, _marshal, actor) =
                 spawn_processing(&context, "duplicate-durability", None).await;
+
+            // Apply block 1 with its flush held, then report it again.
             let first = TestBlock::child(&TestBlock::new(0, 0), 1);
             let (ack, _waiter) = Exact::handle();
             mailbox.report(Update::Block(Arc::new(first.clone()), ack));
@@ -3038,11 +3041,14 @@ mod tests {
 
             let release = control.flushes.lock().remove(0);
             if !succeeds {
+                // A failed flush stops processing and cancels the duplicate receipt.
                 drop(release);
                 actor.await.expect("failed durability stops processing");
                 assert!(duplicate.await.is_err());
                 return;
             }
+
+            // A successful flush releases the duplicate without applying block 1 again.
             release.send(Ok(())).unwrap();
             duplicate.await.unwrap();
             assert!(control.flushes.lock().is_empty());
@@ -3052,6 +3058,8 @@ mod tests {
         });
     }
 
+    /// A live floor redelivers an applied suffix. Fresh receipts wait for the flushes that cover
+    /// their heights, and verification of the tip's child continues undisturbed.
     #[rstest::rstest]
     #[case::unprocessed_genesis(1, false)]
     #[case::same_start(1, true)]
@@ -3061,6 +3069,8 @@ mod tests {
             let mut signing = context.child("signing");
             let fixture =
                 scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_PROCESSING_LIVE_FLOOR", 1);
+
+            // Build the chain through F+2 and the finalization that installs F.
             let mut blocks = vec![TestBlock::new(0, 0)];
             for view in 1..=floor_height + 2 {
                 blocks.push(TestBlock::child(
@@ -3073,6 +3083,8 @@ mod tests {
                 floor_height,
                 blocks[floor_height as usize].digest(),
             );
+
+            // These are the receipts the observer still holds when the floor is installed.
             let heights: Vec<_> = blocks[usize::from(genesis_processed)..]
                 .iter()
                 .map(|block| block.height())
@@ -3090,6 +3102,8 @@ mod tests {
                 Reporters::from((mailbox.clone(), observer.clone())),
             )
             .await;
+
+            // Gate every database flush and the first verification.
             let control = FlushControl::default();
             let (verify_gate, verify_started, verify_release) = application_gate();
             let observed_contexts = Arc::default();
@@ -3113,6 +3127,8 @@ mod tests {
                 deferred_verifications: Vec::new(),
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
+
+            // Marshal reports genesis on startup. Cases with a processed genesis acknowledge it.
             assert_eq!(marshal.mailbox.get_processed_height().await, None);
             drop(mailbox.subscribe_databases().await);
             assert_eq!(observer.pending_ack_heights(), [Height::zero()]);
@@ -3124,6 +3140,8 @@ mod tests {
                 );
             }
 
+            // Finalize blocks 1 through F+2. Flushes through F are released, so F+1 and F+2
+            // are applied but not durable.
             let mut ingress = marshal.mailbox.clone();
             for block in &blocks[1..] {
                 assert!(
@@ -3145,6 +3163,8 @@ mod tests {
                     drop(mailbox.subscribe_databases().await);
                 }
             }
+
+            // The observer holds every receipt, so marshal has not advanced.
             assert_eq!(observer.pending_ack_heights(), heights);
             assert_eq!(
                 marshal.mailbox.get_processed_height().await,
@@ -3170,6 +3190,8 @@ mod tests {
                 .await
                 .expect("child verification should start");
 
+            // Installing F records F-1 as processed and redelivers F through F+2 with fresh
+            // receipts. Nothing is applied again and no flush is added.
             marshal.mailbox.set_floor(floor_finalization);
             assert_eq!(
                 marshal.mailbox.get_processed_height().await,
@@ -3184,6 +3206,8 @@ mod tests {
                 floor_height as usize + 2
             );
             assert_eq!(control.flushes.lock().len(), 1);
+
+            // The verification survives the redelivery and is not restarted.
             assert!(poll!(&mut verify_child).is_pending());
             verify_release
                 .send(())
@@ -3191,6 +3215,7 @@ mod tests {
             assert!(verify_child.await);
             assert_eq!(observed_contexts.lock().len(), 1);
 
+            // Release the observer's copies of the receipts from before the floor.
             for height in heights {
                 assert_eq!(observer.acknowledge_next(), Some(height));
             }
@@ -3200,6 +3225,8 @@ mod tests {
                 marshal.mailbox.get_processed_height().await,
                 Some(Height::new(floor_height - 1))
             );
+
+            // Release the observer's copies of the fresh receipts. Glue still holds F+1 and F+2.
             for height in floor_height..=floor_height + 2 {
                 assert_eq!(observer.acknowledge_next(), Some(Height::new(height)));
             }
@@ -3209,6 +3236,8 @@ mod tests {
                 marshal.mailbox.get_processed_height().await,
                 Some(Height::new(floor_height))
             );
+
+            // Releasing F+1's flush acknowledges it and starts the flush for F+2.
             control.flushes.lock().remove(0).send(Ok(())).unwrap();
             drop(mailbox.subscribe_databases().await);
             assert_eq!(
@@ -3216,6 +3245,8 @@ mod tests {
                 Some(Height::new(floor_height + 1)),
             );
             assert_eq!(control.flushes.lock().len(), 1);
+
+            // Releasing F+2's flush acknowledges it without applying any block again.
             control.flushes.lock().remove(0).send(Ok(())).unwrap();
             drop(mailbox.subscribe_databases().await);
             assert_eq!(
