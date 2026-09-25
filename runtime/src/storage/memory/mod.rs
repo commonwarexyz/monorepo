@@ -7,6 +7,8 @@ use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
+pub mod open;
+
 /// Resolves a blob's header from its full contents (see [super::header::resolve]).
 fn resolve_header(
     content: &[u8],
@@ -59,8 +61,12 @@ impl Generations {
 }
 
 /// In-memory storage implementation for the commonware runtime.
+///
+/// Each open copies the blob's durable contents. Writes remain local to that copy until
+/// synchronized. Removing or replacing a blob retires its previous incarnation, preventing old
+/// handles from publishing into the new one.
 #[derive(Clone)]
-pub struct Storage {
+pub(crate) struct Storage {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     generations: Arc<Mutex<Generations>>,
     pool: BufferPool,
@@ -167,6 +173,16 @@ impl Storage {
         self.partitions.lock().get(partition)?.get(name).cloned()
     }
 
+    /// Return a copy of a blob's durable logical contents, or `None` when the blob is missing or
+    /// its container header does not resolve.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn logical_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        let content = self.raw_blob(partition, name)?;
+        let versions = BlobVersion::new(0)..=BlobVersion::new(u16::MAX);
+        let (_, _, data_offset) = resolve_header(&content, &versions, partition, name).ok()??;
+        Some(content[data_offset as usize..].to_vec())
+    }
+
     /// Install durable raw contents without validating the blob's container header.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn set_raw_blob(&self, partition: &str, name: &[u8], content: Vec<u8>) {
@@ -235,13 +251,12 @@ impl crate::Storage for Storage {
     }
 }
 
-#[derive(Clone)]
 pub struct Blob {
     partitions: Arc<Mutex<BTreeMap<String, Partition>>>,
     generations: Arc<Mutex<Generations>>,
     partition: String,
     name: Vec<u8>,
-    content: Arc<RwLock<Vec<u8>>>,
+    content: RwLock<Vec<u8>>,
     pool: BufferPool,
     /// Physical offset where logical offset 0 begins (the size of the header region).
     data_offset: u64,
@@ -264,7 +279,7 @@ impl Blob {
             generations,
             partition,
             name,
-            content: Arc::new(RwLock::new(content)),
+            content: RwLock::new(content),
             pool,
             data_offset,
             generation,
@@ -282,9 +297,18 @@ impl Blob {
         ))
     }
 
-    fn sync_inner(&self) -> Result<(), crate::Error> {
-        // Create new content for partition
-        let new_content = self.content.read().clone();
+    fn sync_inner(
+        &self,
+        #[cfg(test)] before_publication: impl FnOnce(),
+    ) -> Result<(), crate::Error> {
+        // Hold the live contents until the snapshot is published so a concurrent sync cannot
+        // publish a newer image that this snapshot then overwrites.
+        let live = self.content.read();
+        let new_content = live.clone();
+
+        // Let tests pause between snapshot capture and publication to control competing syncs.
+        #[cfg(test)]
+        before_publication();
 
         // Update partition content
         let generations = self.generations.lock();
@@ -487,7 +511,10 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), crate::Error> {
-        self.sync_inner()
+        self.sync_inner(
+            #[cfg(test)]
+            || {},
+        )
     }
 
     async fn start_sync(&self) -> Handle<()> {
@@ -512,11 +539,151 @@ mod tests {
         telemetry::metrics::Registry,
     };
     use commonware_utils::{ScriptedRng, probability};
+    use futures::executor::block_on;
     use rstest::rstest;
+    use std::{sync::mpsc, time::Duration};
+
+    #[rstest]
+    #[case::range(true)]
+    #[case::full(false)]
+    fn test_concurrent_sync_preserves_durable_append(#[case] range: bool) {
+        let storage = Storage::new(test_pool());
+        let (blob, _) = block_on(storage.open("partition", b"blob")).unwrap();
+        let blob = Arc::new(blob);
+        block_on(blob.write_at(0, b"old", WriteOptions::SYNC)).unwrap();
+        let snapshot = Arc::clone(&blob);
+        let (entered, entering) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let sync = std::thread::spawn(move || {
+            snapshot.sync_inner(|| {
+                entered.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+            })
+        });
+        entering.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        // If publication releases the content guard, complete the newer durable write
+        // before letting the older publication proceed.
+        let protected = blob.content.try_write().is_none();
+        let mut release = Some(release);
+        if protected {
+            release.take().unwrap().send(()).unwrap();
+        }
+        let options = if range {
+            WriteOptions::SYNC
+        } else {
+            WriteOptions::default()
+        };
+        block_on(blob.write_at(3, b"new", options)).unwrap();
+        if !range {
+            block_on(blob.sync()).unwrap();
+        }
+        if let Some(release) = release {
+            release.send(()).unwrap();
+        }
+        sync.join().unwrap().unwrap();
+
+        assert_eq!(
+            block_on(blob.read_at(0, 6, ReadOptions::default()))
+                .unwrap()
+                .coalesce(),
+            b"oldnew"
+        );
+        drop(blob);
+        let (reopened, size) = block_on(storage.open("partition", b"blob")).unwrap();
+        assert_eq!(size, 6);
+        assert_eq!(
+            block_on(reopened.read_at(0, 6, ReadOptions::default()))
+                .unwrap()
+                .coalesce(),
+            b"oldnew"
+        );
+    }
 
     fn test_pool() -> BufferPool {
         let mut registry = Registry::default();
         BufferPool::new(BufferPoolConfig::for_storage(), &mut registry)
+    }
+
+    async fn assert_logical_open_contract<S: crate::Storage>(storage: S, shared: S) {
+        for name in [Some(b"blob".as_slice()), None] {
+            // Storage clones and forwarding wrappers share the same logical open.
+            let (first, _) = storage.open("partition", b"blob").await.unwrap();
+            let first = Arc::new(first);
+            first
+                .write_at(0, b"saved", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            let retained = Arc::clone(&first);
+            assert!(matches!(
+                shared.open("partition", b"blob").await,
+                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+            ));
+            drop(first);
+            assert!(matches!(
+                shared
+                    .open_versioned(
+                        "partition",
+                        b"blob",
+                        crate::DEFAULT_BLOB_VERSION..=crate::DEFAULT_BLOB_VERSION,
+                    )
+                    .await,
+                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+            ));
+            drop(retained);
+            let (old, len) = shared.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 5);
+
+            // Removal permits a replacement while the old incarnation remains readable.
+            storage.remove("partition", name).await.unwrap();
+            let (current, len) = shared.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 0);
+            assert_eq!(
+                old.read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"saved"
+            );
+            drop(old);
+            assert!(matches!(
+                storage.open("partition", b"blob").await,
+                Err(crate::Error::BlobAlreadyOpen(p, n)) if p == "partition" && n == "626c6f62"
+            ));
+            current
+                .write_at(0, b"fresh", WriteOptions::SYNC)
+                .await
+                .unwrap();
+            drop(current);
+            let (reopened, len) = storage.open("partition", b"blob").await.unwrap();
+            assert_eq!(len, 5);
+            assert_eq!(
+                reopened
+                    .read_at(0, 5, ReadOptions::default())
+                    .await
+                    .unwrap()
+                    .coalesce(),
+                b"fresh"
+            );
+            drop(reopened);
+            shared.remove("partition", None).await.unwrap();
+        }
+    }
+
+    #[rstest]
+    #[case::direct(false)]
+    #[case::recording(true)]
+    fn test_public_memory_logical_open(#[case] recording: bool) {
+        crate::deterministic::Runner::default().start(|_| async move {
+            let storage = crate::mocks::Storage::new(test_pool());
+            if recording {
+                let (first, _) = crate::mocks::RecordingContext::new(storage.clone());
+                let (second, _) = crate::mocks::RecordingContext::new(storage);
+                assert_logical_open_contract(first, second).await;
+            } else {
+                assert_logical_open_contract(storage.clone(), storage).await;
+            }
+        });
     }
 
     #[rstest]
@@ -530,7 +697,7 @@ mod tests {
         R::Context: Spawner,
     {
         runner.start(|context| async move {
-            let storage = Storage::new(test_pool());
+            let storage = crate::mocks::Storage::new(test_pool());
             run_storage_tests(context, storage).await;
         });
     }
@@ -564,7 +731,7 @@ mod tests {
         const NAME: &[u8] = b"blob";
         const INSTALLED: &[u8] = b"current";
 
-        let storage = Storage::new(test_pool());
+        let storage = crate::mocks::Storage::new(test_pool());
         let (stale, _) = storage.open(PARTITION, NAME).await.unwrap();
         stale
             .write_at(0, b"stale", WriteOptions::default())
@@ -597,6 +764,13 @@ mod tests {
                 .coalesce(),
             INSTALLED
         );
+        drop(stale);
+        assert!(matches!(
+            storage.open(PARTITION, NAME).await,
+            Err(crate::Error::BlobAlreadyOpen(_, _))
+        ));
+        drop(fresh);
+        drop(storage.open(PARTITION, NAME).await.unwrap());
     }
 
     #[tokio::test]

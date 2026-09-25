@@ -578,8 +578,7 @@ impl<T: Clone> Pruning<T> {
             return None;
         }
 
-        // Do not prune until we've observed the full rewind-safe marshal
-        // window after startup.
+        // Observe the full marshal recovery window after startup before pruning.
         if self.retained_targets.len() < self.marshal_retention_window {
             return None;
         }
@@ -2144,7 +2143,7 @@ mod tests {
         ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
                 deterministic::Context,
-            >>::init(context.child("db_set"), config.clone())
+            >>::init(context.child("db_set"), config.clone(), None)
             .await;
             let metrics = StatefulMetrics::new(&context);
             Self {
@@ -2252,12 +2251,18 @@ mod tests {
         }
 
         async fn reopen_view_at_height(
-            &self,
+            self,
             context: deterministic::Context,
             height: Height,
         ) -> Option<u64> {
+            let Self {
+                processor,
+                db_config,
+                ..
+            } = self;
+            drop(processor);
             let reopened: Qmdb<deterministic::Context> =
-                Qmdb::init(context.child("reopen_db"), self.db_config.clone())
+                Qmdb::init(context.child("reopen_db"), db_config, None)
                     .await
                     .expect("database reopen should succeed");
             reopened

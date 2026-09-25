@@ -1178,6 +1178,7 @@ mod tests {
             assert!(certify_result, "certify should succeed");
 
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(verify_rx);
             drop(inline);
             drop(marshal);
@@ -1287,6 +1288,7 @@ mod tests {
 
             // After certify, the block must be durable across an unclean restart.
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(inline);
             drop(marshal);
 
@@ -1539,6 +1541,7 @@ mod tests {
             // Simulate a crash: abort the actor and drop every handle so the
             // storage partition is fully released before reopening.
             pre_actor.abort();
+            let _ = pre_actor.await;
             drop(pre_marshal);
             drop(pre_extra);
             drop(pre_application);

@@ -3957,6 +3957,7 @@ mod tests {
             assert!(marshal.certified(round, block).await);
 
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(marshal);
 
             let setup2 = StandardHarness::setup_validator(
@@ -7005,10 +7006,10 @@ mod tests {
             );
 
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(mailbox);
             drop(buffer);
             drop(resolver);
-            context.sleep(Duration::from_millis(1)).await;
 
             let (_mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context.child("validator_restart"),
@@ -7072,8 +7073,8 @@ mod tests {
             );
 
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(mailbox);
-            context.sleep(Duration::from_millis(1)).await;
 
             let (mailbox, buffer, resolver, _actor_handle) = start_standard_actor(
                 context
@@ -7264,10 +7265,10 @@ mod tests {
             }
 
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(mailbox);
             drop(buffer);
             drop(resolver);
-            context.sleep(Duration::from_millis(1)).await;
 
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context
@@ -7725,10 +7726,8 @@ mod tests {
             }
 
             actor_handle.abort();
+            let _ = actor_handle.await;
             drop(mailbox);
-
-            // Yield once so the aborted actor drops its storage handles before restart.
-            context.sleep(Duration::from_millis(1)).await;
 
             let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
                 context

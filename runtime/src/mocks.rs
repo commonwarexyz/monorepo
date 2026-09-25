@@ -1,10 +1,8 @@
 //! Mock implementations of runtime primitives for testing.
 
-#[cfg(any(test, feature = "test-utils"))]
-pub use crate::storage::memory::Storage as MemoryStorage;
 use crate::{
     Blob, BlobVersion, BufMut, BufferPool, BufferPooler, Clock, Error, Handle, IoBufs, IoBufsMut,
-    Metrics, Name, ReadOptions, Spawner, Storage, Supervisor, WriteOptions,
+    Metrics, Name, ReadOptions, Spawner, Supervisor, WriteOptions,
     signal::Signal,
     telemetry::metrics::{Metric, Registered},
 };
@@ -21,6 +19,89 @@ use std::{
     sync::Arc,
     task::Poll,
 };
+
+cfg_if::cfg_if! {
+    if #[cfg(any(test, feature = "test-utils"))] {
+        use crate::{IoBufMut, utils::reschedule};
+        use futures::poll;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+    }
+}
+
+/// In-memory storage with exclusive logical opens and durable snapshot inspection.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Clone)]
+pub struct Storage {
+    inner: crate::storage::memory::Storage,
+    opens: Arc<crate::storage::memory::open::Opens>,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Storage {
+    /// Create an empty memory storage backend.
+    pub fn new(pool: BufferPool) -> Self {
+        Self {
+            inner: crate::storage::memory::Storage::new(pool),
+            opens: Arc::default(),
+        }
+    }
+
+    /// Compute a SHA-256 digest of all durable blob contents.
+    pub fn audit(&self) -> [u8; 32] {
+        self.inner.audit()
+    }
+
+    /// Return a copy of a blob's durable raw contents without interpreting its container header.
+    pub fn raw_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.inner.raw_blob(partition, name)
+    }
+
+    /// Return a copy of a blob's durable logical contents, or `None` when the blob is missing or
+    /// its container header does not resolve.
+    pub fn logical_blob(&self, partition: &str, name: &[u8]) -> Option<Vec<u8>> {
+        self.inner.logical_blob(partition, name)
+    }
+
+    /// Install durable raw contents without validating the blob's container header.
+    ///
+    /// This retires the prior incarnation and permits a new open while old handles remain alive.
+    pub fn set_raw_blob(&self, partition: &str, name: &[u8], content: Vec<u8>) {
+        self.opens
+            .replace(partition, Some(name), || {
+                self.inner.set_raw_blob(partition, name, content);
+                Ok(())
+            })
+            .expect("installing a raw memory image cannot fail");
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl crate::Storage for Storage {
+    type Blob = crate::storage::memory::open::Blob<crate::storage::memory::Blob>;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: std::ops::RangeInclusive<BlobVersion>,
+    ) -> Result<(Self::Blob, u64, BlobVersion), Error> {
+        let opened = self.opens.open(
+            partition,
+            name,
+            self.inner.open_versioned(partition, name, versions),
+        )?;
+        Ok(opened.finish())
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+        self.opens
+            .remove(partition, name, self.inner.remove(partition, name))
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+        self.inner.scan(partition).await
+    }
+}
 
 /// Default buffer size (64 KB). Controls both how much data the stream
 /// pulls per recv and the backpressure threshold for send.
@@ -436,14 +517,14 @@ macro_rules! forward_context {
             fn sleep(
                 &self,
                 duration: std::time::Duration,
-            ) -> impl Future<Output = ()> + Send + 'static {
+            ) -> impl Future<Output = ()> + Send + 'static + use<E> {
                 self.inner.sleep(duration)
             }
 
             fn sleep_until(
                 &self,
                 deadline: std::time::SystemTime,
-            ) -> impl Future<Output = ()> + Send + 'static {
+            ) -> impl Future<Output = ()> + Send + 'static + use<E> {
                 self.inner.sleep_until(deadline)
             }
         }
@@ -601,7 +682,7 @@ impl<E: Spawner> Spawner for RecordingContext<E> {
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-impl<E: Storage> Storage for RecordingContext<E> {
+impl<E: crate::Storage> crate::Storage for RecordingContext<E> {
     type Blob = RecordingBlob<E::Blob>;
 
     async fn open_versioned(
@@ -632,7 +713,6 @@ impl<E: Storage> Storage for RecordingContext<E> {
 
 /// Blob wrapper that records read and write options before delegating each operation.
 #[cfg(any(test, feature = "test-utils"))]
-#[derive(Clone)]
 pub struct RecordingBlob<B> {
     inner: B,
     recordings: Recordings,
@@ -668,6 +748,97 @@ impl<B: Blob> Blob for RecordingBlob<B> {
         options: WriteOptions,
     ) -> Result<(), Error> {
         self.recordings.write(options);
+        self.inner.write_at(offset, bufs, options).await
+    }
+
+    async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.inner.resize(len).await
+    }
+
+    async fn sync(&self) -> Result<(), Error> {
+        self.inner.sync().await
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        self.inner.start_sync().await
+    }
+}
+
+/// Blob wrapper that yields after the first backend poll of each read, allowing a test to
+/// hand the unresolved read future to another task even when the backend completes immediately.
+#[cfg(any(test, feature = "test-utils"))]
+pub struct MigratingReadBlob<B> {
+    /// Wrapped blob.
+    inner: B,
+    /// Whether each read must remain pending after its first backend poll.
+    require_pending: bool,
+    /// Reads started through this blob.
+    reads: AtomicUsize,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<B> MigratingReadBlob<B> {
+    /// Wrap `inner`, optionally requiring the first backend poll of each read to return pending.
+    /// Set `require_pending` when a test must exercise registered backend I/O.
+    pub const fn new(inner: B, require_pending: bool) -> Self {
+        Self {
+            inner,
+            require_pending,
+            reads: AtomicUsize::new(0),
+        }
+    }
+
+    /// Number of reads started through this blob.
+    pub fn reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl<B: Blob> Blob for MigratingReadBlob<B> {
+    async fn read_at(
+        &self,
+        offset: u64,
+        len: usize,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.read_at_buf(offset, len, IoBufMut::with_capacity(len), options)
+            .await
+    }
+
+    async fn read_at_buf(
+        &self,
+        offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufsMut> + Send,
+        options: ReadOptions,
+    ) -> Result<IoBufsMut, Error> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        let mut read = Box::pin(self.inner.read_at_buf(offset, len, bufs, options));
+
+        // Capture exactly one backend poll, then yield before exposing its result. Requiring a
+        // pending result lets a test establish that a task handoff carries unresolved backend I/O.
+        let first_poll = poll!(&mut read);
+        if self.require_pending {
+            assert!(
+                first_poll.is_pending(),
+                "blob read completed before registering pending I/O"
+            );
+        }
+        reschedule().await;
+
+        match first_poll {
+            Poll::Ready(result) => result,
+            Poll::Pending => read.await,
+        }
+    }
+
+    async fn write_at(
+        &self,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        options: WriteOptions,
+    ) -> Result<(), Error> {
         self.inner.write_at(offset, bufs, options).await
     }
 
@@ -723,7 +894,7 @@ impl<E: Spawner> Spawner for DelayedSyncContext<E> {
     }
 }
 
-impl<E: Storage> Storage for DelayedSyncContext<E> {
+impl<E: crate::Storage> crate::Storage for DelayedSyncContext<E> {
     type Blob = DelayedSyncBlob<E::Blob>;
 
     async fn open_versioned(
@@ -735,7 +906,7 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
         let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             DelayedSyncBlob {
-                inner,
+                inner: Arc::new(inner),
                 pending: self.pending.clone(),
             },
             len,
@@ -753,9 +924,11 @@ impl<E: Storage> Storage for DelayedSyncContext<E> {
 }
 
 /// Blob wrapper that parks each started sync and supports one-shot blocking sync tracking.
-#[derive(Clone)]
+///
+/// A started sync keeps the wrapped blob, and with it the logical open, alive until its handle
+/// completes or drops.
 pub struct DelayedSyncBlob<B> {
-    inner: B,
+    inner: Arc<B>,
     pending: PendingSyncs,
 }
 
@@ -765,7 +938,7 @@ impl<B> DelayedSyncBlob<B> {
         let pending = PendingSyncs::default();
         (
             Self {
-                inner,
+                inner: Arc::new(inner),
                 pending: pending.clone(),
             },
             pending,
@@ -1059,7 +1232,7 @@ pub struct WriteFaultContext<E> {
 
 forward_context!(WriteFaultContext, faults);
 
-impl<E: Storage> Storage for WriteFaultContext<E> {
+impl<E: crate::Storage> crate::Storage for WriteFaultContext<E> {
     type Blob = WriteFaultBlob<E::Blob>;
 
     async fn open_versioned(
@@ -1089,7 +1262,6 @@ impl<E: Storage> Storage for WriteFaultContext<E> {
 }
 
 /// Blob wrapper that fails `write_at` while its [WriteFaults] is armed.
-#[derive(Clone)]
 pub struct WriteFaultBlob<B> {
     inner: B,
     faults: WriteFaults,
@@ -1149,7 +1321,7 @@ pub struct SyncFaultContext<E> {
 
 forward_context!(SyncFaultContext, fail_partition);
 
-impl<E: Storage> Storage for SyncFaultContext<E> {
+impl<E: crate::Storage> crate::Storage for SyncFaultContext<E> {
     type Blob = SyncFaultBlob<E::Blob>;
 
     async fn open_versioned(
@@ -1179,7 +1351,6 @@ impl<E: Storage> Storage for SyncFaultContext<E> {
 }
 
 /// Blob wrapper that fails `sync` and `start_sync` when marked faulty.
-#[derive(Clone)]
 pub struct SyncFaultBlob<B> {
     inner: B,
     faulty: bool,
@@ -1237,7 +1408,7 @@ impl<B: Blob> Blob for SyncFaultBlob<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Stream, deterministic};
+    use crate::{Clock, IoBufMut, Runner, Sink, Spawner, Storage as _, Stream, deterministic};
     use commonware_macros::select;
     use std::{thread::sleep, time::Duration};
 
@@ -1271,7 +1442,7 @@ mod tests {
         });
     }
 
-    async fn assert_read_options_forwarded<E: Storage>(
+    async fn assert_read_options_forwarded<E: crate::Storage>(
         context: &E,
         recordings: &Recordings,
         partition: &str,

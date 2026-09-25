@@ -52,11 +52,14 @@ where
 {
     /// Returns a [Db] QMDB initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
     pub async fn init(
         context: E,
         cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S>,
+        max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg).await
+        crate::qmdb::any::init(context, cfg, max_size).await
     }
 }
 
@@ -123,11 +126,14 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             cfg: VariableConfig<T, <Operation<F, K, V> as Read>::Cfg, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg).await
+            crate::qmdb::any::init(context, cfg, max_size).await
         }
     }
 
@@ -217,7 +223,39 @@ pub(crate) mod test {
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let config = create_test_config(seed, &context, ());
-        AnyTest::init(context, config).await.unwrap()
+        AnyTest::init(context, config, None).await.unwrap()
+    }
+
+    #[test_traced]
+    fn test_foreign_db_merkleize_rejected() {
+        deterministic::Runner::default().start(|context| async move {
+            let db_a = create_test_db(context.child("a")).await;
+            let db_b = create_test_db(context.child("b")).await;
+
+            let seed_a = db_a
+                .new_batch()
+                .write(Sha256::hash(&[b"a"]), Some(vec![1]))
+                .merkleize(&db_a, None)
+                .await
+                .unwrap();
+            let (db_a, _) = db_a.apply_batch(seed_a).await.unwrap();
+            let seed_b = db_b
+                .new_batch()
+                .write(Sha256::hash(&[b"b"]), Some(vec![2]))
+                .merkleize(&db_b, None)
+                .await
+                .unwrap();
+            let (db_b, _) = db_b.apply_batch(seed_b).await.unwrap();
+
+            assert_eq!(db_a.bounds().end, db_b.bounds().end);
+            assert_ne!(db_a.root(), db_b.root());
+
+            let batch = db_a.new_batch().write(Sha256::hash(&[b"a"]), Some(vec![3]));
+            assert!(matches!(
+                batch.merkleize(&db_b, None).await,
+                Err(Error::StaleBatch)
+            ));
+        });
     }
 
     /// Serial-vs-parallel init equivalence for the variable-value partitioned db. The parallel
@@ -250,7 +288,7 @@ pub(crate) mod test {
 
             // Commit 1: insert every key.
             let cfg = create_test_config(77, &context, NZUsize!(1));
-            let db = PartDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = PartDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -289,7 +327,7 @@ pub(crate) mod test {
                 let ctx = context
                     .child("reopen")
                     .with_attribute("concurrency", concurrency);
-                let db = PartDb::<Sequential>::init(ctx, cfg).await.unwrap();
+                let db = PartDb::<Sequential>::init(ctx, cfg, None).await.unwrap();
                 assert_eq!(
                     db.root(),
                     root,
@@ -382,7 +420,7 @@ pub(crate) mod test {
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
         let cfg = variable_db_config("fixed-bytes-var-partition", &context);
-        VariableDb::init(context, cfg).await.unwrap()
+        VariableDb::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("WARN")]
