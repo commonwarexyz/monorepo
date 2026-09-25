@@ -5,7 +5,7 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    marshal::core::Variant as MarshalVariant, simplex::scheme::Scheme as SimplexScheme,
+    simplex::{marshal::core::Variant as MarshalVariant, scheme::Scheme as SimplexScheme},
     types::Epocher,
 };
 use commonware_cryptography::{

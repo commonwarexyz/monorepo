@@ -17,14 +17,14 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Automaton, Block, CertifiableAutomaton, Heightable, Relay, Reporter,
-    marshal::{
-        self, Start as MarshalStart, Update,
-        core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
-        standard::Standard,
-    },
     simplex::{
         self, ForwardPolicy, Plan, SkipPolicy,
         elector::RoundRobin,
+        marshal::{
+            self, Start as MarshalStart, Update,
+            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+            standard::Standard,
+        },
         mocks::scheme,
         types::{Activity, Context},
     },
