@@ -248,6 +248,77 @@ pub fn metric_samples<'a>(
     })
 }
 
+/// Returns the sum of every sample of `name` in encoded Prometheus `metrics` whose labels include
+/// each `(key, value)` pair of `labels`.
+///
+/// `name` may be either the full encoded metric name or its unprefixed suffix.
+///
+/// # Panics
+///
+/// Panics if a matching sample's value is not a number.
+#[cfg(any(test, feature = "test-utils"))]
+#[must_use]
+pub fn metric_sum(metrics: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
+    metric_samples(metrics, name)
+        .filter(|(sample_labels, _)| {
+            labels
+                .iter()
+                .all(|(key, value)| sample_labels.contains(&format!("{key}=\"{value}\"")))
+        })
+        .map(|(_, value)| {
+            value
+                .parse::<f64>()
+                .expect("metric sample value is a number")
+        })
+        .sum()
+}
+
+/// Returns the upper bound of the first bucket of histogram `name` in encoded Prometheus `metrics`
+/// that holds its `percentile`-th percentile sample, with the histogram's sample count.
+///
+/// Buckets with the same bound are summed across label sets. `name` may be either the full encoded
+/// metric name or its unprefixed suffix, without the `_bucket` suffix. Returns `None` when the
+/// histogram is absent or holds no samples. The bound is infinite when the percentile falls beyond
+/// the largest finite bucket.
+///
+/// # Panics
+///
+/// Panics if a bucket's bound or count is not a number.
+#[cfg(any(test, feature = "test-utils"))]
+#[must_use]
+pub fn histogram_percentile(metrics: &str, name: &str, percentile: u64) -> Option<(f64, u64)> {
+    let bucket = format!("{name}_bucket");
+    let mut buckets = Vec::<(f64, u64)>::new();
+    for (labels, value) in metric_samples(metrics, &bucket) {
+        let Some(bound) = labels
+            .split_once("le=\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(bound, _)| bound)
+        else {
+            continue;
+        };
+        let bound = match bound {
+            "+Inf" => f64::INFINITY,
+            bound => bound.parse().expect("histogram bucket bound is a number"),
+        };
+        let count = value.parse().expect("histogram bucket count is an integer");
+        if let Some((_, total)) = buckets.iter_mut().find(|(existing, _)| *existing == bound) {
+            *total += count;
+        } else {
+            buckets.push((bound, count));
+        }
+    }
+    buckets.sort_by(|(left, _), (right, _)| left.total_cmp(right));
+    let samples = buckets.last().map(|(_, count)| *count)?;
+    if samples == 0 {
+        return None;
+    }
+    let rank = samples.saturating_mul(percentile).div_ceil(100);
+    buckets
+        .into_iter()
+        .find_map(|(bound, count)| (count >= rank).then_some((bound, samples)))
+}
+
 /// Count the number of running tasks whose name starts with the given prefix.
 ///
 /// This function encodes metrics and counts tasks that are currently running
@@ -898,6 +969,43 @@ mod tests {
     use commonware_macros::test_traced;
     use futures::future;
     use std::sync::mpsc::{self, TryRecvError};
+
+    #[test]
+    fn metric_sum_adds_matching_samples_with_every_label() {
+        let metrics = "\
+# HELP node_syncs_total Syncs.
+node_syncs_total{kind=\"journal\",node=\"a\"} 2
+node_syncs_total{kind=\"journal\",node=\"b\"} 3
+node_syncs_total{kind=\"snapshot\",node=\"a\"} 5
+node_resyncs_total 7
+";
+        assert_eq!(metric_sum(metrics, "syncs_total", &[]), 10.0);
+        assert_eq!(metric_sum(metrics, "syncs_total", &[("kind", "journal")]), 5.0);
+        assert_eq!(
+            metric_sum(metrics, "node_syncs_total", &[("kind", "journal"), ("node", "b")]),
+            3.0
+        );
+        assert_eq!(metric_sum(metrics, "missing_total", &[]), 0.0);
+    }
+
+    #[test]
+    fn histogram_percentile_sums_buckets_across_label_sets() {
+        let metrics = "\
+latency_bucket{node=\"a\",le=\"0.001\"} 2
+latency_bucket{node=\"a\",le=\"0.01\"} 8
+latency_bucket{node=\"a\",le=\"+Inf\"} 10
+latency_bucket{node=\"b\",le=\"0.001\"} 0
+latency_bucket{node=\"b\",le=\"0.01\"} 9
+latency_bucket{node=\"b\",le=\"+Inf\"} 10
+";
+        assert_eq!(histogram_percentile(metrics, "latency", 10), Some((0.001, 20)));
+        assert_eq!(histogram_percentile(metrics, "latency", 85), Some((0.01, 20)));
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 100),
+            Some((f64::INFINITY, 20))
+        );
+        assert_eq!(histogram_percentile(metrics, "missing", 50), None);
+    }
 
     #[test]
     fn test_has_metric_value_unlabeled() {
