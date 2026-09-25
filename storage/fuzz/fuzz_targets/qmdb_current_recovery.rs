@@ -122,6 +122,7 @@ fn make_config(
             write_buffer,
             replay_buffer,
             strategy: Sequential,
+            node_cache_size: Some(NZUsize!(64)),
             page_cache: page_cache.clone(),
         },
         journal_config: VConfig {
