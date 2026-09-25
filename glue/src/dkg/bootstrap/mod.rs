@@ -56,17 +56,17 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Application, Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Heightable,
-    marshal::{
-        self, Start,
-        ancestry::Ancestry,
-        core::Actor as MarshalActor,
-        resolver::p2p as marshal_resolver,
-        standard::{Deferred, Standard},
-    },
     simplex::{
         self, Floor,
         config::{ForwardPolicy, SkipBudget, SkipPolicy},
         elector::RoundRobin,
+        marshal::{
+            self, Start,
+            ancestry::Ancestry,
+            core::Actor as MarshalActor,
+            resolver::p2p as marshal_resolver,
+            standard::{Deferred, Standard},
+        },
         types::Context,
     },
     types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},

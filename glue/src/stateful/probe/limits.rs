@@ -1,7 +1,7 @@
 //! Size limits for the payloads the probe sends.
 
 use super::wire::Message;
-use commonware_consensus::marshal::core::Variant;
+use commonware_consensus::simplex::marshal::core::Variant;
 use commonware_cryptography::certificate::Scheme;
 
 /// Returns an upper bound on the payloads the [`Probe`](super::Probe) sends for committees of at
