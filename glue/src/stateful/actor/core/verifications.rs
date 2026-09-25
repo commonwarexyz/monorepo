@@ -5,7 +5,7 @@ use crate::stateful::{
         processor::{Disposition, PendingDigest, VerificationProgress, Verifier},
     },
 };
-use commonware_consensus::marshal::{
+use commonware_consensus::simplex::marshal::{
     ancestry::BlockProvider,
     core::{Mailbox as MarshalMailbox, Variant},
 };

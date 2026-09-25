@@ -12,8 +12,7 @@ use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Buf, Encode as _, Error as CodecError, Read};
 use commonware_consensus::{
     Epochable, Heightable,
-    marshal::core::Variant,
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{marshal::core::Variant, scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::Signer;
@@ -608,11 +607,11 @@ mod tests {
     use commonware_coding::ReedSolomon;
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable,
-        marshal::coding::{
-            Coding,
-            types::{CodedBlock, coding_config_for_participants},
-        },
         simplex::{
+            marshal::coding::{
+                Coding,
+                types::{CodedBlock, coding_config_for_participants},
+            },
             scheme::bls12381_threshold::vrf::Scheme as ThresholdScheme,
             types::{Finalization, Finalize, Proposal},
         },

@@ -138,13 +138,13 @@ mod test {
     };
     use commonware_consensus::{
         Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
-        marshal::{
-            self, Start, Update,
-            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
-            resolver::p2p as marshal_resolver,
-            standard::Standard,
-        },
         simplex::{
+            marshal::{
+                self, Start, Update,
+                core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+                resolver::p2p as marshal_resolver,
+                standard::Standard,
+            },
             mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
             types::{Activity, Context as SimplexContext, Finalization, Finalize, Proposal},
         },

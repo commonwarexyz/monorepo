@@ -5,7 +5,7 @@ use super::{
 use crate::stateful::{actor::core::Verification, db::DatabaseSet};
 use commonware_consensus::{
     Heightable, Roundable,
-    marshal::{
+    simplex::marshal::{
         ancestry::{self as marshal_ancestry, Ancestry, BlockProvider},
         core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
     },

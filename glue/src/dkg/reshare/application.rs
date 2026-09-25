@@ -6,7 +6,7 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     Application as ConsensusApplication, CertifiableBlock,
-    marshal::ancestry::Ancestry,
+    simplex::marshal::ancestry::Ancestry,
     types::{EpochPhase, Epocher as _, FixedEpocher, Height},
 };
 use commonware_cryptography::{Signer, bls12381::primitives::variant::Variant};
@@ -264,7 +264,7 @@ mod tests {
     use commonware_actor::mailbox;
     use commonware_consensus::{
         CertifiableBlock, Heightable,
-        marshal::ancestry,
+        simplex::marshal::ancestry,
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{

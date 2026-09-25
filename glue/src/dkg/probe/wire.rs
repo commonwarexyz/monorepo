@@ -3,8 +3,11 @@ use commonware_codec::{
     Buf, Decode, DecodeExt, EncodeSize, Error, FixedSize, Read, ReadExt, Write,
 };
 use commonware_consensus::{
-    marshal::core::{ExpectedCommitment, Variant},
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{
+        marshal::core::{ExpectedCommitment, Variant},
+        scheme::Scheme,
+        types::Finalization,
+    },
     types::Epoch,
 };
 

@@ -21,14 +21,14 @@ use commonware_broadcast::buffered;
 use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
 use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
-    marshal::{
-        self, Start, ancestry::Ancestry, core::Actor as MarshalActor,
-        resolver::p2p as marshal_resolver, standard::Deferred,
-    },
     simplex::{
         self, Floor,
         config::{ForwardPolicy, SkipBudget, SkipPolicy},
         elector::RoundRobin,
+        marshal::{
+            self, Start, ancestry::Ancestry, core::Actor as MarshalActor,
+            resolver::p2p as marshal_resolver, standard::Deferred,
+        },
         types::Context,
     },
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},

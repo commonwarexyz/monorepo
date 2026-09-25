@@ -12,8 +12,10 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
-    marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
-    simplex::scheme::Scheme as SimplexScheme,
+    simplex::{
+        marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
+        scheme::Scheme as SimplexScheme,
+    },
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{
@@ -1552,7 +1554,7 @@ mod tests {
         tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant},
     };
     use commonware_actor::Feedback;
-    use commonware_consensus::{Reporter, marshal};
+    use commonware_consensus::{Reporter, simplex::marshal};
     use commonware_cryptography::{
         Digestible as _, Signer,
         bls12381::{

@@ -4,12 +4,14 @@ use super::mocks::{TestBlock, TestScheme, TestVariant};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Heightable as _, Reporter,
-    marshal::{
-        self, Update,
-        core::{Actor as MarshalActor, Floor, Mailbox as MarshalMailbox},
-        resolver::handler,
+    simplex::{
+        marshal::{
+            self, Update,
+            core::{Actor as MarshalActor, Floor, Mailbox as MarshalMailbox},
+            resolver::handler,
+        },
+        types::{Finalization, Finalize, Proposal},
     },
-    simplex::types::{Finalization, Finalize, Proposal},
     types::{Epoch, FixedEpocher, Round, View, ViewDelta},
 };
 use commonware_cryptography::{

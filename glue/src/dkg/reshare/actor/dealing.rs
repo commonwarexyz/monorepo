@@ -10,8 +10,7 @@ use crate::dkg::{
 };
 use commonware_codec::{Decode, Encode};
 use commonware_consensus::{
-    marshal::core::Variant as MarshalVariant,
-    simplex::scheme::Scheme as SimplexScheme,
+    simplex::{marshal::core::Variant as MarshalVariant, scheme::Scheme as SimplexScheme},
     types::{Epoch, EpochPhase, Epocher},
 };
 use commonware_cryptography::{
@@ -318,7 +317,7 @@ mod tests {
         tests::mocks::{self, MemorySecretStore},
     };
     use commonware_actor::Feedback;
-    use commonware_consensus::{Reporter, marshal};
+    use commonware_consensus::{Reporter, simplex::marshal};
     use commonware_cryptography::{
         bls12381::{
             dkg::feldman_desmedt::{Dealer as CryptoDealer, Info, Player as CryptoPlayer, Reveal},

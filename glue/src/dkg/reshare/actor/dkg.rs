@@ -6,8 +6,7 @@ use crate::dkg::{
     types::Participants,
 };
 use commonware_consensus::{
-    marshal::core::Variant as MarshalVariant,
-    simplex::scheme::Scheme as SimplexScheme,
+    simplex::{marshal::core::Variant as MarshalVariant, scheme::Scheme as SimplexScheme},
     types::{Epoch, EpochPhase, Epocher, Height},
 };
 use commonware_cryptography::{

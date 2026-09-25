@@ -77,7 +77,7 @@
 //! consensus hot path. After a restart the map is empty, but the actor
 //! recovers lazily: when `propose` or `verify` encounters a parent whose
 //! state is missing, the actor walks back through the block DAG (via a
-//! [`BlockProvider`](commonware_consensus::marshal::ancestry::BlockProvider))
+//! [`BlockProvider`](commonware_consensus::simplex::marshal::ancestry::BlockProvider))
 //! to the nearest known ancestor or the finalized tip,
 //! then replays forward via [`Application::apply`] to fill the gap. Each
 //! replayed block is inserted into the pending map immediately so that
@@ -93,11 +93,13 @@
 //! but not with [`Inline`]. This is because [`Inline`] does not verify the correctness
 //! of the embedded context within the [`CertifiableBlock`].
 //!
-//! [`Deferred`]: commonware_consensus::marshal::standard::Deferred
-//! [`Inline`]: commonware_consensus::marshal::standard::Inline
-//! [`coding::Marshaled`]: commonware_consensus::marshal::coding::Marshaled
+//! [`Deferred`]: commonware_consensus::simplex::marshal::standard::Deferred
+//! [`Inline`]: commonware_consensus::simplex::marshal::standard::Inline
+//! [`coding::Marshaled`]: commonware_consensus::simplex::marshal::coding::Marshaled
 
-use commonware_consensus::{CertifiableBlock, Epochable, Viewable, marshal::ancestry::Ancestry};
+use commonware_consensus::{
+    CertifiableBlock, Epochable, Viewable, simplex::marshal::ancestry::Ancestry,
+};
 use commonware_cryptography::certificate::Scheme;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use db::DatabaseSet;

@@ -26,14 +26,17 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_consensus::{
     CertifiableAutomaton as _, Reporter,
-    marshal::{
-        self,
-        ancestry::Ancestry,
-        core::Actor as MarshalActor,
-        resolver::handler,
-        standard::{Deferred, Standard},
+    simplex::{
+        marshal::{
+            self,
+            ancestry::Ancestry,
+            core::Actor as MarshalActor,
+            resolver::handler,
+            standard::{Deferred, Standard},
+        },
+        mocks::scheme as scheme_mocks,
+        types::Context,
     },
-    simplex::{mocks::scheme as scheme_mocks, types::Context},
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
