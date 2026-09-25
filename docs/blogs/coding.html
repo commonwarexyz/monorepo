@@ -86,9 +86,9 @@
 
         <p>Validators on most blockchain networks are overprovisioned for bandwidth when they are a leader and underutilized the rest of the time.</p>
 
-        <p>In a "standard" blockchain (akin to <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. Meanwhile, validators waiting for their block have ample bandwidth (for when they are a proposer) but are doing nothing with it when not. What if they could help?</p>
+        <p>In a "standard" blockchain (akin to <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/marshal/standard/mod.rs">marshal::standard</a></code> over <code><a href="https://docs.rs/commonware-broadcast/latest/commonware_broadcast/buffered/index.html">broadcast::buffered</a></code>), the proposer pushes the whole block to each validator. Even on multi-Gbps links, distributing a block this way can take hundreds of milliseconds. Meanwhile, validators waiting for their block have ample bandwidth (for when they are a proposer) but are doing nothing with it when not. What if they could help?</p>
 
-        <p>Today, we are introducing a new marshal dialect: <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators verify uniquely constructed shards and relay to other validators. All without slowing down <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> (which supports safely voting for a block before it is fully reconstructed).</p>
+        <p>Today, we are introducing a new marshal dialect: <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/marshal/coding/mod.rs">marshal::coding</a></code>. A leader commits to an erasure-coded block, validators verify uniquely constructed shards and relay to other validators. All without slowing down <code><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html">consensus::simplex</a></code> (which supports safely voting for a block before it is fully reconstructed).</p>
 
         <h2>Certification: A Second Decision Point</h2>
 
@@ -155,7 +155,7 @@
 
         <h2>What Comes Next</h2>
 
-        <p>Delivering blocks in pieces is one part of a larger roadmap toward faster and more composable consensus deployments. <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/marshal/coding/mod.rs">marshal::coding</a></code> is now <a href="/blogs/is-it-ready-yet.html">in ALPHA</a>, and will be included in our next release.</p>
+        <p>Delivering blocks in pieces is one part of a larger roadmap toward faster and more composable consensus deployments. <code><a href="https://github.com/commonwarexyz/monorepo/blob/main/consensus/src/simplex/marshal/coding/mod.rs">marshal::coding</a></code> is now <a href="/blogs/is-it-ready-yet.html">in ALPHA</a>, and will be included in our next release.</p>
 
         <p><i>Can you have too much blockspace?</i></p>
     </div>

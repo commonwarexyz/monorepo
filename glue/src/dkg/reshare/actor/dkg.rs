@@ -7,8 +7,10 @@ use crate::dkg::{
 };
 use commonware_consensus::{
     Heightable as _,
-    marshal::{Identifier, core::Variant as MarshalVariant},
-    simplex::scheme::Scheme as SimplexScheme,
+    simplex::{
+        marshal::{Identifier, core::Variant as MarshalVariant},
+        scheme::Scheme as SimplexScheme,
+    },
     types::{Epoch, Epocher, Height},
 };
 use commonware_cryptography::{
