@@ -14,6 +14,8 @@ default-filter = 'test(/.*_conformance_$/)'
 [profile.all]
 default-filter = 'test(/.*/)'
 
-# Tests that run AVX-512 code paths. CI runs them under Intel SDE.
+# Tests that run AVX-512 code paths, ours and those our dependencies select at runtime (crc-fast
+# for CRC32C, blake3). CI runs them under Intel SDE with `--run-ignored all` so the ignored
+# `avx512_available` guards run too. The large ignored roundtrips are too slow to emulate.
 [profile.avx512]
-default-filter = '(package(commonware-cryptography-curve25519) | (package(commonware-cryptography) & test(/^(reed_solomon|sha256)::/)) | (package(commonware-coding) & test(/reed_solomon/))) & not test(/(.*_slow_$|.*_conformance_$)/)'
+default-filter = '(package(commonware-cryptography-curve25519) | (package(commonware-cryptography) & test(/^((reed_solomon|sha256|crc32|blake3|lthash|transcript)::|fuzz::tests::test_fuzz_(crc32|blake3)$)/)) | (package(commonware-coding) & test(/reed_solomon/))) & not test(/(.*_slow_$|.*_conformance_$|::roundtrip_[0-9]+_[0-9]+$)/)'

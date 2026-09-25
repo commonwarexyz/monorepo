@@ -149,10 +149,10 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
-          # Run the AVX-512 paths on an emulated Ice Lake server (AVX-512F, VL, BW, IFMA, and GFNI).
+          # Run the AVX-512 paths on an emulated Ice Lake server (AVX-512F, VL, BW, IFMA, GFNI, and VPCLMULQDQ).
           - os: ubuntu-latest
             package: commonware-cryptography
-            flags: "--cargo-profile release --profile avx512 -p commonware-coding -p commonware-cryptography-curve25519"
+            flags: "--cargo-profile release --profile avx512 --run-ignored all -p commonware-coding -p commonware-cryptography-curve25519"
             sde: icx
           # Test each package with a std feature without std, one package at a time.
           - os: ubuntu-latest
@@ -187,16 +187,16 @@ jobs:
         mkdir -p "$RUNNER_TEMP/sde"
         tar -xJf "$RUNNER_TEMP/sde.tar.xz" -C "$RUNNER_TEMP/sde" --strip-components=1
         echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$RUNNER_TEMP/sde/sde64 -${{ matrix.sde }} --" >> "$GITHUB_ENV"
-    # Each AVX-512 path has an ignored `avx512_available` guard that fails without its features.
-    - name: Check emulated AVX-512
-      if: ${{ matrix.sde }}
-      run: just test --cargo-profile release -p commonware-cryptography -p commonware-cryptography-curve25519 --run-ignored only -E 'test(/::avx512_available$/)'
     - name: Run no-std tests
       if: ${{ matrix.no-std }}
       run: just test-no-std --verbose
     - name: Run subset tests
       if: ${{ !matrix.no-std }}
       run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
+    # Without VPCLMULQDQ (Skylake and Cascade Lake servers), crc-fast runs a different AVX-512 kernel.
+    - name: Run CRC32 tests on an emulated Skylake server
+      if: ${{ matrix.sde }}
+      run: CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="$RUNNER_TEMP/sde/sde64 -skx --" just test ${{ matrix.flags }} -p ${{ matrix.package }} -E 'test(/^crc32::/) & not test(/::avx512_available$/)' --verbose
     - name: Run subset doc tests
       if: ${{ !matrix.sde && !matrix.no-std }}
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
