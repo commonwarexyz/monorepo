@@ -2,7 +2,8 @@
 //! name starts with `!`.
 //!
 //! CI runs this under Intel SDE before the emulated tests, so a runner or model change that drops
-//! a feature fails the job instead of letting the tests fall back to narrower kernels.
+//! a feature, or adds one the entry expects absent, fails the job instead of silently changing
+//! which kernels the tests reach.
 
 fn detected(feature: &str) -> bool {
     match feature {
@@ -17,6 +18,7 @@ fn detected(feature: &str) -> bool {
 }
 
 fn main() {
+    assert!(std::env::args().len() > 1, "no CPU features named");
     let mut unexpected = Vec::new();
     for arg in std::env::args().skip(1) {
         let (feature, expected) = match arg.strip_prefix('!') {

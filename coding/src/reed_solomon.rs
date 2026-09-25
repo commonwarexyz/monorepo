@@ -768,7 +768,7 @@ mod striped {
     }
 
     /// Decode when an original is missing: recover the missing originals AND read the missing
-    /// recoveries straight out of one decode (the decode reveals every position), so no
+    /// recoveries straight out of the same decode (the decode reveals every position), so no
     /// separate re-encode is needed. The caller feeds exactly `k` shards (surplus recoveries
     /// were trimmed and their digests cleared), so the trimmed positions are reconstructed
     /// here and bound by the commitment root check like any other missing shard. No

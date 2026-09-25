@@ -215,7 +215,7 @@ mod tests {
     }
 
     /// Official BLAKE3 test vectors. Hashing 16 KiB or more in one update reaches the 16-way
-    /// AVX-512 chunk and parent kernels.
+    /// AVX-512 chunk kernel, and 32 KiB or more also reaches the 16-way parent kernel.
     #[test]
     fn test_official_vectors() {
         const VECTORS: [(usize, [u8; DIGEST_LENGTH]); 3] = [

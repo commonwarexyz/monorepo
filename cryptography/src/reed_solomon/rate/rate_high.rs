@@ -350,7 +350,7 @@ impl<E: Engine> HighRateDecoder<E> {
         // When the caller passed `compute_recovery = true` to `decode`, reveal the missing
         // recovery shards at `work[0..recovery_count]`. Scale them by the inverse locator so they
         // hold the canonical recovery values, mirroring the reveal of the originals above. This
-        // lets `DecoderResult::recovery` return them without a separate re-encode.
+        // lets `RecoveryDecoderResult::recovery` return them without a separate re-encode.
         if compute_recovery {
             for i in 0..recovery_count {
                 if !received[i] {
