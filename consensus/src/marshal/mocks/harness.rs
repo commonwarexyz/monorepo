@@ -44,6 +44,7 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{NZU16, NZU64, NZUsize, TestRng, non_empty, probability, test_rng};
+use futures::StreamExt;
 use rand::{
     RngExt as _,
     seq::{IteratorRandom, SliceRandom},
@@ -4828,6 +4829,89 @@ pub fn get_finalization_by_height<H: TestHarness>() {
                 .await
                 .is_none()
         );
+    })
+}
+
+/// Selected blocks stream in increasing height order across finalized history.
+pub fn blocks_forward_range<H: TestHarness>() {
+    let runner = deterministic::Runner::timed(Duration::from_secs(60));
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let mut oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        let me = participants[0].clone();
+        let setup = H::setup_validator(
+            context.child("validator").with_attribute("index", 0),
+            &mut oracle,
+            me,
+            ConstantProvider::new(schemes[0].clone()),
+        )
+        .await;
+        let mut handle = ValidatorHandle {
+            mailbox: setup.mailbox,
+            extra: setup.extra,
+        };
+
+        // The selected suffix starts at the finalized anchor and ends at height 7.
+        let mut parent = Sha256::hash(&[b""]);
+        let mut parent_commitment = H::genesis_parent_commitment(participants.len() as u16);
+        let mut selected = Vec::new();
+        let mut digests = Vec::new();
+        for i in 1..=7u64 {
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                participants.len() as u16,
+            );
+            let digest = H::digest(&block);
+            let commitment = H::commitment(&block);
+            let round = Round::new(Epoch::zero(), View::new(i));
+
+            H::propose(&mut handle, round, &block).await;
+            context.sleep(LINK.latency).await;
+
+            let proposal = Proposal {
+                round,
+                parent: View::new(i - 1),
+                payload: commitment,
+            };
+            if i <= 5 {
+                let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                H::report_finalization(&mut handle.mailbox, finalization).await;
+            }
+            if i >= 5 {
+                selected.push(commitment);
+            }
+            digests.push(digest);
+
+            parent = digest;
+            parent_commitment = commitment;
+        }
+
+        let blocks = handle.mailbox.blocks(Height::new(7), selected.into());
+        assert_eq!(blocks.tip(), Height::new(7));
+        assert_eq!(blocks.digest(Height::new(7)), Some(parent));
+        let fetched = blocks
+            .range(Height::new(1)..=Height::new(7))
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(fetched.len(), 7);
+        for (index, block) in fetched.into_iter().enumerate() {
+            let block = block.unwrap();
+            assert_eq!(block.height().get(), index as u64 + 1);
+            assert_eq!(block.digest(), digests[index]);
+        }
     })
 }
 

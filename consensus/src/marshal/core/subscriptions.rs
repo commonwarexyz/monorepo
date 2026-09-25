@@ -1,4 +1,5 @@
 use super::{Buffer, Variant};
+use crate::{Heightable, types::Height};
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Aborter},
@@ -124,6 +125,70 @@ impl<V: Variant> Subscriptions<V> {
     }
 }
 
+/// Local waiters for canonical block bodies at finalized heights.
+pub(super) struct Finalized<V: Variant> {
+    entries: BTreeMap<Height, Vec<Subscriber<V>>>,
+}
+
+impl<V: Variant> Finalized<V> {
+    pub(super) const fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    pub(super) fn insert(
+        &mut self,
+        span: Span,
+        height: Height,
+        response: oneshot::Sender<V::Block>,
+    ) {
+        self.entries.entry(height).or_default().push(Subscriber {
+            span,
+            sender: response,
+        });
+    }
+
+    /// Delivers a body whose canonical finalization has been established by the actor.
+    pub(super) fn notify(&mut self, block: &V::Block) -> bool {
+        let Some(subscribers) = self.entries.remove(&block.height()) else {
+            return false;
+        };
+        for subscriber in subscribers {
+            deliver(subscriber, block);
+        }
+        true
+    }
+
+    pub(super) fn prune(&mut self, min: Height) {
+        self.entries = self.entries.split_off(&min);
+    }
+
+    /// Removes canceled callers, waking the actor even when no bodies arrive.
+    pub(super) async fn closed(&mut self) {
+        poll_fn(|cx| {
+            let mut closed = false;
+            self.entries.retain(|_, subscribers| {
+                subscribers.retain_mut(|subscriber| {
+                    if subscriber.sender.poll_closed(cx).is_ready() {
+                        closed = true;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                !subscribers.is_empty()
+            });
+            if closed {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +294,48 @@ mod tests {
         assert_receives(first_receiver, &block);
         assert_receives(second_receiver, &block);
         assert!(subscriptions.entries.is_empty());
+    }
+
+    #[test]
+    fn finalized_waiters_share_delivery_and_close_below_prune() {
+        let mut subscriptions = Finalized::<TestVariant>::new();
+        let block = Arc::new(block(5, 50));
+        let (stale_sender, mut stale_receiver) = oneshot::channel();
+        let (first_sender, first_receiver) = oneshot::channel();
+        let (second_sender, second_receiver) = oneshot::channel();
+        subscriptions.insert(Span::none(), Height::new(4), stale_sender);
+        subscriptions.insert(Span::none(), block.height(), first_sender);
+        subscriptions.insert(Span::none(), block.height(), second_sender);
+        subscriptions.prune(block.height());
+        assert!(matches!(
+            stale_receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(subscriptions.notify(&block));
+        assert_receives(first_receiver, &block);
+        assert_receives(second_receiver, &block);
+        assert!(!subscriptions.notify(&block));
+    }
+
+    #[test]
+    fn finalized_cancellation_wakes_without_block_delivery() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut subscriptions = Finalized::<TestVariant>::new();
+            let (response, receiver) = oneshot::channel();
+            subscriptions.insert(Span::none(), Height::new(5), response);
+            select! {
+                _ = subscriptions.closed() => {},
+                _ = async {
+                    context.sleep(std::time::Duration::from_millis(1)).await;
+                    drop(receiver);
+                    std::future::pending::<()>().await;
+                } => unreachable!(),
+                _ = context.sleep(std::time::Duration::from_secs(1)) => {
+                    panic!("cancellation must wake finalized waiter cleanup");
+                },
+            }
+            assert!(subscriptions.entries.is_empty());
+        });
     }
 
     #[test]

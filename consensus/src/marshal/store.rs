@@ -166,6 +166,12 @@ pub trait Blocks: Send + Sync + Sized + 'static {
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
+    /// Checks whether a block is stored by digest without reading its body.
+    fn has(
+        &self,
+        digest: &<Self::Block as Digestible>::Digest,
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+
     /// Prune the store to the provided minimum height (inclusive).
     ///
     /// # Arguments
@@ -285,6 +291,10 @@ where
         <Self as Archive>::get(self, id).await
     }
 
+    async fn has(&self, digest: &<Self::Block as Digestible>::Digest) -> Result<bool, Self::Error> {
+        <Self as Archive>::has(self, Identifier::Key(digest)).await
+    }
+
     async fn prune(self, _: Height) -> Result<Self, Self::Error> {
         // Pruning is a no-op for immutable archives.
         Ok(self)
@@ -377,6 +387,10 @@ where
         id: Identifier<'_, <Self::Block as Digestible>::Digest>,
     ) -> Result<Option<Self::Block>, Self::Error> {
         <Self as Archive>::get(self, id).await
+    }
+
+    async fn has(&self, digest: &<Self::Block as Digestible>::Digest) -> Result<bool, Self::Error> {
+        <Self as Archive>::has(self, Identifier::Key(digest)).await
     }
 
     async fn prune(self, min: Height) -> Result<Self, Self::Error> {

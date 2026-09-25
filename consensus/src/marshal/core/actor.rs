@@ -1,6 +1,7 @@
 use super::{
     Buffer, ExpectedCommitment, Retirement, Variant,
     acks::{PendingAck, PendingAcks},
+    acquisition::Acquisitions,
     cache,
     certified::Certified,
     durability::{DispatchGate, Durable as _},
@@ -8,7 +9,7 @@ use super::{
     mailbox::{Mailbox, Message},
     staged::Staged,
     stream::Stream,
-    subscriptions::Subscriptions,
+    subscriptions::{Finalized as FinalizedSubscriptions, Subscriptions},
     variant::NoBuffer,
 };
 use crate::{
@@ -45,7 +46,7 @@ use commonware_utils::{
 };
 use futures::{
     FutureExt as _, TryFutureExt as _,
-    future::{join, join_all},
+    future::{Either, join, join_all, pending, ready},
     try_join,
 };
 use rand_core::CryptoRng;
@@ -114,7 +115,7 @@ where
     epocher: ES,
     // Minimum number of views to retain temporary data after the application processes a block
     view_retention: ViewDelta,
-    // Maximum number of resolver messages handled in one batch
+    // Speculative body capacity and per-turn acquisition work
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
@@ -134,6 +135,10 @@ where
     tip: Height,
     // Outstanding subscriptions for blocks
     block_subscriptions: Subscriptions<V>,
+    // Metadata leases share bounded speculative fetches and ready bodies.
+    acquisitions: Acquisitions<V>,
+    // Local consumers of the canonical prefix, independent of application acknowledgements.
+    finalized_subscriptions: FinalizedSubscriptions<V>,
     // Commitments known certified above the finalized tip
     certified: Certified<V::Commitment>,
     // Defers application dispatch of finalized-archive writes until a sync
@@ -262,6 +267,8 @@ where
                 cleared_acks: Vec::new(),
                 tip: Height::zero(),
                 block_subscriptions: Subscriptions::new(),
+                acquisitions: Acquisitions::new(config.max_repair.get()),
+                finalized_subscriptions: FinalizedSubscriptions::new(),
                 certified: Certified::new(),
                 dispatch_gate: DispatchGate::default(),
                 staged: Staged::new(config.max_pending_acks.get().saturating_mul(2)),
@@ -271,7 +278,7 @@ where
                 finalized_height,
                 processed_height,
             },
-            Mailbox::new(sender, config.max_pending_acks),
+            Mailbox::new(sender, config.max_pending_acks, config.max_repair),
             floor,
         )
     }
@@ -430,6 +437,11 @@ where
             on_start => {
                 let closed = self.block_subscriptions.retain_open();
                 Self::cancel_acquisitions(&mut resolver, closed);
+                let prefetch = if self.acquisitions.ready() {
+                    Either::Left(ready(()))
+                } else {
+                    Either::Right(pending::<()>())
+                };
             },
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
@@ -454,6 +466,10 @@ where
             closed = self.block_subscriptions.closed() => {
                 Self::cancel_acquisitions(&mut resolver, closed);
             },
+            closed = self.acquisitions.closed() => {
+                Self::cancel_acquisitions(&mut resolver, closed);
+            },
+            () = self.finalized_subscriptions.closed() => {},
             // Handle application acknowledgements (drain all ready acks, sync once)
             result = self.pending_acks.current() => {
                 let next = match self
@@ -494,7 +510,7 @@ where
                     .instrument(span)
                     .await;
             },
-            // Handle resolver messages (batched up to max_repair).
+            // Handle resolver messages before speculative prefetch (batched up to max_repair).
             Some(message) = resolver_rx.recv() else {
                 debug!("handler closed, shutting down");
                 return;
@@ -509,6 +525,9 @@ where
                         &mut application,
                     )
                     .await;
+            },
+            () = prefetch => {
+                self.dispatch_acquisitions(&buffer, &mut resolver).await;
             },
         }
     }
@@ -778,7 +797,14 @@ where
                     (self, stored) = self
                         .update_processed_round_floor(height, round, buffer, application, resolver)
                         .await
-                        .store_finalization(height, digest, &block, Some(finalization), application)
+                        .store_finalization(
+                            height,
+                            digest,
+                            &block,
+                            Some(finalization),
+                            application,
+                            resolver,
+                        )
                         .await;
                     if stored {
                         self.staged.insert(height, block);
@@ -828,6 +854,33 @@ where
             }
             Message::GetProcessedHeight { response, .. } => {
                 response.send_lossy(self.stream.processed_height());
+            }
+            Message::AwaitFinalized {
+                span,
+                height,
+                response,
+            } => {
+                if let Some(block) = self.get_finalized_block(height).await {
+                    response.send_lossy(block);
+                } else if height > self.floor.processed_height() {
+                    self.finalized_subscriptions.insert(span, height, response);
+                }
+            }
+            Message::Prefetch {
+                commitments,
+                range,
+                lease,
+                ..
+            } => {
+                self.acquisitions
+                    .lease(commitments.clone(), range.clone(), lease);
+                if let Some(selected) = commitments.get(range) {
+                    for commitment in selected {
+                        if self.block_subscriptions.contains(commitment) {
+                            self.acquisitions.satisfied(*commitment);
+                        }
+                    }
+                }
             }
             Message::Acquire {
                 span,
@@ -1000,6 +1053,32 @@ where
         });
     }
 
+    async fn dispatch_acquisitions<Buf: Buffer<V>>(
+        &mut self,
+        buffer: &Buf,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
+    ) {
+        for _ in 0..self.max_repair.get() {
+            let Some(commitment) = self.acquisitions.next() else {
+                break;
+            };
+            let digest = V::commitment_to_inner(commitment);
+            if self.block_subscriptions.contains(&commitment)
+                || buffer.find_by_commitment(commitment).await.is_some()
+                || self.cache.has_block(digest).await
+                || self
+                    .finalized_blocks
+                    .has(&digest)
+                    .await
+                    .expect("failed to check finalized block")
+            {
+                self.acquisitions.satisfied(commitment);
+            } else {
+                resolver.fetch(Request::new(commitment, Annotation::Subscription));
+            }
+        }
+    }
+
     async fn handle_acquire<Buf: Buffer<V>>(
         &mut self,
         span: Span,
@@ -1016,13 +1095,15 @@ where
                 self.certified.insert(parent, V::parent_commitment(&block));
             }
             let consumed = self.block_subscriptions.notify(block.clone());
-            if consumed {
+            if consumed || self.acquisitions.contains(&commitment) {
+                self.acquisitions.satisfied(commitment);
                 Self::cancel_acquisitions(resolver, vec![commitment]);
             }
             response.send_lossy(block);
             return;
         }
-        if !self.block_subscriptions.contains(&commitment) {
+        let active = self.acquisitions.claim(commitment);
+        if !active && !self.block_subscriptions.contains(&commitment) {
             resolver.fetch(Request::new(commitment, Annotation::Subscription));
         }
         self.block_subscriptions
@@ -1138,8 +1219,14 @@ where
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
         let commitment = V::commitment(&block);
+        let demanded = self.acquisitions.contains(&commitment);
         let consumed = self.block_subscriptions.notify(block.clone());
         if consumed {
+            self.acquisitions.satisfied(commitment);
+        } else {
+            self.acquisitions.complete(block.clone());
+        }
+        if demanded || consumed {
             Self::cancel_acquisitions(resolver, vec![commitment]);
         }
 
@@ -1226,6 +1313,8 @@ where
         )
         .expect("failed to store floor anchor");
         self = self.sync_finalized().await;
+        self.acquisitions.satisfied(V::commitment(&block));
+        self.finalized_subscriptions.notify(&block);
 
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
@@ -1370,7 +1459,7 @@ where
         }
         if finalization.is_some() || self.finalized_commitment(height).await == Some(commitment) {
             (self, _) = self
-                .store_finalization(height, digest, &block, finalization, application)
+                .store_finalization(height, digest, &block, finalization, application, resolver)
                 .await;
         } else if certified_height.is_some()
             && height > self.floor.processed_height()
@@ -1380,6 +1469,7 @@ where
                 .cache
                 .put_certified(bounds.epoch(), height, digest, &block)
                 .await;
+            self.acquisitions.satisfied(commitment);
         }
         response.send_lossy(true);
         self
@@ -1648,6 +1738,7 @@ where
         block: &V::Block,
         finalization: Option<Finalization<P::Scheme, V::Commitment>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
+        resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> (Box<Self>, bool) {
         // Blocks below the last processed height are not useful to us, so we ignore them (this
         // has the nice byproduct of ensuring we don't call a backing store with a block below the
@@ -1685,6 +1776,12 @@ where
             }
         )
         .unwrap_or_else(|e| panic!("failed to finalize: {e}"));
+
+        let commitment = V::commitment(block);
+        if self.acquisitions.claim(commitment) {
+            Self::cancel_acquisitions(resolver, vec![commitment]);
+        }
+        self.finalized_subscriptions.notify(block);
 
         // The write above is buffered and readable before it is durable, so
         // hold dispatch at or above it until a sync covers it.
@@ -1789,6 +1886,9 @@ where
         buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
+        if let Some(block) = self.acquisitions.get_ready(&commitment) {
+            return Some(block);
+        }
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);
         }
@@ -1845,6 +1945,7 @@ where
                             &block,
                             Some(finalization),
                             application,
+                            resolver,
                         )
                         .await;
                     wrote |= stored;
@@ -1898,6 +1999,7 @@ where
                             &block,
                             finalization,
                             application,
+                            resolver,
                         )
                         .await;
                     wrote |= stored;
@@ -2073,6 +2175,7 @@ where
                 .map_err(BoxedError::from),
         )
         .unwrap_or_else(|e| panic!("failed to prune finalized archives: {e}"));
+        self.finalized_subscriptions.prune(height);
         self
     }
 
@@ -2092,6 +2195,7 @@ where
                 .map_err(BoxedError::from),
         )
         .unwrap_or_else(|e| panic!("failed to prune data below floor: {e}"));
+        self.finalized_subscriptions.prune(height);
         self
     }
 }

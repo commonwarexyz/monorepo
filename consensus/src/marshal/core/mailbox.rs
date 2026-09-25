@@ -13,13 +13,12 @@ use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{Handle, telemetry::traces::TracedExt as _};
 use commonware_utils::channel::oneshot;
-use std::{collections::VecDeque, num::NonZeroUsize};
+use std::{collections::VecDeque, num::NonZeroUsize, ops::Range, sync::Arc};
 use tracing::{Span, info_span};
 
 commonware_macros::stability_scope!(ALPHA {
     use crate::marshal::ancestry::{AncestorStream, Ancestry, BlockProvider};
     use commonware_runtime::{Clock, telemetry::metrics::histogram::Timed};
-    use std::sync::Arc;
 });
 
 /// Messages sent to the marshal [Actor](super::Actor).
@@ -73,6 +72,26 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// The commitment of the block to retrieve.
         commitment: V::Commitment,
         /// A channel to send the retrieved block.
+        response: oneshot::Sender<V::Block>,
+    },
+    /// A lease requesting forward prefetch of commitment metadata.
+    Prefetch {
+        /// The span carried with this request.
+        span: Span,
+        /// The commitments in forward order.
+        commitments: Arc<[V::Commitment]>,
+        /// The selected indices within the commitment sequence.
+        range: Range<usize>,
+        /// The sender retained while the caller owns the lease receiver.
+        lease: oneshot::Sender<()>,
+    },
+    /// A request to wait for a finalized block at a height.
+    AwaitFinalized {
+        /// The span carried with this request.
+        span: Span,
+        /// The height of the finalized block.
+        height: Height,
+        /// A channel to send the finalized block.
         response: oneshot::Sender<V::Block>,
     },
     /// A request to retrieve the verified block previously persisted for `round`.
@@ -189,6 +208,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::GetFinalization { span, .. }
             | Self::GetVerified { span, .. }
             | Self::Acquire { span, .. }
+            | Self::Prefetch { span, .. }
+            | Self::AwaitFinalized { span, .. }
             | Self::Forward { span, .. }
             | Self::Proposed { span, .. }
             | Self::Verified { span, .. }
@@ -210,6 +231,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessedHeight { .. } => "get_processed_height",
             Self::Acquire { .. } => "acquire",
+            Self::Prefetch { .. } => "prefetch",
+            Self::AwaitFinalized { .. } => "await_finalized",
             Self::GetVerified { .. } => "get_verified",
             Self::Forward { .. } => "forward",
             Self::Proposed { .. } => "proposed",
@@ -248,6 +271,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             | Self::GetProcessedHeight { .. } => false,
             Self::Acquire { .. }
+            | Self::AwaitFinalized { .. }
+            | Self::Prefetch { .. }
             | Self::GetVerified { .. }
             | Self::Forward { .. }
             | Self::SetFloor { .. }
@@ -266,7 +291,10 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessedHeight { response, .. } => response.is_closed(),
-            Self::Acquire { response, .. } => response.is_closed(),
+            Self::Acquire { response, .. } | Self::AwaitFinalized { response, .. } => {
+                response.is_closed()
+            }
+            Self::Prefetch { lease, .. } => lease.is_closed(),
             Self::Forward { .. }
             | Self::Proposed { .. }
             | Self::Verified { .. }
@@ -419,14 +447,20 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
     max_pending_acks: usize,
+    pub(in crate::marshal) max_repair: NonZeroUsize,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
+    pub(crate) const fn new(
+        sender: Sender<Message<S, V>>,
+        max_pending_acks: NonZeroUsize,
+        max_repair: NonZeroUsize,
+    ) -> Self {
         Self {
             sender,
             max_pending_acks: max_pending_acks.get(),
+            max_repair,
         }
     }
 
@@ -524,6 +558,52 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let _ = self.sender.enqueue(Message::Acquire {
             span: info_span!("marshal.mailbox.acquire", commitment = %commitment),
             commitment,
+            response,
+        });
+        receiver
+    }
+
+    /// Register forward prefetch demand for `range` within a sequence of commitments.
+    ///
+    /// The lease retains commitment metadata. Marshal bounds the combined number of active
+    /// prefetches and speculative bodies awaiting consumption. Prefetch is best effort: local
+    /// availability fulfills demand, and an explicit acquisition takes over shared work
+    /// and retires its prefetch demand. Explicit acquisitions are owned by their callers
+    /// and are independent of the prefetch bound. Use [Self::acquire] to obtain a body.
+    ///
+    /// Keep the returned receiver alive while the demand is needed; drop it to release
+    /// unused demand. The receiver does not deliver a value and should not be awaited.
+    /// Empty or invalid ranges return a closed receiver.
+    pub fn prefetch(
+        &self,
+        commitments: Arc<[V::Commitment]>,
+        range: Range<usize>,
+    ) -> oneshot::Receiver<()> {
+        let (lease, receiver) = oneshot::channel();
+        if !commitments
+            .get(range.clone())
+            .is_some_and(|selected| !selected.is_empty())
+        {
+            return receiver;
+        }
+        let _ = self.sender.enqueue(Message::Prefetch {
+            span: info_span!("marshal.mailbox.prefetch"),
+            commitments,
+            range,
+            lease,
+        });
+        receiver
+    }
+
+    /// Wait for the finalized block at `height` to become available locally.
+    ///
+    /// This does not initiate a network request. Drop the receiver to cancel the wait.
+    /// The receiver closes without delivery if marshal shuts down or prunes the height.
+    pub fn finalized(&self, height: Height) -> oneshot::Receiver<V::Block> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::AwaitFinalized {
+            span: info_span!("marshal.mailbox.finalized", height = height.traced()),
+            height,
             response,
         });
         receiver
@@ -905,7 +985,8 @@ mod tests {
         runner.start(|context| async move {
             let (sender, receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1));
+            let mailbox =
+                Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1), NZUsize!(8));
             drop(receiver);
 
             let (ack, receiver) = oneshot::channel();
@@ -1254,5 +1335,45 @@ mod tests {
             Err(TryRecvError::Empty)
         ));
         assert!(matches!(last_receiver.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn finalized_body_waits_preserve_actor_prune_decisions() {
+        let mut overflow = pending();
+        let (older_response, mut older_receiver) = oneshot::channel();
+        let (closed_response, closed_receiver) = oneshot::channel();
+        let (current_response, mut current_receiver) = oneshot::channel();
+        for (height, response) in [
+            (4, older_response),
+            (5, closed_response),
+            (5, current_response),
+        ] {
+            <TestMessage as Policy>::handle(
+                &mut overflow,
+                TestMessage::AwaitFinalized {
+                    span: Span::none(),
+                    height: Height::new(height),
+                    response,
+                },
+            );
+        }
+        drop(closed_receiver);
+        <TestMessage as Policy>::handle(&mut overflow, prune(5));
+        assert!(matches!(
+            older_receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            current_receiver.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        let drained = drain(&mut overflow);
+        assert_eq!(drained.len(), 3);
+        assert!(
+            matches!(drained[1], TestMessage::AwaitFinalized { height, .. } if height == Height::new(4))
+        );
+        assert!(
+            matches!(drained[2], TestMessage::AwaitFinalized { height, .. } if height == Height::new(5))
+        );
     }
 }
