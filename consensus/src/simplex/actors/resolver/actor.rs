@@ -476,7 +476,10 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_async, test_collect_traces};
-    use commonware_p2p::simulated::{Config as NetworkConfig, Link, Network};
+    use commonware_p2p::{
+        simulated::{Config as NetworkConfig, Link, Network},
+        utils::mocks::NoopBlocker,
+    };
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer as _, Delivery};
     use commonware_runtime::{
@@ -493,24 +496,7 @@ mod tests {
 
     type TestScheme = ed25519::Scheme;
     type TestActor =
-        Actor<deterministic::Context, TestScheme, NoopBlocker, Sha256Digest, Sequential>;
-
-    #[derive(Clone, Default)]
-    struct NoopBlocker;
-
-    impl Blocker for NoopBlocker {
-        type PublicKey = PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) =
-                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
-            receiver
-        }
-    }
+        Actor<deterministic::Context, TestScheme, NoopBlocker<PublicKey>, Sha256Digest, Sequential>;
 
     /// Tracks the set of pending requests the way the resolver engine would.
     #[derive(Clone, Default)]
@@ -620,7 +606,7 @@ mod tests {
             context,
             Config {
                 scheme,
-                blocker: NoopBlocker,
+                blocker: NoopBlocker::default(),
                 strategy: Sequential,
                 epoch: EPOCH,
                 mailbox_size: NZUsize!(8),
@@ -697,7 +683,7 @@ mod tests {
                 context.child("requester"),
                 Config {
                     scheme: schemes[0].clone(),
-                    blocker: NoopBlocker,
+                    blocker: NoopBlocker::default(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -717,7 +703,7 @@ mod tests {
                 context.child("responder"),
                 Config {
                     scheme: schemes[2].clone(),
-                    blocker: NoopBlocker,
+                    blocker: NoopBlocker::default(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -885,7 +871,7 @@ mod tests {
                 context.child("requester"),
                 Config {
                     scheme: schemes[0].clone(),
-                    blocker: NoopBlocker,
+                    blocker: NoopBlocker::default(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -909,7 +895,7 @@ mod tests {
                     context.child("holder"),
                     Config {
                         scheme: schemes[index].clone(),
-                        blocker: NoopBlocker,
+                        blocker: NoopBlocker::default(),
                         strategy: Sequential,
                         epoch: EPOCH,
                         mailbox_size: NZUsize!(8),
@@ -1021,7 +1007,7 @@ mod tests {
                 context.child("requester"),
                 Config {
                     scheme: schemes[0].clone(),
-                    blocker: NoopBlocker,
+                    blocker: NoopBlocker::default(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -1041,7 +1027,7 @@ mod tests {
                 context.child("first_responder"),
                 Config {
                     scheme: schemes[1].clone(),
-                    blocker: NoopBlocker,
+                    blocker: NoopBlocker::default(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
@@ -1061,7 +1047,7 @@ mod tests {
                 context.child("nullification_holder"),
                 Config {
                     scheme: schemes[2].clone(),
-                    blocker: NoopBlocker,
+                    blocker: NoopBlocker::default(),
                     strategy: Sequential,
                     epoch: EPOCH,
                     mailbox_size: NZUsize!(8),
