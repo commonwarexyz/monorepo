@@ -134,13 +134,11 @@ stability_scope!(ALPHA, cfg(any(test, feature = "mocks")) {
     pub mod twins;
 });
 stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
-    use crate::marshal::ancestry::Ancestry;
+    use crate::simplex::marshal::ancestry::Ancestry;
     use commonware_actor::Feedback;
     use commonware_cryptography::{Digest, PublicKey, certificate::Scheme};
     use commonware_utils::channel::{fallible::OneshotExt, oneshot, ring};
     use std::future::Future;
-
-    pub mod marshal;
 
     mod reporter;
     pub use reporter::*;

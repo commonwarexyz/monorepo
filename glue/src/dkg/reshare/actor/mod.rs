@@ -32,8 +32,10 @@ use commonware_actor::mailbox::{self as actor_mailbox, Receiver as MailboxReceiv
 use commonware_codec::Codec;
 use commonware_consensus::{
     Block as _, Heightable as _,
-    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
-    simplex::scheme::Scheme as SimplexScheme,
+    simplex::{
+        marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+        scheme::Scheme as SimplexScheme,
+    },
     types::{EpochPhase, FixedEpocher, Height},
 };
 use commonware_cryptography::{
