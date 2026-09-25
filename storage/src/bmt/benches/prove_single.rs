@@ -23,7 +23,12 @@ fn bench_prove_single(c: &mut Criterion) {
 
         // Select SAMPLE_SIZE random elements without replacement and create/verify proofs
         c.bench_function(
-            &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
+            &format!(
+                "{}/n={} items={} hasher=sha256",
+                module_path!(),
+                n,
+                SAMPLE_SIZE
+            ),
             |b| {
                 b.iter_batched(
                     || {

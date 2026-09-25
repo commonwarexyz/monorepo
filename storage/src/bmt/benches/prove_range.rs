@@ -23,7 +23,12 @@ fn bench_prove_range(c: &mut Criterion) {
 
         // Prove range of proofs for random starting positions
         c.bench_function(
-            &format!("{}/n={} items={}", module_path!(), n, SAMPLE_SIZE),
+            &format!(
+                "{}/n={} items={} hasher=sha256",
+                module_path!(),
+                n,
+                SAMPLE_SIZE
+            ),
             |b| {
                 b.iter_batched(
                     || {

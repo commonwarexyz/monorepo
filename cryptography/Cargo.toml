@@ -86,7 +86,6 @@ bench = false
 [features]
 default = [ "std" ]
 bls12381 = [ "dep:blst" ]
-blake3-parallel = [ "blake3/rayon", "std" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",

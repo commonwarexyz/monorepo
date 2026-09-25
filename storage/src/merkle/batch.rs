@@ -92,13 +92,18 @@ use crate::merkle::{
 use ahash::RandomState;
 use alloc::{
     sync::{Arc, Weak},
+    vec,
     vec::Vec,
 };
 #[cfg(feature = "std")]
 use commonware_codec::Write;
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
+use commonware_utils::iter::zip_eq;
 use core::ops::Range;
+
+/// Nodes per [`Hasher::node_digests`] call when merkleizing, bounding the working set.
+const WINDOW: usize = 256;
 
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
@@ -418,37 +423,41 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         (left, right)
     }
 
-    /// Compute the digests of `positions` two at a time so the hasher can make progress on both
-    /// concurrently, appending `(position, digest)` results to `output`.
-    fn zip_nodes(
+    /// Compute the digests of `positions` together so the hasher can make progress on many at
+    /// once, returning `(position, digest)` results in order.
+    ///
+    /// Positions are hashed in windows of [`WINDOW`] nodes to bound the working set.
+    fn hash_nodes(
         &self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
         positions: &[Position<F>],
         height: u32,
-        output: &mut Vec<(Position<F>, D)>,
-    ) {
-        let (pairs, remainder) = positions.as_chunks::<2>();
-        for pair in pairs {
-            let (left, right) = (pair[0], pair[1]);
-            let (ll, lr) = self.child_digests(base, left, height);
-            let (rl, rr) = self.child_digests(base, right, height);
-            let (left_digest, right_digest) =
-                hasher.node_digest_pair([(left, &ll, &lr), (right, &rl, &rr)]);
-            output.push((left, left_digest));
-            output.push((right, right_digest));
+    ) -> Vec<(Position<F>, D)> {
+        if let [pos] = *positions {
+            let (left, right) = self.child_digests(base, pos, height);
+            return vec![(pos, hasher.node_digest(pos, &left, &right))];
         }
-        if let [pos] = remainder {
-            let (left, right) = self.child_digests(base, *pos, height);
-            output.push((*pos, hasher.node_digest(*pos, &left, &right)));
+
+        let mut output = Vec::with_capacity(positions.len());
+        for window in positions.chunks(WINDOW) {
+            let nodes: Vec<_> = window
+                .iter()
+                .map(|&pos| {
+                    let (left, right) = self.child_digests(base, pos, height);
+                    (pos, left, right)
+                })
+                .collect();
+            output.extend(zip_eq(window.iter().copied(), hasher.node_digests(&nodes)));
         }
+        output
     }
 
     /// Compute digests for one height's dirty nodes via the configured strategy.
     ///
-    /// Positions are split evenly across the strategy's workers so each worker can pair
-    /// adjacent nodes for [`Hasher::node_digest_pair`]. The chunk size is rounded up to
-    /// even so no pair straddles a chunk boundary.
+    /// Positions are split evenly across the strategy's workers, and each worker hashes its
+    /// share together with [`Hasher::node_digests`]. The chunk size is rounded up to even so
+    /// hashers that hash nodes in pairs pair every node.
     fn merkleize_bucket(
         &mut self,
         base: &Mem<F, D>,
@@ -466,11 +475,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                 positions.chunks(chunk),
                 chunk,
                 || hasher.clone(),
-                |hasher, positions| {
-                    let mut computed = Vec::with_capacity(positions.len());
-                    self.zip_nodes(base, &*hasher, positions, height, &mut computed);
-                    computed
-                },
+                |hasher, positions| self.hash_nodes(base, &*hasher, positions, height),
             );
         for nodes in computed {
             for (pos, digest) in nodes {

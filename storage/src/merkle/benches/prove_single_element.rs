@@ -47,7 +47,7 @@ fn bench_prove_single_element_family<F: Family>(c: &mut Criterion, family: &str)
     for n in N_LEAVES {
         c.bench_function(
             &format!(
-                "{}/n={n} samples={SAMPLE_SIZE} family={family}",
+                "{}/n={n} samples={SAMPLE_SIZE} family={family} hasher=sha256",
                 module_path!(),
             ),
             |b| {

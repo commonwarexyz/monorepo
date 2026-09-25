@@ -9,27 +9,32 @@
 
 use crate::Hasher;
 use arbitrary::{Arbitrary, Unstructured};
+use commonware_parallel::Sequential;
 use core::{fmt::Debug, marker::PhantomData};
 
-/// Pick a contiguous message length biased toward the boundaries of
-/// SHA-256's specialized paths (the pair kernels at 64 and 72 bytes and the
-/// two-block fixed path limit at 119 bytes), which are harmless biases for
-/// other hashers.
+/// Pick a contiguous message length biased toward the boundaries of the
+/// specialized paths: the pair kernels at 64 and 72 bytes, SHA-256's
+/// two-block fixed path limit at 119 bytes, and BLAKE3's two-block gather
+/// limit at 128 bytes. These are harmless biases for other hashers.
 fn arbitrary_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    Ok(match u.int_in_range(0..=6)? {
+    Ok(match u.int_in_range(0..=8)? {
         0 => 55,
         1 => 64,
         2 => 72,
         3 => 119,
         4 => 120,
-        5 => 1024,
+        5 => 128,
+        6 => 129,
+        7 => 1024,
         _ => u.int_in_range(0..=1024)?,
     })
 }
 
 /// Pick a batch message length while keeping the complete plan bounded.
+///
+/// Lengths around 1024 and 2048 bytes span one to three BLAKE3 chunks.
 fn arbitrary_batch_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
-    Ok(match u.int_in_range(0..=13)? {
+    Ok(match u.int_in_range(0..=17)? {
         0 => 0,
         1 => 55,
         2 => 56,
@@ -43,6 +48,10 @@ fn arbitrary_batch_len(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
         10 => 128,
         11 => 129,
         12 => 256,
+        13 => 1024,
+        14 => 1025,
+        15 => 2048,
+        16 => 2049,
         _ => u.int_in_range(0..=256)?,
     })
 }
@@ -138,6 +147,8 @@ impl<H: Hasher> Plan<H> {
 
         assert_eq!(H::hash(&left), expected_left);
         assert_eq!(H::hash(&right), expected_right);
+        assert_eq!(H::hash_with(&Sequential, &left), expected_left);
+        assert_eq!(H::hash_with(&Sequential, &right), expected_right);
         let (left_digest, right_digest) = H::hash_pair(&left, &right);
         assert_eq!(left_digest, expected_left);
         assert_eq!(right_digest, expected_right);
@@ -163,12 +174,20 @@ impl<H: Hasher> Arbitrary<'_> for BatchPlan<H> {
         let count = u.int_in_range(0..=40)?;
         let equal_lengths = u.arbitrary::<bool>()?;
         let common_len = arbitrary_batch_len(u)?;
+
+        // Cap the plan to the remaining input so long messages shrink the plan
+        // instead of rejecting the whole input.
+        let count = if equal_lengths {
+            count.min(u.len() / common_len.max(1))
+        } else {
+            count
+        };
         let mut messages = Vec::with_capacity(count);
         for lane in 0..count {
             let len = if equal_lengths {
                 common_len
             } else {
-                arbitrary_batch_len(u)?
+                arbitrary_batch_len(u)?.min(u.len())
             };
             let mut message = u.bytes(len)?.to_vec();
             if let Some(first) = message.first_mut() {
@@ -196,13 +215,25 @@ impl<H: Hasher> BatchPlan<H> {
             })
             .collect::<Vec<_>>();
         assert_eq!(H::hash_many(&self.messages), expected);
+
+        // The same messages split into three parts (the first and last may be
+        // empty) must hash identically.
+        let split: Vec<[&[u8]; 3]> = self
+            .messages
+            .iter()
+            .map(|message| {
+                let (a, b) = (message.len() / 3, 2 * message.len() / 3);
+                [&message[..a], &message[a..b], &message[b..]]
+            })
+            .collect();
+        assert_eq!(H::hash_many_parts(&split), expected);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Blake3, Sha256};
+    use crate::{Blake3, Keccak256, Sha256};
     use commonware_invariants::minifuzz;
     use std::rc::Rc;
 
@@ -226,6 +257,7 @@ mod tests {
         let mut saw_equal_full_blocks = false;
         let mut saw_equal_two_block_padding = false;
         let mut saw_unequal_lengths = false;
+        let mut saw_equal_multi_chunk = false;
         minifuzz::Builder::default()
             .with_seed(0)
             .with_search_limit(512)
@@ -249,6 +281,8 @@ mod tests {
                 saw_equal_two_block_padding |=
                     equal_lengths && plan.messages.len() >= 16 && first_len % 64 >= 56;
                 saw_unequal_lengths |= !equal_lengths;
+                saw_equal_multi_chunk |=
+                    equal_lengths && plan.messages.len() >= 2 && first_len > 1024;
                 plan.run();
                 Ok(())
             });
@@ -258,6 +292,7 @@ mod tests {
         assert!(saw_equal_full_blocks);
         assert!(saw_equal_two_block_padding);
         assert!(saw_unequal_lengths);
+        assert!(saw_equal_multi_chunk);
     }
 
     #[test]
@@ -271,6 +306,16 @@ mod tests {
     }
 
     #[test]
+    fn test_fuzz_blake3() {
+        test_fuzz::<Blake3>();
+    }
+
+    #[test]
+    fn test_fuzz_hash_many_blake3() {
+        test_fuzz_hash_many::<Blake3>();
+    }
+
+    #[test]
     fn test_hash_many_default_matches_individual_hashes() {
         let messages = (0..33)
             .map(|lane| Rc::<[u8]>::from(vec![lane as u8; lane]))
@@ -278,19 +323,14 @@ mod tests {
         let expected = messages
             .iter()
             .map(|message| {
-                let mut hasher = Blake3::default();
+                let mut hasher = Keccak256::default();
                 hasher.update(message);
                 hasher.finalize().1
             })
             .collect::<Vec<_>>();
         for count in 0..=messages.len() {
-            assert_eq!(Blake3::hash_many(&messages[..count]), expected[..count]);
+            assert_eq!(Keccak256::hash_many(&messages[..count]), expected[..count]);
         }
-    }
-
-    #[test]
-    fn test_fuzz_blake3() {
-        test_fuzz::<Blake3>();
     }
 
     #[cfg(feature = "std")]

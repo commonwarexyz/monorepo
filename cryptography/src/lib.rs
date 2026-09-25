@@ -288,6 +288,14 @@ commonware_macros::stability_scope!(BETA {
         /// the overhead of the streaming machinery.
         fn hash(parts: &[&[u8]]) -> Self::Digest;
 
+        /// Hash the concatenation of `parts` in a single shot, splitting the
+        /// work across `strategy` when the hash function allows it.
+        ///
+        /// Must be equivalent to [`Hasher::hash`].
+        fn hash_with(_strategy: &impl Strategy, parts: &[&[u8]]) -> Self::Digest {
+            Self::hash(parts)
+        }
+
         /// Hash two messages, each given as a concatenation of parts, in a
         /// single shot.
         ///
@@ -306,12 +314,35 @@ commonware_macros::stability_scope!(BETA {
                 .collect()
         }
 
+        /// Hash multiple independent messages, each given as a concatenation
+        /// of `P` parts.
+        ///
+        /// Returns one digest per message in the same order. Output position
+        /// `i` is equivalent to `Self::hash(&messages[i])`.
+        fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Vec<Self::Digest> {
+            hash_pairs::<Self, P>(messages)
+        }
+
         /// Append `bytes` to the hasher's running state.
         fn update(&mut self, bytes: &[u8]) -> &mut Self;
 
         /// Consume the hasher, returning a freshly-reset hasher alongside the
         /// digest of everything written so far.
         fn finalize(self) -> (Self, Self::Digest);
+    }
+
+    /// Hash messages two at a time with [`Hasher::hash_pair`], hashing an odd
+    /// trailing message alone.
+    fn hash_pairs<H: Hasher, const P: usize>(messages: &[[&[u8]; P]]) -> Vec<H::Digest> {
+        let mut digests = Vec::with_capacity(messages.len());
+        let (pairs, rest) = messages.as_chunks::<2>();
+        for [left, right] in pairs {
+            let (left, right) = H::hash_pair(left, right);
+            digests.push(left);
+            digests.push(right);
+        }
+        digests.extend(rest.iter().map(|parts| H::hash(parts)));
+        digests
     }
 });
 

@@ -1,23 +1,23 @@
-use commonware_cryptography::{Sha256, sha256};
+use commonware_cryptography::{Blake3, Hasher, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_storage::bmt::Builder;
 use commonware_utils::test_rng;
 use criterion::{Criterion, criterion_group};
 
-fn bench_new(c: &mut Criterion) {
+fn bench_hasher<H: Hasher>(c: &mut Criterion, hasher: &str) {
     for n in [100, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000] {
         // Generate random elements
         let mut elements = Vec::with_capacity(n);
         let mut sampler = test_rng();
         for _ in 0..n {
-            let element = sha256::Digest::random(&mut sampler);
+            let element = H::Digest::random(&mut sampler);
             elements.push(element);
         }
 
         // Generate Binary Merkle Tree
-        c.bench_function(&format!("{}/n={}", module_path!(), n), |b| {
+        c.bench_function(&format!("{}/n={n} hasher={hasher}", module_path!()), |b| {
             b.iter(|| {
-                let mut builder = Builder::<Sha256>::new(elements.len());
+                let mut builder = Builder::<H>::new(elements.len());
                 for element in &elements {
                     builder.add(element);
                 }
@@ -25,6 +25,11 @@ fn bench_new(c: &mut Criterion) {
             })
         });
     }
+}
+
+fn bench_new(c: &mut Criterion) {
+    bench_hasher::<Sha256>(c, "sha256");
+    bench_hasher::<Blake3>(c, "blake3");
 }
 
 criterion_group! {

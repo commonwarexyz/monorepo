@@ -6,7 +6,7 @@ use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     Hasher,
     blake3::{Blake3 as OurBlake3, Digest},
-    fuzz::Plan,
+    fuzz::{BatchPlan, Plan},
 };
 use libfuzzer_sys::fuzz_target;
 use zeroize::Zeroize;
@@ -16,6 +16,7 @@ pub struct FuzzInput {
     pub chunks: Vec<Vec<u8>>,
     pub data: Vec<u8>,
     pub plan: Plan<OurBlake3>,
+    pub batch_plan: BatchPlan<OurBlake3>,
     pub case_selector: u8,
 }
 
@@ -158,7 +159,7 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
 }
 
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 9 {
+    match input.case_selector % 10 {
         0 => fuzz_basic_hashing(&input.chunks),
         1 => fuzz_reset_functionality(&input.chunks),
         2 => fuzz_chunked_vs_whole(&input.chunks),
@@ -168,6 +169,7 @@ fn fuzz(input: FuzzInput) {
         6 => fuzz_digest_operations(&input.data),
         7 => fuzz_from_hash_and_deref(&input.data),
         8 => input.plan.run(),
+        9 => input.batch_plan.run(),
         _ => unreachable!(),
     }
 }

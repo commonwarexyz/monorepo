@@ -150,31 +150,16 @@ impl<D: Digest> Tree<D> {
         // Construct the tree level-by-level
         let mut current_level = levels.last();
         while !current_level.is_singleton() {
-            let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
-
-            // Process four nodes (two sibling pairs) at a time, duplicating an unpaired
-            // trailing node. Hashing both pairs together lets the underlying hasher
-            // interleave independent messages (see `Hasher::hash_pair`). A trailing
-            // group with a single pair falls back to a single hash.
-            for group in current_level.chunks(4) {
-                match group {
-                    [a, b, c, d] => {
-                        let (left, right) =
-                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), d.as_ref()]);
-                        next_level.push(left);
-                        next_level.push(right);
-                    }
-                    [a, b, c] => {
-                        let (left, right) =
-                            H::hash_pair(&[a.as_ref(), b.as_ref()], &[c.as_ref(), c.as_ref()]);
-                        next_level.push(left);
-                        next_level.push(right);
-                    }
-                    [a, b] => next_level.push(H::hash(&[a.as_ref(), b.as_ref()])),
-                    [a] => next_level.push(H::hash(&[a.as_ref(), a.as_ref()])),
-                    _ => unreachable!("chunks(4) yields at most 4 elements"),
-                }
-            }
+            // Hash every sibling pair of the level together, duplicating an unpaired
+            // trailing node, so the hasher can work on many independent messages at once
+            // (see `Hasher::hash_many_parts`).
+            let (pairs, rest) = current_level.as_chunks::<2>();
+            let messages: Vec<[&[u8]; 2]> = pairs
+                .iter()
+                .map(|[a, b]| [a.as_ref(), b.as_ref()])
+                .chain(rest.iter().map(|a| [a.as_ref(), a.as_ref()]))
+                .collect();
+            let next_level = H::hash_many_parts(&messages);
 
             // Add the computed level to the tree
             levels.push(non_empty_vec![@next_level]);

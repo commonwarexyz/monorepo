@@ -1,4 +1,4 @@
-use commonware_cryptography::{Sha256, sha256};
+use commonware_cryptography::{Blake3, Hasher, Sha256};
 use commonware_math::algebra::Random as _;
 use commonware_runtime::{
     Strategizer,
@@ -29,13 +29,18 @@ const N_LEAVES: [usize; 1] = [100_000];
 #[cfg(full_bench)]
 const N_LEAVES: [usize; 4] = [100_000, 1_000_000, 5_000_000, 10_000_000];
 
-fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, family: &str) {
+fn bench_update_family<F: Family, H: Hasher>(
+    c: &mut Criterion,
+    runner: &tokio::Runner,
+    family: &str,
+    hasher: &str,
+) {
     for updates in [1_000_000, 100_000] {
         for leaves in N_LEAVES {
             for mode in [Mode::BatchedSerial, Mode::BatchedParallel] {
                 c.bench_function(
                     &format!(
-                        "{}/updates={updates} leaves={leaves} strategy={mode:?} family={family}",
+                        "{}/updates={updates} leaves={leaves} strategy={mode:?} family={family} hasher={hasher}",
                         module_path!(),
                     ),
                     |b| {
@@ -50,13 +55,13 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                             let mut elements = Vec::with_capacity(leaves);
                             let mut sampler = test_rng();
                             let mut leaf_locations = Vec::with_capacity(leaves);
-                            let h = StandardHasher::<Sha256>::new(ForwardFold);
+                            let h = StandardHasher::<H>::new(ForwardFold);
 
                             let mut mem = Mem::<F, _>::new();
                             let batch = {
                                 let mut batch = mem.new_batch();
                                 for _ in 0..leaves {
-                                    let digest = sha256::Digest::random(&mut sampler);
+                                    let digest = H::Digest::random(&mut sampler);
                                     elements.push(digest);
                                     let loc = batch.leaves();
                                     leaf_locations.push(loc);
@@ -79,10 +84,8 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
                                     leaf_map.insert(rand_leaf_loc, *new_element);
                                 }
 
-                                let updates: Vec<(
-                                    Location<F>,
-                                    commonware_cryptography::sha256::Digest,
-                                )> = leaf_map.into_iter().collect();
+                                let updates: Vec<(Location<F>, H::Digest)> =
+                                    leaf_map.into_iter().collect();
                                 match strategy {
                                     Some(ref s) => {
                                         let mut batch = mem.new_batch_with_strategy(s.clone());
@@ -110,8 +113,10 @@ fn bench_update_family<F: Family>(c: &mut Criterion, runner: &tokio::Runner, fam
 fn bench_update(c: &mut Criterion) {
     let cfg = Config::default();
     let runner = tokio::Runner::new(cfg);
-    bench_update_family::<commonware_storage::mmr::Family>(c, &runner, "mmr");
-    bench_update_family::<commonware_storage::mmb::Family>(c, &runner, "mmb");
+    bench_update_family::<commonware_storage::mmr::Family, Sha256>(c, &runner, "mmr", "sha256");
+    bench_update_family::<commonware_storage::mmb::Family, Sha256>(c, &runner, "mmb", "sha256");
+    bench_update_family::<commonware_storage::mmr::Family, Blake3>(c, &runner, "mmr", "blake3");
+    bench_update_family::<commonware_storage::mmb::Family, Blake3>(c, &runner, "mmb", "blake3");
 }
 
 criterion_group! {

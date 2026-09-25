@@ -60,47 +60,50 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
     for n in N_LEAVES {
         // Flush moves ~2n nodes; rebuild every `cycles` flushes to cap the journal's on-disk size.
         let cycles = (REBUILD_NODE_BUDGET / (2 * n)).max(1);
-        c.bench_function(&format!("{}/n={n} family={family}", module_path!()), |b| {
-            b.to_async(&runner).iter_custom(move |iters| async move {
-                let ctx = context::get::<Context>();
-                let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-                let mut rng = test_rng();
-                let mut total = Duration::ZERO;
+        c.bench_function(
+            &format!("{}/n={n} family={family} hasher=sha256", module_path!()),
+            |b| {
+                b.to_async(&runner).iter_custom(move |iters| async move {
+                    let ctx = context::get::<Context>();
+                    let hasher = StandardHasher::<Sha256>::new(ForwardFold);
+                    let mut rng = test_rng();
+                    let mut total = Duration::ZERO;
 
-                // `iters` is the number of flushes to time. Rebuild a fresh structure every
-                // `cycles` flushes so the journal it appends to never grows without bound.
-                let mut remaining = iters;
-                while remaining > 0 {
-                    let mut merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
-                        ctx.child(family),
-                        &hasher,
-                        merkle_cfg(&ctx, family),
-                    )
-                    .await
-                    .unwrap();
+                    // `iters` is the number of flushes to time. Rebuild a fresh structure every
+                    // `cycles` flushes so the journal it appends to never grows without bound.
+                    let mut remaining = iters;
+                    while remaining > 0 {
+                        let mut merkle = full::Merkle::<F, _, sha256::Digest, _>::init(
+                            ctx.child(family),
+                            &hasher,
+                            merkle_cfg(&ctx, family),
+                        )
+                        .await
+                        .unwrap();
 
-                    let flushes = (cycles as u64).min(remaining);
-                    for _ in 0..flushes {
-                        // Untimed: apply a batch of `n` leaves to the in-memory structure.
-                        let mut batch = merkle.new_batch();
-                        for _ in 0..n {
-                            batch = batch.add(&hasher, &sha256::Digest::random(&mut rng));
+                        let flushes = (cycles as u64).min(remaining);
+                        for _ in 0..flushes {
+                            // Untimed: apply a batch of `n` leaves to the in-memory structure.
+                            let mut batch = merkle.new_batch();
+                            for _ in 0..n {
+                                batch = batch.add(&hasher, &sha256::Digest::random(&mut rng));
+                            }
+                            let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+                            merkle = merkle.apply_batch(&batch).unwrap();
+
+                            // Timed: flush the freshly applied nodes to the journal.
+                            let start = Instant::now();
+                            merkle = merkle.flush().await.unwrap();
+                            total += start.elapsed();
                         }
-                        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
-                        merkle = merkle.apply_batch(&batch).unwrap();
 
-                        // Timed: flush the freshly applied nodes to the journal.
-                        let start = Instant::now();
-                        merkle = merkle.flush().await.unwrap();
-                        total += start.elapsed();
+                        merkle.destroy().await.unwrap();
+                        remaining -= flushes;
                     }
-
-                    merkle.destroy().await.unwrap();
-                    remaining -= flushes;
-                }
-                total
-            });
-        });
+                    total
+                });
+            },
+        );
     }
 }
 
