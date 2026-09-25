@@ -458,6 +458,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// 4. **Incompatible**: retained data starts after range.start
     ///    - Discards existing data and creates a new [Journal] at `range.start`
     ///
+    /// Without `pinned_nodes`, boundary pins already in metadata take precedence over journal
+    /// nodes, including pins persisted by an earlier interrupted call.
+    ///
     /// If interrupted, retry [Self::init_sync] with the authoritative range and pins. When the
     /// range starts outside the retained tree, ordinary [Self::init] may fail with
     /// [Error::MissingNode] until that retry completes the reset.

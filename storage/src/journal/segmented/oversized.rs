@@ -721,9 +721,9 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Pending<E, I, V> {
 impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
     /// Open through `section` and index-byte `end`, rounding down a partial entry.
     ///
-    /// Later index sections and whole index pages above `end` are removed before opening. Later
-    /// value sections are removed without being opened. Recovery validates the paired retained
-    /// prefix.
+    /// Later index sections and whole index pages above `end` are removed before opening, and the
+    /// removal stays durable even if initialization then fails. Later value sections are removed
+    /// without being opened. Recovery validates the paired retained prefix.
     pub async fn init_at_most(
         context: E,
         cfg: Config<V::Cfg>,
@@ -3144,6 +3144,136 @@ mod tests {
             assert_eq!(pending.calls(), 2);
             assert_eq!(journal.size(1).unwrap(), chunk);
             assert_eq!(journal.last(1).await.unwrap().unwrap().id, 0);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The bounded-open pretrim removes index sections above the target newest-first and never
+    /// touches value sections, so a crash inside it leaves an index prefix beside every value
+    /// section. The cases crash after removing only the newest index section and after removing
+    /// every index section above target section 1.
+    #[rstest::rstest]
+    #[case::newest(3)]
+    #[case::all(1)]
+    #[test_traced]
+    fn test_oversized_pretrim_crash_recovers_unbounded(#[case] kept: u64) {
+        const SECTIONS: u64 = 4;
+        const ENTRIES: u64 = 3;
+        deterministic::Runner::default().start(|context| async move {
+            // Seed sections 1 through 4 with three entries each, every entry with a distinct
+            // value, and make both journals durable.
+            let cfg = entry_cfg(&context);
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("seed"), cfg.clone())
+                    .await
+                    .unwrap();
+            for section in 1..=SECTIONS {
+                for position in 0..ENTRIES {
+                    let id = section * ENTRIES + position;
+                    (journal, _, _, _) = journal
+                        .append(section, TestEntry::new(id, 0, 0), &[id as u8; 16])
+                        .await
+                        .unwrap();
+                }
+            }
+            journal = journal.sync_all().await.unwrap();
+            drop(journal);
+
+            // The pretrim of a bounded open of section 1 removes the index sections above it
+            // newest-first before opening either journal. It never touches value sections. Crash
+            // once every index section above `kept` is gone.
+            for section in (kept + 1..=SECTIONS).rev() {
+                context
+                    .remove(&cfg.index_partition, Some(&section.to_be_bytes()))
+                    .await
+                    .unwrap();
+            }
+
+            // Unbounded recovery retains every surviving index entry with its value.
+            let mut journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("restart"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(journal.newest_section(), Some(kept));
+            for section in 1..=kept {
+                assert_eq!(
+                    journal.size(section).unwrap(),
+                    ENTRIES * TestEntry::SIZE as u64
+                );
+                for position in 0..ENTRIES {
+                    let id = section * ENTRIES + position;
+                    let entry = journal.get(section, position).await.unwrap();
+                    assert_eq!(entry.id, id);
+                    assert_eq!(
+                        journal
+                            .get_value(section, entry.value_offset, entry.value_size)
+                            .await
+                            .unwrap(),
+                        [id as u8; 16]
+                    );
+                }
+            }
+
+            // Removed sections stay out of range, and recovery removes the value sections that
+            // lost their index, so both partitions hold exactly the surviving sections.
+            for section in kept + 1..=SECTIONS {
+                assert!(matches!(
+                    journal.get(section, 0).await,
+                    Err(Error::SectionOutOfRange(missing)) if missing == section
+                ));
+            }
+            let retained: Vec<_> = (1..=kept)
+                .map(|section| section.to_be_bytes().to_vec())
+                .collect();
+            assert_eq!(context.scan(&cfg.index_partition).await.unwrap(), retained);
+            assert_eq!(context.scan(&cfg.value_partition).await.unwrap(), retained);
+
+            // Appending to the newest surviving section continues after its last entry and value.
+            let end = journal.value_size(kept).await.unwrap();
+            let (next, offset);
+            (journal, next, offset, _) = journal
+                .append(kept, TestEntry::new(100, 0, 0), &[100; 16])
+                .await
+                .unwrap();
+            assert_eq!(next, ENTRIES);
+            assert_eq!(offset, end);
+
+            // Appending to the first removed section starts both of its journals from zero.
+            let (first, start);
+            (journal, first, start, _) = journal
+                .append(kept + 1, TestEntry::new(101, 0, 0), &[101; 16])
+                .await
+                .unwrap();
+            assert_eq!(first, 0);
+            assert_eq!(start, 0);
+            journal = journal.sync_all().await.unwrap();
+            drop(journal);
+
+            // A clean reopen keeps the recovered prefix and both appended entries.
+            let journal: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("reopen"), cfg).await.unwrap();
+            assert_eq!(journal.newest_section(), Some(kept + 1));
+            for section in 1..kept {
+                assert_eq!(
+                    journal.size(section).unwrap(),
+                    ENTRIES * TestEntry::SIZE as u64
+                );
+            }
+            assert_eq!(
+                journal.size(kept).unwrap(),
+                (ENTRIES + 1) * TestEntry::SIZE as u64
+            );
+            for (section, position, id) in [(kept, ENTRIES, 100), (kept + 1, 0, 101)] {
+                let entry = journal.get(section, position).await.unwrap();
+                assert_eq!(entry.id, id);
+                assert_eq!(
+                    journal
+                        .get_value(section, entry.value_offset, entry.value_size)
+                        .await
+                        .unwrap(),
+                    [id as u8; 16]
+                );
+            }
             journal.destroy().await.unwrap();
         });
     }

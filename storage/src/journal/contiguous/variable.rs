@@ -2900,6 +2900,102 @@ mod tests {
     }
 
     #[test]
+    fn test_bounded_inspection_preserves_data_above_watermark_until_publication() {
+        deterministic::Runner::default().start(|context| async move {
+            // Acknowledge 7 items with a full sync, so the offsets watermark is 7.
+            let cfg = initialization_cfg(&context, "inspection-preserves-data", 5);
+            let offsets_partition = cfg.offsets_partition();
+            let data_partition = cfg.data_partition();
+            let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
+                .await
+                .unwrap();
+            for item in 0..7u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            journal = journal.sync().await.unwrap();
+
+            // Make 13 more items durable through start_sync, then crash before the next sync.
+            // The watermark only advances to the previously proven size, so it stays at 7 while
+            // data and offsets reach 20 across four full sections and an empty tail.
+            for item in 7..20u64 {
+                (journal, _) = journal.append(&item).await.unwrap();
+            }
+            let (journal, handle) = journal.start_sync().await.unwrap();
+            handle.await.unwrap();
+            drop(journal);
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("lagged"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(7)
+            );
+
+            // Record every data blob with its size. Comparing them after the open detects a
+            // removed blob or a cut that drops a physical page, and the reads after the retry
+            // catch any lost item.
+            let mut data = Vec::new();
+            for name in context.scan(&data_partition).await.unwrap() {
+                let (_, size) = context.open(&data_partition, &name).await.unwrap();
+                data.push((name, size));
+            }
+            data.sort();
+            assert_eq!(data.len(), 5);
+
+            // The cap lies above the watermark, so inspection rebuilds offsets 7..12 from data.
+            // Blobs 3 and 4 start past the cap and blob 2 holds items past it. Publication owns
+            // removing and truncating that data, so an open that never publishes must leave it.
+            // Inspection also keeps the watermark at 7, so a retry replays the same frames.
+            let pending = Recovery::<_, u64>::open(context.child("bounded"), cfg.clone(), Some(12))
+                .await
+                .unwrap();
+            assert_eq!(pending.bounds, 0..12);
+            assert_eq!(pending.discarded, vec![3, 4]);
+            drop(pending);
+            let mut inspected = Vec::new();
+            for name in context.scan(&data_partition).await.unwrap() {
+                let (_, size) = context.open(&data_partition, &name).await.unwrap();
+                inspected.push((name, size));
+            }
+            inspected.sort();
+            assert_eq!(inspected, data);
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("inspected"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(7)
+            );
+
+            // Abandoning the unpublished view leaves every durable item to the next ordinary
+            // open.
+            let journal = Journal::<_, u64>::init(context.child("retry"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds(), 0..20);
+            for item in 0..20 {
+                assert_eq!(journal.read(item).await.unwrap(), item);
+            }
+            drop(journal);
+
+            // Publishing the full history advances the offsets watermark to the recovered end.
+            assert_eq!(
+                fixed::Journal::<_, u64>::persisted_watermark(
+                    context.child("reopened"),
+                    &offsets_partition
+                )
+                .await
+                .unwrap(),
+                Some(20)
+            );
+        });
+    }
+
+    #[test]
     fn test_recovery_failure_must_not_clear_durable_data() {
         deterministic::Runner::default().start(|context| async move {
             let config = initialization_cfg(&context, "initialization-recovery-clear", 20);
