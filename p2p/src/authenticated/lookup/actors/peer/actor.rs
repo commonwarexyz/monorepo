@@ -355,7 +355,10 @@ mod tests {
                 .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
                 .await;
             assert!(
-                matches!(result, Err(Error::InvalidChannel)),
+                matches!(
+                    result,
+                    Err(Error::Connection(connection::Error::InvalidChannel))
+                ),
                 "Expected InvalidChannel error, got: {result:?}"
             );
 
@@ -542,7 +545,7 @@ mod tests {
             peer_mailbox.kill();
             let result = peer_handle.await.expect("peer task failed");
             assert!(
-                matches!(result, Err(Error::PeerKilled(_))),
+                matches!(result, Err(Error::Connection(connection::Error::Killed(_)))),
                 "unexpected result: {result:?}"
             );
         });

@@ -928,7 +928,10 @@ mod tests {
                 )
                 .await;
             assert!(
-                matches!(result, Err(Error::InvalidChannel)),
+                matches!(
+                    result,
+                    Err(Error::Connection(connection::Error::InvalidChannel))
+                ),
                 "Expected InvalidChannel error, got: {result:?}"
             );
 
