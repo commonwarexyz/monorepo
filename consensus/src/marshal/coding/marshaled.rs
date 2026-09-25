@@ -340,26 +340,14 @@ where
                 let round = consensus_context.round;
                 let (parent_view, parent_commitment) = consensus_context.parent;
 
-                // Start the parent fetch immediately so it can proceed in parallel
-                // with candidate reconstruction. The parent round comes from the
-                // caller's context (the certified consensus context in verify, the
-                // quorum-defended embedded context in certify), never from the
-                // unverified child block.
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    core::CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    },
-                );
+                // Acquire the exact parent concurrently with candidate reconstruction.
+                let parent_request = marshal.acquire(parent_commitment);
 
-                // Get the candidate block either from the caller or by waiting for
-                // local reconstruction. Candidate data remains local-only: a
-                // notarization is not sufficient reason to request it from peers.
+                // Reuse the candidate supplied by certification, or acquire it by commitment.
                 let block = if let Some(block) = prefetched_block {
                     block
                 } else {
-                    let block_request =
-                        marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
+                    let block_request = marshal.acquire(commitment);
                     select! {
                         _ = tx.closed() => {
                             debug!(
@@ -495,22 +483,13 @@ where
         // will verify against the proper context and reject the mismatch, preventing a 2f+1
         // finalization quorum.
         //
-        // We must fetch here rather than only wait for local reconstruction. A Byzantine
-        // leader can send enough shards to just f+1 honest validators, collect enough honest
-        // notarize votes to form a notarization, and leave the remaining honest validators
-        // unable to reconstruct the block. Those validators need the notarized round to
-        // recover and certify; otherwise they can remain stuck if the Byzantine validators
-        // stop participating in the next view.
-        //
-        // Subscribe to the block and verify using its embedded context once available.
+        // Acquire the notarized commitment and verify its embedded context when available.
         debug!(
             ?round,
             ?payload,
             "subscribing to block for certification using embedded context"
         );
-        let block_rx = self
-            .marshal
-            .subscribe_by_commitment(payload, core::CommitmentFallback::FetchByRound { round });
+        let block_rx = self.marshal.acquire(payload);
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
@@ -599,12 +578,7 @@ where
         payload: Commitment<B, C, H>,
         task: oneshot::Receiver<GateOutcome>,
     ) -> oneshot::Receiver<bool> {
-        // `verify()` intentionally waits only for local candidate data. Once
-        // certification starts, a notarization exists and the same pending
-        // verifier must be unblocked by round-bound recovery if local
-        // reconstruction never completes.
         self.shards.notarized(payload, round);
-        self.marshal.hint_notarized(round, payload);
 
         // A completed gate either carries an applicable local verdict or requests
         // recovery. After an unclean restart the in-memory task is gone, which also
@@ -757,21 +731,9 @@ where
                     return;
                 }
 
-                // The parent for any consensus context is in the same epoch: the
-                // boundary block of the previous epoch is the genesis block of the
-                // current epoch.
-                //
-                // Proposal context carries the certified parent view/commitment but
-                // not the parent height. The parent may be certified above the
-                // finalized tip, so this must stay round-bound until the block is
-                // returned.
+                // Consensus supplies the exact parent commitment.
                 let (parent_view, parent_commitment) = consensus_context.parent;
-                let parent_request = marshal.subscribe_by_commitment(
-                    parent_commitment,
-                    core::CommitmentFallback::FetchByRound {
-                        round: Round::new(consensus_context.epoch(), parent_view),
-                    },
-                );
+                let parent_request = marshal.acquire(parent_commitment);
 
                 let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
                 let parent = select! {
@@ -943,18 +905,8 @@ where
         // 2. The parent-child height check would fail (parent IS the block)
         // 3. Waiting for shards could stall if the leader doesn't rebroadcast
         if is_reproposal {
-            // Fetch the block to verify it's at the epoch boundary. This should be fast
-            // since the parent block is typically already cached. A re-proposal names its
-            // own parent, so the parent round is a certified round for this commitment and
-            // lets a participant that never received the original proposal acquire it
-            // instead of waiting for shards it cannot yet classify.
-            let (parent_view, _) = consensus_context.parent;
-            let block_rx = self.marshal.subscribe_by_commitment(
-                payload,
-                core::CommitmentFallback::FetchByRound {
-                    round: Round::new(consensus_context.epoch(), parent_view),
-                },
-            );
+            // Acquire the boundary block before classifying the re-proposal.
+            let block_rx = self.marshal.acquire(payload);
             let marshal = self.marshal.clone();
             let shards = self.shards.clone();
             let epocher = self.epocher.clone();

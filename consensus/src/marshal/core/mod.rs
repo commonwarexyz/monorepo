@@ -48,15 +48,14 @@ pub use actor::Actor;
 mod acks;
 pub(crate) mod cache;
 mod certified;
-mod delivery;
 pub(crate) mod durability;
 mod floor;
 pub use floor::Floor;
 mod staged;
 mod stream;
 
-mod mailbox;
-pub use mailbox::{CommitmentFallback, DigestFallback, Mailbox};
+pub(crate) mod mailbox;
+pub use mailbox::Mailbox;
 
 mod subscriptions;
 mod variant;
