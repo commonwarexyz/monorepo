@@ -331,8 +331,9 @@ where
         self.bounds().end
     }
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> Range<Location<F>> {
         Location::new(self.journal.bounds().start)..Location::new(self.journal.bounds().end)
     }
@@ -485,11 +486,11 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [crate::merkle::Error::LocationOverflow] if `op_count` or `start_loc` >
-    /// [crate::merkle::Family::MAX_LEAVES].
     /// Returns [crate::merkle::Error::RangeOutOfBounds] if `op_count` > number of operations, or
     /// if `start_loc` >= `op_count`.
-    /// Returns [`Error::OperationPruned`] if `start_loc` has been pruned.
+    /// Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+    /// with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
+    /// been pruned.
     /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
     /// commit op, either because the caller passed a non-commit-boundary `op_count` or
     /// because pruning removed the commit that would have governed `op_count`.
@@ -538,16 +539,17 @@ where
         self.historical_proof(op_count, start_index, max_ops).await
     }
 
-    /// Prune operations prior to `prune_loc`. This does not affect the db's root, but it will
-    /// affect retrieval of any keys that were set prior to `prune_loc`.
+    /// Prune operations prior to `loc` without changing the db's root. Keys whose operations
+    /// are no longer retained cannot be retrieved.
+    ///
+    /// The retained start in [`Self::bounds`] can remain below `loc`.
     ///
     /// Pruning is irreversible and requires no prior commit. After a crash, the database remains
     /// recoverable; uncommitted operations are not guaranteed to survive.
     ///
     /// # Errors
     ///
-    /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
-    /// - Returns [crate::merkle::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
+    /// - Returns [Error::PruneBeyondMinRequired] if `loc` > inactivity floor.
     #[tracing::instrument(name = "qmdb.immutable.db.prune", level = "info", skip_all)]
     #[boxed]
     pub async fn prune(mut self, loc: Location<F>) -> Result<Self, Error<F>> {

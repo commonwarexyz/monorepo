@@ -296,6 +296,8 @@ mod tests {
                 .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = Arc::new(source.sync().await.unwrap());
+            let source_root = source.root();
+            let source_end = source.bounds().end;
 
             // Import a suffix whose logical inactivity floor precedes its retained start.
             let client_cfg = db_config("synced-range-client", &context, Sequential);
@@ -303,8 +305,8 @@ mod tests {
                 context: context.child("client"),
                 db_config: client_cfg.clone(),
                 target: sync::Target {
-                    root: source.root(),
-                    range: non_empty_range!(Location::new(5), source.bounds().end),
+                    root: source_root,
+                    range: non_empty_range!(Location::new(5), source_end),
                 },
                 source,
                 apply_batch_size: NZU64!(10),
@@ -320,11 +322,14 @@ mod tests {
             assert_eq!(*client.bounds().start, 5);
             assert_eq!(*client.inactivity_floor_loc(), 0);
 
-            // Persist and reopen the imported prefix without requiring replay from its floor.
+            // Persist and reopen the imported suffix without requiring replay from its floor.
             _ = client.sync().await.unwrap();
-            TestDb::<mmr::Family>::init(context.child("reopened"), client_cfg, None)
+            let client = TestDb::<mmr::Family>::init(context.child("reopened"), client_cfg, None)
                 .await
                 .unwrap();
+            assert_eq!(client.bounds(), Location::new(5)..source_end);
+            assert_eq!(*client.sync_boundary(), 0);
+            assert_eq!(client.root(), source_root);
         });
     }
 
@@ -722,6 +727,7 @@ mod tests {
         test_keyless_fixed_empty_db_recovery => run_empty_db_recovery, reopen_indexed;
         test_keyless_fixed_replay_with_trailing_appends => run_replay_with_trailing_appends, reopen_indexed;
         test_keyless_fixed_get_out_of_bounds => run_get_out_of_bounds, db;
+        test_keyless_fixed_get_pruned => run_get_pruned, db;
         test_keyless_fixed_metadata => run_metadata, db;
         test_keyless_fixed_pruning => run_pruning, reopen;
         test_keyless_fixed_batch_get => run_batch_get, db;

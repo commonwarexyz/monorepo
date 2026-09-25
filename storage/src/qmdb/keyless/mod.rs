@@ -213,8 +213,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfBounds`] if `loc` >=
-    /// `self.bounds().end`.
+    /// - Returns [`Error::LocationOutOfBounds`] if `loc` >= `self.bounds().end`.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `loc` <
+    ///   `self.bounds().start`.
     pub async fn get(&self, loc: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
@@ -236,7 +237,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfBounds`] if any location >= `bounds().end`.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location >= `self.bounds().end`.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if any location <
+    ///   `self.bounds().start`.
     pub async fn get_many(&self, locs: &[Location<F>]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         if locs.is_empty() {
             return Ok(Vec::new());
@@ -266,8 +269,9 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -284,9 +288,10 @@ where
         );
     }
 
-    /// Return the most recent location from which this database can safely be synced, and the
-    /// upper bound on [`Self::prune`]'s `loc`. For keyless databases, this equals the
-    /// inactivity floor declared by the last committed batch.
+    /// Return the inactivity floor declared by the last committed batch, which is the upper bound
+    /// on [`Self::prune`]'s `loc`.
+    ///
+    /// This logical boundary may precede the retained start in [`Self::bounds`].
     pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
@@ -323,7 +328,8 @@ where
     ///
     /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
     ///   >= the number of operations.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+    ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
     pub async fn proof(
         &self,
@@ -343,7 +349,8 @@ where
     ///
     /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
     ///   >= `op_count` or `op_count` > number of operations.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+    ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
     /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
     ///   op.
@@ -387,6 +394,8 @@ where
     }
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
+    ///
+    /// The retained start in [`Self::bounds`] can remain below `loc`.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -2028,6 +2037,41 @@ pub(crate) mod tests {
             Err(Error::LocationOutOfBounds(loc, size))
                 if loc == Location::new(4) && size == Location::new(4)
         ));
+
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_get_pruned<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        let mut round = 0u64;
+        while db.bounds().start == Location::new(0) {
+            round += 1;
+            assert!(round <= 64, "failed to prune any history");
+            (db, _) =
+                commit_appends(db, (0..16).map(|i| V::Value::make(round * 100 + i)), None).await;
+            let last_commit = db.bounds().end - 1;
+            db = db.prune(last_commit).await.unwrap();
+        }
+
+        let start = db.bounds().start;
+        let pruned = start - 1;
+        assert!(matches!(
+            db.get(pruned).await,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *pruned
+        ));
+        assert!(matches!(
+            db.get_many(&[pruned, start]).await,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *pruned
+        ));
+        db.get(start).await.unwrap();
+        db.get_many(&[start]).await.unwrap();
 
         db.destroy().await.unwrap();
     }

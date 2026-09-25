@@ -218,8 +218,10 @@ where
         self.any.get_many(keys).await
     }
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained. Proofs against
+    /// [`Self::root`] also require the operations' bitmap chunks to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         self.any.bounds()
     }
@@ -357,9 +359,10 @@ where
     /// # Errors
     ///
     /// Returns [Error::OperationPruned] if `start_loc` falls in a pruned bitmap chunk. Returns
-    /// [`crate::merkle::Error::LocationOverflow`] if `start_loc` >
-    /// [`crate::merkle::Family::MAX_LEAVES`]. Returns [`crate::merkle::Error::RangeOutOfBounds`] if
-    /// `start_loc` >= number of leaves in the tree.
+    /// [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`] with
+    /// [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has been
+    /// pruned. Returns [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc` >= number of
+    /// leaves in the tree.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.current.db.range_proof",
@@ -428,10 +431,11 @@ where
     /// Returns the most recent location from which this database can safely be synced, and the
     /// upper bound on [`Self::prune`]'s `prune_loc`.
     ///
-    /// Callers constructing a sync [`Target`](crate::qmdb::sync::Target) may use this value, or
-    /// any earlier retained location, as `range.start`. Values *above* this boundary are unsafe:
-    /// the receiver's grafted-pin derivation requires absorption-settled state for every fully
-    /// pruned chunk, which this value guarantees.
+    /// Callers constructing a sync [`Target`](crate::qmdb::sync::Target) may use as `range.start`
+    /// any location at or below this value that this database can still prove. Not every
+    /// location in [`Self::bounds`] is provable. Values *above* this boundary are unsafe: the
+    /// receiver's grafted-pin derivation requires absorption-settled state for every fully pruned
+    /// chunk, which this value guarantees.
     ///
     /// # Computation
     ///
@@ -535,8 +539,6 @@ where
     /// # Errors
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > [`Self::sync_boundary`].
-    /// - Returns [`crate::merkle::Error::LocationOverflow`] if `prune_loc` >
-    ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::DataCorrupted] if internal grafted-tree state is inconsistent (a pinned
     ///   or retained node is missing, or the prune location overflows a [Position]).
     #[tracing::instrument(name = "qmdb.current.db.prune", level = "info", skip_all)]

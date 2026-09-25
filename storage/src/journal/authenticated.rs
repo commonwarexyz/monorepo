@@ -32,6 +32,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions};
+use commonware_utils::NZU64;
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -377,12 +378,10 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Merkle] with [merkle::Error::LocationOverflow] if `start_loc` >
-    ///   [Family::MAX_LEAVES].
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
     pub async fn proof(
         &self,
         start_loc: Location<F>,
@@ -446,8 +445,8 @@ where
     ///
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
     ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
     pub async fn historical_proof(
         &self,
         historical_leaves: Location<F>,
@@ -623,7 +622,7 @@ where
         merkle: Merkle<F, E, H::Digest, S>,
         journal: C,
         hasher: StandardHasher<H>,
-        apply_batch_size: u64,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
 
@@ -647,7 +646,7 @@ where
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,
         hasher: &StandardHasher<H>,
-        apply_batch_size: u64,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Merkle<F, E, H::Digest, S>, Error<F>> {
         let journal_size = journal.bounds().end;
         let mut merkle_leaves = merkle.leaves();
@@ -666,7 +665,7 @@ where
             );
 
             while merkle_leaves < journal_size {
-                let count = apply_batch_size.min(journal_size - *merkle_leaves);
+                let count = apply_batch_size.get().min(journal_size - *merkle_leaves);
                 let mut items = Vec::with_capacity(count as usize);
                 for _ in 0..count {
                     items.push(journal.read(*merkle_leaves).await?);
@@ -768,10 +767,12 @@ where
         Ok(self)
     }
 
-    /// Prune both the Merkle structure and journal to the given location.
+    /// Prune journal items before `prune_loc`, then raise the Merkle pruning boundary to the
+    /// journal's retained start if it is lower.
     ///
     /// # Returns
-    /// The new pruning boundary, which may be less than the requested `prune_loc`.
+    /// The journal's retained start, which may be less than `prune_loc`. After state sync, the
+    /// Merkle pruning boundary can remain above the returned start.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
@@ -911,7 +912,7 @@ where
 }
 
 /// The number of items to apply to the Merkle structure in a single batch.
-const APPLY_BATCH_SIZE: u64 = 1 << 16;
+const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
@@ -1838,7 +1839,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let serial = TestJournal::<F>::align(serial, &journal, &hasher, 7)
+        let serial = TestJournal::<F>::align(serial, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 
@@ -1853,7 +1854,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, 7)
+        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 
