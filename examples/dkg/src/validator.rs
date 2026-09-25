@@ -17,16 +17,16 @@ use clap::Args;
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     Reporters,
-    marshal::{
-        self,
-        core::Actor as MarshalActor,
-        resolver::p2p as marshal_resolver,
-        standard::{Deferred, Standard},
-    },
     simplex::{
         SkipBudget,
         config::{ForwardPolicy, SkipPolicy},
         elector::RoundRobin,
+        marshal::{
+            self,
+            core::Actor as MarshalActor,
+            resolver::p2p as marshal_resolver,
+            standard::{Deferred, Standard},
+        },
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };

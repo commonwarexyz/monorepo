@@ -13,8 +13,7 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Epochable as _,
-    marshal::core::Processed,
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{marshal::core::Processed, scheme::Scheme, types::Finalization},
     types::{Epoch, Epocher, FixedEpocher},
 };
 #[cfg(feature = "arbitrary")]

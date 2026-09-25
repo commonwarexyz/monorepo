@@ -5,8 +5,9 @@ use crate::dkg::{
     types::Payload,
 };
 use commonware_consensus::{
-    Heightable as _, marshal::core::Variant as MarshalVariant,
-    simplex::scheme::Scheme as SimplexScheme, types::Epocher,
+    Heightable as _,
+    simplex::{marshal::core::Variant as MarshalVariant, scheme::Scheme as SimplexScheme},
+    types::Epocher,
 };
 use commonware_cryptography::{
     BatchVerifier, Signer, bls12381::primitives::variant::Variant as BlsVariant,
