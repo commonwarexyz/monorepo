@@ -2298,7 +2298,11 @@ mod tests {
             unreachable!("the test never starts the engine")
         }
 
-        fn spawn<F, T>(&self, len: usize, f: F) -> impl Future<Output = T> + Send + 'static
+        fn spawn<F, T>(
+            &self,
+            len: usize,
+            f: F,
+        ) -> impl Future<Output = T> + Send + 'static + use<F, T>
         where
             F: FnOnce(Self) -> T + Send + 'static,
             T: Send + 'static,
