@@ -117,8 +117,8 @@ benchmark-tracking mode='generate' *args='':
     esac
 
 # Run tests
-test *args='':
-    cargo nextest run $@
+test *args:
+    cargo nextest run "$@"
 
 # Run loom tests
 test-loom *args='':
