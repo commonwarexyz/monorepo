@@ -465,15 +465,18 @@ mod tests {
     fn direct_matches_transform() {
         let mut rng = test_rng();
 
-        // The last two domains end one short of and exactly at DIRECT_EVALUATION_LIMIT.
+        // `chunk - 1` and `chunk` originals both pad to `chunk`, so the last two domains end one
+        // short of and exactly at DIRECT_EVALUATION_LIMIT.
         let quarter = DIRECT_EVALUATION_LIMIT / 4;
+        let chunk = quarter.next_power_of_two();
+        let recovery = DIRECT_EVALUATION_LIMIT - chunk;
         for (original_count, recovery_count) in [
             (1usize, 1),
             (3, 5),
             (7, 13),
             (quarter / 2, quarter),
-            (quarter - 1, 3 * quarter - 1),
-            (quarter, 3 * quarter),
+            (chunk - 1, recovery - 1),
+            (chunk, recovery),
         ] {
             let chunk_size = original_count.next_power_of_two();
             let end = chunk_size + recovery_count;

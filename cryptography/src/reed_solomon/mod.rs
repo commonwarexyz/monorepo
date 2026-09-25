@@ -57,8 +57,8 @@
 //! - Fuses formal-derivative leaves in blocks of four shards for every engine. When the `Avx512`
 //!   engine's CPU features are present, blocks of 16 shards use an AVX-512 leaf for suitable shard
 //!   counts and sizes, regardless of the selected engine.
-//! - Builds the 128-bit multiplication tables in native byte order, since the SIMD engines load
-//!   them byte by byte.
+//! - Builds the 128-bit multiplication tables in native byte order, since the Neon, Avx2, and
+//!   Ssse3 engines read each table as a vector of its in-memory bytes.
 //! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
 //! - Rewrote comments in Commonware style: removed section banners and uppercase step headers,
 //!   and attached floating comments to the code they describe.
