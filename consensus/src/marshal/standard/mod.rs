@@ -387,6 +387,12 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_standard_floor_retains_processed_predecessor() {
+        harness::floor_retains_processed_predecessor::<InlineHarness>();
+        harness::floor_retains_processed_predecessor::<DeferredHarness>();
+    }
+
+    #[test_traced("WARN")]
     fn test_standard_subscribe_basic_block_delivery() {
         harness::subscribe_basic_block_delivery::<InlineHarness>();
         harness::subscribe_basic_block_delivery::<DeferredHarness>();

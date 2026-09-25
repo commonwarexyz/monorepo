@@ -3810,6 +3810,94 @@ pub fn prune_finalized_archives<H: TestHarness>() {
     })
 }
 
+/// Installing a floor at a section boundary keeps its processed predecessor.
+pub fn floor_retains_processed_predecessor<H: TestHarness>() {
+    let runner = deterministic::Runner::new(
+        deterministic::Config::new().with_timeout(Some(Duration::from_secs(120))),
+    );
+    runner.start(|mut context| async move {
+        let Fixture {
+            participants,
+            schemes,
+            ..
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        let oracle = setup_network_with_participants(
+            context.child("network"),
+            NZUsize!(1),
+            participants.clone(),
+        )
+        .await;
+
+        // Prunable archives use ten-item sections, so a floor at 20 starts a new section.
+        let validator = participants[0].clone();
+        let (mut mailbox, extra, _application) = H::setup_prunable_validator(
+            context.child("validator"),
+            &oracle,
+            validator.clone(),
+            &schemes,
+            &format!("floor-predecessor-{validator}"),
+            CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        )
+        .await;
+
+        // Finalize blocks 1 through 19. Block 20 is only verified, so its floor lands above
+        // the processed height.
+        let mut parent = Sha256::hash(&[b""]);
+        let mut parent_commitment = H::genesis_parent_commitment(NUM_VALIDATORS as u16);
+        let epocher = FixedEpocher::new(BLOCKS_PER_EPOCH);
+        let mut floor = None;
+        for i in 1..=20u64 {
+            let block = H::make_test_block(
+                parent,
+                parent_commitment,
+                Height::new(i),
+                i,
+                NUM_VALIDATORS as u16,
+            );
+            let commitment = H::commitment(&block);
+            parent = H::digest(&block);
+            parent_commitment = commitment;
+            let bounds = epocher.containing(Height::new(i)).unwrap();
+            let round = Round::new(bounds.epoch(), View::new(i));
+
+            let mut handle = ValidatorHandle {
+                mailbox: mailbox.clone(),
+                extra: extra.clone(),
+            };
+            H::verify_for_prune(&mut handle, round, &block).await;
+            context.sleep(LINK.latency).await;
+
+            let proposal = Proposal {
+                round,
+                parent: View::new(i - 1),
+                payload: commitment,
+            };
+            let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+            if i < 20 {
+                H::report_finalization(&mut mailbox, finalization).await;
+            } else {
+                floor = Some(finalization);
+            }
+        }
+        while mailbox.get_processed_height().await != Some(Height::new(19)) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+
+        // Installing the floor prunes before it dispatches block 20, so processing 20 means
+        // pruning finished.
+        mailbox.set_floor(floor.unwrap());
+        while mailbox.get_processed_height().await != Some(Height::new(20)) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
+
+        // The section holding block 19 survives. Older sections are pruned.
+        assert!(mailbox.get_block(Height::new(19)).await.is_some());
+        assert!(mailbox.get_finalization(Height::new(19)).await.is_some());
+        assert!(mailbox.get_block(Height::new(9)).await.is_none());
+        assert!(mailbox.get_finalization(Height::new(9)).await.is_none());
+    })
+}
+
 /// Regression test: delayed block backfill delivered after floor advancement must not crash.
 ///
 /// This models a resolver peer that responds to `Key::Block` only after the
