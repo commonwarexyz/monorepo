@@ -11,7 +11,7 @@ use commonware_actor::Feedback;
 use commonware_consensus::{
     Reporter,
     marshal::{self, core::Actor as MarshalActor, resolver::handler, standard::Standard},
-    simplex::types::Activity,
+    simplex::{mocks::scheme as scheme_mocks, types::Activity},
     types::{FixedEpocher, Height, ViewDelta},
 };
 use commonware_cryptography::{Digestible as _, certificate::ConstantProvider};
@@ -51,6 +51,9 @@ impl<R: Reporter<Activity = marshal::Update<Block>>> Reporter for HoldBlock<R> {
 fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
     let mut checkpoint = None;
     let mut state = None;
+
+    // The first two cuts leave F unapplied. The third applies F, and the
+    // fourth opens its committed target from durable storage.
     for boot in 0..4 {
         let runner = checkpoint.map_or_else(
             || deterministic::Runner::timed(Duration::from_secs(30)),
@@ -61,8 +64,12 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 Some(state) => state,
                 None => {
                     let (genesis, blocks) = build_chain(&context, floor_height).await;
-                    let fixture =
-                        fixtures::single_validator(b"_COMMONWARE_GLUE_LIVE_FLOOR_RECOVERY");
+                    let mut signing = context.child("signing");
+                    let fixture = scheme_mocks::fixture(
+                        &mut signing,
+                        b"_COMMONWARE_GLUE_LIVE_FLOOR_RECOVERY",
+                        1,
+                    );
                     (genesis, blocks, fixture)
                 }
             };
@@ -80,12 +87,10 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
             let mut certificates =
                 archive_config("floor-marshal", "finalizations", page_cache.clone(), ());
             certificates.items_per_section = NZU64!(4);
-            let finalizations_by_height = prunable::Archive::init(
-                context.child("finalizations_by_height"),
-                certificates,
-            )
-            .await
-            .unwrap();
+            let finalizations_by_height =
+                prunable::Archive::init(context.child("finalizations_by_height"), certificates)
+                    .await
+                    .unwrap();
             let mut archived = archive_config("floor-marshal", "blocks", page_cache.clone(), ());
             archived.items_per_section = NZU64!(4);
             let finalized_blocks =
@@ -170,13 +175,14 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                 // The single pending acknowledgement makes delivery at F a durable
                 // fence for the predecessor's application state.
                 let report = floor_reports.recv().await.expect("floor report missing");
-                assert!(matches!(&report, marshal::Update::Block(block, _) if block.height == floor_height));
+                assert!(matches!(
+                    &report,
+                    marshal::Update::Block(block, _) if block.height == floor_height
+                ));
                 assert_eq!(marshal.get_processed_height().await, Some(predecessor));
                 assert_eq!(
-                    <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::committed_targets(
-                        &databases,
-                    )
-                    .await,
+                    SingleDatabaseSet::<deterministic::Context>::committed_targets(&databases)
+                        .await,
                     predecessor_target,
                 );
                 if boot == 0 {
@@ -191,8 +197,8 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     assert!(marshal.get_block(floor_height).await.is_some());
                 }
                 if boot == 2 {
-                    // The mailbox reports F after the application acknowledges and
-                    // Marshal makes its processed height durable.
+                    // Release F to the application, then wait for its acknowledgement to
+                    // advance marshal's durable processed height.
                     application.report(report);
                     while marshal.get_processed_height().await != Some(floor_height) {}
                 }
@@ -200,16 +206,12 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
             if boot >= 2 {
                 assert_eq!(marshal.get_processed_height().await, Some(floor_height));
                 assert_eq!(
-                    <SingleDatabaseSet<deterministic::Context> as DatabaseSet<_>>::committed_targets(
-                        &databases,
-                    )
-                    .await,
+                    SingleDatabaseSet::<deterministic::Context>::committed_targets(&databases)
+                        .await,
                     floor_target,
                 );
             }
 
-            // The first two cuts leave F unapplied. The third applies F, and the
-            // fourth opens its committed target from durable storage.
             (genesis, blocks, fixture)
         });
         state = Some(next_state);

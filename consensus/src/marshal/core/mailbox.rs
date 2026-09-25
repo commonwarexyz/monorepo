@@ -186,9 +186,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
-    /// If the verified finalization advances marshal's current floor, marshal
-    /// anchors on its block, retains its processed predecessor when available, and
-    /// delivers blocks starting at the floor height. Stale or superseded floors may be ignored.
+    /// If the floor block is above the processed height, marshal prunes below its
+    /// predecessor before delivering blocks starting at the floor height. Stale or superseded
+    /// floors may be ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -960,14 +960,14 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
-    /// If the verified finalization advances marshal's current floor, marshal
-    /// anchors on its block, retains its processed predecessor when available, and
-    /// delivers blocks starting at the floor height. Stale or superseded floors may be ignored.
+    /// If the floor block is above the processed height, marshal prunes below its
+    /// predecessor before delivering blocks starting at the floor height. Stale or superseded
+    /// floors may be ignored.
     ///
     /// Before advancing the starting point, callers must have recoverable application state through
-    /// the height preceding the new floor. Installing a floor retires outstanding acknowledgement
-    /// waiters and may redeliver a suffix with fresh acknowledgements, including when a newer
-    /// accepted round keeps the starting height unchanged.
+    /// the height preceding the new floor. Installing a floor may retire outstanding
+    /// acknowledgement waiters and redeliver a suffix with fresh acknowledgements, including
+    /// when a newer accepted round keeps the starting height unchanged.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Self::prune] instead.

@@ -257,10 +257,7 @@ where
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(self) {
         let (marshal, _) = self.marshal;
-        let syncer::StartupResult {
-            sync: SyncResult { databases, anchor },
-            skip_finalized_until,
-        } = syncer::init_databases_from_marshal::<E, A, S, V>(
+        let SyncResult { databases, anchor } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.child("databases"),
             &marshal,
             self.db_config,
@@ -284,7 +281,6 @@ where
             marshal,
             processor,
             deferred_verifications: Vec::new(),
-            skip_finalized_until,
         }
         .start()
         .await

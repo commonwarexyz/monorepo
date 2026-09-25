@@ -458,7 +458,9 @@ mod tests {
         #[case] expected_height: u64,
     ) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let fixture = fixtures::single_validator(b"_COMMONWARE_GLUE_RETAINED_FLOOR_ANCHOR");
+            let mut signing = context.child("signing");
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_RETAINED_FLOOR_ANCHOR", 1);
             let mut blocks = vec![TestBlock::new(0, 0)];
             for height in 1..=height {
                 blocks.push(TestBlock::child(
@@ -520,6 +522,7 @@ mod tests {
             assert_eq!(third.floor.height(), Some(predecessor));
             assert_eq!(third.floor.round(), installed.round());
             assert!(third.mailbox.get_block(predecessor).await.is_some());
+            assert!(third.mailbox.get_finalization(predecessor).await.is_some());
             assert!(third.mailbox.get_block(block.height()).await.is_some());
 
             let selected_block = &blocks[selected_height as usize];
@@ -559,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_uses_floor_anchor_when_processed_predecessor_is_pruned() {
+    fn startup_uses_floor_anchor_when_processed_predecessor_is_missing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-install", 1);
             let floor = TestBlock::new(2, 2);
@@ -597,14 +600,13 @@ mod tests {
             >(context.child("databases"), &marshal, 2, metadata)
             .await;
 
-            assert_eq!(startup.sync.anchor.height, Height::new(2));
-            assert_eq!(startup.sync.databases.committed_targets().await, 2);
-            assert_eq!(startup.skip_finalized_until, Some(Height::new(2)));
+            assert_eq!(startup.anchor.height, Height::new(2));
+            assert_eq!(startup.databases.committed_targets().await, 2);
         });
     }
 
     #[test]
-    fn resolved_floor_uses_anchor_when_processed_predecessor_is_pruned() {
+    fn resolved_floor_uses_anchor_when_processed_predecessor_is_missing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-resolve", 1);
             let selected = TestBlock::new(1, 1);

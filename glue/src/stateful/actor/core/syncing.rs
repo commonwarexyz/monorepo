@@ -265,7 +265,8 @@ where
     /// Classify finalized messages relative to the completed sync artifact.
     ///
     /// Live floor changes can redeliver a suffix. Order those receipts by height so each
-    /// unique block extends the artifact consecutively and all duplicates share its barrier.
+    /// unique block extends the artifact consecutively. Duplicate receipts wait for the
+    /// same durability barrier as their applied block.
     fn prepare_handoffs(
         &self,
         mut finalized: VecDeque<PendingFinalization<Arc<A::Block>>>,
@@ -277,9 +278,8 @@ where
         finalized
             .make_contiguous()
             .sort_unstable_by_key(|pending| pending.block.height());
-        let finalized = finalized.into_iter();
-        let mut previous_height = artifact.anchor.height;
-        let mut handoffs = VecDeque::with_capacity(finalized.size_hint().0);
+        let mut previous = artifact.anchor;
+        let mut handoffs = VecDeque::with_capacity(finalized.len());
 
         for PendingFinalization {
             block,
@@ -300,22 +300,19 @@ where
                 continue;
             }
 
-            if block.height() == previous_height {
-                let Some(FinalizedHandoff::Apply(previous, _)) = handoffs.back() else {
-                    unreachable!("a height above the artifact must be applied");
-                };
+            if block.height() == previous.height {
                 assert_eq!(
                     block.digest(),
-                    previous.digest(),
+                    previous.digest,
                     "duplicate finalized block must match its original digest"
                 );
             } else {
                 assert_eq!(
                     block.height(),
-                    previous_height.next(),
+                    previous.height.next(),
                     "finalized blocks must ascend consecutively from the sync anchor",
                 );
-                previous_height = block.height();
+                previous = Anchor::from(block.as_ref());
             }
             handoffs.push_back(FinalizedHandoff::Apply(block, acknowledgement));
         }
@@ -404,7 +401,6 @@ where
             marshal: self.marshal,
             processor,
             deferred_verifications: self.deferred_verifications,
-            skip_finalized_until: Some(completed_height),
         }
         .start()
         .await
@@ -447,6 +443,7 @@ mod tests {
         Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
+        reschedule,
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
@@ -686,6 +683,18 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "duplicate finalized block must match its original digest")]
+    fn duplicate_handoff_with_conflicting_digest_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = TestHarness::new(context, anchor(7, 9)).await;
+            let _ = harness.syncing.prepare_handoffs(VecDeque::from([
+                pending(TestBlock::new(8, 10)),
+                pending(TestBlock::new(8, 11)),
+            ]));
+        });
+    }
+
+    #[test]
     #[should_panic(expected = "ascend consecutively from the sync anchor")]
     fn non_anchor_non_next_block_panics() {
         deterministic::Runner::default().start(|context| async move {
@@ -884,7 +893,9 @@ mod tests {
     #[case::failure(false)]
     fn live_floor_reports_handoff_once_after_durability(#[case] succeeds: bool) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let fixture = fixtures::single_validator(b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR");
+            let mut signing = context.child("signing");
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR", 1);
             let (sender, mut reports) = actor_mailbox::new(context.child("reports"), NZUsize!(8));
             let reporter = StatefulMailbox::<_, TestApp>::new(sender);
             let marshal = fixtures::marshal_fixture_with_reporter(
@@ -1019,11 +1030,12 @@ mod tests {
             assert!(response.send(Some(artifact)).is_ok());
             drop(update);
             let (syncing, handoffs) = process.await.unwrap();
-            let flush_started = control.observe_next_flush();
             let transition = context.child("transition").spawn(move |_| {
                 syncing.transition(handoffs.expect("completed artifact must hand off reports"))
             });
-            flush_started.await.expect("handoff must start durability");
+            while control.flushes.lock().is_empty() {
+                reschedule().await;
+            }
             assert_eq!(control.applied.load(Ordering::Relaxed), 2);
             assert_eq!(control.flushes.lock().len(), 1);
             assert_eq!(
@@ -1036,7 +1048,7 @@ mod tests {
                 transition.await.expect("failed durability stops handoff");
                 marshal.abort().await;
                 let restarted = fixtures::marshal_fixture_with_reporter(
-                    context.child("marshal_restarted"),
+                    context.child("restart"),
                     "syncing-live-floor",
                     fixture.schemes[0].clone(),
                     NZUsize!(4),
@@ -1045,7 +1057,7 @@ mod tests {
                 .await;
                 assert_eq!(restarted.floor.height(), Some(Height::new(1)));
                 let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                    context.child("metadata_restarted"),
+                    context.child("metadata"),
                     "syncing-test",
                 )
                 .await;

@@ -49,7 +49,7 @@ enum Step<M, P> {
 struct Durability {
     /// Highest applied height known to be durable.
     durable: Height,
-    /// Applied heights whose marshal acknowledgements await durability.
+    /// Applied heights whose marshal acknowledgements await durability, in nondecreasing order.
     acknowledgements: VecDeque<(Height, Exact)>,
     /// Active barrier, whose output includes the height of its captured prefix.
     sync: Option<Handle<(Height, bool)>>,
@@ -235,10 +235,6 @@ where
 
     /// Verification requests deferred until processing starts.
     pub(super) deferred_verifications: Vec<VerificationRequest<E, A>>,
-
-    /// Finalized marshal blocks at or below this height were already reflected
-    /// in the selected database anchor and should be acknowledged only.
-    pub(super) skip_finalized_until: Option<Height>,
 }
 
 impl<E, A, S, V> Processing<E, A, S, V>
@@ -427,11 +423,10 @@ where
                     acknowledgement,
                     retry_mailbox,
                 }) => {
-                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                        // The block is already reflected in the database set by a
-                        // completed state sync, so there is nothing to capture or apply.
-                        acknowledgement.acknowledge();
-                    } else if block.height() < self.processor.last_processed().height {
+                    if block.height() < self.processor.last_processed().height {
+                        // Older receipts need neither application nor a finalization boundary.
+                        // Their blocks are already reflected, and children of the current anchor
+                        // remain valid verification candidates.
                         durability.retain_duplicate(block.height(), acknowledgement);
                     } else {
                         let process = info_span!(parent: &span, "stateful.actor.finalized");
@@ -540,23 +535,9 @@ where
     }
 }
 
-fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool {
-    let Some(target) = *skip_until else {
-        return false;
-    };
-    if height > target {
-        *skip_until = None;
-        return false;
-    }
-    if height == target {
-        *skip_until = None;
-    }
-    true
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Message, Processing, VerificationRequest, skip_finalized_block};
+    use super::{Message, Processing, VerificationRequest};
     use crate::stateful::{
         Application, Input, Proposed, PruneConfig,
         actor::{
@@ -931,7 +912,6 @@ mod tests {
             marshal: marshal.mailbox,
             processor,
             deferred_verifications: Vec::new(),
-            skip_finalized_until: None,
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
         (Mailbox::new(sender), marshal.guards, actor)
@@ -1001,7 +981,6 @@ mod tests {
             marshal: marshal.mailbox,
             processor,
             deferred_verifications: Vec::new(),
-            skip_finalized_until: None,
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
         (Mailbox::new(sender), control, marshal.guards, actor)
@@ -1054,7 +1033,6 @@ mod tests {
             marshal: marshal.mailbox,
             processor,
             deferred_verifications: Vec::new(),
-            skip_finalized_until: None,
         };
         let actor = context.child("loop").spawn(move |_| processing.start());
         (Mailbox::new(sender), control, marshal.guards, actor)
@@ -1343,7 +1321,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -1428,7 +1405,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -1902,7 +1878,7 @@ mod tests {
     }
 
     #[test]
-    fn skipped_finalization_keeps_retained_verification_progressing() {
+    fn anchor_redelivery_keeps_retained_verification_progressing() {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let genesis = TestBlock::new(0, 0);
             let finalized = TestBlock::child(&genesis, 1);
@@ -1950,7 +1926,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: Some(finalized.height()),
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -1968,11 +1943,11 @@ mod tests {
             let _ = mailbox.report(Update::Block(Arc::new(finalized), acknowledgement));
             waiter
                 .await
-                .expect("skipped finalized block should be acknowledged");
+                .expect("redelivered anchor should be acknowledged");
 
             assert!(
                 poll!(&mut verify_child).is_pending(),
-                "skipped finalization must not resolve a retained verification",
+                "anchor redelivery must not resolve a retained verification",
             );
             verify_release
                 .send(())
@@ -2033,7 +2008,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -2119,7 +2093,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: vec![request],
-                skip_finalized_until: Some(Height::new(0)),
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -2188,7 +2161,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -2289,7 +2261,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -2385,7 +2356,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -2494,7 +2464,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -2622,7 +2591,6 @@ mod tests {
                 marshal: marshal.mailbox.clone(),
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -2752,7 +2720,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -2992,7 +2959,6 @@ mod tests {
                 marshal: marshal.mailbox,
                 processor,
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
 
@@ -3058,10 +3024,9 @@ mod tests {
             let (mut mailbox, control, _marshal, actor) =
                 spawn_processing(&context, "duplicate-durability", None).await;
             let first = TestBlock::child(&TestBlock::new(0, 0), 1);
-            let (ack, original) = Exact::handle();
+            let (ack, _waiter) = Exact::handle();
             mailbox.report(Update::Block(Arc::new(first.clone()), ack));
             drop(mailbox.subscribe_databases().await);
-            drop(original);
             let (ack, mut duplicate) = Exact::handle();
             mailbox.report(Update::Block(Arc::new(first.clone()), ack));
 
@@ -3093,7 +3058,9 @@ mod tests {
     #[case::forward_start(2, true)]
     fn live_floor_fences_suffix_ack(#[case] floor_height: u64, #[case] genesis_processed: bool) {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
-            let fixture = fixtures::single_validator(b"_COMMONWARE_GLUE_PROCESSING_LIVE_FLOOR");
+            let mut signing = context.child("signing");
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_PROCESSING_LIVE_FLOOR", 1);
             let mut blocks = vec![TestBlock::new(0, 0)];
             for view in 1..=floor_height + 2 {
                 blocks.push(TestBlock::child(
@@ -3124,6 +3091,8 @@ mod tests {
             )
             .await;
             let control = FlushControl::default();
+            let (verify_gate, verify_started, verify_release) = application_gate();
+            let observed_contexts = Arc::default();
             let processing = Processing {
                 context: ContextCell::new(context.child("processing")),
                 mailbox: receiver,
@@ -3131,10 +3100,10 @@ mod tests {
                 marshal: marshal.mailbox.clone(),
                 processor: Processor::new(
                     GatedApp {
-                        verify_gates: Arc::default(),
+                        verify_gates: Arc::new(Mutex::new(VecDeque::from([verify_gate]))),
                         proposal_gate: Arc::default(),
                         verify_valid: true,
-                        observed_contexts: Arc::default(),
+                        observed_contexts: Arc::clone(&observed_contexts),
                     },
                     Shared::new("test", TestDb::gated(control.clone())),
                     anchor(0, 0),
@@ -3142,7 +3111,6 @@ mod tests {
                     None,
                 ),
                 deferred_verifications: Vec::new(),
-                skip_finalized_until: None,
             };
             let actor = context.child("loop").spawn(move |_| processing.start());
             assert_eq!(marshal.mailbox.get_processed_height().await, None);
@@ -3188,6 +3156,20 @@ mod tests {
                 floor_height as usize + 2
             );
             assert_eq!(control.flushes.lock().len(), 1);
+
+            // A child of the applied tip remains valid while older heights are redelivered.
+            let tip = blocks.last().unwrap();
+            let child = TestBlock::child(tip, (floor_height + 3).try_into().unwrap());
+            let mut verifier = mailbox.clone();
+            let mut verify_child = Box::pin(verifier.verify(
+                (context.child("verify_child"), child.context()),
+                ancestry::from_iter([Arc::new(child), Arc::new(tip.clone())]),
+            ));
+            assert!(poll!(&mut verify_child).is_pending());
+            verify_started
+                .await
+                .expect("child verification should start");
+
             marshal.mailbox.set_floor(floor_finalization);
             assert_eq!(
                 marshal.mailbox.get_processed_height().await,
@@ -3195,17 +3177,19 @@ mod tests {
             );
             drop(mailbox.subscribe_databases().await);
             let mut expected = heights.clone();
-            expected.extend([
-                Height::new(floor_height),
-                Height::new(floor_height + 1),
-                Height::new(floor_height + 2),
-            ]);
+            expected.extend((floor_height..=floor_height + 2).map(Height::new));
             assert_eq!(observer.pending_ack_heights(), expected);
             assert_eq!(
                 control.applied.load(Ordering::Relaxed),
                 floor_height as usize + 2
             );
             assert_eq!(control.flushes.lock().len(), 1);
+            assert!(poll!(&mut verify_child).is_pending());
+            verify_release
+                .send(())
+                .expect("redelivery must retain the active verification");
+            assert!(verify_child.await);
+            assert_eq!(observed_contexts.lock().len(), 1);
 
             for height in heights {
                 assert_eq!(observer.acknowledge_next(), Some(height));
@@ -3216,18 +3200,11 @@ mod tests {
                 marshal.mailbox.get_processed_height().await,
                 Some(Height::new(floor_height - 1))
             );
-            assert_eq!(observer.acknowledge_next(), Some(Height::new(floor_height)));
-            assert_eq!(
-                observer.acknowledge_next(),
-                Some(Height::new(floor_height + 1))
-            );
+            for height in floor_height..=floor_height + 2 {
+                assert_eq!(observer.acknowledge_next(), Some(Height::new(height)));
+            }
 
-            assert_eq!(
-                observer.acknowledge_next(),
-                Some(Height::new(floor_height + 2))
-            );
-
-            // Only the first suffix block belongs to the captured durability prefix.
+            // The floor block is durable. Its two successors await separate flushes.
             assert_eq!(
                 marshal.mailbox.get_processed_height().await,
                 Some(Height::new(floor_height))
@@ -3645,24 +3622,5 @@ mod tests {
                 context.sleep(Duration::from_millis(100)).await;
             }
         });
-    }
-
-    #[test]
-    fn skip_finalized_block_skips_through_target_height() {
-        let mut skip_until = Some(Height::new(3));
-
-        assert!(skip_finalized_block(&mut skip_until, Height::new(1)));
-        assert_eq!(skip_until, Some(Height::new(3)));
-        assert!(skip_finalized_block(&mut skip_until, Height::new(3)));
-        assert_eq!(skip_until, None);
-        assert!(!skip_finalized_block(&mut skip_until, Height::new(4)));
-    }
-
-    #[test]
-    fn skip_finalized_block_clears_stale_target() {
-        let mut skip_until = Some(Height::new(3));
-
-        assert!(!skip_finalized_block(&mut skip_until, Height::new(4)));
-        assert_eq!(skip_until, None);
     }
 }

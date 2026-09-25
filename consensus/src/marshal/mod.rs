@@ -21,10 +21,11 @@
 //!
 //! ## Delivery
 //!
-//! The actor delivers each finalized block at least once. Reports are consecutive and increase
-//! in height between floor installations. Installing a floor can redeliver an already reported
-//! suffix with fresh acknowledgements, even when a newer accepted round keeps the starting height
-//! unchanged, so reporters must handle duplicates.
+//! The actor delivers finalized blocks at or above its starting height at least once. Within a run,
+//! reports are consecutive and increase in height between floor installations. A new floor can skip
+//! earlier heights. Restarts and floor installations can redeliver a previously reported suffix
+//! with fresh acknowledgements, even when the starting height is unchanged, so reporters must
+//! handle duplicates.
 //!
 //! ## Finalization
 //!
@@ -47,18 +48,18 @@
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
 //! to store blocks and finalizations. Internal storage (in-memory caches) is used for data that is only
 //! needed for a short period of time, such as unverified blocks or notarizations. External storage
-//! (archive backends) is used to persist finalized blocks and certificates indefinitely.
+//! (archive backends) is used to persist finalized blocks and certificates.
 //!
 //! Marshal stores finalized blocks from a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. The floor
-//! is supplied as a finalization; marshal fetches the corresponding block asynchronously
-//! before dispatching application blocks starting at that height. Older history may be pruned
-//! if the backing [`store::Blocks`] supports pruning, while the processed predecessor and
-//! section-aligned history may remain available.
+//! is supplied as a finalization. Marshal fetches the corresponding block asynchronously
+//! before dispatching application blocks starting at that height. Installing a floor may prune
+//! older history if [`store::Blocks`] supports pruning, but keeps the stored block preceding
+//! the floor.
 //!
-//! _Setting a configurable starting height will prevent others from backfilling blocks below said height. This
-//! feature is only recommended for applications that support state sync (i.e., those that don't require full
-//! block history to participate in consensus)._
+//! _History below the starting height may be unavailable to peers. This feature is only
+//! recommended for applications that support state sync and do not require full block history to
+//! participate in consensus._
 //!
 //! ## Limitations and Future Work
 //!
@@ -134,9 +135,10 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 /// An update reported to the application, either a new finalized tip or a finalized block.
 ///
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
-/// Finalized blocks are reported without gaps and in increasing height order between floor
-/// installations. Installing a floor can redeliver a suffix with fresh acknowledgements,
-/// including when a newer accepted round keeps the starting height unchanged.
+/// Finalized blocks are reported at or above the starting height, without gaps and in increasing
+/// height order within each run between floor installations. A new floor can skip earlier heights.
+/// Restarts and floor installations can redeliver a suffix with fresh acknowledgements, including
+/// when the starting height is unchanged.
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip and the finalization round.
@@ -147,9 +149,8 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     Tip(Round, Height, B::Digest),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
-    /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
-    /// until the application explicitly acknowledges the update. If the [Acknowledgement] is dropped before
-    /// handling, marshal will exit (assuming the application is shutting down).
+    /// Marshal waits to mark a block as delivered until the application explicitly acknowledges the
+    /// update. Dropping an [Acknowledgement] while marshal still waits for it stops marshal.
     ///
     /// Cloning the update shares the immutable block, so applications can fan it out without requiring
     /// block clones. Marshal only considers the block delivered once every acknowledgement is handled.

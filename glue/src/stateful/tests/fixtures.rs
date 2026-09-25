@@ -13,11 +13,8 @@ use commonware_consensus::{
     types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
-    Digestible as _, Signer as _,
-    certificate::{
-        ConstantProvider,
-        mocks::{Fixture, Shared as SigningState},
-    },
+    Digestible as _,
+    certificate::{ConstantProvider, mocks::Fixture},
     ed25519,
     sha256::Digest as Sha256Digest,
 };
@@ -29,10 +26,9 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    NZU16, NZU64, NZUsize, Participant,
+    NZU16, NZU64, NZUsize,
     acknowledgement::{Acknowledgement as _, Exact},
     non_empty,
-    ordered::Set,
     sync::Mutex,
     vec::NonEmptyVec,
 };
@@ -138,27 +134,6 @@ impl TargetedResolver for IgnoreResolver {
         F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
         Feedback::Ok
-    }
-}
-
-/// Uses the fixed leader shared by the test block builders as the sole validator.
-pub(crate) fn single_validator(namespace: &[u8]) -> Fixture<TestScheme> {
-    let private_key = ed25519::PrivateKey::from_seed(0);
-    let public_key = private_key.public_key();
-    let participants = Set::from_iter_dedup([public_key.clone()]);
-    let shared = SigningState::default();
-    let signer = TestScheme::signer(
-        namespace,
-        participants.clone(),
-        Participant::new(0),
-        shared.clone(),
-    )
-    .unwrap();
-    Fixture {
-        participants: vec![public_key],
-        private_keys: vec![private_key],
-        schemes: vec![signer],
-        verifier: TestScheme::verifier(namespace, participants, shared),
     }
 }
 

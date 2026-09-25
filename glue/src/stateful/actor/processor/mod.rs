@@ -135,8 +135,8 @@ impl<D: Copy> VerificationProgress<D> {
 /// Pending parents whose branch-scoped batches remain valid after one
 /// finalized block is applied.
 ///
-/// Marshal delivers finalized blocks in height order. Canonical older blocks
-/// are therefore already covered by the processed anchor and resolve while
+/// Finalizations reaching this boundary are at or above the processed anchor.
+/// Canonical older blocks are already covered by that anchor and resolve while
 /// their verification is still acquiring. The exact processed phase is the
 /// only older replay or verification phase that can survive from the preceding
 /// finalization.
