@@ -85,6 +85,7 @@ mod tests {
     use commonware_p2p::{
         Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Config as NConfig, Link, Network, Oracle, Sender},
+        utils::mocks::NoopBlocker,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -361,24 +362,6 @@ mod tests {
             .expect("finalization requires a quorum of votes")
     }
 
-    /// A blocker that drops all block requests.
-    #[derive(Clone)]
-    struct NoopBlocker;
-
-    impl commonware_p2p::Blocker for NoopBlocker {
-        type PublicKey = PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) =
-                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
-            receiver
-        }
-    }
-
     #[derive(Clone)]
     struct RecordingBlocker(Arc<Mutex<Vec<PublicKey>>>);
 
@@ -443,7 +426,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -521,7 +504,7 @@ mod tests {
             let mut tracked = super::Round::new(
                 round_id,
                 Arc::new(schemes[0].clone()),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NoopReporter(PhantomData),
                 false,
             );
@@ -630,7 +613,7 @@ mod tests {
             let mut tracked = super::Round::new(
                 round_id,
                 Arc::new(schemes[0].clone()),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NoopReporter(PhantomData),
                 false,
             );
@@ -741,7 +724,7 @@ mod tests {
         let mut tracked = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -831,7 +814,7 @@ mod tests {
         let mut tracked = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -872,7 +855,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -928,7 +911,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1002,7 +985,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[1].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1118,7 +1101,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             RecordingReporter(activities.clone()),
             false,
         );
@@ -1144,7 +1127,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             RecordingReporter(activities.clone()),
             false,
         );
@@ -1166,7 +1149,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             RecordingReporter(activities.clone()),
             false,
         );
@@ -1208,7 +1191,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1229,7 +1212,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1258,7 +1241,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             RecordingReporter(activities.clone()),
             false,
         );
@@ -1321,7 +1304,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             RecordingReporter(activities.clone()),
             false,
         );
@@ -1359,7 +1342,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[1].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1400,7 +1383,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1433,7 +1416,7 @@ mod tests {
             let mut round = super::Round::new(
                 round_id,
                 Arc::new(verifier),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NoopReporter(PhantomData),
                 false,
             );
@@ -1516,7 +1499,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(verifier),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1576,7 +1559,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(verifier),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1638,7 +1621,7 @@ mod tests {
         let mut round = super::Round::new(
             round_id,
             Arc::new(schemes[0].clone()),
-            NoopBlocker,
+            NoopBlocker::default(),
             NoopReporter(PhantomData),
             false,
         );
@@ -1823,7 +1806,7 @@ mod tests {
             let mut round = super::Round::new(
                 round_id,
                 Arc::new(schemes[0].clone()),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NoopReporter(PhantomData),
                 false,
             );
@@ -1857,7 +1840,7 @@ mod tests {
             let mut round = super::Round::new(
                 round_id,
                 Arc::new(schemes[0].clone()),
-                NoopBlocker,
+                NoopBlocker::default(),
                 NoopReporter(PhantomData),
                 false,
             );
@@ -2132,7 +2115,7 @@ mod tests {
             let mut round = super::Round::new(
                 round_id,
                 Arc::new(schemes[0].clone()),
-                NoopBlocker,
+                NoopBlocker::default(),
                 reporter.clone(),
                 false,
             );
