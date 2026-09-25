@@ -462,7 +462,8 @@ mod tests {
 
     impl TestHarness<deterministic::Context> {
         async fn new(context: deterministic::Context, anchor: Anchor<Sha256Digest>) -> Self {
-            Self::new_on(context.child("fixture"), context, anchor).await
+            let marshal = harness_marshal(context.child("marshal")).await;
+            Self::new_on(context.child("harness"), marshal, anchor).await
         }
 
         /// Build the harness mid-sync: no artifact yet, the provided marshal mailbox, and a
@@ -476,8 +477,7 @@ mod tests {
             actor_mailbox::Receiver<syncer::mailbox::Message<deterministic::Context, TestApp>>,
             oneshot::Sender<SyncResult<deterministic::Context, TestApp>>,
         ) {
-            let syncing_context = context.child("syncing_context");
-            Self::new_syncing_on(context, syncing_context, marshal).await
+            Self::new_syncing_on(context.child("harness"), marshal).await
         }
 
         async fn advance_full_ack_window(
@@ -545,8 +545,7 @@ mod tests {
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
         async fn new_syncing_on(
-            context: deterministic::Context,
-            syncing_context: E,
+            context: E,
             marshal: MarshalMailbox<TestScheme, TestVariant>,
         ) -> (
             Self,
@@ -555,19 +554,23 @@ mod tests {
             oneshot::Sender<SyncResult<E, TestApp>>,
         ) {
             let (mailbox_sender, mailbox) =
-                actor_mailbox::new(syncing_context.child("mailbox"), NZUsize!(1));
+                actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let (syncer_sender, syncer_receiver) =
-                actor_mailbox::new(syncing_context.child("syncer_mailbox"), NZUsize!(1));
+                actor_mailbox::new(context.child("syncer"), NZUsize!(1));
             let (sync_complete, sync_completed) = oneshot::channel();
 
             let harness = Self {
                 syncing: Syncing {
-                    context: ContextCell::new(syncing_context.child("syncing")),
+                    context: ContextCell::new(context.child("syncing")),
                     mailbox,
                     application: TestApp::default(),
                     provider: (),
                     marshal,
-                    sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
+                    sync_metadata: StateSyncMetadata::init(
+                        context.child("metadata"),
+                        "syncing-test",
+                    )
+                    .await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
@@ -587,56 +590,31 @@ mod tests {
             )
         }
 
-        /// Build the harness with `syncing_context` owning the syncing actor and its
-        /// state-sync metadata, while the marshal fixture runs on the plain `context`.
+        /// Build the harness with `context` owning the syncing actor and its state-sync
+        /// metadata, holding a completed sync artifact at `anchor`.
         async fn new_on(
-            context: deterministic::Context,
-            syncing_context: E,
+            context: E,
+            marshal: MarshalMailbox<TestScheme, TestVariant>,
             anchor: Anchor<Sha256Digest>,
         ) -> Self {
-            let mut marshal_context = context.child("marshal");
-            let scheme = scheme_mocks::fixture(&mut marshal_context, b"syncing-harness", 1).schemes
-                [0]
-            .clone();
-            let marshal = fixtures::marshal_fixture(
-                marshal_context,
-                "syncing-harness",
-                scheme,
-                None,
-                NZUsize!(1),
-                false,
-            )
-            .await
-            .mailbox;
-            let (_mailbox_sender, mailbox) =
-                actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
-            let (syncer_sender, _syncer_receiver) =
-                actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
-            let (_sync_complete, sync_completed) = oneshot::channel();
-
-            Self {
-                syncing: Syncing {
-                    context: ContextCell::new(syncing_context.child("syncing")),
-                    mailbox,
-                    application: TestApp::default(),
-                    provider: (),
-                    marshal,
-                    sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
-                    syncer: syncer::Mailbox::new(syncer_sender),
-                    deferred_verifications: Vec::new(),
-                    database_subscribers: Vec::new(),
-                    artifact: Some(SyncResult {
-                        databases: test_databases(),
-                        anchor,
-                    }),
-                    resolvers: NoopResolver,
-                    sync_completed,
-                    pending_finalizations: VecDeque::new(),
-                    pruning: None,
-                    metrics: StatefulMetrics::new(&context),
-                },
-            }
+            let (mut harness, _mailbox, _syncer_receiver, _sync_complete) =
+                Self::new_syncing_on(context, marshal).await;
+            harness.syncing.artifact = Some(SyncResult {
+                databases: test_databases(),
+                anchor,
+            });
+            harness
         }
+    }
+
+    /// Start a stopped marshal fixture for the harness and return its mailbox.
+    async fn harness_marshal(
+        mut context: deterministic::Context,
+    ) -> MarshalMailbox<TestScheme, TestVariant> {
+        let scheme = scheme_mocks::fixture(&mut context, b"syncing-harness", 1).schemes[0].clone();
+        fixtures::marshal_fixture(context, "syncing-harness", scheme, None, NZUsize!(1), false)
+            .await
+            .mailbox
     }
 
     #[test]
@@ -750,8 +728,8 @@ mod tests {
                 inner: context.child("delayed"),
                 pending: pending.clone(),
             };
-            let mut harness =
-                TestHarness::new_on(context.child("harness"), delayed, anchor(7, 9)).await;
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let mut harness = TestHarness::new_on(delayed, marshal, anchor(7, 9)).await;
             harness.syncing.pruning = Some(Pruning::build(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
@@ -835,9 +813,11 @@ mod tests {
             );
 
             // The completed height is durable: reopen the metadata partition.
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(9)));
         });
     }
@@ -870,9 +850,11 @@ mod tests {
                 waiter.await.is_err(),
                 "an aborted handoff must cancel marshal's acknowledgement",
             );
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), None);
         });
     }
@@ -1003,9 +985,11 @@ mod tests {
                 assert!(waiter.await.is_ok());
             }
 
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(9)));
         });
     }
@@ -1041,8 +1025,7 @@ mod tests {
                 pending: pending.clone(),
             };
             let (mut harness, mut mailbox, _syncer_receiver, sync_complete) =
-                TestHarness::new_syncing_on(context.child("harness"), syncing_context, marshal)
-                    .await;
+                TestHarness::new_syncing_on(syncing_context, marshal).await;
             harness.syncing.sync_metadata = harness
                 .syncing
                 .sync_metadata
@@ -1105,9 +1088,11 @@ mod tests {
             drop(mailbox);
             actor.await.expect("syncing actor failed");
 
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(9)));
         });
     }
@@ -1150,9 +1135,11 @@ mod tests {
             drop(mailbox);
             actor.await.expect("syncing actor failed");
 
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(10)));
         });
     }
@@ -1195,9 +1182,11 @@ mod tests {
             // Drop all volatile retarget state after marshal has acknowledged the window.
             drop(harness);
 
-            let plan =
-                syncer::SyncPlan::<_, TestScheme, TestVariant>::init(&context, "syncing-test")
-                    .await;
+            let plan = syncer::SyncPlan::<_, TestScheme, TestVariant>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert!(
                 plan.should_state_sync(false),
                 "an interrupted sync must restart peer state sync",

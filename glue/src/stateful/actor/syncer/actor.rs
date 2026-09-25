@@ -474,7 +474,7 @@ mod tests {
             assert!(marshal.get_block(Height::new(2)).await.is_some());
 
             let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
-                &context,
+                context.child("metadata"),
                 "syncer-floor-install",
             )
             .await;
@@ -483,7 +483,7 @@ mod tests {
                 WedgeApp,
                 TestScheme,
                 TestVariant,
-            >(&context, &marshal, 2, metadata)
+            >(context.child("databases"), &marshal, 2, metadata)
             .await;
 
             assert_eq!(startup.sync.anchor.height, Height::new(2));
