@@ -4,7 +4,7 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
+        DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
         MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, REVEAL, SHARING_MODE,
         VOTE_CHANNEL,
     },
@@ -16,7 +16,10 @@ use commonware_glue::dkg::{
     bootstrap,
     types::{EpochInfo, EpochOutcome},
 };
-use commonware_p2p::authenticated::{self, discovery};
+use commonware_p2p::{
+    authenticated::{self, discovery},
+    max_message_size,
+};
 use commonware_runtime::{Strategizer, Supervisor as _, tokio};
 use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZUsize, sequence::Unit};
@@ -45,6 +48,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let local = node.public_key();
     let bootstrappers = network.bootstrappers(&local);
     let max_peers_per_set = authenticated::peer_set_limit(&network.participants, &local);
+    let limits = bootstrap::Limits::new::<MinSig, _>(MAX_PARTICIPANTS, &Unit);
 
     let mut p2p_config = discovery::Config::local(
         Handshake::new(node.signer.clone()),
@@ -53,7 +57,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        MAX_MESSAGE_SIZE,
+        max_message_size(&[&limits]),
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);

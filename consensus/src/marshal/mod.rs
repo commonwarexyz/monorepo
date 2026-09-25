@@ -42,40 +42,29 @@
 //!
 //! ## Message Sizes
 //!
-//! Applications must align block production, block decoding, application validation, and P2P
-//! message limits so every permitted block can be both disseminated and recovered. Enforce the
-//! block bound for remote proposals as well as locally produced blocks, consistently across
-//! validators.
+//! [`Limits`] bounds the blocks marshal handles and the payloads it sends. Fold it into the P2P
+//! `max_message_size` with [`commonware_p2p::max_message_size`]. Every validator must configure
+//! the same [`Limits::block`], and changing it requires a coordinated restart.
 //!
-//! Recovery responses contain one of the following values, encoded as a single resolver message:
+//! Marshal never admits a block above the bound:
 //!
-//! - A block, for a request by commitment.
-//! - A [`Notarization`](crate::simplex::types::Notarization) and a block, for a request by round.
-//! - A [`Finalization`](crate::simplex::types::Finalization) and a block, for a request by height.
+//! - [`standard::Inline`], [`standard::Deferred`], and [`coding::Marshaled`] skip a proposal whose
+//!   block exceeds the bound.
+//! - The actor ignores a block above the bound from the buffer, a buffer subscription, or the
+//!   resolver. A peer that delivers one is not blocked when the delivery is otherwise valid.
+//! - The actor panics on a block above the bound passed to [`core::Mailbox`] or as the genesis
+//!   anchor.
+//! - [`coding::shards::Engine`] drops a shard above [`Limits::buffer`] without blocking its sender
+//!   and rejects a reconstructed block above the bound. It panics when proposing to a committee
+//!   larger than [`Limits::participants`].
 //!
-//! In [`standard`], the block is the application block. In [`coding`], commitment and round
-//! requests send the complete [`CodedBlock`](coding::types::CodedBlock), which adds the coding
-//! configuration to the application block. Height requests send the application block, so
-//! budgeting for the coded block covers every request. Recovery does not fragment blocks or fetch
-//! individual shards, so shards that fit do not imply the block can be recovered.
+//! As a result, [`standard`] never votes for such a block. In [`coding`], a notarize vote needs
+//! only the assigned shard, so such a block can be notarized, but it is never certified or
+//! finalized.
 //!
-//! [`max_recovery_overhead`] bounds everything in a response except the block: the proposal, the
-//! largest certificate the scheme accepts, and
-//! [`MAX_RESPONSE_OVERHEAD`](commonware_resolver::p2p::MAX_RESPONSE_OVERHEAD) bytes of resolver
-//! framing. A configuration is sufficient when the maximum encoded
-//! [`Variant::Block`](core::Variant::Block) size plus this overhead is at most `max_message_size`.
-//! Include any channel wrappers, such as a [`mux`](commonware_p2p::utils::mux) subchannel prefix,
-//! in this budget. Authenticated P2P's own framing and encryption overhead are outside its
-//! `max_message_size` limit.
-//!
-//! Take the largest overhead across all committees and epochs that can be served or synchronized.
-//! Certificate bounds must cover every accepted signer count, which may exceed a quorum. Measuring
-//! one certificate with [`commonware_codec::EncodeSize`] does not establish a maximum.
-//!
-//! Violating this requirement can halt consensus even if block or shard dissemination succeeds.
-//! Authenticated P2P panics on oversized sends, so a node's resolver panics when it serves an
-//! oversized recovery response. Any connected peer can trigger this by requesting such a block,
-//! and peers that cannot recover it may be unable to certify.
+//! Recovery sends a complete block, with a certificate when requested by round or height, in one
+//! resolver response. [`Limits`] bounds it for committees of at most [`Limits::participants`]
+//! members.
 //!
 //! ## Storage
 //!
@@ -114,7 +103,7 @@ use std::sync::Arc;
 mod config;
 pub use config::{Config, Start};
 mod sizing;
-pub use sizing::max_recovery_overhead;
+pub use sizing::Limits;
 
 pub mod ancestry;
 pub mod core;

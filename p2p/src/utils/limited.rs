@@ -148,6 +148,11 @@ where
             sender: &mut self.sender,
         })
     }
+
+    /// Returns the largest payload, in bytes, that the wrapped sender accepts.
+    pub fn max_message_size(&self) -> u32 {
+        self.sender.max_message_size()
+    }
 }
 
 /// Filters peers by rate limit, returning those that pass and the latest retry
@@ -264,6 +269,10 @@ mod tests {
             let message = message.into().coalesce();
             self.sent.lock().push((recipients, message, priority));
             Unreliable::new(Feedback::Ok)
+        }
+
+        fn max_message_size(&self) -> u32 {
+            u32::MAX
         }
     }
 

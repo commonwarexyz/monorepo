@@ -6,14 +6,14 @@
 use crate::{
     CertifiableBlock, Heightable, Reporter,
     marshal::{
-        Identifier,
+        Identifier, Limits,
         ancestry::BlockProvider,
         coding::{
             Coding, shards,
             types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
-        core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Variant},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -27,7 +27,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_broadcast::buffered;
 use commonware_codec::{Buf, EncodeSize, Error as CodecError, Read, Write};
-use commonware_coding::{CodecConfig, ReedSolomon};
+use commonware_coding::ReedSolomon;
 use commonware_cryptography::{
     Committable, Digest as DigestTrait, Digestible, Hasher, Signer,
     bls12381::primitives::variant::MinPk,
@@ -52,7 +52,7 @@ use commonware_storage::{
     translator::EightCap,
 };
 use commonware_utils::{
-    NZU16, NZU64, NZUsize, TestRng, non_empty, probability, test_rng, vec::NonEmptyVec,
+    NZU16, NZU64, NZUsize, TestRng, Widen, non_empty, probability, test_rng, vec::NonEmptyVec,
 };
 use futures::StreamExt;
 use rand::{
@@ -162,6 +162,15 @@ pub const UNRELIABLE_LINK: Link = Link {
     success_rate: probability!(0.7),
 };
 pub const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+
+/// Largest encoded application block the tests build.
+pub const MAX_BLOCK_SIZE: usize = 1024;
+
+/// Returns marshal limits for committees of [`NUM_VALIDATORS`] and blocks of at most
+/// [`MAX_BLOCK_SIZE`].
+pub fn limits<V: Variant>() -> Limits<V::Commitment> {
+    Limits::new::<V, S>(Widen::widen(NUM_VALIDATORS), MAX_BLOCK_SIZE)
+}
 
 /// A provider that always returns `None`, modeling an application that
 /// has pruned all epoch state.
@@ -1883,6 +1892,7 @@ impl TestHarness for StandardHarness {
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
+            limits: limits::<Self::Variant>(),
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
@@ -1903,6 +1913,7 @@ impl TestHarness for StandardHarness {
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
+            limits: config.limits,
         };
         let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
@@ -1911,6 +1922,7 @@ impl TestHarness for StandardHarness {
             mailbox_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
+            max_size: config.limits.buffer(),
             codec_config: (),
             peer_provider: oracle.manager(),
         };
@@ -2115,6 +2127,7 @@ impl TestHarness for StandardHarness {
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
+            limits: limits::<Self::Variant>(),
             block_codec_config: (),
             partition_prefix: partition_prefix.to_string(),
             prunable_items_per_section: NZU64!(10),
@@ -2135,6 +2148,7 @@ impl TestHarness for StandardHarness {
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
+            limits: config.limits,
         };
         let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
@@ -2143,6 +2157,7 @@ impl TestHarness for StandardHarness {
             mailbox_size: config.mailbox_size,
             deque_size: 10,
             priority: false,
+            max_size: config.limits.buffer(),
             codec_config: (),
             peer_provider: oracle.manager(),
         };
@@ -2675,6 +2690,7 @@ impl TestHarness for CodingHarness {
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks,
+            limits: limits::<Self::Variant>(),
             block_codec_config: (),
             partition_prefix: format!("validator-{}", validator.clone()),
             prunable_items_per_section: NZU64!(10),
@@ -2696,6 +2712,7 @@ impl TestHarness for CodingHarness {
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
+            limits: config.limits,
         };
         let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
@@ -2783,9 +2800,7 @@ impl TestHarness for CodingHarness {
         let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
+            limits: config.limits,
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
@@ -2947,6 +2962,7 @@ impl TestHarness for CodingHarness {
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
+            limits: limits::<Self::Variant>(),
             block_codec_config: (),
             partition_prefix: partition_prefix.to_string(),
             prunable_items_per_section: NZU64!(10),
@@ -2967,15 +2983,14 @@ impl TestHarness for CodingHarness {
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
+            limits: config.limits,
         };
         let resolver = resolver::init(context.child("resolver"), resolver_cfg, backfill);
 
         let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
             scheme_provider: provider.clone(),
             blocker: oracle.control(validator.clone()),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
+            limits: config.limits,
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),

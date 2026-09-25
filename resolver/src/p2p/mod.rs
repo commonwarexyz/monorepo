@@ -82,9 +82,10 @@
 //!
 //! # Message Sizes
 //!
-//! A produced value is sent in one response message, with up to [`MAX_RESPONSE_OVERHEAD`] bytes
-//! of resolver framing. Configure value bounds so the complete response fits the underlying P2P
-//! application message limit. The resolver does not fragment oversized values.
+//! Each produced value is sent unfragmented in one response, adding up to
+//! [`MAX_MESSAGE_OVERHEAD`] bytes. A response larger than the sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) is replaced by an error
+//! response, which the requester handles like missing data. Bound values so responses fit.
 //!
 //! # Performance Considerations
 //!
@@ -104,7 +105,7 @@ mod ingress;
 pub use ingress::Mailbox;
 mod metrics;
 mod wire;
-pub use wire::MAX_RESPONSE_OVERHEAD;
+pub use wire::MAX_MESSAGE_OVERHEAD;
 
 #[cfg(feature = "mocks")]
 pub mod mocks;
@@ -123,16 +124,19 @@ mod tests {
     use super::{
         Config, Engine, Mailbox,
         mocks::{Consumer, Key, Producer},
+        wire,
     };
     use crate::{Delivery, Fetch, Outcome, Resolver, TargetedResolver};
     use bytes::Bytes;
+    use commonware_codec::{DecodeExt, Encode, EncodeSize};
     use commonware_cryptography::{
         Signer,
         ed25519::{PrivateKey, PublicKey},
     };
     use commonware_macros::{select, test_traced};
     use commonware_p2p::{
-        Blocker, Manager as _, Provider, TrackedPeers,
+        Blocker, LimitedSender as _, Manager as _, Provider, Receiver as _, Recipients,
+        Sender as _, TrackedPeers,
         simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
@@ -140,7 +144,7 @@ mod tests {
         telemetry::metrics::count_running_tasks,
     };
     use commonware_utils::{
-        NZU32, NZUsize,
+        NZU32, NZUsize, Widen,
         channel::{
             fallible::{FallibleExt, OneshotExt},
             mpsc, oneshot,
@@ -4200,6 +4204,62 @@ mod tests {
             let (key_actual, value) = cons_out2.recv().await.unwrap();
             assert_eq!(key_actual, key);
             assert_eq!(value, data);
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_response_sends_error() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|context| async move {
+            let (mut oracle, mut schemes, peers, mut connections) =
+                setup_network_and_peers(&context, &[1, 2]).await;
+            add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+            // Peer 1 sends raw requests
+            let (mut sender, mut receiver) = connections.remove(0);
+            let max: usize = Widen::widen(sender.max_message_size());
+
+            // A response adds an 8-byte ID, a 1-byte tag, and a 3-byte length at this size
+            let fits = max - 12;
+            let response = |id, len| wire::Message::<Key> {
+                id,
+                payload: wire::Payload::Response(Bytes::from(vec![0; len])),
+            };
+            assert_eq!(response(0, fits).encode_size(), max);
+
+            // Peer 2 serves one value that fits and one a byte over the limit
+            let mut producer = Producer::default();
+            producer.insert(Key(1), Bytes::from(vec![0; fits]));
+            producer.insert(Key(2), Bytes::from(vec![0; fits + 1]));
+            let scheme = schemes.remove(1);
+            let _mailbox = setup_and_spawn_actor(
+                &context,
+                oracle.manager(),
+                oracle.control(scheme.public_key()),
+                scheme,
+                connections.remove(0),
+                dummy_consumer(),
+                producer,
+            );
+
+            // The oversized value is answered with an error, and serving continues
+            for (id, key, expected) in [
+                (2, Key(2), wire::Payload::Error),
+                (1, Key(1), response(1, fits).payload),
+            ] {
+                let request = wire::Message {
+                    id,
+                    payload: wire::Payload::Request(key),
+                };
+                let sent = sender.send(Recipients::One(peers[1].clone()), request.encode(), false);
+                assert_eq!(sent, vec![peers[1].clone()]);
+
+                let (from, message) = receiver.recv().await.unwrap();
+                assert_eq!(from, peers[1]);
+                let message = wire::Message::<Key>::decode(message).unwrap();
+                assert_eq!(message.id, id);
+                assert_eq!(message.payload, expected);
+            }
         });
     }
 

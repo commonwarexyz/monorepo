@@ -2,7 +2,7 @@ use super::{Variant, durability::Durable as _};
 use crate::{
     Reporter,
     marshal::{
-        Identifier,
+        Identifier, Limits,
         ancestry::{AncestorStream, Ancestry, BlockProvider},
     },
     simplex::types::{Activity, Finalization, Notarization},
@@ -12,6 +12,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
 };
+use commonware_codec::EncodeSize;
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
@@ -630,14 +631,20 @@ impl<S: Scheme, V: Variant> Policy for Message<S, V> {
 pub struct Mailbox<S: Scheme, V: Variant> {
     sender: Sender<Message<S, V>>,
     max_pending_acks: usize,
+    limits: Limits<V::Commitment>,
 }
 
 impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Creates a new mailbox.
-    pub(crate) const fn new(sender: Sender<Message<S, V>>, max_pending_acks: NonZeroUsize) -> Self {
+    pub(crate) const fn new(
+        sender: Sender<Message<S, V>>,
+        max_pending_acks: NonZeroUsize,
+        limits: Limits<V::Commitment>,
+    ) -> Self {
         Self {
             sender,
             max_pending_acks: max_pending_acks.get(),
+            limits,
         }
     }
 
@@ -645,6 +652,11 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// acknowledgements advance its processed floor.
     pub const fn max_pending_acks(&self) -> usize {
         self.max_pending_acks
+    }
+
+    /// Returns whether `block` fits [`Limits::block`].
+    pub fn admits(&self, block: &V::ApplicationBlock) -> bool {
+        V::block_size(block.encode_size()).is_some_and(|size| size <= self.limits.block())
     }
 
     /// Create an ancestor stream that fetches missing parents by commitment.
@@ -1317,7 +1329,11 @@ mod tests {
         runner.start(|context| async move {
             let (sender, receiver) =
                 commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
-            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender, NZUsize!(1));
+            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(
+                sender,
+                NZUsize!(1),
+                harness::limits::<Standard<harness::B>>(),
+            );
             drop(receiver);
 
             let (ack, receiver) = oneshot::channel();

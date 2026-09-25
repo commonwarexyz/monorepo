@@ -10,9 +10,17 @@
 //! - [`Actor`]: service loop that bridges the [`Mailbox`] with the P2P
 //!   engine, dispatches fetches, fans out deliveries to waiting callers,
 //!   and serves produce requests from the local database.
+//!
+//! # Message Sizes
+//!
+//! [`Actor`] halves the operations in a response until it fits the sender's
+//! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) with
+//! resolver framing, or holds one operation. The requester fetches the rest
+//! later. Boundary responses are served whole, so the network limit must
+//! admit [`boundary_size`] for the largest operation.
 
 mod actor;
-pub use actor::{Actor, Config};
+pub use actor::{Actor, Config, boundary_size};
 
 mod mailbox;
 pub use mailbox::{Mailbox, ResponseDropped};

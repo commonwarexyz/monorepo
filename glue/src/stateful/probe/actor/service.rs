@@ -1,6 +1,6 @@
 use crate::stateful::probe::{mailbox::Message, sample, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Encode, ReadExt as _};
+use commonware_codec::{Encode, EncodeSize, ReadExt as _};
 use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::{scheme::Scheme, types::Finalization},
@@ -9,10 +9,10 @@ use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::channel::fallible::OneshotExt;
+use commonware_utils::{Widen, channel::fallible::OneshotExt};
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
-use tracing::debug;
+use tracing::{debug, warn};
 
 /// The service phase of [`Probe`](super::Probe).
 ///
@@ -48,6 +48,7 @@ where
         sender: &mut impl Sender<PublicKey = P>,
         receiver: &mut impl Receiver<PublicKey = P>,
     ) {
+        let max: usize = Widen::widen(sender.max_message_size());
         let mut mailbox_drained = false;
         select_loop! {
             self.context,
@@ -92,11 +93,15 @@ where
                 let Some(finalization) = sample::latest_finalization(&self.marshal).await else {
                     continue;
                 };
-                sender.send(
-                    Recipients::One(peer),
-                    wire::Message::<S, V>::Response(finalization).encode(),
-                    false,
-                );
+
+                // Skip a reply the sender cannot carry
+                let response = wire::Message::<S, V>::Response(finalization);
+                let size = response.encode_size();
+                if size > max {
+                    warn!(?peer, size, max, "response exceeds max message size");
+                    continue;
+                }
+                sender.send(Recipients::One(peer), response.encode(), false);
             },
         }
     }

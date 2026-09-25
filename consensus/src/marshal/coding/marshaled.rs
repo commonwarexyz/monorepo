@@ -99,7 +99,7 @@ use crate::{
     types::{Epoch, Epocher, Round, coding::Commitment},
 };
 use commonware_actor::Feedback;
-use commonware_coding::Scheme as CodingScheme;
+use commonware_coding::Bounded;
 use commonware_cryptography::{
     Committable, Digestible, Hasher,
     certificate::{Provider, Scheme as _, Verifier},
@@ -127,7 +127,7 @@ use tracing::{Instrument as _, debug, info_span, warn};
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -158,7 +158,7 @@ where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -185,7 +185,7 @@ where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -221,7 +221,7 @@ where
             Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -640,7 +640,7 @@ where
             Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -845,6 +845,12 @@ where
                     },
                 };
                 build_timer.observe(&runtime_context);
+
+                // Skip before erasure coding a block marshal would not admit
+                if !marshal.admits(&built_block) {
+                    debug!(reason = "block exceeds size limit", "skipping proposal");
+                    return;
+                }
 
                 let erasure_timer = erasure_encode_duration.timer(&runtime_context);
                 let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
@@ -1102,7 +1108,7 @@ where
             Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -1132,7 +1138,7 @@ where
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,
@@ -1168,7 +1174,7 @@ where
             Context = Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         > + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<B, C, H>>>,
     S: Strategy,

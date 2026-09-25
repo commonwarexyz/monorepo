@@ -1,7 +1,8 @@
 use crate::{Ingress, authenticated::data::Data};
 use commonware_codec::{
-    Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write, config::RangeCfg,
-    varint::UInt,
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    config::RangeCfg,
+    varint::{MAX_U64_VARINT_SIZE, UInt},
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufMut, Clock};
@@ -69,6 +70,26 @@ pub enum Payload<C: PublicKey> {
 
     /// A vector of verifiable peer information.
     Peers(Vec<Info<C>>),
+}
+
+impl<C: PublicKey> Payload<C> {
+    /// Returns the largest encoded [Payload] other than [Payload::Data] that decodes under a
+    /// [PayloadConfig] with `max_bit_vec` and `max_peers`.
+    ///
+    /// Returns `None` if the bound overflows `usize` or `max_peers` exceeds `u32::MAX`.
+    pub fn max_control_size(max_bit_vec: u64, max_peers: usize) -> Option<usize> {
+        let info = Ingress::max_size() + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE;
+
+        // A bit vector packs eight bits per byte behind a fixed-width bit count.
+        let bits = usize::try_from(max_bit_vec.div_ceil(8)).ok()?;
+        let bit_vec = (MAX_U64_VARINT_SIZE + u64::SIZE).checked_add(bits)?;
+
+        // Peer records follow a varint count.
+        let count = UInt(u32::try_from(max_peers).ok()?).encode_size();
+        let peers = max_peers.checked_mul(info)?.checked_add(count)?;
+
+        u8::SIZE.checked_add(info.max(bit_vec).max(peers))
+    }
 }
 
 impl<C: PublicKey> EncodeSize for Payload<C> {
@@ -387,7 +408,7 @@ mod tests {
     };
     use commonware_math::algebra::Random;
     use commonware_runtime::{Clock, IoBuf, Runner, deterministic};
-    use commonware_utils::{hostname, test_rng};
+    use commonware_utils::{Hostname, Widen, hostname, test_rng};
     use std::{net::SocketAddr, time::Duration};
 
     const NAMESPACE: &[u8] = b"test";
@@ -578,6 +599,68 @@ mod tests {
             payload.encode_size(),
             message_len + MAX_PAYLOAD_OVERHEAD as usize
         );
+    }
+
+    /// Returns the largest [Info] signed by `signer`.
+    fn max_info<S: Signer>(signer: &S) -> Info<S::PublicKey> {
+        // Four labels of at most 63 characters reach the hostname limit.
+        let host = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
+        Info {
+            ingress: Ingress::Dns {
+                host: Hostname::new(host).unwrap(),
+                port: u16::MAX,
+            },
+            timestamp: u64::MAX,
+            public_key: signer.public_key(),
+            signature: signer.sign(NAMESPACE, &[]),
+        }
+    }
+
+    /// Asserts that the largest control messages decode under `max_bit_vec` and `max_peers` and
+    /// that the largest of them matches [Payload::max_control_size].
+    fn assert_max_control_size<S: Signer>(signer: &S, max_bit_vec: u64, max_peers: usize) {
+        let cfg = PayloadConfig {
+            max_bit_vec,
+            max_peers,
+            max_data_length: 0,
+        };
+        let info = max_info(signer);
+        let messages = [
+            Payload::Greeting(info.clone()),
+            Payload::BitVec(BitVec {
+                index: u64::MAX,
+                bits: BitMap::ones(max_bit_vec),
+            }),
+            Payload::Peers(vec![info; max_peers]),
+        ];
+        let mut largest = 0;
+        for message in messages {
+            let encoded = message.encode();
+            largest = largest.max(encoded.len());
+            assert!(Payload::<S::PublicKey>::decode_cfg(encoded, &cfg).is_ok());
+        }
+        assert_eq!(
+            Payload::<S::PublicKey>::max_control_size(max_bit_vec, max_peers),
+            Some(largest)
+        );
+    }
+
+    #[test]
+    fn test_max_control_size() {
+        let signer = PrivateKey::random(test_rng());
+
+        // Cover each dominant variant and partial bit vector bytes.
+        for (max_bit_vec, max_peers) in [(0, 0), (9, 2), (100_000, 1), (100_001, 1), (100_001, 300)]
+        {
+            assert_max_control_size(&signer, max_bit_vec, max_peers);
+        }
+    }
+
+    #[test]
+    fn test_max_control_size_overflow() {
+        let count: usize = Widen::widen(u32::MAX);
+        assert!(Payload::<PublicKey>::max_control_size(0, count).is_some());
+        assert!(Payload::<PublicKey>::max_control_size(0, count + 1).is_none());
     }
 
     #[test]

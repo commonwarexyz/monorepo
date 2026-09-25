@@ -4,12 +4,11 @@ use commonware_codec::{
 };
 use commonware_utils::Span;
 
-/// Maximum number of bytes added to a produced value in a P2P resolver response.
+/// Maximum number of bytes a P2P resolver message adds to its payload.
 ///
-/// Includes an 8-byte request ID, a 1-byte response tag, and a value-length varint of at most
-/// 5 bytes. This overhead counts toward the underlying P2P application's message size limit.
-/// It excludes P2P framing and encryption overhead.
-pub const MAX_RESPONSE_OVERHEAD: u32 = (u64::SIZE + u8::SIZE + MAX_U32_VARINT_SIZE) as u32;
+/// A response adds an 8-byte request ID, a 1-byte tag, and a value-length varint of at most
+/// 5 bytes. Requests and errors add only the ID and tag.
+pub const MAX_MESSAGE_OVERHEAD: u32 = (u64::SIZE + u8::SIZE + MAX_U32_VARINT_SIZE) as u32;
 
 /// Represents a message sent between peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -188,6 +187,7 @@ mod tests {
     use bytes::Buf as _;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
+    use commonware_utils::Widen;
 
     #[test]
     fn test_codec_request() {
@@ -209,25 +209,28 @@ mod tests {
     }
 
     #[test]
-    fn test_max_response_overhead() {
-        for size in [0, 127, 128, 16_383, 16_384] {
-            let message = Message::<u8> {
+    fn test_max_message_overhead() {
+        let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
+        let size = |payload: Payload<u8>| {
+            Message {
                 id: u64::MAX,
-                payload: Payload::Response(Bytes::from(vec![0; size])),
-            };
-            assert!(message.encode().len() - size <= MAX_RESPONSE_OVERHEAD as usize);
+                payload,
+            }
+            .encode()
+            .len()
+        };
+        assert!(size(Payload::Request(u8::MAX)) - u8::SIZE <= overhead);
+        assert!(size(Payload::Error) <= overhead);
+        for len in [0, 127, 128, 16_383, 16_384] {
+            assert!(size(Payload::Response(Bytes::from(vec![0; len]))) - len <= overhead);
         }
 
         // Combine the encoded envelope with the largest supported length prefix without
         // allocating a maximum-size response value.
-        let message = Message::<u8> {
-            id: u64::MAX,
-            payload: Payload::Response(Bytes::new()),
-        };
-        let envelope_size = message.encode().len() - Bytes::new().encode_size();
+        let envelope = size(Payload::Response(Bytes::new())) - Bytes::new().encode_size();
         assert_eq!(
-            envelope_size + (u32::MAX as usize).encode_size(),
-            MAX_RESPONSE_OVERHEAD as usize,
+            envelope + Widen::<usize>::widen(u32::MAX).encode_size(),
+            overhead
         );
     }
 

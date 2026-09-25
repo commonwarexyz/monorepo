@@ -1,6 +1,9 @@
 //! Shared marshal fixtures for stateful actor tests.
 
-use super::mocks::{TestBlock, TestScheme, TestVariant};
+use super::{
+    common::marshal_limits,
+    mocks::{TestBlock, TestScheme, TestVariant},
+};
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Heightable as _, Reporter,
@@ -14,7 +17,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digestible as _,
-    certificate::{ConstantProvider, mocks::Fixture},
+    certificate::{ConstantProvider, Scheme as _, mocks::Fixture},
     ed25519,
     sha256::Digest as Sha256Digest,
 };
@@ -426,6 +429,7 @@ where
         >,
     FB: marshal::store::Blocks<Block = Arc<TestBlock>>,
 {
+    let limits = marshal_limits::<TestVariant>(scheme.participants().len());
     let provider = ConstantProvider::new(scheme);
     let (actor, mailbox, floor) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
         context.child("marshal_actor"),
@@ -446,6 +450,7 @@ where
             replay_buffer: NZUsize!(64),
             key_write_buffer: NZUsize!(64),
             value_write_buffer: NZUsize!(64),
+            limits,
             block_codec_config: (),
             max_repair: NZUsize!(1),
             max_pending_acks: options.max_pending_acks,

@@ -665,6 +665,11 @@ where
                 };
                 build_timer.observe(&runtime_context);
 
+                if !marshal.admits(&built_block) {
+                    debug!(reason = "block exceeds size limit", "skipping proposal");
+                    return;
+                }
+
                 let digest = built_block.digest();
                 gates
                     .stage(

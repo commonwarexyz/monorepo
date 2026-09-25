@@ -1,5 +1,6 @@
 use crate::{
     Block,
+    marshal::Limits,
     simplex::types::Finalization,
     types::{Epoch, Epocher, ViewDelta},
 };
@@ -88,7 +89,13 @@ where
     /// The size of the write buffer for the value journal of storage archives.
     pub value_write_buffer: NonZeroUsize,
 
+    /// Size limits for blocks and the payloads marshal sends. See
+    /// [message sizes](crate::marshal#message-sizes).
+    pub limits: Limits<C>,
+
     /// Codec configuration for block type.
+    ///
+    /// Must decode every block within [`Limits::block`] of [`Self::limits`].
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of blocks to repair at once.

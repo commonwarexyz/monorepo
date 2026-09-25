@@ -136,9 +136,10 @@ impl<D: EngineDefinition> PlanBuilder<D> {
     /// Participants are derived from the engine via
     /// [`EngineDefinition::participants`].
     ///
-    /// Defaults: seed 0, 1MB max message size, good links (10ms latency,
-    /// 5ms jitter, 100% success), no crashes, 10 required finalizations,
-    /// no timeout.
+    /// Defaults: seed 0, the engine's
+    /// [`max_message_size`](EngineDefinition::max_message_size), good links
+    /// (10ms latency, 5ms jitter, 100% success), no crashes, 10 required
+    /// finalizations, no timeout.
     pub fn new(engine: D) -> Self {
         let participants = engine.participants();
         Self {
@@ -149,7 +150,7 @@ impl<D: EngineDefinition> PlanBuilder<D> {
                 jitter: Duration::from_millis(5),
                 success_rate: probability!(1.0),
             },
-            max_message_size: 1024 * 1024,
+            max_message_size: engine.max_message_size(),
             engine,
             crashes: vec![],
             required_finalizations: 10,
@@ -920,6 +921,10 @@ mod tests {
             vec![]
         }
 
+        fn max_message_size(&self) -> u32 {
+            commonware_p2p::max_message_size(&[])
+        }
+
         fn init(
             &self,
             ctx: super::super::engine::InitContext<'_, Self::PublicKey>,
@@ -973,6 +978,10 @@ mod tests {
 
         fn channels(&self) -> Vec<(u64, Quota)> {
             vec![]
+        }
+
+        fn max_message_size(&self) -> u32 {
+            commonware_p2p::max_message_size(&[])
         }
 
         fn init(

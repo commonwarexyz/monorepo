@@ -111,6 +111,17 @@ pub trait Variant: Clone + Send + Sync + 'static {
         block: Self::ApplicationBlock,
         payload: Self::Commitment,
     ) -> Self::Block;
+
+    /// Returns the largest encoded [`Self::Block`] for application blocks of at most `block`
+    /// encoded bytes, or `None` if the size overflows.
+    fn block_size(block: usize) -> Option<usize>;
+
+    /// Returns the largest payload a [`Buffer`] passes to the network to disseminate an encoded
+    /// [`Self::Block`] of at most `block` bytes to a committee of at most `participants`.
+    ///
+    /// Returns `None` if the size overflows, if the variant supports no committee of at most
+    /// `participants`, or if it cannot disseminate such a block to one it supports.
+    fn buffer_size(participants: usize, block: usize) -> Option<usize>;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different
@@ -194,6 +205,9 @@ pub trait Buffer<V: Variant>: Clone + Send + Sync + 'static {
 
     /// Send a block to peers.
     fn send(&self, round: Round, block: V::Block, recipients: Recipients<Self::PublicKey>);
+
+    /// Returns the largest payload, in bytes, this buffer can pass to the network.
+    fn max_message_size(&self) -> usize;
 }
 
 /// A buffer implementation that never stores, subscribes, finalizes, or sends blocks.
@@ -246,4 +260,8 @@ where
     fn retire(&self, _: Retirement<V::Commitment>) {}
 
     fn send(&self, _: Round, _: V::Block, _: Recipients<Self::PublicKey>) {}
+
+    fn max_message_size(&self) -> usize {
+        usize::MAX
+    }
 }

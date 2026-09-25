@@ -9,6 +9,7 @@ use super::{
 use crate::{Consumer, Delivery, Outcome, subscribers};
 use bytes::Bytes;
 use commonware_actor::mailbox;
+use commonware_codec::EncodeSize;
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -19,7 +20,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{GaugeExt, histogram, status::Status},
 };
-use commonware_utils::{Span, channel::oneshot, futures::Pool as FuturesPool};
+use commonware_utils::{Span, Widen, channel::oneshot, futures::Pool as FuturesPool};
 use futures::{
     StreamExt,
     future::{self, Either},
@@ -387,7 +388,15 @@ where
             |_| wire::Payload::Error,
             |data| wire::Payload::Response(data),
         );
-        let msg = wire::Message { id, payload };
+        let mut msg = wire::Message { id, payload };
+
+        // Answer with an error if the response exceeds the sender limit
+        let size = msg.encode_size();
+        let max: usize = Widen::widen(sender.max_message_size());
+        if size > max {
+            warn!(?peer, ?id, size, max, "response exceeds max message size");
+            msg.payload = wire::Payload::Error;
+        }
 
         // Send message to peer
         let result = sender.send(Recipients::One(peer.clone()), msg, priority);

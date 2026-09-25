@@ -15,7 +15,7 @@ use super::{
 use crate::{
     Block, Epochable, Heightable, Reporter,
     marshal::{
-        Config, Identifier as BlockID, Start, Update,
+        Config, Identifier as BlockID, Limits, Start, Update,
         resolver::handler::{self, Annotation, Key, Request},
         store::{Blocks, Certificates},
     },
@@ -27,7 +27,7 @@ use crate::{
 };
 use bytes::Bytes;
 use commonware_actor::mailbox;
-use commonware_codec::{Decode, Encode, Read};
+use commonware_codec::{Decode, Encode, EncodeSize, Read};
 use commonware_cryptography::{
     Digestible,
     certificate::{Provider, Scoped, Verifier},
@@ -126,6 +126,8 @@ where
     max_repair: NonZeroUsize,
     // Codec configuration for block type
     block_codec_config: <V::ApplicationBlock as Read>::Cfg,
+    // Size limits for blocks and sent payloads
+    limits: Limits<V::Commitment>,
     // Strategy for parallel operations
     strategy: T,
 
@@ -220,6 +222,10 @@ where
                     Height::zero(),
                     "genesis anchor must be at height zero"
                 );
+                assert!(
+                    anchor.encode_size() <= config.limits.block(),
+                    "genesis anchor exceeds size limit"
+                );
                 finalized_blocks =
                     Self::ensure_genesis_anchor(finalized_blocks, anchor, last_processed_height)
                         .await;
@@ -263,6 +269,7 @@ where
                 view_retention: config.view_retention,
                 max_repair: config.max_repair,
                 block_codec_config: config.block_codec_config,
+                limits: config.limits,
                 strategy: config.strategy,
                 floor: floor_state,
                 stream,
@@ -279,7 +286,7 @@ where
                 finalized_height,
                 processed_height,
             },
-            Mailbox::new(sender, config.max_pending_acks),
+            Mailbox::new(sender, config.max_pending_acks, config.limits),
             floor,
         )
     }
@@ -334,6 +341,10 @@ where
     }
 
     /// Start the actor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the buffer's [`Buffer::max_message_size`] is below [`Limits::buffer`].
     pub fn start<R, Buf>(
         self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -348,6 +359,12 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
+        assert!(
+            buffer.max_message_size() >= self.limits.buffer(),
+            "buffer size {} is below limit {}",
+            buffer.max_message_size(),
+            self.limits.buffer()
+        );
         let mut actor = Box::new(self);
         spawn_cell!(actor.context, actor.run(application, buffer, resolver))
     }
@@ -466,6 +483,10 @@ where
             },
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
+                Ok(block) if !self.admits(&block) => {
+                    // Subscribers keep waiting, as if the buffer never held the block
+                    debug!(height = %block.height(), "ignoring oversized buffered block");
+                }
                 Ok(block) => {
                     (self, _) = self
                         .ingest(block, &mut buffer, &mut application, &mut resolver)
@@ -687,6 +708,7 @@ where
                 // storage tolerates multiple candidates per round (see
                 // [Mailbox::get_verified]), and the propose paths skip or
                 // reuse a recovered block on restart.
+                assert!(self.admits(&block), "proposed block exceeds size limit");
                 buffer.send(round, block.clone(), recipients);
                 self = self
                     .persist_verified(round, block, ack, buffer, application, resolver)
@@ -695,6 +717,7 @@ where
             Message::Verified {
                 round, block, ack, ..
             } => {
+                assert!(self.admits(&block), "verified block exceeds size limit");
                 self = self
                     .persist_verified(round, block, ack, buffer, application, resolver)
                     .await;
@@ -702,6 +725,7 @@ where
             Message::Certified {
                 round, block, ack, ..
             } => {
+                assert!(self.admits(&block), "certified block exceeds size limit");
                 (self, _) = self
                     .ingest(block.clone(), buffer, application, resolver)
                     .await;
@@ -1047,8 +1071,7 @@ where
 
     /// Handle a produce request from a remote peer.
     ///
-    /// Response shapes must match the budget in
-    /// [`max_recovery_overhead`](crate::marshal::max_recovery_overhead).
+    /// Response shapes must match the bound in [`Limits::new`].
     #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
@@ -1496,6 +1519,14 @@ where
                     return self;
                 }
 
+                // The peer served the requested block, so a block above the bound is unavailable
+                // rather than invalid
+                if !self.admits(&block) {
+                    debug!(?commitment, height = %block.height(), "ignoring oversized block");
+                    response.send_lossy(true);
+                    return self;
+                }
+
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
@@ -1752,6 +1783,13 @@ where
                     let round = finalization.round();
                     let height = block.height();
                     let digest = block.digest();
+
+                    // The certificate authenticates the block, so a block above the bound is
+                    // unavailable rather than invalid
+                    if !self.admits(&block) {
+                        debug!(?round, %height, "ignoring oversized finalized block");
+                        continue;
+                    }
                     debug!(?round, %height, "received finalization");
 
                     // The floor-anchor path fully handles this finalization
@@ -1781,6 +1819,13 @@ where
                     let round = notarization.round();
                     let commitment = notarization.proposal.payload;
                     let digest = V::commitment_to_inner(commitment);
+
+                    // The certificate authenticates the block, so a block above the bound is
+                    // unavailable rather than invalid
+                    if !self.admits(&block) {
+                        debug!(?round, ?digest, "ignoring oversized notarized block");
+                        continue;
+                    }
                     debug!(?round, ?digest, "received notarization");
 
                     // Cache the notarization and block, blocking until both are
@@ -1842,6 +1887,11 @@ where
             }
         }
         self
+    }
+
+    /// Returns whether `block` fits [`Limits::block`].
+    fn admits(&self, block: &V::Block) -> bool {
+        block.encode_size() <= self.limits.block()
     }
 
     /// Returns the epoch containing `height` and the scope that verifies its certificates.
@@ -2224,7 +2274,10 @@ where
         buffer: &Buf,
         digest: <V::Block as Digestible>::Digest,
     ) -> Option<V::Block> {
-        if let Some(block) = buffer.find_by_digest(digest).await {
+        // A buffered block above the bound is treated as absent
+        if let Some(block) = buffer.find_by_digest(digest).await
+            && self.admits(&block)
+        {
             return Some(block);
         }
         self.find_block_in_storage(digest).await
@@ -2239,7 +2292,10 @@ where
         buffer: &Buf,
         commitment: V::Commitment,
     ) -> Option<V::Block> {
-        if let Some(block) = buffer.find_by_commitment(commitment).await {
+        // A buffered block above the bound is treated as absent
+        if let Some(block) = buffer.find_by_commitment(commitment).await
+            && self.admits(&block)
+        {
             return Some(block);
         }
         self.find_block_in_storage_by_commitment(commitment).await

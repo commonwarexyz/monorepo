@@ -77,6 +77,15 @@ where
     ) -> Self::Block {
         Arc::new(block)
     }
+
+    fn block_size(block: usize) -> Option<usize> {
+        Some(block)
+    }
+
+    fn buffer_size(_participants: usize, block: usize) -> Option<usize> {
+        // The buffer broadcasts each block whole
+        Some(block)
+    }
 }
 
 impl<B, K> Buffer<Standard<B>> for buffered::Mailbox<K, B>
@@ -106,6 +115,10 @@ where
 
     fn send(&self, _round: Round, block: Arc<B>, recipients: Recipients<K>) {
         self.broadcast_shared(recipients, block);
+    }
+
+    fn max_message_size(&self) -> usize {
+        self.max_size()
     }
 }
 

@@ -6,9 +6,9 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
-        LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
-        RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
+        LogReporter, MAILBOX_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
+        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL, RESOLVER_CHANNEL, REVEAL,
+        Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -81,7 +81,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        MAX_MESSAGE_SIZE,
+        types::max_message_size(),
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
@@ -124,6 +124,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         );
     }
 
+    let limits = types::marshal_limits();
     let resolver = marshal_resolver::init(
         context.child("marshal_resolver"),
         marshal_resolver::Config {
@@ -135,6 +136,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             fetch_retry_timeout: Duration::from_millis(100),
             priority_requests: false,
             priority_responses: false,
+            limits,
         },
         backfill_network,
     );
@@ -146,6 +148,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             mailbox_size: MAILBOX_SIZE,
             deque_size: 16,
             priority: false,
+            max_size: limits.buffer(),
             codec_config: (),
             peer_provider: oracle.clone(),
         },
@@ -226,6 +229,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             replay_buffer: types::IO_BUFFER_SIZE,
             key_write_buffer: types::IO_BUFFER_SIZE,
             value_write_buffer: types::IO_BUFFER_SIZE,
+            limits,
             block_codec_config: (),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),

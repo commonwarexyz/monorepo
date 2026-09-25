@@ -12,6 +12,7 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, status::Status},
 };
 use commonware_utils::{
+    Widen,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
 };
@@ -64,6 +65,9 @@ where
 
     /// Number of messages to cache per peer
     deque_size: usize,
+
+    /// Largest encoded message the sender must accept
+    max_size: usize,
 
     /// Configuration for decoding messages
     codec_config: M::Cfg,
@@ -121,7 +125,7 @@ where
     pub fn new(context: E, cfg: Config<P, M::Cfg, D>) -> (Self, Mailbox<P, M>) {
         let (mailbox_sender, mailbox_receiver) =
             mailbox::new(context.child("mailbox"), cfg.mailbox_size);
-        let mailbox = Mailbox::<P, M>::new(mailbox_sender);
+        let mailbox = Mailbox::<P, M>::new(mailbox_sender, cfg.max_size);
 
         let metrics = metrics::Metrics::init(&context);
 
@@ -130,6 +134,7 @@ where
             public_key: cfg.public_key,
             priority: cfg.priority,
             deque_size: cfg.deque_size,
+            max_size: cfg.max_size,
             codec_config: cfg.codec_config,
             mailbox_receiver,
             waiters: BTreeMap::new(),
@@ -145,10 +150,21 @@ where
     }
 
     /// Starts the engine with the given network.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`Config::max_size`] exceeds the sender's
+    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size).
     pub fn start(
         mut self,
         network: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) -> Handle<()> {
+        let limit: usize = Widen::widen(network.0.max_message_size());
+        assert!(
+            self.max_size <= limit,
+            "max size {} exceeds sender limit {limit}",
+            self.max_size
+        );
         spawn_cell!(self.context, self.run(network))
     }
 

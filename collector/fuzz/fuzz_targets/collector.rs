@@ -223,6 +223,10 @@ impl LimitedSender for MockSender {
     ) -> Result<Self::Checked<'_>, SystemTime> {
         Ok(MockCheckedSender)
     }
+
+    fn max_message_size(&self) -> u32 {
+        u32::MAX
+    }
 }
 
 struct MockCheckedSender;

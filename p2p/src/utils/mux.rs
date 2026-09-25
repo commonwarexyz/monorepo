@@ -7,10 +7,18 @@
 //!   per-subchannel queues.
 //! - Call [MuxHandle::register] to obtain a ([SubSender], [SubReceiver]) pair for that subchannel,
 //!   even if the muxer is already running.
+//!
+//! Every payload carries its subchannel as a varint prefix. [SubSender] reports the wrapped
+//! [Sender]'s limit minus its own prefix, and [GlobalSender] reports it minus the largest prefix.
 
-use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
+use crate::{
+    Channel, CheckedSender, Footprint, LimitedSender, Message, Receiver, Recipients, Sender,
+};
 use commonware_actor::{Feedback, Unreliable};
-use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
+use commonware_codec::{
+    Encode, EncodeSize, Error as CodecError, ReadExt,
+    varint::{MAX_U64_VARINT_SIZE, UInt},
+};
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
 use commonware_utils::channel::{
@@ -37,6 +45,12 @@ pub enum Error {
 pub fn parse(mut buf: IoBuf) -> Result<(Channel, IoBuf), CodecError> {
     let subchannel: Channel = UInt::read(&mut buf)?.into();
     Ok((subchannel, buf))
+}
+
+/// Returns the largest payload `sender` accepts after a `prefix`-byte subchannel prefix.
+fn net<S: LimitedSender>(sender: &S, prefix: usize) -> u32 {
+    let prefix = u32::try_from(prefix).expect("prefix exceeds u32::MAX");
+    sender.max_message_size().saturating_sub(prefix)
 }
 
 /// Control messages for the [Muxer].
@@ -243,6 +257,10 @@ impl<S: Sender> LimitedSender for SubSender<S> {
             .check(recipients)
             .map(|checked| checked.with_subchannel(self.subchannel))
     }
+
+    fn max_message_size(&self) -> u32 {
+        net(&self.inner.inner, UInt(self.subchannel).encode_size())
+    }
 }
 
 /// Receiver that yields messages for a specific subchannel.
@@ -324,6 +342,10 @@ impl<S: Sender> LimitedSender for GlobalSender<S> {
                 inner: checked,
             })
     }
+
+    fn max_message_size(&self) -> u32 {
+        net(&self.inner, MAX_U64_VARINT_SIZE)
+    }
 }
 
 /// A checked sender for a [GlobalSender].
@@ -352,6 +374,22 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
         let mut message = message.into();
         message.prepend(subchannel.encode().into());
         self.inner.send(message, priority)
+    }
+}
+
+/// A [`Footprint`] whose payloads travel on a [`Muxer`] subchannel.
+///
+/// Adds the largest subchannel prefix, so the bound holds for every subchannel. Its footprint
+/// panics if the sum overflows `usize`.
+#[derive(Clone, Copy, Debug)]
+pub struct Prefixed<F>(pub F);
+
+impl<F: Footprint> Footprint for Prefixed<F> {
+    fn footprint(&self) -> usize {
+        self.0
+            .footprint()
+            .checked_add(MAX_U64_VARINT_SIZE)
+            .expect("footprint overflow")
     }
 }
 
@@ -505,7 +543,7 @@ mod tests {
     };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
-    use commonware_utils::{NZUsize, ordered::Set, probability};
+    use commonware_utils::{NZUsize, Widen, ordered::Set, probability};
     use std::{
         num::NonZeroU32,
         time::{Duration, SystemTime},
@@ -669,8 +707,9 @@ mod tests {
         assert_eq!(n_backup, count_backup);
     }
 
+    /// Sender that rate-limits every recipient and accepts payloads of at most `.0` bytes.
     #[derive(Clone)]
-    struct RateLimitedSender;
+    struct RateLimitedSender(u32);
 
     struct UnusedCheckedSender;
 
@@ -696,14 +735,100 @@ mod tests {
         ) -> Result<Self::Checked<'_>, SystemTime> {
             Err(SystemTime::UNIX_EPOCH)
         }
+
+        fn max_message_size(&self) -> u32 {
+            self.0
+        }
     }
 
     #[test]
     fn test_global_sender_rate_limited_send_rejected() {
-        let mut sender = GlobalSender::new(RateLimitedSender);
+        let mut sender = GlobalSender::new(RateLimitedSender(u32::MAX));
         let feedback = sender.send(0, Recipients::One(pk(0)), b"rate-limited", false);
         assert_eq!(feedback, Unreliable::Rejected);
         assert!(!feedback.accepted());
+    }
+
+    #[test]
+    fn test_sender_max_message_size_net_of_prefix() {
+        const LIMIT: u32 = 1024;
+        let global = |limit| GlobalSender::new(RateLimitedSender(limit));
+        let sub = |limit, subchannel| SubSender {
+            inner: global(limit),
+            subchannel,
+        };
+
+        // A subchannel sender reserves exactly its own prefix.
+        assert_eq!(sub(LIMIT, 0).max_message_size(), LIMIT - 1);
+        assert_eq!(sub(LIMIT, 127).max_message_size(), LIMIT - 1);
+        assert_eq!(sub(LIMIT, 128).max_message_size(), LIMIT - 2);
+        assert_eq!(sub(LIMIT, u64::MAX).max_message_size(), LIMIT - 10);
+
+        // A global sender picks the subchannel per send, so it reserves the largest prefix.
+        assert_eq!(global(LIMIT).max_message_size(), LIMIT - 10);
+
+        // Limits below the prefix saturate.
+        assert_eq!(sub(1, 128).max_message_size(), 0);
+        assert_eq!(global(9).max_message_size(), 0);
+    }
+
+    #[test]
+    fn test_prefixed_footprint() {
+        assert_eq!(Prefixed(0usize).footprint(), 10);
+        assert_eq!(Prefixed(1024usize).footprint(), 1034);
+        assert_eq!(Prefixed(usize::MAX - 10).footprint(), usize::MAX);
+
+        // A folded prefixed footprint fits every subchannel sender.
+        let limit = crate::max_message_size(&[&Prefixed(1024usize)]);
+        let sub = SubSender {
+            inner: GlobalSender::new(RateLimitedSender(limit)),
+            subchannel: u64::MAX,
+        };
+        assert_eq!(sub.max_message_size(), 1024);
+    }
+
+    #[test]
+    #[should_panic(expected = "footprint overflow")]
+    fn test_prefixed_footprint_overflow() {
+        Prefixed(usize::MAX - 9).footprint();
+    }
+
+    #[test]
+    fn test_sub_sender_accepts_max_message_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.child("network"));
+
+            let (pk1, mut handle1) = create_peer(&context, &mut oracle, 0).await;
+            let (pk2, mut handle2) = create_peer(&context, &mut oracle, 1).await;
+            link_bidirectional(&mut oracle, pk1.clone(), pk2.clone()).await;
+
+            let (_, mut rx) = handle1.register(u64::MAX).await.unwrap();
+            let (mut tx, _) = handle2.register(u64::MAX).await.unwrap();
+
+            // The largest reported payload still fits the wrapped sender once prefixed.
+            let payload = IoBuf::from(vec![0; Widen::widen(tx.max_message_size())]);
+            let _ = tx.send(Recipients::One(pk1), payload.clone(), false);
+            let (from, bytes) = rx.recv().await.unwrap();
+            assert_eq!(from, pk2);
+            assert_eq!(bytes, payload);
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "message too large")]
+    fn test_sub_sender_panics_above_max_message_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut oracle = start_network(context.child("network"));
+
+            let (pk1, _) = create_peer(&context, &mut oracle, 0).await;
+            let (_, mut handle2) = create_peer(&context, &mut oracle, 1).await;
+            let (mut tx, _) = handle2.register(u64::MAX).await.unwrap();
+
+            let payload = vec![0; Widen::<usize>::widen(tx.max_message_size()) + 1];
+            let _ = tx.send(Recipients::One(pk1), payload, false);
+        });
     }
 
     #[test]

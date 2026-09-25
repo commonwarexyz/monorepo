@@ -9,15 +9,8 @@
 //!
 //! # Message Sizes
 //!
-//! Each broadcast sends the complete encoded message as one P2P message. Applications must
-//! bound this encoding, including length prefixes and application wrappers, by the P2P message
-//! size limit. [`Config::codec_config`] controls decoding. It does not limit locally submitted
-//! messages. The engine does not fragment messages, and authenticated P2P panics on oversized
-//! sends.
-//!
-//! Align message production, decoding, and validation limits across peers. If another protocol
-//! recovers broadcast data, budget for its complete recovery messages too, including any
-//! certificates and response framing.
+//! Each message is sent unfragmented. Include [`Config::max_size`] when sizing the network with
+//! [`max_message_size`](commonware_p2p::max_message_size).
 //!
 //! # Message Caching
 //!
@@ -61,14 +54,14 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
+        LimitedSender as _, Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Link, Network, Oracle, Receiver, Sender},
     };
     use commonware_runtime::{
         Clock, Error, IoBuf, Metrics as _, Quota, Runner, Supervisor as _, deterministic,
         telemetry::metrics::count_running_tasks,
     };
-    use commonware_utils::{NZUsize, Probability, probability};
+    use commonware_utils::{NZUsize, Probability, Widen, probability};
     use std::{
         collections::{BTreeMap, VecDeque},
         num::NonZeroU32,
@@ -78,6 +71,9 @@ mod tests {
 
     // Number of messages to cache per sender
     const CACHE_SIZE: usize = 10;
+
+    // Largest encoded message the sender must accept
+    const MAX_SIZE: usize = 1024;
 
     // Enough time to receive a cached message. Cannot be instantaneous as the test runtime
     // requires some time to switch context.
@@ -371,6 +367,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
+                max_size: MAX_SIZE,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
             };
@@ -919,6 +916,31 @@ mod tests {
         });
     }
 
+    #[test]
+    #[should_panic(expected = "exceeds sender limit")]
+    fn test_start_rejects_max_size_above_sender_limit() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let (peers, mut registrations, oracle) =
+                initialize_simulation(context.child("network"), 1, probability!(1.0)).await;
+            let network = registrations.remove(&peers[0]).unwrap();
+            let limit: usize = Widen::widen(network.0.max_message_size());
+            let config = Config {
+                public_key: peers[0].clone(),
+                mailbox_size: NZUsize!(1024),
+                deque_size: CACHE_SIZE,
+                priority: false,
+                max_size: limit + 1,
+                codec_config: RangeCfg::from(..),
+                peer_provider: oracle.manager(),
+            };
+            let (engine, mailbox) =
+                Engine::<_, PublicKey, TestMessage, _>::new(context.child("peer"), config);
+            assert_eq!(mailbox.max_size(), limit + 1);
+            engine.start(network);
+        });
+    }
+
     #[test_traced]
     fn test_dropped_waiters_for_missing_digest_are_cleaned_up() {
         let runner = deterministic::Runner::timed(Duration::from_secs(10));
@@ -934,6 +956,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
+                max_size: MAX_SIZE,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
             };
@@ -1022,6 +1045,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
+                max_size: MAX_SIZE,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
             };
@@ -1171,6 +1195,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
+                max_size: MAX_SIZE,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
             };
@@ -1188,6 +1213,7 @@ mod tests {
                     mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
+                    max_size: MAX_SIZE,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
                 };
@@ -1285,6 +1311,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
+                max_size: MAX_SIZE,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
             };
@@ -1301,6 +1328,7 @@ mod tests {
                     mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
+                    max_size: MAX_SIZE,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
                 };
@@ -1421,6 +1449,7 @@ mod tests {
                     mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
+                    max_size: MAX_SIZE,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
                 };
@@ -1470,6 +1499,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
+                max_size: MAX_SIZE,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
             };
@@ -1550,6 +1580,7 @@ mod tests {
                     mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
+                    max_size: MAX_SIZE,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
                 };
@@ -1616,6 +1647,7 @@ mod tests {
                 mailbox_size: NZUsize!(1024),
                 deque_size: CACHE_SIZE,
                 priority: false,
+                max_size: MAX_SIZE,
                 codec_config: RangeCfg::from(..),
                 peer_provider: oracle.manager(),
             };
@@ -1633,6 +1665,7 @@ mod tests {
                     mailbox_size: NZUsize!(1024),
                     deque_size: CACHE_SIZE,
                     priority: false,
+                    max_size: MAX_SIZE,
                     codec_config: RangeCfg::from(..),
                     peer_provider: oracle.manager(),
                 };

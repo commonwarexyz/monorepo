@@ -1,7 +1,9 @@
 //! E2E tests for `stateful`
 
 use self::{
-    common::{EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config},
+    common::{
+        EPOCH_LENGTH, IO_BUFFER_SIZE, PAGE_CACHE_SIZE, PAGE_SIZE, archive_config, marshal_limits,
+    },
     multi_db_app::{
         App as MultiApp, Block as MultiBlock, MultiDatabaseSet, MultiDbEngine, QmdbB,
         qmdb_config as multi_qmdb_config,
@@ -1206,6 +1208,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                     replay_buffer: IO_BUFFER_SIZE,
                     key_write_buffer: IO_BUFFER_SIZE,
                     value_write_buffer: IO_BUFFER_SIZE,
+                    limits: marshal_limits::<Standard<Block>>(fixture.schemes.len()),
                     block_codec_config: (),
                     max_repair: NZUsize!(10),
                     max_pending_acks: NZUsize!(1),
@@ -1338,6 +1341,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                     replay_buffer: IO_BUFFER_SIZE,
                     key_write_buffer: IO_BUFFER_SIZE,
                     value_write_buffer: IO_BUFFER_SIZE,
+                    limits: marshal_limits::<Standard<Block>>(fixture.schemes.len()),
                     block_codec_config: (),
                     max_repair: NZUsize!(64),
                     max_pending_acks: NZUsize!(64),
@@ -1529,6 +1533,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                     replay_buffer: IO_BUFFER_SIZE,
                     key_write_buffer: IO_BUFFER_SIZE,
                     value_write_buffer: IO_BUFFER_SIZE,
+                    limits: marshal_limits::<Standard<MultiBlock>>(fixture.schemes.len()),
                     block_codec_config: (),
                     max_repair: NZUsize!(10),
                     max_pending_acks: NZUsize!(1),
@@ -1787,6 +1792,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                     replay_buffer: IO_BUFFER_SIZE,
                     key_write_buffer: IO_BUFFER_SIZE,
                     value_write_buffer: IO_BUFFER_SIZE,
+                    limits: marshal_limits::<Standard<MultiBlock>>(fixture.schemes.len()),
                     block_codec_config: (),
                     max_repair: NZUsize!(10),
                     max_pending_acks: NZUsize!(1),

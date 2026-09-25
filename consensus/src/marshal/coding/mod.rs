@@ -44,10 +44,8 @@
 //! caches; once a block is finalized it is evicted from the reconstruction map, reducing memory
 //! pressure.
 //!
-//! Recovery sends the complete application block in one resolver message, with coding configuration
-//! and a certificate as required by the request. Follow marshal's
-//! [message size requirements](crate::marshal#message-sizes) when setting block and P2P bounds.
-//! Fitting each dissemination shard is insufficient.
+//! Recovery fetches complete blocks, not shards. See marshal's
+//! [message sizes](crate::marshal#message-sizes).
 //!
 //! # When to Use
 //!
@@ -71,6 +69,7 @@ mod tests {
     use crate::{
         Automaton, Block, CertifiableAutomaton, CertifiableBlock, Heightable, Relay, Reporter,
         marshal::{
+            Limits,
             ancestry::{Ancestry, BlockProvider},
             coding::{
                 Coding, Marshaled, MarshaledConfig, shards,
@@ -102,8 +101,8 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
-    use commonware_codec::{Encode, FixedSize};
-    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon, Scheme as _};
+    use commonware_codec::{Encode, EncodeSize, FixedSize};
+    use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
         certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
@@ -119,7 +118,7 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
+        NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
     use futures::StreamExt;
     use std::{sync::Arc, time::Duration};
@@ -195,6 +194,10 @@ mod tests {
 
         fn send(&self, round: Round, block: Arc<TestCodedBlock>, recipients: Recipients<K>) {
             self.sends.lock().push((round, block, recipients));
+        }
+
+        fn max_message_size(&self) -> usize {
+            usize::MAX
         }
     }
 
@@ -416,6 +419,7 @@ mod tests {
             view_retention: ViewDelta::new(10),
             max_repair: NZUsize!(10),
             max_pending_acks: NZUsize!(1),
+            limits: harness::limits::<TestCodingVariant>(),
             block_codec_config: (),
             partition_prefix: partition_prefix.to_string(),
             prunable_items_per_section: NZU64!(10),
@@ -548,9 +552,7 @@ mod tests {
         let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
+            limits: harness::limits::<TestCodingVariant>(),
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
@@ -4736,6 +4738,75 @@ mod tests {
                 "certify resolved true, so block must be durably persisted"
             );
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_marshaled_propose_skips_oversized_block() {
+        for oversized in [false, true] {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let provider = ConstantProvider::new(schemes[0].clone());
+                let genesis = genesis_block();
+                let ctx = CodingCtx {
+                    round: Round::new(Epoch::zero(), View::new(1)),
+                    leader: participants[0].clone(),
+                    parent: (View::zero(), genesis_coding_commitment(&genesis)),
+                };
+
+                // The widest timestamp keeps genesis within the bound
+                let block =
+                    make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
+                let bound = block.encode_size() - usize::from(oversized);
+                let mut config = test_config(&context, "propose-oversized", provider.clone());
+                config.limits =
+                    Limits::new::<TestCodingVariant, S>(Widen::widen(NUM_VALIDATORS), bound);
+                let (finalizations_by_height, finalized_blocks) =
+                    immutable_finalized_stores(&context, "propose-oversized", &config).await;
+                let (actor, marshal, _) = core::Actor::init(
+                    context.child("actor"),
+                    finalizations_by_height,
+                    finalized_blocks,
+                    config,
+                )
+                .await;
+                let (resolver_rx, resolver) = RecordingResolver::holding(context.child("resolver"));
+                let _actor_handle = actor.start(
+                    Application::<CodingB>::default(),
+                    RecordingCodingBuffer::default(),
+                    (resolver_rx, resolver),
+                );
+                let shards =
+                    start_shard_mailbox(context.child("shards"), participants, provider.clone())
+                        .await;
+
+                let cfg = MarshaledConfig {
+                    application: MockVerifyingApp::<CodingB, S>::new()
+                        .with_propose_result(block.clone()),
+                    marshal,
+                    shards,
+                    scheme_provider: provider,
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                };
+                let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+                let proposal = marshaled.propose(ctx).await.await;
+                if oversized {
+                    assert!(proposal.is_err(), "an oversized block must not be proposed");
+                } else {
+                    let commitment = proposal.expect("proposal missing");
+                    assert_eq!(commitment.block(), block.digest());
+                }
+            });
+        }
     }
 
     /// Regression: a leader must be able to recover its own block across an unclean restart.

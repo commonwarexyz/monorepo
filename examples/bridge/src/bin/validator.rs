@@ -18,10 +18,10 @@ use commonware_cryptography::{
         sharing::{ModeVersion, Sharing},
         variant::{MinSig, Variant},
     },
-    ed25519,
+    ed25519, sha256,
 };
 use commonware_formatting::from_hex;
-use commonware_p2p::{Manager as _, authenticated};
+use commonware_p2p::{Manager as _, authenticated, max_message_size};
 use commonware_runtime::{
     Network, Quota, Runner, Strategizer, Supervisor as _, buffer::paged::CacheRef, tokio,
 };
@@ -174,7 +174,10 @@ fn main() {
         MAX_MESSAGE_SIZE,
     );
 
-    // Configure network
+    // Configure network for consensus messages
+    let limits = simplex::Limits::new::<Scheme<ed25519::PublicKey, MinSig>, sha256::Digest>(
+        validators.len(),
+    );
     let p2p_cfg = authenticated::discovery::Config::local(
         Handshake::new(signer),
         &union(APPLICATION_NAMESPACE, P2P_SUFFIX),
@@ -182,7 +185,7 @@ fn main() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         bootstrapper_identities.clone(),
         max_peers_per_set,
-        MAX_MESSAGE_SIZE,
+        max_message_size(&[&limits]),
     );
 
     // Start context

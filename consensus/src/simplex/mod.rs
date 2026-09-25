@@ -364,21 +364,10 @@
 //!
 //! ### Message Sizes
 //!
-//! Applications must configure P2P limits to fit every fully encoded [`Vote`](types::Vote) and
-//! [`Certificate`](types::Certificate) for the deployed scheme and participant set. Missing
-//! certificate recovery sends an encoded `Certificate` inside a resolver response, adding up to
-//! [`MAX_RESPONSE_OVERHEAD`](commonware_resolver::p2p::MAX_RESPONSE_OVERHEAD) bytes. Include any
-//! channel wrappers, such as a [`mux`](commonware_p2p::utils::mux) subchannel prefix, in this
-//! budget. These messages are not fragmented, and authenticated P2P panics on oversized sends.
-//!
-//! [`Verifier::certificate_max_size`](commonware_cryptography::certificate::Verifier::certificate_max_size)
-//! bounds the underlying scheme certificate. The full Simplex certificate also includes its
-//! proposal or round fields and a variant tag. Size for every accepted signer count across the
-//! committees and epochs being served. A certificate containing only a quorum may be smaller.
-//!
-//! Application block dissemination and recovery must also fit their P2P limits. When using
-//! Marshal, follow its [Message Sizes](crate::marshal#message-sizes) requirements and use
-//! [`max_recovery_overhead`](crate::marshal::max_recovery_overhead) to budget for block recovery.
+//! [`Limits`] bounds every message simplex sends, each unfragmented. Fold it for the largest
+//! committee into [`max_message_size`](commonware_p2p::max_message_size). Certificates received
+//! from peers decode under the engine's committee, so rebroadcast certificates stay within the
+//! same bound.
 //!
 //! ## Pluggable Hashing and Cryptography
 //!
@@ -586,6 +575,8 @@ cfg_if::cfg_if! {
         pub use config::{Config, Floor, ForwardPolicy, SkipBudget, SkipPolicy};
         mod engine;
         pub use engine::Engine;
+        mod limits;
+        pub use limits::Limits;
         mod metrics;
 
         /// The window of views an actor tracks, bounded below by retention
@@ -712,7 +703,7 @@ mod tests {
     };
     use commonware_macros::{select, test_group, test_traced};
     use commonware_p2p::{
-        Manager as _, Recipients, Sender as _, TrackedPeers,
+        Footprint, Manager as _, Recipients, Sender as _, TrackedPeers,
         simulated::{Config, Link, Network, Oracle, Receiver, Sender, SplitOrigin},
         utils::mocks::inert_channel,
     };
@@ -1302,6 +1293,79 @@ mod tests {
             Random::new(RandomVersion::V1),
             |context| context.strategy(NZUsize!(2)),
         );
+    }
+
+    /// Runs validators on a network whose `max_size` derives from their [Limits] until each
+    /// finalizes a few views.
+    fn sized_network(max_size: fn(usize) -> usize) {
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|mut context| async move {
+            // Size the network from the committee
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, b"consensus", 4);
+            let size = Limits::new::<ed25519::Scheme, Sha256Digest>(participants.len()).footprint();
+            let (network, mut oracle) = Network::new_with_peers(
+                context.child("network"),
+                Config {
+                    max_size: u32::try_from(max_size(size)).unwrap(),
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            network.start();
+            let mut registrations = register_validators(&mut oracle, &participants).await;
+            let link = Link {
+                latency: Duration::from_millis(10),
+                jitter: Duration::from_millis(1),
+                success_rate: probability!(1.0),
+            };
+            link_validators(&mut oracle, &participants, Action::Link(link), None).await;
+
+            // Start every validator
+            let mut reporters = start_certified_split_engines(
+                &context,
+                CertifiedSplitEngineConfig {
+                    oracle: &oracle,
+                    participants: &participants,
+                    schemes: &schemes,
+                    registrations: &mut registrations,
+                    silent: participants.len(),
+                    elector: &RoundRobin::<Sha256>::default(),
+                    epoch: Epoch::new(333),
+                    view_retention: ViewDelta::new(10),
+                    skip_timeout: Duration::from_secs(12),
+                },
+            );
+
+            // Wait for all engines to finalize
+            let mut finalizers = Vec::new();
+            for reporter in reporters.values_mut() {
+                let (mut latest, mut monitor) = reporter.subscribe().await;
+                finalizers.push(context.child("finalizer").spawn(move |_| async move {
+                    while latest < View::new(10) {
+                        latest = monitor.recv().await.expect("event missing");
+                    }
+                }));
+            }
+            join_all(finalizers).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_limits_fit_network() {
+        sized_network(|size| size);
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "simplex size 343 exceeds sender limit 342")]
+    fn test_limits_reject_sender() {
+        sized_network(|size| size - 1);
     }
 
     fn non_genesis_floor_joiner_catches_tip<S, F, L>(fixture: F, elector: L)

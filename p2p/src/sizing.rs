@@ -1,5 +1,34 @@
 use std::{cmp::Ordering, num::NonZeroUsize};
 
+/// A component that passes payloads to p2p senders.
+pub trait Footprint {
+    /// Returns the largest payload, in bytes, this component passes to any sender.
+    fn footprint(&self) -> usize;
+}
+
+/// A payload bound known directly, such as an application message limit.
+impl Footprint for usize {
+    fn footprint(&self) -> usize {
+        *self
+    }
+}
+
+/// Returns the smallest `max_message_size` that admits every component.
+///
+/// Every peer should fold every component that sends on a channel it registers.
+///
+/// # Panics
+///
+/// Panics if the largest footprint exceeds `u32::MAX`.
+pub fn max_message_size(components: &[&dyn Footprint]) -> u32 {
+    let largest = components
+        .iter()
+        .map(|component| component.footprint())
+        .max()
+        .unwrap_or(0);
+    u32::try_from(largest).expect("footprint exceeds u32::MAX")
+}
+
 /// Returns the smallest `max_peers_per_set` that admits every peer set drawn
 /// from distinct `participants` when the network runs as `local`.
 ///
@@ -90,7 +119,22 @@ pub(crate) fn peer_set_size<'a, P: Ord + 'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, Widen};
+
+    #[test]
+    fn test_max_message_size() {
+        assert_eq!(max_message_size(&[]), 0);
+        assert_eq!(max_message_size(&[&3usize, &7usize, &5usize]), 7);
+        let largest: usize = Widen::widen(u32::MAX);
+        assert_eq!(max_message_size(&[&0usize, &largest]), u32::MAX);
+    }
+
+    #[test]
+    #[should_panic(expected = "footprint exceeds u32::MAX")]
+    fn test_max_message_size_overflow() {
+        let largest = Widen::<usize>::widen(u32::MAX) + 1;
+        max_message_size(&[&0usize, &largest]);
+    }
 
     #[test]
     fn test_max_retained_peers() {

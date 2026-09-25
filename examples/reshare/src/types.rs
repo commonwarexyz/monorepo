@@ -3,12 +3,12 @@
 use crate::config::NetworkConfig;
 use commonware_actor::Feedback;
 use commonware_codec::{
-    Buf, Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _,
-    Write,
+    Buf, Decode as _, DecodeExt as _, Encode, EncodeSize, Error as CodecError, FixedSize, Read,
+    ReadExt as _, Write, varint::MAX_U64_VARINT_SIZE,
 };
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Epochable, Heightable, Reporter,
-    marshal::Update,
+    marshal::{self, Update, standard::Standard},
     simplex::{self, types::Context},
     types::{Epoch, Height, Round, View},
 };
@@ -29,12 +29,14 @@ use commonware_cryptography::{
 use commonware_formatting::{from_hex, hex};
 use commonware_glue::{
     dkg::{self, ParticipantsProvider, Registrar as RegistrarTrait, ReshareBlock, types::Payload},
-    stateful::db::{Shared, SyncEngineConfig},
+    stateful::db::{Shared, SyncEngineConfig, p2p as qmdb_resolver},
 };
+use commonware_p2p::utils::mux::Prefixed;
 use commonware_parallel::Sequential;
 use commonware_runtime::{BufMut, Quota, buffer::paged::CacheRef};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FixedLogConfig,
+    merkle::Family as _,
     mmr::{self, Location, full::Config as MmrJournalConfig},
     qmdb::{
         any::{FixedConfig, unordered::fixed},
@@ -43,7 +45,7 @@ use commonware_storage::{
     translator::TwoCap,
 };
 use commonware_utils::{
-    Acknowledgement, NZU32, NZU64, NZUsize,
+    Acknowledgement, NZU32, NZU64, NZUsize, Widen,
     ordered::Set,
     range::NonEmptyRange,
     sequence::{U64, Unit},
@@ -103,8 +105,39 @@ pub const DKG_PROBE_CHANNEL: u64 = 7;
 pub const MAILBOX_SIZE: std::num::NonZeroUsize = NZUsize!(100);
 /// Per-peer message quota for every P2P channel.
 pub const MESSAGE_RATE: Quota = Quota::per_second(NZU32!(128));
-/// Maximum P2P message size in bytes.
-pub const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
+
+/// Returns the DKG limits for participant sets of at most [`MAX_PARTICIPANTS`] entries.
+pub fn dkg_limits() -> dkg::Limits {
+    dkg::Limits::new::<MinSig, ed25519::PrivateKey>(MAX_PARTICIPANTS)
+}
+
+/// Returns the marshal limits every validator configures.
+///
+/// The block bound admits the largest [`Block`]: a context (round, leader, and parent), a parent
+/// digest, a height, a state root, an operation range, and an optional reshare payload.
+pub fn marshal_limits() -> marshal::Limits<sha256::Digest> {
+    // Operation locations decode only up to the largest leaf count
+    let range = 2 * mmr::Family::MAX_LEAVES.encode_size();
+    let header = 4 * MAX_U64_VARINT_SIZE
+        + range
+        + ed25519::PublicKey::SIZE
+        + 3 * sha256::Digest::SIZE
+        + u8::SIZE;
+    marshal::Limits::new::<Standard<Block>, Scheme>(
+        Widen::widen(MAX_PARTICIPANTS.get()),
+        header + dkg_limits().payload(0),
+    )
+}
+
+/// Returns the P2P `max_message_size` of a validator.
+pub fn max_message_size() -> u32 {
+    let simplex =
+        simplex::Limits::new::<Scheme, sha256::Digest>(Widen::widen(MAX_PARTICIPANTS.get()));
+    let qmdb = qmdb_resolver::boundary_size::<mmr::Family, sha256::Digest>(
+        fixed::Operation::<mmr::Family, U64, U64>::SIZE,
+    );
+    commonware_p2p::max_message_size(&[&Prefixed(simplex), &marshal_limits(), &dkg_limits(), &qmdb])
+}
 
 /// Chain block carrying the QMDB state root and an optional reshare payload.
 #[derive(Clone, PartialEq, Eq)]
@@ -594,6 +627,30 @@ mod tests {
         (0..n)
             .map(|_| ed25519::PrivateKey::random(&mut rng).public_key())
             .collect()
+    }
+
+    #[test]
+    fn block_bound_admits_widest_block() {
+        let block = Block {
+            context: Context {
+                round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+                leader: keys(1).pop().unwrap(),
+                parent: (View::new(u64::MAX), Sha256::hash(&[b"parent"])),
+            },
+            parent: Sha256::hash(&[b"parent"]),
+            height: Height::new(u64::MAX),
+            state_root: Sha256::hash(&[b"state"]),
+            range: commonware_utils::non_empty_range!(
+                Location::new(*mmr::Family::MAX_LEAVES - 1),
+                mmr::Family::MAX_LEAVES
+            ),
+            payload: None,
+        };
+        assert!(Block::decode(block.encode()).unwrap() == block);
+        assert_eq!(
+            marshal_limits().block(),
+            block.encode_size() + dkg_limits().payload(0)
+        );
     }
 
     #[test]

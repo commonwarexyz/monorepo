@@ -318,12 +318,9 @@ impl<N: Namespace> Generic<N> {
         true
     }
 
-    /// Returns the maximum encoded certificate size for this participant set.
-    pub fn certificate_max_size(&self) -> Option<usize> {
-        crate::certificate::max_individual_certificate_size(
-            self.participants.len(),
-            Ed25519Signature::SIZE,
-        )
+    /// Returns the maximum encoded certificate size for at most `participants` participants.
+    pub fn certificate_max_size(participants: usize) -> Option<usize> {
+        crate::certificate::max_individual_certificate_size(participants, Ed25519Signature::SIZE)
     }
 
     pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
@@ -538,8 +535,8 @@ macro_rules! impl_certificate_ed25519 {
                 $crate::ed25519::certificate::Generic::<$namespace>::is_batchable()
             }
 
-            fn certificate_max_size(&self) -> Option<usize> {
-                self.generic.certificate_max_size()
+            fn certificate_max_size(participants: usize) -> Option<usize> {
+                $crate::ed25519::certificate::Generic::<$namespace>::certificate_max_size(participants)
             }
 
             fn certificate_codec_config(
@@ -1027,6 +1024,7 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
+        assert!(encoded.len() <= Scheme::certificate_max_size(schemes.len()).unwrap());
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
     }
@@ -1034,30 +1032,20 @@ mod tests {
     #[test]
     fn test_certificate_max_size() {
         let mut rng = test_rng();
-        let (schemes, _) = setup_signers(&mut rng, 4);
-        let max_size = schemes[0].certificate_max_size().unwrap();
-        let quorum = N3f1::quorum(schemes.len()) as usize;
-
-        for count in [quorum, schemes.len()] {
-            let attestations: Vec<_> = schemes
-                .iter()
-                .take(count)
-                .map(|s| {
-                    s.sign::<Sha256Digest>(TestSubject {
-                        message: Bytes::from_static(MESSAGE),
-                    })
-                    .unwrap()
-                })
-                .collect();
-            let certificate = schemes[0]
-                .assemble(non_empty![@attestations], &Sequential)
-                .unwrap();
-            let size = certificate.encode().len();
-            assert!(size <= max_size);
-            if count == schemes.len() {
-                assert_eq!(size, max_size);
-            }
-        }
+        let (schemes, _) = setup_signers(&mut rng, 128);
+        let attestations = schemes.iter().map(|s| {
+            s.sign::<Sha256Digest>(TestSubject {
+                message: Bytes::from_static(MESSAGE),
+            })
+            .unwrap()
+        });
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert_eq!(
+            Some(certificate.encode().len()),
+            Scheme::certificate_max_size(schemes.len())
+        );
     }
 
     #[test]

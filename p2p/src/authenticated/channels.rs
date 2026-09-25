@@ -65,6 +65,10 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         self.messenger
             .content(recipients, self.channel, message, priority)
     }
+
+    fn max_message_size(&self) -> u32 {
+        self.max_size
+    }
 }
 
 /// Sends arbitrary bytes over one registered channel.
@@ -118,6 +122,10 @@ where
         recipients: Recipients<Self::PublicKey>,
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients)
+    }
+
+    fn max_message_size(&self) -> u32 {
+        self.limited_sender.max_message_size()
     }
 }
 
@@ -189,6 +197,11 @@ impl<P: PublicKey> Channels<P> {
     pub(super) const fn outbound_mailbox_size(&self, base: NonZeroUsize) -> NonZeroUsize {
         base.checked_add(self.outbound_capacity)
             .expect("router mailbox capacity overflow")
+    }
+
+    /// Returns the largest payload, in bytes, that registered channels send or receive.
+    pub(super) const fn max_size(&self) -> u32 {
+        self.max_size
     }
 
     /// Connects every registered channel sender to the router mailbox.
@@ -273,6 +286,19 @@ mod tests {
             for _ in 0..4 {
                 assert!(receiver.receiver.try_recv().is_ok());
             }
+        });
+    }
+
+    #[test]
+    fn registered_sender_reports_max_size() {
+        deterministic::Runner::default().start(|context| async move {
+            let messenger = Messenger::<PublicKey>::unbound(context.network_buffer_pool().clone());
+            let mut channels = Channels::new(messenger, 1024, NZUsize!(2));
+            let quota = Quota::per_second(NZU32!(2));
+            let (sender, _) = channels.register(1, quota, context.child("channel"));
+
+            assert_eq!(channels.max_size(), 1024);
+            assert_eq!(crate::LimitedSender::max_message_size(&sender), 1024);
         });
     }
 

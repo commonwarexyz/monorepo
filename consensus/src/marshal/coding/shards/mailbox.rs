@@ -202,6 +202,7 @@ where
     P: PublicKey,
 {
     pub(super) sender: Sender<Message<B, C, H, P>>,
+    max_size: usize,
 }
 
 impl<B, C, H, P> Clone for Mailbox<B, C, H, P>
@@ -214,6 +215,7 @@ where
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            max_size: self.max_size,
         }
     }
 }
@@ -225,9 +227,14 @@ where
     H: Hasher,
     P: PublicKey,
 {
-    /// Create a new [`Mailbox`] with the given sender.
-    pub(crate) const fn new(sender: Sender<Message<B, C, H, P>>) -> Self {
-        Self { sender }
+    /// Create a new [`Mailbox`] with the given sender and shard bound.
+    pub(crate) const fn new(sender: Sender<Message<B, C, H, P>>, max_size: usize) -> Self {
+        Self { sender, max_size }
+    }
+
+    /// Returns the configured [`Limits::buffer`](crate::marshal::Limits::buffer).
+    pub(crate) const fn max_size(&self) -> usize {
+        self.max_size
     }
 
     /// Broadcast a proposed erasure coded block's shards to the participants.
