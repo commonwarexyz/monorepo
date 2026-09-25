@@ -79,6 +79,7 @@ struct Inner<E: Storage + Metrics, A: CodecFixed> {
 enum PreflightMode {
     /// Preserve each durable validation floor while replay repairs its suffix.
     Floors {
+        /// Logical byte prefix of each section protected by a durable validation marker.
         floors: BTreeMap<u64, u64>,
 
         /// Highest section the recovery owner may open. Later sections stay unopened until paired
@@ -90,6 +91,8 @@ enum PreflightMode {
     Restore {
         /// The checkpoint section remains explicit because an empty checkpoint has no floor.
         section: u64,
+
+        /// Logical byte prefix of each checkpoint-covered section, which replay preserves.
         floors: BTreeMap<u64, u64>,
     },
 }

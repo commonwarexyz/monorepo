@@ -378,17 +378,20 @@ mod tests {
             }
             let batch = ref_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
             let ref_mmr = ref_mmr.apply_batch(&batch).unwrap();
+
+            // Read the pins for a boundary at `leaves` from the reference, in the `nodes_to_pin`
+            // order init_sync expects.
             let prune_loc = Location::from(leaves);
             let mut pinned = Vec::new();
             for pos in Family::nodes_to_pin(prune_loc) {
                 pinned.push(ref_mmr.get_node(pos).await.unwrap().unwrap());
             }
 
-            // The local blobs span positions 0..14 but recover a tree of size 8, so both sync
-            // starts lie past the recovered tree and init_sync resets the journal to the start.
-            // Position 197 (100 leaves) lies past every blob, so the journal stays unopened.
+            // Two local blobs with capacity 7 span positions 0..14 but recover a tree of size 8, so
+            // both sync starts lie past the recovered tree and init_sync resets the journal to the
+            // start. Position 197 (100 leaves) lies past every blob, so the journal stays unopened.
             // Position 10 (6 leaves) lies inside the second blob, so the journal is opened and
-            // found too short.
+            // found too short. The asserts pin each case's start against 8 and 14.
             let expected_size = Position::try_from(prune_loc).unwrap();
             assert!(*expected_size > 8);
             assert_eq!(*expected_size < 14, opened);
@@ -404,7 +407,9 @@ mod tests {
             // The MMR should have size matching the prune boundary position.
             assert_eq!(sync_mmr.size(), expected_size);
 
-            // Appending the same leaf to both trees must yield the same root.
+            // Appending the same leaf to both trees must yield the same root. Below its start the
+            // sync tree holds only the pins, so a match shows init_sync placed the pins and sized
+            // the tree at the boundary.
             let batch = sync_mmr.new_batch().add(&hasher, &test_digest(999));
             let batch = sync_mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
             let sync_mmr = sync_mmr.apply_batch(&batch).unwrap();

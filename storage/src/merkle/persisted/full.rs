@@ -2601,6 +2601,8 @@ mod tests {
         executor.start(full_init_sync_empty_inner::<mmb::Family>);
     }
 
+    /// Retry `init_sync` over a node journal that the first attempt left empty at the sync start.
+    /// The retry keeps that journal instead of resetting it again.
     async fn init_sync_empty_at_start_keeps_journal_inner<F: Family>(
         context: deterministic::Context,
     ) {
@@ -3081,6 +3083,7 @@ mod tests {
         init_sync_recovered_pins_crash_inner::<mmb::Family>();
     }
 
+    /// Return the sorted indices of the blobs in the node journal's `-blobs` partition.
     async fn node_blob_names(
         context: &deterministic::Context,
         cfg: &Config<Sequential>,
@@ -3096,6 +3099,8 @@ mod tests {
         names
     }
 
+    /// Crash a bounded open after it removes the suffix past the cap but before it creates the
+    /// empty tail blob, then recover with `init_sync` from the cap.
     fn init_sync_after_interrupted_bounded_publication_inner<F: Family>(boundary_leaves: u64) {
         let ((root_at_boundary, root_at_end), checkpoint) = deterministic::Runner::default()
             .start_and_recover(move |context| async move {
@@ -3104,9 +3109,14 @@ mod tests {
                 let end = Location::<F>::new(boundary_leaves * 2);
                 let boundary_pos = Position::<F>::try_from(boundary).unwrap();
                 let end_pos = Position::<F>::try_from(end).unwrap();
+
+                // One blob holds exactly the tree of `boundary` leaves, and the tree of `end`
+                // leaves spans blobs 0 through 2. Capping at `boundary` keeps blob 0 whole,
+                // discards blobs 1 and 2, and needs a new empty blob 1 as the tail.
                 let mut cfg = test_config(&context);
                 cfg.items_per_blob = NonZeroU64::new(*boundary_pos).unwrap();
 
+                // Sync the tree at `boundary` leaves and again at `end` leaves, keeping both roots.
                 let mut merkle = Merkle::<F, _, Digest, Sequential>::init(
                     context.child("seed"),
                     &hasher,
@@ -3147,10 +3157,16 @@ mod tests {
                 } else {
                     assert!(merkle.metadata.keys().next().is_none());
                 }
+
+                // Pruning to 10 falls inside blob 0 and removes no blob, so both cases still
+                // store every node, in blobs 0 through 2.
                 assert_eq!(merkle.journal.bounds(), 0..*end_pos);
                 assert_eq!(node_blob_names(&context, &cfg).await, vec![0, 1, 2]);
                 drop(merkle);
 
+                // Recover at most `boundary` leaves through a context that parks every started
+                // sync. Publication seals blob 0, the tail's predecessor, and awaits its sync
+                // before it creates the tail.
                 let pending = PendingSyncs::default();
                 let delayed = DelayedSyncContext {
                     inner: context.child("bounded"),
@@ -3163,6 +3179,8 @@ mod tests {
                     boundary,
                 ));
 
+                // Poll the open until it parks its first started sync, then wait until that sync
+                // blocks on its release.
                 poll_fn(|cx| match bounded.as_mut().poll(cx) {
                     Poll::Ready(result) => {
                         panic!("init_at_most returned before its predecessor sync: {result:?}")
@@ -3180,6 +3198,9 @@ mod tests {
                     .await
                     .expect("predecessor sync never reached its deferred completion");
 
+                // Only that predecessor sync has started and it has not completed, so the open is
+                // still pending. The cap has already removed blobs 1 and 2, and the empty tail does
+                // not exist yet.
                 assert_eq!(pending.starts(), 1);
                 assert_eq!(pending.entered(), 1);
                 assert_eq!(pending.completions(), 0);
@@ -3205,6 +3226,10 @@ mod tests {
                 let mut cfg = test_config(&context);
                 cfg.items_per_blob = NonZeroU64::new(*boundary_pos).unwrap();
 
+                // The crash left blob 0 full with no tail after it and the watermark at the
+                // boundary. The journal's blob span therefore ends at the sync start, so a probe
+                // there would leave the journal unopened. init_sync instead probes the highest
+                // boundary pin missing from metadata, which lies inside the span.
                 assert_eq!(node_blob_names(&context, &cfg).await, vec![0]);
                 assert_eq!(persisted_watermark(&context).await, Some(*boundary_pos));
 
@@ -3220,9 +3245,14 @@ mod tests {
                 )
                 .await
                 .unwrap();
+
+                // init_sync reads the boundary pins from metadata where it holds them and from
+                // blob 0 otherwise. The stored tree ends at the sync start, so init_sync then
+                // resets the journal to empty there.
                 assert_eq!(merkle.bounds(), boundary..boundary);
                 assert_eq!(merkle.root(&hasher, 0).unwrap(), root_at_boundary);
 
+                // Appending the range reproduces the root at `end`.
                 let mut batch = merkle.new_batch();
                 for i in boundary_leaves as usize..boundary_leaves as usize * 2 {
                     batch = batch.add(&hasher, &test_digest(i));
@@ -3241,6 +3271,8 @@ mod tests {
             let boundary_pos = Position::<F>::try_from(boundary).unwrap();
             let mut cfg = test_config(&context);
             cfg.items_per_blob = NonZeroU64::new(*boundary_pos).unwrap();
+
+            // An ordinary reopen recovers the synced range.
             let merkle =
                 Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
                     .await
@@ -3265,6 +3297,8 @@ mod tests {
         }
     }
 
+    /// Run `init_sync` as the first initializer after a node-journal clear was staged but not
+    /// completed.
     async fn init_sync_after_interrupted_clear_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
         let local_start = Location::<F>::new(7);
@@ -3377,6 +3411,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
+
+                // Caller pins, or boundary pins all held in metadata, make init_sync probe the
+                // journal at the sync start. The staged clear gives the journal an empty span at
+                // `target`, so a start equal to the target opens the journal, which completes that
+                // clear. Any other start leaves it unopened, and init_sync stages its own clear to
+                // the start. Either route leaves the journal empty at the sync start.
                 assert_eq!(merkle.size(), Position::try_from(start).unwrap());
 
                 // Appending the range reproduces the reference root.
@@ -3413,11 +3453,16 @@ mod tests {
             .start(init_sync_after_interrupted_clear_inner::<mmb::Family>);
     }
 
+    /// Without caller pins, `init_sync` rejects an undecodable metadata pin even when the journal
+    /// still stores that node.
     async fn init_sync_rejects_malformed_metadata_pin_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let cfg = test_config(&context);
         let boundary = Location::<F>::new(11);
+
+        // Pruning to 10 stores the pins of 10 in metadata. Pick one that is also a pin of the sync
+        // boundary at 11.
         let merkle = seed_recovery_tree::<F>(&context, cfg.clone(), 22).await;
         let mut merkle = merkle.prune(Location::new(10)).await.unwrap();
         let pos = F::nodes_to_pin(boundary)
@@ -3453,6 +3498,8 @@ mod tests {
             .start(init_sync_rejects_malformed_metadata_pin_inner::<mmb::Family>);
     }
 
+    /// Without caller pins, `init_sync` fails with `Error::MissingNode` when a boundary pin is in
+    /// neither metadata nor the journal, and the local tree still reopens.
     async fn init_sync_rejects_missing_pin_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
         let start = Location::<F>::new(6);
@@ -3733,6 +3780,8 @@ mod tests {
 
     /// Tear the tail page of node blob `blob` so its next open must truncate it.
     async fn tear_node_blob(context: &deterministic::Context, cfg: &Config<Sequential>, blob: u64) {
+        // Fresh journals store node blobs in `{journal_partition}-blobs`, named by big-endian
+        // index. Dropping the last byte leaves a partial physical page with no valid checksum.
         let (blob, len) = context
             .open(
                 &format!("{}-blobs", cfg.journal_partition),
@@ -3744,6 +3793,8 @@ mod tests {
         blob.sync().await.unwrap();
     }
 
+    /// `init_sync` over a stored tree extending past the range end removes the node blobs wholly
+    /// beyond the end without opening them.
     async fn init_sync_ahead_skips_discarded_blobs_inner<F: Family>(
         context: deterministic::Context,
     ) {
@@ -3752,6 +3803,10 @@ mod tests {
         let end = Location::<F>::new(20);
         let end_pos = Position::<F>::try_from(end).unwrap();
         let stale = || U64::new(NODE_PREFIX, u64::MAX);
+
+        // All cases store the same 20-leaf target followed by a longer suffix. The 80-leaf cases
+        // hold more node blobs past the range end than the 50-leaf case, and the torn case also
+        // tears the newest of them.
         let mut calls = Vec::new();
         let mut reads = Vec::new();
         for (stored_leaves, torn) in [(50, false), (80, false), (80, true)] {
@@ -3769,6 +3824,9 @@ mod tests {
             )
             .await
             .unwrap();
+
+            // Capture the 20-leaf target root and its pins at `restart`, then extend the tree to
+            // `stored_leaves` so the journal runs past the range end.
             let mut batch = merkle.new_batch();
             for i in 0..20 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -3784,6 +3842,9 @@ mod tests {
             let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
             merkle = merkle.apply_batch(&batch).unwrap();
             let merkle = merkle.sync().await.unwrap();
+
+            // The newest node blob starts at or past `end_pos`, so the open bounded at the range
+            // end discards it without opening it.
             let newest = (*merkle.size() - 1) / cfg.items_per_blob.get();
             assert!(newest * cfg.items_per_blob.get() >= *end_pos);
             drop(merkle);
@@ -3804,6 +3865,9 @@ mod tests {
                 tear_node_blob(&context, &cfg, newest).await;
             }
 
+            // Count the durability operations and blob reads init_sync issues. Opening a
+            // non-empty blob reads its tail page, and opening the torn blob would also sync its
+            // trimmed tail.
             let pending = PendingSyncs::default();
             pending.arm();
             let (recorded, recordings) = RecordingContext::new(context.child("delayed"));
@@ -3830,6 +3894,7 @@ mod tests {
             reads.push(recordings.snapshot().reads.len());
             drop(merkle);
 
+            // Reopen from storage to check what init_sync persisted.
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("check"), metadata_cfg)
                 .await
                 .unwrap();
@@ -3883,6 +3948,9 @@ mod tests {
             )
             .await
             .unwrap();
+
+            // Capture the full 50-leaf root and the pins at `restart`, then prune to leaf 30 so
+            // the retained history starts past the range end.
             let mut batch = merkle.new_batch();
             for i in 0..50 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -3901,6 +3969,8 @@ mod tests {
                 tear_node_blob(&context, &cfg, newest).await;
             }
 
+            // Count the durability operations init_sync issues. Opening the torn blob would sync
+            // its trimmed tail and raise the count.
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
@@ -3922,6 +3992,9 @@ mod tests {
             .unwrap();
             assert_eq!(merkle.bounds(), restart..restart);
             calls.push(pending.calls());
+
+            // The reset restarts the journal empty at `restart`. Replaying leaves 7..50 over the
+            // supplied pins rebuilds the full 50-leaf root.
             let mut batch = merkle.new_batch();
             for i in 7..50 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -3960,6 +4033,9 @@ mod tests {
             Merkle::<F, _, Digest, Sequential>::init(context.child("seed"), &hasher, cfg.clone())
                 .await
                 .unwrap();
+
+        // Capture the 50-leaf root and the pins at `restart`, then prune to leaf 30 so the retained
+        // history starts past the range end.
         let mut batch = merkle.new_batch();
         for i in 0..50 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -3989,6 +4065,8 @@ mod tests {
         .await;
         assert!(matches!(result, Err(Error::InvalidPinnedNodes)));
 
+        // The rejected call leaves the pruned journal intact: a plain reopen recovers the same
+        // bounds and root.
         let merkle =
             Merkle::<F, _, Digest, Sequential>::init(context.child("reopen"), &hasher, cfg)
                 .await
@@ -4022,6 +4100,8 @@ mod tests {
             Merkle::<F, _, Digest, Sequential>::init(context.child("seed"), &hasher, cfg.clone())
                 .await
                 .unwrap();
+
+        // Capture the target root and the pins at `restart` from the 20-leaf tree.
         let mut batch = merkle.new_batch();
         for i in 0..20 {
             batch = batch.add(&hasher, &test_digest(i));
@@ -4042,6 +4122,9 @@ mod tests {
         }
         let merkle = merkle.sync().await.unwrap();
         drop(merkle);
+
+        // Node blob names are big-endian indices. The largest index is the newest blob, which must
+        // be the blob holding `end_pos`.
         let newest = context
             .scan(&format!("{}-blobs", cfg.journal_partition))
             .await
@@ -4079,6 +4162,7 @@ mod tests {
         assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
         drop(merkle);
 
+        // Reopen from storage to check what init_sync persisted.
         let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("check"), metadata_cfg)
             .await
             .unwrap();
@@ -4151,10 +4235,18 @@ mod tests {
             let target_root = merkle.root(&hasher, 0).unwrap();
             let pinned_nodes = merkle.pinned_nodes_at(restart).await.unwrap();
             let merkle = drive_pending_syncs(&pending, merkle.flush()).await.unwrap();
+
+            // The delayed context parks the new data sync, so `start_sync` cannot raise the
+            // watermark past the size proven durable before it. Driving the handle then makes
+            // every node durable while the watermark stays behind.
             let (merkle, handle) = merkle.start_sync().await.unwrap();
             drive_pending_syncs(&pending, handle).await.unwrap();
             assert_eq!(merkle.size(), end_pos);
             drop(merkle);
+
+            // The persisted watermark ends at or below the newest blob's first node, so recovery
+            // treats every node in that blob as unacknowledged and truncates a torn page instead
+            // of failing.
             let newest = (*end_pos - 1) / items_per_blob;
             let watermark = Journal::<_, Digest>::persisted_watermark(
                 context.child("probe"),
@@ -4168,6 +4260,8 @@ mod tests {
                 tear_node_blob(&context, &cfg, newest).await;
             }
 
+            // Count the durability operations init_sync issues, including any repair of the torn
+            // tail.
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
@@ -4188,6 +4282,9 @@ mod tests {
             .await
             .unwrap();
             calls.push(pending.calls());
+
+            // Recovery discards the torn last page of the newest blob, so the torn case recovers
+            // fewer leaves.
             if torn {
                 assert!(merkle.leaves() < end);
             } else {
@@ -4237,6 +4334,9 @@ mod tests {
             cfg.journal_partition = format!("journal-{torn}");
             cfg.metadata_partition = format!("metadata-{torn}");
             let items_per_blob = cfg.items_per_blob.get();
+
+            // Seed 50 leaves through a delayed context, capture the pins at `restart`, then prune
+            // to leaf 30. The delayed context also parks the data sync of the `start_sync` below.
             let pending = PendingSyncs::default();
             let delayed = DelayedSyncContext {
                 inner: context.child("seed_delayed"),
@@ -4282,6 +4382,10 @@ mod tests {
             merkle = merkle.apply_batch(&batch).unwrap();
             let target_root = merkle.root(&hasher, 0).unwrap();
             let merkle = drive_pending_syncs(&pending, merkle.flush()).await.unwrap();
+
+            // The delayed context parks the new data sync, so `start_sync` cannot raise the
+            // watermark past the size proven durable before it. Driving the handle then makes
+            // every node durable while the watermark stays behind.
             let (merkle, handle) = merkle.start_sync().await.unwrap();
             drive_pending_syncs(&pending, handle).await.unwrap();
             let newest = (*merkle.size() - 1) / items_per_blob;
@@ -4312,6 +4416,8 @@ mod tests {
                 tear_node_blob(&context, &cfg, newest).await;
             }
 
+            // Count the durability operations init_sync issues. Opening the torn blob would sync
+            // its trimmed tail and raise the count.
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
@@ -4333,6 +4439,9 @@ mod tests {
             .unwrap();
             assert_eq!(merkle.bounds(), restart..restart);
             calls.push(pending.calls());
+
+            // The reset restarts the journal empty at `restart`. Replaying leaves 20..60 over the
+            // supplied pins rebuilds the 60-leaf root.
             let mut batch = merkle.new_batch();
             for i in 20..60 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -4342,6 +4451,7 @@ mod tests {
             assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
             drop(merkle);
 
+            // Reopen from storage to check what init_sync persisted.
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("check"), metadata_cfg)
                 .await
                 .unwrap();
@@ -4434,6 +4544,10 @@ mod tests {
             let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
             merkle = merkle.apply_batch(&batch).unwrap();
             let merkle = drive_pending_syncs(&pending, merkle.flush()).await.unwrap();
+
+            // The delayed context parks the new data sync, so `start_sync` cannot raise the
+            // watermark past the size proven durable before it. Driving the handle then makes
+            // every node durable while the watermark stays behind.
             let (merkle, handle) = merkle.start_sync().await.unwrap();
             drive_pending_syncs(&pending, handle).await.unwrap();
             let newest = (*merkle.size() - 1) / items_per_blob;
@@ -4448,7 +4562,8 @@ mod tests {
             assert!(watermark <= newest * items_per_blob);
 
             // Every stored node lies below the range start, including the newest blob's
-            // capacity.
+            // capacity. `Journal::span` ends at that capacity, so the span misses the range start
+            // and init_sync leaves the journal unopened.
             assert!((newest + 1) * items_per_blob <= *prune_pos);
 
             // init_sync retains only the selected boundary's pins, so the stale key planted
@@ -4467,6 +4582,8 @@ mod tests {
                 tear_node_blob(&context, &cfg, newest).await;
             }
 
+            // Count the durability operations init_sync issues. Opening the torn blob would sync
+            // its trimmed tail and raise the count.
             let pending = PendingSyncs::default();
             pending.arm();
             let delayed = DelayedSyncContext {
@@ -4488,6 +4605,9 @@ mod tests {
             .unwrap();
             assert_eq!(merkle.bounds(), restart..restart);
             calls.push(pending.calls());
+
+            // The reset restarts the journal empty at `restart`. Replaying leaves 30..50 over the
+            // reference pins rebuilds the reference root.
             let mut batch = merkle.new_batch();
             for i in 30..50 {
                 batch = batch.add(&hasher, &test_digest(i));
@@ -4497,6 +4617,7 @@ mod tests {
             assert_eq!(merkle.root(&hasher, 0).unwrap(), target_root);
             drop(merkle);
 
+            // Reopen from storage to check what init_sync persisted.
             let metadata = Metadata::<_, U64, Vec<u8>>::init(context.child("check"), metadata_cfg)
                 .await
                 .unwrap();

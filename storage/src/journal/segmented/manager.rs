@@ -909,6 +909,9 @@ pub(super) mod tests {
     #[test]
     fn test_init_bounded_leaves_later_sections_unopened() {
         deterministic::Runner::default().start(|context| async move {
+            // Seed empty blobs for sections 1, 2 and 5 with an unbounded manager. The drop hook is
+            // installed only after seeding, so `dropped` counts only drops of buffers built by the
+            // bounded managers below.
             let dropped = Arc::new(AtomicUsize::new(0));
             let mut cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
             let mut manager = Manager::init(context.child("seed"), cfg.clone())
@@ -931,11 +934,16 @@ pub(super) mod tests {
             assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
             assert_eq!(manager.newest_section(), Some(2));
             assert_eq!(context.scan("test").await.unwrap().len(), 3);
+
+            // Truncating to the ceiling removes the unopened section 5 and keeps both opened ones.
             manager.truncate_pending(2, 0).await.unwrap();
             assert_eq!(
                 context.scan("test").await.unwrap(),
                 vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()]
             );
+
+            // Dropping the manager releases every buffer it built. A count of two means the factory
+            // built buffers only for sections 1 and 2.
             drop(manager);
             assert_eq!(
                 dropped.load(Ordering::Relaxed),
@@ -944,6 +952,7 @@ pub(super) mod tests {
             );
 
             // A ceiling below every stored section opens nothing and truncation removes them all.
+            // Section 0 has no blob, and truncating to it does not create one.
             let mut manager = Manager::init_bounded(context.child("empty"), cfg, 0)
                 .await
                 .unwrap();
@@ -951,6 +960,8 @@ pub(super) mod tests {
             assert_eq!(manager.newest_section(), None);
             manager.truncate_pending(0, 0).await.unwrap();
             assert!(context.scan("test").await.unwrap().is_empty());
+
+            // This manager built no buffers, so the drop count is unchanged.
             drop(manager);
             assert_eq!(dropped.load(Ordering::Relaxed), 2);
         });
@@ -962,6 +973,8 @@ pub(super) mod tests {
     )]
     fn test_truncate_pending_above_ceiling_panics() {
         deterministic::Runner::default().start(|context| async move {
+            // Seed section 1 for the bounded manager to open and section 5 for it to leave
+            // unopened. No section is stored at 3 or 4.
             let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
             let mut manager = Manager::init(context.child("seed"), cfg.clone())
                 .await
@@ -985,6 +998,7 @@ pub(super) mod tests {
     )]
     fn test_get_or_create_above_ceiling_panics() {
         deterministic::Runner::default().start(|context| async move {
+            // Seed only section 5, which the ceiling of 2 below leaves unopened.
             let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
             let mut manager = Manager::init(context.child("seed"), cfg.clone())
                 .await
@@ -1004,6 +1018,7 @@ pub(super) mod tests {
     #[test]
     fn test_truncate_pending_removes_unopened_sections_newest_first() {
         deterministic::Runner::default().start(|context| async move {
+            // Seed two sections at or below the ceiling of 2 and three above it.
             let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
             let mut manager = Manager::init(context.child("seed"), cfg.clone())
                 .await
@@ -1024,9 +1039,13 @@ pub(super) mod tests {
             assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
 
             // Truncation removes unopened sections newest-first, so a crash mid-removal leaves a
-            // prefix of the stored sections.
+            // prefix of the stored sections. No opened section lies above target 2, so the log
+            // holds only unopened-section removals. Without the sort they would run 5, 6, 7.
             manager.truncate_pending(2, 0).await.unwrap();
             assert_eq!(*removals.lock(), removed(&[7, 6, 5]));
+
+            // Both opened sections survive in the manager and in storage. The plain context lists
+            // names in ascending order.
             assert_eq!(manager.sections().collect::<Vec<_>>(), vec![1, 2]);
             assert_eq!(
                 context.scan("test").await.unwrap(),
@@ -1050,6 +1069,9 @@ pub(super) mod tests {
                 inner: context.child("reversed"),
                 removals: removals.clone(),
             };
+
+            // End 0 gives a physical ceiling of zero bytes for any page size and target section 2
+            // is empty, so no resize runs. The call changes storage only by removing sections.
             truncate_paged_tail(&reversed, "test", NZU16!(64), 2, 0)
                 .await
                 .unwrap();
@@ -1066,6 +1088,8 @@ pub(super) mod tests {
     #[test]
     fn test_clear_removes_unopened_sections_and_lifts_ceiling() {
         deterministic::Runner::default().start(|context| async move {
+            // Seed section 1 for the bounded manager to open and section 5 for it to leave
+            // unopened.
             let cfg = test_config(PendingSyncs::default(), Arc::new(AtomicUsize::new(0)));
             let mut manager = Manager::init(context.child("seed"), cfg.clone())
                 .await
@@ -1081,7 +1105,8 @@ pub(super) mod tests {
             manager.clear().await.unwrap();
             assert!(context.scan("test").await.unwrap().is_empty());
 
-            // No stored section remains above the ceiling, so it no longer restricts creation.
+            // No stored section remains above the ceiling, so it no longer restricts creation. The
+            // stored section 5 was removed, so creating it opens a fresh empty blob.
             manager.get_or_create(5).await.unwrap();
             assert_eq!(manager.sections().collect::<Vec<_>>(), vec![5]);
         });

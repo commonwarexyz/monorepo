@@ -7090,7 +7090,8 @@ mod tests {
     #[case::higher(60)]
     #[test_traced]
     fn test_fixed_journal_init_sync_after_interrupted_clear(#[case] start: u64) {
-        // State sync is the first open after a clear crashed with its intent staged.
+        // State sync is the first open after a clear crashed with its intent staged. The cases
+        // start below, at, and above the staged target 50.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
@@ -7122,7 +7123,8 @@ mod tests {
             .expect("init_sync must complete or replace the staged clear");
             assert_eq!(journal.bounds(), start..start);
 
-            // Appends begin at the sync start.
+            // Appends begin at the sync start. Digests of 100 onward differ from every stale item,
+            // so the reads below tell new items from stale ones.
             for i in 0..3u64 {
                 let pos;
                 (journal, pos) = journal.append(&test_digest(100 + i)).await.unwrap();
@@ -7137,6 +7139,8 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(journal.bounds(), start..start + 3);
+
+            // For start 7, the pruned position 6 held a stale item before the clear.
             assert!(matches!(
                 journal.read(start - 1).await,
                 Err(Error::ItemPruned(pos)) if pos == start - 1

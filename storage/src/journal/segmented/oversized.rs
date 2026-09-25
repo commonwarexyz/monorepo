@@ -2919,6 +2919,10 @@ mod tests {
                 Oversized::init(context.child("seed"), cfg.clone())
                     .await
                     .expect("failed to init");
+
+            // Section 1 holds the only checkpointed entry. Sections 2 and 3 lie past the
+            // checkpoint. Each index page holds one entry, so section 2's three entries give
+            // corrupt_page an interior page 1 that a complete page follows.
             (oversized, _, _, _) = oversized
                 .append(1, TestEntry::new(0, 0, 0), &[0; 16])
                 .await
@@ -2978,6 +2982,8 @@ mod tests {
             assert_eq!(pending.calls(), 2);
             drop(discarded_index);
             drop(discarded_value);
+
+            // Restore removed sections 2 and 3 from both partitions without opening them.
             let retained = vec![1u64.to_be_bytes().to_vec()];
             assert_eq!(delayed.scan(&cfg.index_partition).await.unwrap(), retained);
             assert_eq!(delayed.scan(&cfg.value_partition).await.unwrap(), retained);
@@ -3001,6 +3007,9 @@ mod tests {
             }
             journal = journal.sync_all().await.unwrap();
             drop(journal);
+
+            // Sections 1 and 2 each hold one entry, and the cap below keeps only section 1. The
+            // torn section 2 index tail would cost a repair sync if paged recovery opened it.
             tear_index_tail(&context, &cfg, 2).await;
 
             // An exclusive live value handle proves bounded recovery never opens that section.
@@ -3021,7 +3030,12 @@ mod tests {
             )
             .await
             .unwrap();
+
+            // PendingSyncs counts syncs, not removals. Pretrimming deletes index section 2 unread,
+            // and section 1 already ends at the cap in both journals, so nothing needs a sync.
             assert_eq!(pending.calls(), 0);
+
+            // Section 1 keeps its entry and value, and section 2 is gone from both partitions.
             assert_eq!(journal.newest_section(), Some(1));
             let entry = journal.last(1).await.unwrap().unwrap();
             assert_eq!(entry.id, 1);
@@ -3038,6 +3052,7 @@ mod tests {
             drop(discarded_value);
             drop(journal);
 
+            // Unbounded recovery reopens the published state with section 1 still newest.
             let recovered: Oversized<_, TestEntry, TestValue> =
                 drive_pending_syncs(&pending, Oversized::init(delayed.child("restart"), cfg))
                     .await
@@ -3063,6 +3078,9 @@ mod tests {
             }
             journal = journal.sync_all().await.unwrap();
             drop(journal);
+
+            // Tearing the tail truncates entry 1's physical page. The two-entry cap covers that
+            // page, so pretrimming keeps it and paged recovery trims it when opening section 1.
             tear_index_tail(&context, &cfg, 1).await;
 
             let pending = PendingSyncs::default();
@@ -3078,6 +3096,9 @@ mod tests {
             )
             .await
             .unwrap();
+
+            // One sync makes the index trim durable. The other makes truncating entry 1's value
+            // durable, since no retained index entry references that value.
             assert_eq!(pending.calls(), 2);
             assert_eq!(journal.size(1).unwrap(), chunk);
             assert_eq!(journal.last(1).await.unwrap().unwrap().id, 0);
@@ -3102,8 +3123,10 @@ mod tests {
             journal = journal.sync_all().await.unwrap();
             drop(journal);
 
-            // The cap retains page one, while the torn third page is removed before paged
-            // recovery opens. Index pretrimming and value truncation each require one sync.
+            // Section 1 holds three one-page entries, and the tear truncates the third page. The
+            // one-entry cap retains only the first page. Pretrimming removes the second and torn
+            // third pages before paged recovery opens the blob, so no tail repair reads them.
+            // Index pretrimming and value truncation each require one sync.
             tear_index_tail(&context, &cfg, 1).await;
             let pending = PendingSyncs::default();
             pending.arm();
@@ -3144,6 +3167,7 @@ mod tests {
             journal = journal.sync_all().await.unwrap();
             drop(journal);
 
+            // Publish a floor of one committed item for each section in `markers`.
             let mut metadata: Metadata<_, SectionKey, u64> = Metadata::init(
                 context.child("seed_markers"),
                 MetadataConfig {
@@ -3157,8 +3181,12 @@ mod tests {
                 metadata.put(SectionKey::new(section), 1);
             }
             drop(metadata.sync().await.unwrap());
+
+            // Section 2 lies above the cap. Its torn index tail would cost a repair sync if
+            // recovery opened it.
             tear_index_tail(&context, &cfg, 2).await;
 
+            // Live handles fail any open of either section 2 blob with BlobAlreadyOpen.
             let (discarded_index, _) = context
                 .open(&cfg.index_partition, &2u64.to_be_bytes())
                 .await
@@ -3186,7 +3214,14 @@ mod tests {
             )
             .await
             .unwrap();
+
+            // Capping at section 1's single entry drops the section 2 marker. Any section 1
+            // marker already equals that one item, and section 1 already ends at the cap in both
+            // journals. PendingSyncs does not count removing section 2 from either partition.
             assert_eq!(pending.calls(), 1, "only the marker update needs a sync");
+
+            // Replay yields only the section 1 entry. The finished journal keeps section 1 alone
+            // in both partitions.
             assert_eq!(
                 drive_pending_syncs(&pending, replay.next())
                     .await
@@ -3208,6 +3243,8 @@ mod tests {
             drop(discarded_value);
             drop(journal);
 
+            // Reopen without a cap. A surviving section 2 marker would name a missing blob and
+            // fail floor preflight. The retained pair replays the same single entry.
             let mut replay = drive_pending_syncs(
                 &pending,
                 Oversized::<_, TestEntry, TestValue>::init_with_metadata(
@@ -3265,6 +3302,8 @@ mod tests {
             journal = journal.sync_all().await.unwrap();
             drop(journal);
 
+            // Mark both one-entry sections committed. Capping at section 1 must durably drop the
+            // section 2 marker before removing either section 2 blob.
             let mut metadata: Metadata<_, SectionKey, u64> = Metadata::init(
                 context.child("markers"),
                 MetadataConfig {
@@ -3296,6 +3335,9 @@ mod tests {
             )
             .await;
             assert!(result.is_err(), "writing the lower marker must fail");
+
+            // The failed marker rewrite returns before either journal removes its suffix, so both
+            // partitions still hold section 2.
             let all_sections = vec![1u64.to_be_bytes().to_vec(), 2u64.to_be_bytes().to_vec()];
             assert_eq!(
                 context.scan(&cfg.index_partition).await.unwrap(),

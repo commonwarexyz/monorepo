@@ -390,6 +390,9 @@ mod tests {
     fn test_fixed_sync_journal_caps_ahead_and_discards_pruned_progress() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg(&context);
+
+            // Open 7..20 over 30 and then 60 synced items. The larger store adds only items past
+            // the range end.
             let mut reads = Vec::new();
             for stored_end in [30u64, 60] {
                 let measure = context.child("ahead").with_attribute("end", stored_end);
@@ -402,6 +405,8 @@ mod tests {
                 let journal = journal.sync().await.unwrap();
                 drop(journal);
 
+                // Record every blob read issued through the sync context, from the open through
+                // the in-range reads below.
                 let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
                 let (recorded, recordings) = RecordingContext::new(measure.child("sync"));
                 let journal =
@@ -409,6 +414,8 @@ mod tests {
                         .await
                         .unwrap();
 
+                // The end is capped at the range end. Pruning to the range start removes only
+                // whole blobs below it, so the start is 5, the first position of blob 1.
                 assert_eq!(journal.bounds(), 5..20);
                 for value in 7..20u8 {
                     assert_eq!(
@@ -419,6 +426,9 @@ mod tests {
                 reads.push(recordings.snapshot().reads.len());
                 journal.destroy().await.unwrap();
             }
+
+            // Recovery discards blobs at or past the range end without opening them, so the
+            // extra history adds no blob reads.
             assert_eq!(
                 reads[0], reads[1],
                 "reading cost grew with discarded operations"
@@ -482,6 +492,9 @@ mod tests {
     fn test_variable_sync_journal_caps_ahead_and_discards_pruned_progress() {
         deterministic::Runner::default().start(|context| async move {
             let cfg = variable_test_cfg(&context);
+
+            // Open 7..20 over 30 and then 60 synced items. The larger store adds only items past
+            // the range end.
             let mut reads = Vec::new();
             for stored_end in [30u64, 60] {
                 let measure = context.child("ahead").with_attribute("end", stored_end);
@@ -494,6 +507,8 @@ mod tests {
                 let journal = journal.sync().await.unwrap();
                 drop(journal);
 
+                // Record every blob read issued through the sync context, from the open through
+                // the in-range reads below.
                 let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
                 let (recorded, recordings) = RecordingContext::new(measure.child("sync"));
                 let journal =
@@ -501,6 +516,8 @@ mod tests {
                         .await
                         .unwrap();
 
+                // The end is capped at the range end. Pruning to the range start removes only
+                // whole sections below it, so the start is 5, the first position of section 1.
                 assert_eq!(journal.bounds(), 5..20);
                 for value in 7..20u64 {
                     assert_eq!(journal.read(value).await.unwrap(), value);
@@ -508,6 +525,9 @@ mod tests {
                 reads.push(recordings.snapshot().reads.len());
                 journal.destroy().await.unwrap();
             }
+
+            // Recovery discards data and offsets blobs at or past the range end without opening
+            // them, so the extra history adds no blob reads.
             assert_eq!(
                 reads[0], reads[1],
                 "reading cost grew with discarded operations"
@@ -549,8 +569,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let cfg = test_cfg(&context);
             let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(20));
+
+            // Both attempts open the same partition, so the second finds what the first left.
             let mut calls = Vec::new();
             for attempt in ["first", "second"] {
+                // Count every blob sync issued through `delayed`. drive_pending_syncs releases
+                // each parked sync so the open completes.
                 let pending = PendingSyncs::default();
                 pending.arm();
                 let delayed = DelayedSyncContext {
@@ -587,11 +611,16 @@ mod tests {
         #[case] range_end: u64,
     ) {
         deterministic::Runner::default().start(|context| async move {
+            // Run the same open over a clean store and a torn one, each in its own partition,
+            // and compare the syncs each open issues.
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
                 let mut cfg = test_cfg(&context);
                 cfg.partition = format!("sync-journal-{torn}");
+
+                // Retain 40..50. Pruning to 40 removes every blob below blob 8, leaving blobs 8
+                // and 9 full.
                 let mut journal = FixedJournal::init(context.child("setup"), cfg.clone())
                     .await
                     .unwrap();
@@ -604,10 +633,15 @@ mod tests {
                 let journal = journal.sync().await.unwrap();
                 assert_eq!(journal.bounds(), 40..50);
                 drop(journal);
+
+                // Tear blob 9, which holds 45..49 and is the newest blob with items.
                 if torn {
                     tear(&context, &format!("{}-blobs", cfg.partition), 9).await;
                 }
 
+                // `reopen` bypasses the counter for the ordinary reopen below. Count every blob
+                // sync issued through `delayed`. drive_pending_syncs releases each parked sync so
+                // the open completes.
                 let reopen = context.child("reopen");
                 let pending = PendingSyncs::default();
                 pending.arm();
@@ -615,6 +649,11 @@ mod tests {
                     inner: context,
                     pending: pending.clone(),
                 };
+
+                // Both cases start below the retained start 40, one with the whole range below it
+                // and one overlapping 40..50. The span, read from blob names and the checkpoint
+                // alone, covers neither start, so the open resets to an empty journal at the range
+                // start without opening any stored blob.
                 let range = non_empty_range!(
                     Location::<F>::new(range_start),
                     Location::<F>::new(range_end)
@@ -632,7 +671,8 @@ mod tests {
                 assert_eq!(journal.bounds(), range_start..range_start);
                 calls.push(pending.calls());
 
-                // The cleared journal accepts appends that survive an ordinary reopen.
+                // The cleared journal accepts appends that survive an ordinary reopen. Its blobs
+                // were opened through `delayed`, so its sync also runs under drive_pending_syncs.
                 for value in range_start..range_start + 3 {
                     (journal, _) = journal.append(&Digest([value as u8; 32])).await.unwrap();
                 }
@@ -649,7 +689,8 @@ mod tests {
                 journal.destroy().await.unwrap();
             }
 
-            // Local history cannot serve the range start, so its torn tail adds no repair.
+            // Opening the torn blob would trim and sync its tail. Local history cannot serve the
+            // range start, so its torn tail adds no repair.
             assert_eq!(calls[0], calls[1]);
         });
     }
@@ -657,6 +698,8 @@ mod tests {
     #[test_traced]
     fn test_fixed_sync_journal_repairs_retained_torn_tail() {
         deterministic::Runner::default().start(|context| async move {
+            // Run the same open over a clean store and a torn one, each in its own partition,
+            // and compare the syncs each open issues.
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
@@ -672,16 +715,23 @@ mod tests {
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
+
+                // Tear blob 5, which holds 25..29 and is the newest blob with items.
                 if torn {
                     tear(&context, &format!("{}-blobs", cfg.partition), 5).await;
                 }
 
+                // Count every blob sync issued through `delayed`. drive_pending_syncs releases
+                // each parked sync so the open completes.
                 let pending = PendingSyncs::default();
                 pending.arm();
                 let delayed = DelayedSyncContext {
                     inner: context,
                     pending: pending.clone(),
                 };
+
+                // The range reaches the stored end 30, so blob 5 lies inside it and recovery
+                // opens it, repairing any torn tail.
                 let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(30));
                 let journal = drive_pending_syncs(
                     &pending,
@@ -693,6 +743,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
+
+                // Pruning to 7 removes only whole blobs below it, so both copies start at 5. The
+                // torn copy ends before 30 after repair truncates its torn tail. Every retained
+                // item from the range start reads back intact.
                 let bounds = journal.bounds();
                 assert_eq!(bounds.start, 5);
                 if torn {
@@ -710,7 +764,8 @@ mod tests {
                 journal.destroy().await.unwrap();
             }
 
-            // A torn tail inside the range is repaired.
+            // A torn tail inside the range is repaired. The repair's syncs add to the torn open's
+            // count.
             assert!(calls[1] > calls[0]);
         });
     }
@@ -724,12 +779,17 @@ mod tests {
         #[case] range_end: u64,
     ) {
         deterministic::Runner::default().start(|context| async move {
+            // Run the same open over a clean store and a torn one, each in its own partition,
+            // and compare the syncs each open issues.
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
                 let mut cfg = variable_test_cfg(&context);
                 cfg.partition = format!("variable-sync-journal-{torn}");
                 let data = format!("{}_data", cfg.partition);
+
+                // Retain 40..50. Pruning to 40 removes every data blob below blob 8, leaving
+                // blobs 8 and 9 full.
                 let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
                     .await
                     .unwrap();
@@ -742,11 +802,15 @@ mod tests {
                 let journal = journal.sync().await.unwrap();
                 assert_eq!(journal.bounds(), 40..50);
                 drop(journal);
+
+                // Tear data blob 9, which holds 45..49 and is the newest data blob with items.
                 if torn {
                     tear(&context, &data, 9).await;
                 }
 
-                // Discarded data is never synced, so a sync fault on its partition is unreachable.
+                // `reopen` bypasses the counter and the fault for the ordinary reopens below.
+                // Count every blob sync issued through `delayed`. Discarded data is never synced,
+                // so a sync fault on its partition is unreachable.
                 let reopen = context.child("reopen");
                 let pending = PendingSyncs::default();
                 pending.arm();
@@ -757,6 +821,11 @@ mod tests {
                     },
                     pending: pending.clone(),
                 };
+
+                // Both cases start below the retained start 40, one with the whole range below it
+                // and one overlapping 40..50. The span, read from blob names and the offsets
+                // checkpoint alone, covers neither start, so the open resets to an empty journal
+                // at the range start without opening any stored blob.
                 let range = non_empty_range!(
                     Location::<F>::new(range_start),
                     Location::<F>::new(range_end)
@@ -794,7 +863,8 @@ mod tests {
                 journal.destroy().await.unwrap();
             }
 
-            // Local history cannot serve the range start, so its torn tail adds no repair.
+            // Opening the torn blob would trim and sync its tail. Local history cannot serve the
+            // range start, so its torn tail adds no repair.
             assert_eq!(calls[0], calls[1]);
         });
     }
@@ -802,6 +872,8 @@ mod tests {
     #[test_traced]
     fn test_variable_sync_journal_repairs_retained_torn_tail() {
         deterministic::Runner::default().start(|context| async move {
+            // Run the same open over a clean store and a torn one, each in its own partition,
+            // and compare the syncs each open issues.
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
@@ -817,16 +889,23 @@ mod tests {
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
+
+                // Tear data blob 5, which holds 25..29 and is the newest data blob with items.
                 if torn {
                     tear(&context, &format!("{}_data", cfg.partition), 5).await;
                 }
 
+                // Count every blob sync issued through `delayed`. drive_pending_syncs releases
+                // each parked sync so the open completes.
                 let pending = PendingSyncs::default();
                 pending.arm();
                 let delayed = DelayedSyncContext {
                     inner: context,
                     pending: pending.clone(),
                 };
+
+                // The range reaches the stored end 30, so data blob 5 lies inside it and recovery
+                // opens it, repairing any torn tail.
                 let range = non_empty_range!(Location::<F>::new(7), Location::<F>::new(30));
                 let journal = drive_pending_syncs(
                     &pending,
@@ -838,6 +917,10 @@ mod tests {
                 )
                 .await
                 .unwrap();
+
+                // Pruning to 7 removes only whole sections below it, so both copies start at 5.
+                // The torn copy ends before 30 after repair truncates its torn tail. Every
+                // retained item from the range start reads back intact.
                 let bounds = journal.bounds();
                 assert_eq!(bounds.start, 5);
                 if torn {
@@ -852,7 +935,8 @@ mod tests {
                 journal.destroy().await.unwrap();
             }
 
-            // A torn tail inside the range is repaired.
+            // A torn tail inside the range is repaired. The repair's syncs add to the torn open's
+            // count.
             assert!(calls[1] > calls[0]);
         });
     }
@@ -868,6 +952,11 @@ mod tests {
         #[case] repairs_tail: bool,
     ) {
         deterministic::Runner::default().start(|context| async move {
+            // Thirty items fill blobs 0 through 5, so the start 50 lies past every blob's
+            // capacity. Twenty-seven items leave 25 and 26 in blob 5, whose capacity 25..30
+            // covers the start 28. In both cases every stored item lies below the range start.
+            // Each case runs over a clean store and a torn one, comparing the syncs each open
+            // issues.
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
@@ -883,10 +972,15 @@ mod tests {
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
+
+                // Tear blob 5, the newest blob holding items in either case.
                 if torn {
                     tear(&context, &format!("{}-blobs", cfg.partition), 5).await;
                 }
 
+                // `reopen` bypasses the counter for the ordinary reopen below. Count every blob
+                // sync issued through `delayed`. drive_pending_syncs releases each parked sync so
+                // the open completes.
                 let reopen = context.child("reopen");
                 let pending = PendingSyncs::default();
                 pending.arm();
@@ -911,7 +1005,8 @@ mod tests {
                 assert_eq!(journal.bounds(), range_start..range_start);
                 calls.push(pending.calls());
 
-                // The cleared journal accepts appends that survive an ordinary reopen.
+                // The cleared journal accepts appends that survive an ordinary reopen. Its blobs
+                // were opened through `delayed`, so its sync also runs under drive_pending_syncs.
                 for value in range_start..range_start + 3 {
                     (journal, _) = journal.append(&Digest([value as u8; 32])).await.unwrap();
                 }
@@ -944,12 +1039,16 @@ mod tests {
     #[test_traced]
     fn test_variable_sync_journal_stale_below_start_leaves_blobs_unopened() {
         deterministic::Runner::default().start(|context| async move {
+            // Run the same open over a clean store and a torn one, each in its own partition,
+            // and compare the syncs each open issues.
             let mut calls = Vec::new();
             for torn in [false, true] {
                 let context = context.child(if torn { "torn" } else { "clean" });
                 let mut cfg = variable_test_cfg(&context);
                 cfg.partition = format!("variable-sync-journal-{torn}");
                 let data = format!("{}_data", cfg.partition);
+
+                // Thirty items fill data blobs 0 through 5.
                 let mut journal = VariableJournal::init(context.child("setup"), cfg.clone())
                     .await
                     .unwrap();
@@ -960,11 +1059,15 @@ mod tests {
                 // Commit leaves the watermark behind the data, so the tail is unacknowledged.
                 let journal = journal.commit().await.unwrap();
                 drop(journal);
+
+                // Tear data blob 5, which holds 25..29 and is the newest data blob with items.
                 if torn {
                     tear(&context, &data, 5).await;
                 }
 
-                // Discarded data is never synced, so a sync fault on its partition is unreachable.
+                // `reopen` bypasses the counter and the fault for the ordinary reopens below.
+                // Count every blob sync issued through `delayed`. Discarded data is never synced,
+                // so a sync fault on its partition is unreachable.
                 let reopen = context.child("reopen");
                 let pending = PendingSyncs::default();
                 pending.arm();
@@ -975,6 +1078,10 @@ mod tests {
                     },
                     pending: pending.clone(),
                 };
+
+                // The range start 50 lies past every data blob's capacity. The span, read from
+                // blob names and the offsets checkpoint alone, cannot cover it, so the open resets
+                // to an empty journal at 50 without opening any stored blob.
                 let range = non_empty_range!(Location::<F>::new(50), Location::<F>::new(70));
                 let journal = drive_pending_syncs(
                     &pending,

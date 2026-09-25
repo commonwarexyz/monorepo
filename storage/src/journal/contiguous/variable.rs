@@ -2823,7 +2823,7 @@ mod tests {
     #[test]
     fn test_bounded_inspection_preserves_acknowledged_offsets_until_publication() {
         deterministic::Runner::default().start(|context| async move {
-            // Acknowledge 20 items across four full sections.
+            // Acknowledge 20 items across four full sections, so the offsets watermark is 20.
             let cfg = initialization_cfg(&context, "inspection-preserves-offsets", 5);
             let offsets_partition = cfg.offsets_partition();
             let mut journal = Journal::<_, u64>::init(context.child("seed"), cfg.clone())
@@ -2845,7 +2845,8 @@ mod tests {
 
             // The cap clamps the recovery anchor to the ceiling, below the watermark, so inspection
             // rebuilds no offsets. It must leave the acknowledged offsets and their watermark for
-            // publication to trim.
+            // publication to trim. Comparing offsets blob names before and after the open detects
+            // any blob it removed.
             let offsets_blobs = format!("{offsets_partition}-blobs");
             let offsets = context.scan(&offsets_blobs).await.unwrap();
             let pending = Recovery::<_, u64>::open(context.child("bounded"), cfg.clone(), Some(10))
@@ -2874,6 +2875,8 @@ mod tests {
                 assert_eq!(journal.read(item).await.unwrap(), item);
             }
             drop(journal);
+
+            // Publishing the full history keeps the offsets watermark at the acknowledged end.
             assert_eq!(
                 fixed::Journal::<_, u64>::persisted_watermark(
                     context.child("reopened"),
@@ -2993,8 +2996,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Without data blobs the span would collapse to the offsets start, so a sync start
-            // inside the acknowledged range would clear it. The span must report corruption.
+            // Without data blobs the span would collapse to the offsets start 0. Start 7 lies
+            // inside the acknowledged range but an empty span at 0 does not cover it, so init_sync
+            // would clear the acknowledged items. The span must report corruption instead.
             let result = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("sync"),
                 config.clone(),
@@ -9126,7 +9130,8 @@ mod tests {
             drop(journal.sync().await.unwrap());
 
             // Crash a clear to 50 after it durably staged its intent, either before or after it
-            // removed the data partition.
+            // removed the data partition. Staging writes only the offsets checkpoint, so the
+            // offsets blobs survive in both cuts.
             fixed::Journal::<_, u64>::test_stage_clear(
                 context.child("intent"),
                 &cfg.offsets_partition(),
@@ -9138,8 +9143,9 @@ mod tests {
                 context.remove(&cfg.data_partition(), None).await.unwrap();
             }
 
-            // No ordinary open consumes the intent first. A start at the target completes the
-            // staged clear, and any other start replaces it with a clear to the start.
+            // No ordinary open consumes the intent first. The span of a staged clear is empty at
+            // its target, so only a start of 50 calls `recover`, which completes the staged clear.
+            // Starts 7 and 60 call `clear`, which replaces the intent with a clear to the start.
             let mut journal = authenticated::init_sync::<_, Journal<_, u64>>(
                 context.child("sync"),
                 cfg.clone(),
@@ -9149,7 +9155,8 @@ mod tests {
             .unwrap();
             assert_eq!(journal.bounds(), start..start);
 
-            // The reset journal appends from the sync start.
+            // The reset journal appends from the sync start. Values from 1000 differ from every
+            // stale value, so the reads below tell new items from stale ones.
             for value in 0..3u64 {
                 let pos;
                 (journal, pos) = journal.append(&(1000 + value)).await.unwrap();

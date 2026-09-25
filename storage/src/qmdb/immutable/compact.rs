@@ -2308,6 +2308,8 @@ mod tests {
         witness_cfg: &JournalConfig<()>,
         blob: u64,
     ) {
+        // The variable journal keeps data blobs in `{partition}_data`, named by the big-endian
+        // section index.
         let partition = format!("{}_data", witness_cfg.partition);
         let (handle, len) = context.open(&partition, &blob.to_be_bytes()).await.unwrap();
         handle.resize(len - 1).await.unwrap();
@@ -2322,6 +2324,9 @@ mod tests {
         witness_cfg: JournalConfig<()>,
         cap: Location<mmr::Family>,
     ) -> (DelayedDb, usize) {
+        // Arming counts every durability call from here on. The gate blocks the first call and
+        // every later started sync parks. `drive_pending_syncs` releases them whenever
+        // initialization stalls.
         let pending = PendingSyncs::default();
         pending.arm();
         let delayed = DelayedSyncContext {
@@ -2344,6 +2349,10 @@ mod tests {
     #[test_traced]
     fn test_compact_bounded_initialization_ignores_discarded_witness_sections() {
         deterministic::Runner::default().start(|context| async move {
+            // Build twin journals with one witness per section, so position `p` lives in data
+            // blob `p`. Each holds the bootstrap witness (position 0, size 1), a synced commit
+            // (position 1, size 2), and a commit without sync (position 2, size 3). The control
+            // twin stays intact and sets the baseline durability count.
             let control_cfg =
                 sectioned_witness_config("immutable-skip-discarded-control", &context);
             let torn_cfg = sectioned_witness_config("immutable-skip-discarded-torn", &context);
@@ -2371,6 +2380,9 @@ mod tests {
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 drop(db.commit().await.unwrap());
             }
+
+            // The twins share one history, so the synced commit's size and root are the expected
+            // recovery for both.
             assert_eq!(states[0], states[1]);
             let (size, root) = states[0];
 
@@ -2378,6 +2390,8 @@ mod tests {
             // must not open it. Tear its data blob: repairing the tail would sync it.
             tear_witness_data(&context, &torn_cfg, 2).await;
 
+            // Both twins recover the synced commit under the bound. They differ only in data
+            // blob 2, so equal durability counts show the torn blob was not repaired.
             let (control, control_calls) =
                 open_bounded_counting(&context, "control_cap", control_cfg, size).await;
             let (torn, torn_calls) =
@@ -2406,6 +2420,8 @@ mod tests {
             let torn_cfg = witness_config("immutable-repair-retained-torn", &context);
             let mut states = Vec::new();
             for (label, witness_cfg) in [("clean", &clean_cfg), ("torn", &torn_cfg)] {
+                // Fresh storage bootstraps the witness at position 0 (size 1), the state the torn
+                // twin falls back to.
                 let cfg = Config {
                     strategy: Sequential,
                     witness: witness_cfg.clone(),
@@ -2428,6 +2444,9 @@ mod tests {
             }
             assert_eq!(states[0], states[1]);
             let (genesis, size, root) = states[0];
+
+            // The torn twin's last page in section 0 holds the end of the witness at position 1,
+            // so tearing it leaves that witness incomplete.
             tear_witness_data(&context, &torn_cfg, 0).await;
 
             // Section 0 lies below the bound, so both twins open it. The torn twin trims its
@@ -2436,6 +2455,9 @@ mod tests {
                 open_bounded_counting(&context, "clean_cap", clean_cfg, size).await;
             let (torn, torn_calls) =
                 open_bounded_counting(&context, "torn_cap", torn_cfg, size).await;
+
+            // The clean twin recovers the witness at position 1. The torn twin recovers the
+            // bootstrap witness and spends extra durability calls on the repair.
             assert_eq!(clean.size(), size);
             assert_eq!(clean.root(), root);
             assert_eq!(torn.size(), Location::new(1));
@@ -2455,7 +2477,9 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_bounded_initialization_after_import_below_positions() {
         deterministic::Runner::default().start(|context| async move {
-            // A source state of size 2, captured from its witness journal.
+            // A source state of size 2, captured from its witness journal. Its tip witness holds
+            // the pinned nodes one operation below the commit, which a compact-sync boundary
+            // response carries.
             let src_cfg = sectioned_witness_config("immutable-import-below-src", &context);
             let (src_size, src_root) =
                 seed_witness_sections(context.child("src"), src_cfg.clone(), 1).await[0];
@@ -2469,6 +2493,10 @@ mod tests {
             // The destination has used positions 0 through 3, so the import lands at position 4.
             let dst_cfg = sectioned_witness_config("immutable-import-below-dst", &context);
             seed_witness_sections(context.child("dst"), dst_cfg.clone(), 3).await;
+
+            // Import the source state from its last commit location, pinned nodes, and commit
+            // operation. `seed_witness_sections` committed it with metadata `fill(1)` at floor 0,
+            // so the rebuilt root matches the source root.
             let journal = witness::Journal::init(context.child("import"), dst_cfg.clone())
                 .await
                 .unwrap();
@@ -2482,6 +2510,9 @@ mod tests {
             )
             .unwrap();
             assert_eq!(imported.root(), src_root);
+
+            // Committing applies the pending import. It clears the destination journal at its end
+            // and appends the imported witness there, so its only entry has size 2 at position 4.
             drop(imported.commit().await.unwrap());
             let journal = witness::Journal::<_, mmr::Family, Digest>::init(
                 context.child("placed"),
@@ -2492,7 +2523,8 @@ mod tests {
             assert_eq!(journal.bounds(), 4..5);
             drop(journal);
 
-            // Three more commits occupy positions 5 through 7 with sizes 3 through 5.
+            // Reopening recovers the imported state. Three more commits occupy positions 5 through
+            // 7 with sizes 3 through 5. `states` holds the size and root at positions 4 through 7.
             let cfg = Config {
                 strategy: Sequential,
                 witness: dst_cfg.clone(),
@@ -2514,9 +2546,12 @@ mod tests {
             }
             drop(db);
 
-            // From the tip down: a view ending at the bound with a tip size below the bound
-            // widens, and a bound at or below the retained start opens unbounded. Each selects
-            // by size.
+            // Open at each recorded size from the tip down. The cap-5 bounded view holds only
+            // position 4 (size 2). It ends at the bound with a tip size below the bound, so
+            // recovery widens and selects position 7 by size. Caps 4, 3, and 2 lie at or below the
+            // retained start (position 4), so recovery opens unbounded and selects positions 6, 5,
+            // and 4. Each open discards the witnesses above its selection, so the caps must
+            // descend.
             for (size, root) in states.into_iter().rev() {
                 let db = open_bounded::<mmr::Family>(
                     context.child("bounded").with_attribute("cap", *size),
@@ -2528,6 +2563,8 @@ mod tests {
                 assert_eq!(db.size(), size);
                 assert_eq!(db.root(), root);
             }
+
+            // Only the imported witness remains, and its size 2 exceeds cap 1.
             assert!(matches!(
                 open_bounded::<mmr::Family>(context.child("pruned"), dst_cfg, Location::new(1))
                     .await,
@@ -2544,6 +2581,9 @@ mod tests {
             let partition = "immutable-failed-bounded-offsets";
             let cap = Location::new(5);
             let witness_cfg = sectioned_witness_config(partition, &context);
+
+            // The witness journal lives in `{partition}-witness`. Its offsets journal, whose
+            // checkpoint persists the recovery watermark, lives in `{partition}-witness_offsets`.
             let offsets_partition = format!("{partition}-witness_offsets");
             let cfg = Config {
                 strategy: Sequential,
@@ -2553,8 +2593,8 @@ mod tests {
             let mut db: TestDb<mmr::Family> =
                 Db::init(context.child("seed"), cfg, None).await.unwrap();
 
-            // The first commit carries six sets, so the witness at position 1 has size 8, above
-            // the cap used below.
+            // The first batch appends six sets and a commit after the bootstrap commit, so the
+            // witness at position 1 has size 8, above the cap used below.
             let mut batch = db.new_batch();
             for key in 1..=6u8 {
                 batch = batch.set(Sha256::fill(key), Sha256::fill(key));
@@ -2566,6 +2606,8 @@ mod tests {
             assert!(first_retained_size > cap);
 
             // Eight synced empty commits occupy positions 2 through 9 with sizes 9 through 16.
+            // One witness per section puts positions 1 through 4 in the sections the cap-5 view
+            // opens, and positions 5 through 9 in sections it discards.
             for _ in 0..8 {
                 let batch = db
                     .new_batch()
@@ -2578,7 +2620,8 @@ mod tests {
             let tip = db.size();
 
             // Pruning at the first commit removes the bootstrap section. The retained start
-            // (position 1) lies below the cap while its size lies above it.
+            // (position 1) lies below the cap while its size lies above it. A retained start at
+            // or above the cap would open unbounded instead.
             let db = db
                 .prune(first_retained_size)
                 .await
@@ -2609,8 +2652,8 @@ mod tests {
                 Err(Error::HistoricalFloorPruned(found)) if found == cap
             ));
 
-            // Inspection anchored at the ceiling skips the offsets truncate, so the failed attempt
-            // leaves the durable watermark at 10.
+            // Selection fails before publication, and inspection anchored at the ceiling skips the
+            // offsets truncate, so the failed attempt leaves the durable watermark at 10.
             let watermark = fixed::Journal::<_, u64>::persisted_watermark(
                 context.child("watermark_after"),
                 &offsets_partition,
