@@ -137,7 +137,7 @@ jobs:
       run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
 
   Tests-Subset:
-    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\"${{ matrix.sde && format(', sde: {0}', matrix.sde) }})"
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\", sde: \"${{ matrix.sde }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) }}\")"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
