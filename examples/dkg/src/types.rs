@@ -8,8 +8,11 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Block as ConsensusBlock, BoundedBlock, CertifiableBlock, Epochable, Heightable, Reporter,
-    marshal::{self, Update, standard::Standard},
-    simplex::{self, types::Context},
+    simplex::{
+        self,
+        marshal::{self, Update, standard::Standard},
+        types::Context,
+    },
     types::{Epoch, Height, Round, View},
 };
 use commonware_cryptography::{
