@@ -284,9 +284,11 @@ where
         );
     }
 
-    /// Return the most recent location from which this database can safely be synced, and the
-    /// upper bound on [`Self::prune`]'s `loc`. For keyless databases, this equals the
-    /// inactivity floor declared by the last committed batch.
+    /// Return the inactivity floor declared by the last retained commit, which is the upper
+    /// bound on [`Self::prune`]'s `loc`.
+    ///
+    /// This logical boundary may precede the retained start in [`Self::bounds`]. Proofs and
+    /// serving are available only from the retained start.
     pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
