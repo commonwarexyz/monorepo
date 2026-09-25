@@ -2175,6 +2175,17 @@ mod tests {
         assert!(proof.verify::<Sha256, _, N>(loc, &[element], &[chunk], &root));
     }
 
+    #[test]
+    fn chunk_width_boundaries() {
+        let max_exponent = (usize::BITS - 4).min(59);
+        let largest = 1usize << max_exponent;
+        assert_eq!(chunk_bits(largest).unwrap(), (largest * 8) as u64);
+
+        for width in [largest << 1, 0, 3, usize::MAX] {
+            assert!(chunk_bits(width).is_err());
+        }
+    }
+
     fn invalid_chunk_sizes() -> impl Iterator<Item = usize> {
         [0, 3, usize::MAX, 1 << (usize::BITS - 1)]
             .into_iter()

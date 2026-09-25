@@ -16,6 +16,8 @@ use core::{
 };
 #[cfg(feature = "std")]
 use std::collections::VecDeque;
+#[cfg(verus_keep_ghost)]
+use vstd::prelude::*;
 
 #[cfg(feature = "std")]
 mod atomic;
@@ -37,6 +39,7 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8;
 /// Operations panic if `bit / CHUNK_SIZE_BITS > usize::MAX`. On 32-bit systems
 /// with N=32, this occurs at bit >= 1,099,511,627,776.
 #[derive(Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(verus_keep_ghost, verus_verify)]
 pub struct BitMap<const N: usize = DEFAULT_CHUNK_SIZE> {
     /// The bitmap itself, in chunks of size N bytes. Within each byte, lowest order bits are
     /// treated as coming before higher order bits in the bit ordering.
@@ -53,7 +56,19 @@ impl<const N: usize> BitMap<N> {
     const _CHUNK_SIZE_NON_ZERO_ASSERT: () = assert!(N > 0, "chunk size must be > 0");
 
     /// The size of a chunk in bits.
-    pub const CHUNK_SIZE_BITS: u64 = (N * 8) as u64;
+    pub const CHUNK_SIZE_BITS: u64 = Self::chunk_size_bits();
+
+    #[inline(always)]
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, allow(unused, verus_impl_method_marker))]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result =>
+        requires N as int * 8 <= usize::MAX,
+        ensures result as int == N as int * 8,
+    ))]
+    const fn chunk_size_bits() -> u64 {
+        (N * 8) as u64
+    }
 
     /// A chunk of all 0s.
     pub const EMPTY_CHUNK: [u8; N] = [0u8; N];
@@ -205,6 +220,9 @@ impl<const N: usize> BitMap<N> {
     /// Get the value at the given `bit` from the `chunk`.
     /// `bit` is an index into the entire bitmap, not just the chunk.
     #[inline]
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, allow(unused, verus_impl_method_marker))]
+    #[cfg_attr(verus_keep_ghost, verus_spec(requires N > 0,))]
     pub const fn get_bit_from_chunk(chunk: &[u8; N], bit: u64) -> bool {
         let byte = Self::chunk_byte_offset(bit);
         let byte = chunk[byte];
@@ -549,12 +567,18 @@ impl<const N: usize> BitMap<N> {
 
     /// Convert a bit offset into a bitmask for the byte containing that bit.
     #[inline]
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, allow(unused, verus_impl_method_marker))]
+    #[cfg_attr(verus_keep_ghost, verus_spec())]
     pub(super) const fn chunk_byte_bitmask(bit: u64) -> u8 {
         1 << (bit % 8)
     }
 
     /// Convert a bit into the index of the byte within a chunk containing the bit.
     #[inline]
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, allow(unused, verus_impl_method_marker))]
+    #[cfg_attr(verus_keep_ghost, verus_spec(result => requires N > 0, ensures result < N,))]
     pub(super) const fn chunk_byte_offset(bit: u64) -> usize {
         ((bit / 8) % N as u64) as usize
     }
@@ -565,12 +589,23 @@ impl<const N: usize> BitMap<N> {
     ///
     /// Panics if the chunk index overflows `usize`.
     #[inline]
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, allow(unused, verus_impl_method_marker))]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result =>
+        requires N > 0, N as int * 8 <= usize::MAX,
+            bit as int / (N as int * 8) <= usize::MAX,
+        ensures result as int == bit as int / (N as int * 8),
+    ))]
     pub(super) fn to_chunk_index(bit: u64) -> usize {
-        let chunk = bit / Self::CHUNK_SIZE_BITS;
+        let chunk = bit / Self::chunk_size_bits();
+        #[cfg(not(verus_keep_ghost))]
         assert!(
             chunk <= usize::MAX as u64,
             "chunk overflow: {chunk} exceeds usize::MAX",
         );
+        #[cfg(verus_keep_ghost)]
+        proof! { assert(chunk <= usize::MAX as u64); }
         chunk as usize
     }
 
@@ -947,43 +982,431 @@ impl<const N: usize> iter::Iterator for Iterator<'_, N> {
 
 impl<const N: usize> ExactSizeIterator for Iterator<'_, N> {}
 
+// Readable implementations supply a coherent chunk snapshot. Callers keep it unchanged
+// throughout iteration, including when the source uses interior mutability.
+#[cfg(not(verus_keep_ghost))]
+#[doc(hidden)]
+pub trait ScanModel<const N: usize> {}
+
+#[cfg(not(verus_keep_ghost))]
+impl<B: ?Sized, const N: usize> ScanModel<N> for B {}
+
+#[cfg(verus_keep_ghost)]
+verus! {
+pub trait ScanModel<const N: usize> {
+    spec fn scan_snapshot(&self) -> scan_model::Snapshot;
+    spec fn scan_coherent(&self) -> bool;
+}
+
+impl<const N: usize> ScanModel<N> for BitMap<N> {
+    closed spec fn scan_snapshot(&self) -> scan_model::Snapshot {
+        scan_model::Snapshot {
+            len: self.len,
+            pruned: 0,
+            chunks: IMap::new(|i: int| 0 <= i < self.chunks@.len(), |i: int| self.chunks@[i]@),
+        }
+    }
+
+    closed spec fn scan_coherent(&self) -> bool { true }
+}
+
+mod scan_model {
+    use super::*;
+    use vstd::arithmetic::div_mod::{
+        lemma_fundamental_div_mod, lemma_fundamental_div_mod_converse,
+    };
+
+    pub struct Snapshot {
+        pub len: u64,
+        pub pruned: usize,
+        pub chunks: IMap<int, Seq<u8>>,
+    }
+
+    pub open spec fn snapshot<B: ScanModel<N> + ?Sized, const N: usize>(b: &B) -> Snapshot {
+        b.scan_snapshot()
+    }
+
+    pub open spec fn set(word: u64, i: u64) -> bool { scan_proof::bit(word, i) == 1 }
+
+    // A constructible OnesIter has at least N+32 bytes on the pinned 64-bit
+    // compiler, whose object-size limit is 2^61. The 32-bit width bound is smaller.
+    pub open spec fn valid<B: ScanModel<N> + ?Sized, const N: usize>(b: &B) -> bool {
+        let s = snapshot::<B, N>(b);
+        let c = N as int * 8;
+        &&& b.scan_coherent()
+        &&& N > 0
+        &&& c <= usize::MAX
+        &&& N as int + 32 < 0x2000_0000_0000_0000int
+        &&& s.pruned as int * c <= s.len
+        &&& forall|j: int| s.pruned <= j && j * c < s.len ==>
+            s.chunks.dom().contains(j) && #[trigger] s.chunks[j].len() == N
+    }
+
+    pub open spec fn addressable<B: ScanModel<N> + ?Sized, const N: usize>(b: &B, pos: int) -> bool {
+        let s = snapshot::<B, N>(b);
+        pos >= s.len || s.pruned as int * (N as int * 8) == s.len
+            || (s.len - 1) / (N as int * 8) <= usize::MAX
+    }
+
+    pub open spec fn truth<B: ScanModel<N> + ?Sized, const N: usize>(b: &B, i: int) -> bool {
+        let s = snapshot::<B, N>(b);
+        let c = N as int * 8;
+        s.pruned as int * c <= i < s.len
+            && set(s.chunks[i / c][(i % c) / 8] as u64, ((i % c) % 8) as u64)
+    }
+
+    pub proof fn zero_word()
+        ensures forall|i: u64| i < 64 ==> !#[trigger] set(0, i),
+    {
+        assert forall|i: u64| i < 64 implies !#[trigger] set(0, i) by {
+            assert((0u64 >> i) & 1 == 0) by(bit_vector);
+        }
+    }
+
+    pub proof fn aligned_base(p: int, c: int)
+        requires p >= 0, c > 0,
+        ensures ({
+            let b = p / c * c + (p % c) / 64 * 64;
+            &&& 0 <= b <= p < b + 64
+            &&& b / c == p / c
+            &&& b % c == (p % c) / 64 * 64
+            &&& (b % c) % 64 == 0
+            &&& (b % c) % 8 == 0
+            &&& p < b + c - b % c
+        }),
+    {
+        lemma_fundamental_div_mod(p, c);
+        let r = p % c;
+        lemma_fundamental_div_mod(r, 64);
+        let a = r / 64 * 64;
+        assert(p / c * c == c * (p / c)) by(nonlinear_arith);
+        assert(0 <= p / c * c <= p) by(nonlinear_arith)
+            requires p >= 0, c > 0, 0 <= p % c < c, p == c * (p / c) + p % c;
+        lemma_fundamental_div_mod_converse(p / c * c + a, c, p / c, a);
+        lemma_fundamental_div_mod_converse(a, 64, r / 64, 0);
+        assert(a == (r / 64 * 8) * 8);
+        lemma_fundamental_div_mod_converse(a, 8, r / 64 * 8, 0);
+    }
+
+    pub proof fn chunk_index(p: int, c: int, pruned: int)
+        requires c > 0, pruned >= 0, pruned * c <= p,
+        ensures pruned <= p / c, p / c * c <= p,
+    {
+        lemma_fundamental_div_mod(p, c);
+        vstd::arithmetic::div_mod::lemma_div_by_multiple(pruned, c);
+        vstd::arithmetic::div_mod::lemma_div_is_ordered(pruned * c, p, c);
+        assert(p / c * c == c * (p / c)) by(nonlinear_arith);
+    }
+
+    pub proof fn chunk_offset(b: int, c: int, i: int)
+        requires b >= 0, c > 0, 0 <= i, b % c + i < c,
+        ensures (b + i) / c == b / c, (b + i) % c == b % c + i,
+    {
+        lemma_fundamental_div_mod(b, c);
+        assert(b + i == (b / c) * c + (b % c + i)) by(nonlinear_arith)
+            requires b == c * (b / c) + b % c;
+        lemma_fundamental_div_mod_converse(b + i, c, b / c, b % c + i);
+    }
+
+    pub proof fn advance(b: int, c: int)
+        requires b >= 0, c > 0, (b % c) % 64 == 0,
+        ensures ({
+            let same = b % c + 64 < c;
+            let n = b + if same { 64 } else { c - b % c };
+            &&& n > b
+            &&& (n % c) % 64 == 0
+            &&& (n % c) % 8 == 0
+            &&& if same { n / c == b / c } else { n / c == b / c + 1 }
+        }),
+    {
+        let r = b % c;
+        lemma_fundamental_div_mod(b, c);
+        lemma_fundamental_div_mod(r, 64);
+        if r + 64 < c {
+            chunk_offset(b, c, 64);
+            lemma_fundamental_div_mod_converse(r + 64, 64, r / 64 + 1, 0);
+            assert(r + 64 == (r / 64 + 1) * 8 * 8);
+            lemma_fundamental_div_mod_converse(r + 64, 8, (r / 64 + 1) * 8, 0);
+        } else {
+            assert(b + c - r == (b / c + 1) * c) by(nonlinear_arith)
+                requires b == c * (b / c) + r;
+            lemma_fundamental_div_mod_converse(b + c - r, c, b / c + 1, 0);
+        }
+    }
+}
+
+impl<'a, B: ScanModel<N>, const N: usize> OnesIter<'a, B, N> {
+    pub closed spec fn source(&self) -> &'a B { self.bitmap }
+    pub closed spec fn length(&self) -> u64 { self.len }
+
+    pub closed spec fn end(&self) -> int {
+        let c = N as int * 8;
+        vstd::math::min(self.len as int,
+            vstd::math::min(self.base as int + 64, self.base as int + c - self.base as int % c))
+    }
+
+    pub closed spec fn pending(&self, i: int) -> bool {
+        (self.base <= i < self.end() && scan_model::set(self.word, (i - self.base) as u64))
+            || (self.end() <= i < self.len && scan_model::truth::<B, N>(self.bitmap, i))
+    }
+
+    #[verifier::type_invariant]
+    pub closed spec fn safe(&self) -> bool {
+        let c = N as int * 8;
+        let s = scan_model::snapshot::<B, N>(self.bitmap);
+        &&& scan_model::valid::<B, N>(self.bitmap)
+        &&& self.len == s.len
+        &&& self.base <= self.len
+        &&& self.base == self.len ==> self.word == 0
+        &&& self.base < self.len ==> {
+            &&& s.pruned as int * c <= self.base
+            &&& (self.base as int % c) % 64 == 0
+            &&& (self.len - 1) / c <= usize::MAX
+        }
+        &&& forall|i: u64| i < 64 && #[trigger] scan_model::set(self.word, i) ==>
+            self.base as int + i < self.len && self.base as int % c + i < c
+    }
+
+    pub closed spec fn wf(&self) -> bool {
+        let c = N as int * 8;
+        let s = scan_model::snapshot::<B, N>(self.bitmap);
+        &&& self.safe()
+        &&& self.base < self.len ==> {
+            &&& self.chunk@ == s.chunks[self.base as int / c]
+        }
+        &&& forall|i: u64| i < 64 && #[trigger] scan_model::set(self.word, i) ==>
+            scan_model::truth::<B, N>(self.bitmap, self.base as int + i)
+    }
+
+    proof fn zero_pending(&self)
+        requires self.word == 0,
+        ensures forall|i: int| #[trigger] self.pending(i) <==>
+            self.end() <= i < self.len && scan_model::truth::<B, N>(self.bitmap, i),
+    {
+        scan_model::zero_word();
+        assert forall|i: int| #[trigger] self.pending(i) <==>
+            (self.end() <= i < self.len && scan_model::truth::<B, N>(self.bitmap, i)) by {
+            if self.base <= i < self.end() {
+                assert(0 <= i - self.base < 64);
+                assert(!scan_model::set(0, (i - self.base) as u64));
+            }
+        }
+    }
+
+    proof fn establish_word(&self, cut: int)
+        requires
+            scan_model::valid::<B, N>(self.bitmap),
+            scan_model::addressable::<B, N>(self.bitmap, self.base as int),
+            self.len == scan_model::snapshot::<B, N>(self.bitmap).len,
+            scan_model::snapshot::<B, N>(self.bitmap).pruned as int * (N as int * 8) <= self.base,
+            self.base < self.len,
+            (self.base as int % (N as int * 8)) % 64 == 0,
+            self.chunk@ == scan_model::snapshot::<B, N>(self.bitmap).chunks[self.base as int / (N as int * 8)],
+            self.base <= cut < self.end(),
+            forall|i: u64| i < 64 ==> (#[trigger] scan_model::set(self.word, i) <==>
+                cut <= self.base as int + i < self.len && scan_proof::chunk_bit(
+                    self.chunk@, self.base as int % (N as int * 8) + i)),
+        ensures
+            self.wf(),
+            forall|i: int| #[trigger] self.pending(i) <==>
+                cut <= i && scan_model::truth::<B, N>(self.bitmap, i),
+    {
+        let c = N as int * 8;
+        assert forall|i: u64| i < 64 && #[trigger] scan_model::set(self.word, i) implies
+            self.base as int + i < self.len
+                && self.base as int % c + i < c
+                && scan_model::truth::<B, N>(self.bitmap, self.base as int + i) by {
+            scan_model::chunk_offset(self.base as int, c, i as int);
+        }
+        assert forall|i: int| #[trigger] self.pending(i) <==>
+            (cut <= i && scan_model::truth::<B, N>(self.bitmap, i)) by {
+            if self.base <= i < self.end() {
+                let k = (i - self.base) as u64;
+                assert(k < 64);
+                scan_model::chunk_offset(self.base as int, c, k as int);
+                assert(scan_model::set(self.word, k) <==>
+                    cut <= i && scan_model::truth::<B, N>(self.bitmap, i));
+            }
+        }
+    }
+}
+
+// Standard adaptor contracts requiring a prophetic sequence are outside this theorem.
+// The scanner uses the explicit pending-set transition and enumeration client below.
+impl<'a, B: Readable<N>, const N: usize> vstd::std_specs::iter::IteratorSpecImpl
+    for OnesIter<'a, B, N>
+{
+    open spec fn obeys_prophetic_iter_laws(&self) -> bool { false }
+    #[verifier::prophetic]
+    open spec fn remaining(&self) -> Seq<u64> { Seq::empty() }
+    #[verifier::prophetic]
+    open spec fn will_return_none(&self) -> bool { false }
+    open spec fn decrease(&self) -> Option<nat> { None }
+    open spec fn peek(&self, _index: int) -> Option<u64> { None }
+}
+
+// The client records only values returned by the production constructor and next.
+// Its finite progress measure composes the per-call contract into exact enumeration.
+fn verify_enumeration<B: Readable<N>, const N: usize>(bitmap: &B, pos: u64)
+    -> (result: Ghost<Seq<u64>>)
+    requires scan_model::valid::<B, N>(bitmap), scan_model::addressable::<B, N>(bitmap, pos as int),
+    ensures
+        forall|bit: u64| #[trigger] result@.contains(bit) <==>
+            pos <= bit && scan_model::truth::<B, N>(bitmap, bit as int),
+        forall|i: int, j: int| 0 <= i < j < result@.len() ==>
+            #[trigger] result@[i] < #[trigger] result@[j],
+{
+    let mut iter = bitmap.ones_iter_from(pos);
+    let mut floor = pos.min(bitmap.len());
+    let ghost mut values = Seq::<u64>::empty();
+    loop
+        invariant
+            iter.wf(), iter.source() == bitmap,
+            floor <= iter.length(),
+            forall|bit: u64| #[trigger] values.contains(bit) <==>
+                pos <= bit && scan_model::truth::<B, N>(bitmap, bit as int) && bit < floor,
+            forall|i: int| #[trigger] iter.pending(i) <==>
+                floor <= i && pos <= i && scan_model::truth::<B, N>(bitmap, i),
+            forall|i: int, j: int| 0 <= i < j < values.len() ==>
+                #[trigger] values[i] < #[trigger] values[j],
+        decreases iter.length() - floor + 1,
+    {
+        let ghost before = iter;
+        let result = iter.next();
+        match result {
+            None => {
+                let again = iter.next();
+                assert(again.is_none());
+                assert forall|bit: u64| #[trigger] values.contains(bit) <==>
+                    (pos <= bit && scan_model::truth::<B, N>(bitmap, bit as int)) by {
+                    if pos <= bit && scan_model::truth::<B, N>(bitmap, bit as int) {
+                        assert(!before.pending(bit as int));
+                        assert(bit < floor);
+                    }
+                }
+                return Ghost(values);
+            },
+            Some(bit) => {
+                assert(bit < iter.length());
+                assert(bit >= floor);
+                proof {
+                    let previous = values;
+                    values = values.push(bit);
+                    assert forall|i: int, j: int| 0 <= i < j < values.len() implies
+                        #[trigger] values[i] < #[trigger] values[j] by {
+                        if j == previous.len() {
+                            assert(previous.contains(previous[i]));
+                        }
+                    }
+                    assert forall|b: u64| #[trigger] values.contains(b) <==>
+                        (pos <= b && scan_model::truth::<B, N>(bitmap, b as int) && b < bit + 1) by {
+                        vstd::seq_lib::lemma_seq_contains_after_push(previous, bit, b);
+                        assert(values.contains(b) <==> previous.contains(b) || b == bit);
+                        if floor <= b < bit {
+                            assert(!before.pending(b as int));
+                        }
+                    }
+                }
+                floor = bit + 1;
+            },
+        }
+    }
+}
+
+// Arbitrary bytes in a concrete non-word-sized bitmap inhabit the input contract.
+fn verify_snapshot_domain(bytes: [u8; 3])
+{
+    let mut chunks = VecDeque::new();
+    chunks.push_back(bytes);
+    let bitmap = BitMap::<3> { chunks, len: 24 };
+    assert(scan_model::valid::<BitMap<3>, 3>(&bitmap));
+}
+}
+
 /// Read-only access to a bitmap's chunks and metadata.
-pub trait Readable<const N: usize> {
+#[cfg_attr(verus_keep_ghost, verifier::verify)]
+pub trait Readable<const N: usize>: ScanModel<N> {
     /// Return the number of complete (fully filled) chunks.
     fn complete_chunks(&self) -> usize;
 
     /// Return the chunk data at the given absolute chunk index.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result =>
+        requires scan_model::valid::<Self, N>(self),
+            scan_model::snapshot::<Self, N>(self).pruned <= chunk,
+            chunk as int * (N as int * 8) < scan_model::snapshot::<Self, N>(self).len,
+        ensures result@ == scan_model::snapshot::<Self, N>(self).chunks[chunk as int],
+    ))]
     fn get_chunk(&self, chunk: usize) -> [u8; N];
 
     /// Return the last chunk and its size in bits.
     fn last_chunk(&self) -> ([u8; N], u64);
 
     /// Return the number of pruned chunks.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result => requires scan_model::valid::<Self, N>(self),
+        ensures result == scan_model::snapshot::<Self, N>(self).pruned,
+    ))]
     fn pruned_chunks(&self) -> usize;
 
     /// Return the total number of bits.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result => requires scan_model::valid::<Self, N>(self),
+        ensures result == scan_model::snapshot::<Self, N>(self).len,
+    ))]
     fn len(&self) -> u64;
 
     /// Returns true if the bitmap is empty.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(requires scan_model::valid::<Self, N>(self),))]
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Return the number of pruned bits (i.e. pruned chunks * bits per chunk).
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result => requires scan_model::valid::<Self, N>(self),
+        ensures result as int == scan_model::snapshot::<Self, N>(self).pruned as int * (N as int * 8),
+    ))]
     fn pruned_bits(&self) -> u64 {
-        (self.pruned_chunks() as u64) * BitMap::<N>::CHUNK_SIZE_BITS
+        (self.pruned_chunks() as u64) * BitMap::<N>::chunk_size_bits()
     }
 
     /// Return the value of a single bit.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        requires scan_model::valid::<Self, N>(self),
+            scan_model::snapshot::<Self, N>(self).pruned as int * (N as int * 8) <= bit,
+            bit < scan_model::snapshot::<Self, N>(self).len,
+            bit as int / (N as int * 8) <= usize::MAX,
+    ))]
     fn get_bit(&self, bit: u64) -> bool {
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            let c = N as int * 8;
+            vstd::arithmetic::div_mod::lemma_div_is_ordered(bit as int, scan_model::snapshot::<Self, N>(self).len as int - 1, c);
+            scan_model::chunk_index(bit as int, c, scan_model::snapshot::<Self, N>(self).pruned as int);
+        }
         let chunk = self.get_chunk(BitMap::<N>::to_chunk_index(bit));
-        BitMap::<N>::get_bit_from_chunk(&chunk, bit % BitMap::<N>::CHUNK_SIZE_BITS)
+        BitMap::<N>::get_bit_from_chunk(&chunk, bit % BitMap::<N>::chunk_size_bits())
     }
 
     /// Returns an iterator over the indices of set bits starting from `pos`.
     ///
     /// If `pos` falls within a pruned region, iteration starts at the first
     /// unpruned bit instead.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result => requires scan_model::valid::<Self, N>(self),
+            scan_model::addressable::<Self, N>(self, pos as int),
+        ensures result.wf(), result.source() == self,
+            forall|i: int| #[trigger] result.pending(i)
+                <==> pos <= i && scan_model::truth::<Self, N>(self, i),
+    ))]
     fn ones_iter_from(&self, pos: u64) -> OnesIter<'_, Self, N>
     where
         Self: Sized,
@@ -991,6 +1414,8 @@ pub trait Readable<const N: usize> {
         let len = self.len();
         let pruned_start = self.pruned_bits();
         let pos = pos.max(pruned_start);
+        #[cfg(verus_keep_ghost)]
+        proof! { scan_model::zero_word(); }
         let mut iter = OnesIter {
             bitmap: self,
             len,
@@ -999,12 +1424,47 @@ pub trait Readable<const N: usize> {
             chunk: [0; N],
         };
         if pos < len {
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                let c = N as int * 8;
+                scan_model::aligned_base(pos as int, c);
+                vstd::arithmetic::div_mod::lemma_div_is_ordered(pos as int, len as int - 1, c);
+                assert(pruned_start as int == scan_model::snapshot::<Self, N>(self).pruned as int * c);
+                scan_model::chunk_index(pos as int, c, scan_model::snapshot::<Self, N>(self).pruned as int);
+            }
             let chunk_idx = BitMap::<N>::to_chunk_index(pos);
-            let chunk_start = chunk_idx as u64 * BitMap::<N>::CHUNK_SIZE_BITS;
+            let chunk_start = chunk_idx as u64 * BitMap::<N>::chunk_size_bits();
             iter.chunk = self.get_chunk(chunk_idx);
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                let c = N as int * 8;
+                let b = chunk_start as int + (pos - chunk_start) / 64 * 64;
+                assert(pruned_start <= b) by(nonlinear_arith)
+                    requires pruned_start as int == scan_model::snapshot::<Self, N>(self).pruned as int * c,
+                        scan_model::snapshot::<Self, N>(self).pruned <= chunk_idx,
+                        chunk_start as int == chunk_idx as int * c,
+                        b >= chunk_start;
+                let future = OnesIter { base: b as u64, ..iter };
+                assert(future.safe());
+            }
             iter.base = chunk_start + (pos - chunk_start) / 64 * 64;
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(iter.base <= pos < iter.end());
+                assert forall|w: u64, i: u64| i < 64 implies
+                    (#[trigger] scan_model::set(w & (u64::MAX << sub(pos, iter.base)), i)
+                        <==> scan_model::set(w, i) && pos - iter.base <= i) by {
+                    scan_proof::lemma_high_mask_bits(w, sub(pos, iter.base));
+                    assert(scan_proof::bit(w & (u64::MAX << sub(pos, iter.base)), i) == 1
+                        <==> scan_proof::bit(w, i) == 1 && sub(pos, iter.base) <= i);
+                }
+            }
             iter.word = iter.load_word() & (u64::MAX << (pos - iter.base));
+            #[cfg(verus_keep_ghost)]
+            proof! { iter.establish_word(pos as int); }
         }
+        #[cfg(verus_keep_ghost)]
+        proof! { if pos >= len { iter.zero_pending(); } }
         iter
     }
 }
@@ -1045,7 +1505,8 @@ impl<const N: usize> Readable<N> for BitMap<N> {
 /// lock-guarded shared bitmap) instead requires the caller to prevent concurrent mutation
 /// across the whole iteration, for example by constructing the iterator from a held read
 /// guard rather than a bare shared reference.
-pub struct OnesIter<'a, B, const N: usize> {
+#[cfg_attr(verus_keep_ghost, verus_verify)]
+pub struct OnesIter<'a, B: ScanModel<N>, const N: usize> {
     bitmap: &'a B,
     /// Cached `bitmap.len()` at iterator construction. For layered bitmaps, `len()`
     /// walks the layer chain, so caching this avoids that walk on every `next`.
@@ -1061,50 +1522,248 @@ pub struct OnesIter<'a, B, const N: usize> {
     chunk: [u8; N],
 }
 
-impl<B: Readable<N>, const N: usize> OnesIter<'_, B, N> {
+impl<'a, B: ScanModel<N>, const N: usize> OnesIter<'a, B, N> {
     /// Load the word at `base` from `chunk`, masking off bits at or beyond `len`.
     ///
     /// Requires `base < len` and that `chunk` is the chunk containing `base`. Chunks
     /// shorter than a word (`N < 8`) and trailing sub-word regions (`N % 8 != 0`) are
     /// zero-padded.
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, allow(unused, verus_impl_method_marker))]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result =>
+        requires N > 0, N as int * 8 <= usize::MAX,
+            self.base < self.len,
+            (self.base as int % (N as int * 8)) % 8 == 0,
+        ensures forall|i: u64| i < 64 ==> (
+            scan_proof::bit(result, i) == 1 <==>
+            self.base as int + i < self.len &&
+            scan_proof::chunk_bit(
+                self.chunk@,
+                self.base as int % (N as int * 8) + i,
+            )
+        ),
+    ))]
     fn load_word(&self) -> u64 {
-        let off = ((self.base % BitMap::<N>::CHUNK_SIZE_BITS) / 8) as usize;
+        let chunk_bits = BitMap::<N>::chunk_size_bits();
+        let off = ((self.base % chunk_bits) / 8) as usize;
         let take = (N - off).min(8);
         let mut buf = [0u8; 8];
         buf[..take].copy_from_slice(&self.chunk[off..off + take]);
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(self.chunk@.len() == N);
+            assert(buf@.len() == 8);
+            assert(0 <= off < N);
+            assert(take == if N - off < 8 { N - off } else { 8 });
+            assert forall|j: int| 0 <= j < 8 implies #[trigger] buf@[j]
+                == if j < take { self.chunk@[off as int + j] } else { 0 } by {
+                if j < take {
+                    assert(buf@[j] == self.chunk@[off as int + j]);
+                } else {
+                    assert(buf@[j] == 0);
+                }
+            }
+        }
+        // vstd's byte conversion wraps the native conversion for exactly eight bytes.
+        #[cfg(not(verus_keep_ghost))]
         let mut word = u64::from_le_bytes(buf);
+        #[cfg(verus_keep_ghost)]
+        let mut word = vstd::bytes::u64_from_le_bytes(&buf);
+        #[cfg(verus_keep_ghost)]
+        let raw_word = word;
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|i: u64| i < 64 implies (
+                scan_proof::bit(raw_word, i) == 1 <==>
+                scan_proof::chunk_bit(self.chunk@, off as int * 8 + i)
+            ) by {
+                scan_proof::lemma_chunk_word(self.chunk@, buf@, off as int, take as int, i);
+            }
+        }
         let rem = self.len - self.base;
         if rem < 64 {
-            word &= (1 << rem) - 1;
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(rem < 64 ==> 0 < (1u64 << rem)) by (bit_vector);
+            }
+            word &= (1u64 << rem) - 1;
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                scan_proof::lemma_low_mask_bits(raw_word, rem);
+            }
+        }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|i: u64| i < 64 implies (
+                scan_proof::bit(word, i) == 1 <==>
+                self.base as int + i < self.len &&
+                scan_proof::chunk_bit(
+                    self.chunk@,
+                    self.base as int % (N as int * 8) + i,
+                )
+            ) by {
+                assert(rem as int == self.len as int - self.base as int);
+                assert((rem as int == self.len as int - self.base as int) ==>
+                    ((self.base as int + i < self.len) <==> (i < rem)))
+                    by (nonlinear_arith);
+                let rel = self.base % chunk_bits;
+                assert(rel as int == self.base as int % (N as int * 8));
+                assert(off as int == rel as int / 8);
+                assert(rel as int % 8 == 0);
+                vstd::arithmetic::div_mod::lemma_fundamental_div_mod(rel as int, 8);
+                assert((rel as int == 8 * (rel as int / 8) + rel as int % 8
+                    && off as int == rel as int / 8 && rel as int % 8 == 0) ==>
+                    rel as int == off as int * 8) by (nonlinear_arith);
+                assert(self.base as int % (N as int * 8) == off as int * 8);
+                if rem < 64 {
+                    assert(scan_proof::bit(word, i) == 1 <==>
+                        scan_proof::bit(raw_word, i) == 1 && i < rem);
+                } else {
+                    assert(word == raw_word);
+                    assert(i < rem);
+                }
+            }
         }
         word
     }
 }
 
-impl<B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'_, B, N> {
+#[cfg_attr(verus_keep_ghost, verifier::verify)]
+impl<'a, B: Readable<N>, const N: usize> iter::Iterator for OnesIter<'a, B, N> {
     type Item = u64;
 
+    #[cfg_attr(verus_keep_ghost, verus_verify)]
+    #[cfg_attr(verus_keep_ghost, verus_spec(
+        result =>
+        ensures final(self).source() == old(self).source(), final(self).length() == old(self).length(),
+            old(self).wf() ==> final(self).wf(),
+            old(self).wf() ==> match result {
+                Some(r) => old(self).pending(r as int)
+                    && (forall|i: int| #[trigger] old(self).pending(i) ==> r <= i)
+                    && (forall|i: int| #[trigger] final(self).pending(i)
+                        <==> old(self).pending(i) && i != r),
+                None => (forall|i: int| !#[trigger] old(self).pending(i))
+                    && (forall|i: int| !#[trigger] final(self).pending(i)),
+            },
+    ))]
     fn next(&mut self) -> Option<u64> {
-        let chunk_bits = BitMap::<N>::CHUNK_SIZE_BITS;
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            use_type_invariant(&*self);
+            scan_model::zero_word();
+        }
+        let chunk_bits = BitMap::<N>::chunk_size_bits();
+        #[cfg_attr(verus_keep_ghost, verus_spec(
+            invariant self.safe(), old(self).wf() ==> self.wf(),
+                self.bitmap == old(self).bitmap, self.len == old(self).len,
+                chunk_bits as int == N as int * 8,
+                old(self).wf() ==> forall|i: int| #[trigger] self.pending(i) <==> old(self).pending(i),
+            decreases self.len - self.base,
+        ))]
         while self.word == 0 {
+            #[cfg(verus_keep_ghost)]
+            proof_decl! { let ghost before = *self; }
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                scan_model::zero_word();
+                self.zero_pending();
+            }
             // Advance to the next word: either the next 64-bit stride of the current
             // chunk or the first word of the next chunk. Checked, because a heavily
             // pruned bitmap can end within one stride of u64::MAX.
             let rel = self.base % chunk_bits;
             let same_chunk = rel + 64 < chunk_bits;
             let stride = if same_chunk { 64 } else { chunk_bits - rel };
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                assert(stride > 0);
+                assert(self.end() == vstd::math::min(self.len as int, self.base as int + stride));
+                if self.base as int + stride >= self.len {
+                    assert forall|i: int| !#[trigger] self.pending(i) by {}
+                    if old(self).wf() {
+                        assert forall|i: int| !#[trigger] old(self).pending(i) by {
+                            assert(!self.pending(i));
+                        }
+                    }
+                }
+            }
             let next = self.base.checked_add(stride)?;
             if next >= self.len {
                 return None;
+            }
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                let c = N as int * 8;
+                scan_model::advance(self.base as int, c);
+                vstd::arithmetic::div_mod::lemma_div_is_ordered(next as int, self.len as int - 1, c);
+                scan_model::chunk_index(next as int, c, scan_model::snapshot::<B, N>(self.bitmap).pruned as int);
+                let future = OnesIter { base: next, ..*self };
+                assert(future.safe());
             }
             self.base = next;
             if !same_chunk {
                 self.chunk = self.bitmap.get_chunk(BitMap::<N>::to_chunk_index(next));
             }
             self.word = self.load_word();
+            #[cfg(verus_keep_ghost)]
+            proof! {
+                if old(self).wf() {
+                    self.establish_word(next as int);
+                    assert forall|i: int| #[trigger] self.pending(i) <==> before.pending(i) by {}
+                }
+            }
+        }
+        #[cfg(verus_keep_ghost)]
+        proof_decl! { let ghost before = *self; }
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            scan_proof::lemma_trailing_zeros(self.word);
+            scan_proof::lemma_clear_lowest_set_bit(self.word);
+            assert forall|i: u64| i < 64 && #[trigger] scan_model::set(self.word & sub(self.word, 1), i)
+                implies scan_model::set(self.word, i) by {
+                assert(scan_proof::bit(self.word & sub(self.word, 1), i) == 1
+                    <==> scan_proof::bit(self.word, i) == 1
+                        && i != vstd::std_specs::bits::u64_trailing_zeros(self.word));
+            }
         }
         let bit = self.word.trailing_zeros() as u64;
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert(bit < 64 && scan_model::set(self.word, bit));
+            assert(self.base as int + bit < self.end());
+            assert(self.pending(self.base as int + bit));
+            assert forall|i: int| #[trigger] self.pending(i) implies self.base as int + bit <= i by {
+                if i < self.end() {
+                    assert(scan_model::set(self.word, (i - self.base) as u64));
+                }
+            }
+        }
         self.word &= self.word - 1;
+        #[cfg(verus_keep_ghost)]
+        proof! {
+            assert forall|i: u64| i < 64 implies (#[trigger] scan_model::set(self.word, i)
+                <==> scan_model::set(before.word, i) && i != bit) by {
+                assert(scan_proof::bit(before.word & sub(before.word, 1), i) == 1
+                    <==> scan_proof::bit(before.word, i) == 1 && i != bit);
+            }
+            assert forall|i: int| #[trigger] self.pending(i) <==>
+                (before.pending(i) && i != self.base as int + bit) by {
+                if self.base <= i < self.end() {
+                    assert(0 <= i - self.base < 64);
+                }
+            }
+            if old(self).wf() {
+                assert(old(self).pending(self.base as int + bit));
+                assert forall|i: int| #[trigger] old(self).pending(i) implies self.base as int + bit <= i by {
+                    assert(before.pending(i));
+                }
+                assert forall|i: int| #[trigger] self.pending(i) <==>
+                    (old(self).pending(i) && i != self.base as int + bit) by {
+                    assert(before.pending(i) <==> old(self).pending(i));
+                }
+            }
+        }
         Some(self.base + bit)
     }
 }
@@ -2817,5 +3476,268 @@ mod tests {
         commonware_conformance::conformance_tests! {
             CodecConformance<BitMap>
         }
+    }
+}
+
+#[cfg(verus_keep_ghost)]
+mod scan_proof {
+    use super::*;
+    use vstd::{
+        arithmetic::div_mod::{lemma_fundamental_div_mod, lemma_fundamental_div_mod_converse},
+        bytes::{
+            lemma_auto_spec_u64_to_from_le_bytes, spec_u64_from_le_bytes, spec_u64_to_le_bytes,
+            spec_u64_to_le_bytes_open, spec_u64_to_le_bytes_to_open,
+        },
+        std_specs::bits::{axiom_u64_trailing_zeros, u64_trailing_zeros},
+    };
+
+    verus! {
+
+    pub open spec fn bit(word: u64, index: u64) -> u64 {
+        (word >> index) & 1u64
+    }
+
+    pub open spec fn chunk_bit(bytes: Seq<u8>, off: int) -> bool {
+        0 <= off < bytes.len() * 8
+            && bit(bytes[off / 8] as u64, (off % 8) as u64) == 1
+    }
+
+    pub proof fn lemma_trailing_zeros(word: u64)
+        requires
+            word != 0,
+        ensures
+            u64_trailing_zeros(word) < 64,
+            bit(word, u64_trailing_zeros(word) as u64) == 1,
+            forall|i: u64| i < u64_trailing_zeros(word) ==>
+                #[trigger] bit(word, i) == 0,
+    {
+        axiom_u64_trailing_zeros(word);
+    }
+
+    pub proof fn lemma_clear_lowest_set_bit(word: u64)
+        requires
+            word != 0,
+        ensures
+            forall|i: u64| i < 64 ==> (
+                #[trigger] bit(word & sub(word, 1), i) == 1
+                    <==> bit(word, i) == 1 && i != u64_trailing_zeros(word)
+            ),
+    {
+        lemma_trailing_zeros(word);
+        axiom_u64_trailing_zeros(word);
+        let tz = u64_trailing_zeros(word) as u64;
+        assert forall|i: u64| i < 64 implies (
+            #[trigger] bit(word & sub(word, 1), i) == 1
+                <==> bit(word, i) == 1 && i != tz
+        ) by {
+            if i < tz {
+                assert(bit(word, i) == 0);
+                assert((word >> i) & 1u64 == 0);
+                assert(((word >> i) & 1u64 == 0) ==>
+                    (((word & sub(word, 1)) >> i) & 1u64 == 0)) by (bit_vector);
+            } else {
+                assert(tz < 64);
+                assert(bit(word, tz) == 1);
+                assert((word >> tz) & 1u64 == 1);
+                assert(word << sub(64u64, tz) == 0);
+                assert((i >= tz && i < 64 && tz < 64 && ((word >> tz) & 1u64) == 1
+                    && word << sub(64u64, tz) == 0) ==> (
+                    ((((word & sub(word, 1)) >> i) & 1u64 == 1)
+                    <==> (((word >> i) & 1u64 == 1) && i != tz)))) by (bit_vector);
+            }
+        }
+    }
+
+    pub proof fn lemma_u64_from_le_bytes_bit(bytes: Seq<u8>, index: u64)
+        requires
+            bytes.len() == 8,
+            index < 64,
+        ensures
+            bit(spec_u64_from_le_bytes(bytes), index)
+                == bit(bytes[(index / 8) as int] as u64, index % 8),
+    {
+        lemma_auto_spec_u64_to_from_le_bytes();
+        let word = spec_u64_from_le_bytes(bytes);
+        assert(spec_u64_to_le_bytes(word) == bytes);
+        spec_u64_to_le_bytes_to_open(word);
+        assert(spec_u64_to_le_bytes_open(word) == bytes);
+        assert(index / 8 == index >> 3u64) by (bit_vector);
+        assert(index % 8 == index & 7u64) by (bit_vector);
+        if index < 8 {
+            assert(index < 8 ==> (index >> 3u64) == 0) by (bit_vector);
+            assert((index / 8) == 0);
+            let byte = bytes[0] as u64;
+            assert(word & 0xff < 256) by (bit_vector);
+            assert(byte == word & 0xff);
+            assert((index < 8 && byte == (word & 0xff)) ==>
+                bit(word, index) == bit(byte, index & 7u64)) by (bit_vector);
+        } else if index < 16 {
+            assert(8 <= index && index < 16 ==> (index >> 3u64) == 1) by (bit_vector);
+            assert((index / 8) == 1);
+            let byte = bytes[1] as u64;
+            assert((word >> 8) & 0xff < 256) by (bit_vector);
+            assert(byte == (word >> 8) & 0xff);
+            assert((8 <= index && index < 16 && byte == ((word >> 8) & 0xff)) ==>
+                bit(word, index) == bit(byte, index & 7u64)) by (bit_vector);
+        } else if index < 24 {
+            assert(16 <= index && index < 24 ==> (index >> 3u64) == 2) by (bit_vector);
+            assert((index / 8) == 2);
+            let byte = bytes[2] as u64;
+            assert((word >> 16) & 0xff < 256) by (bit_vector);
+            assert(byte == (word >> 16) & 0xff);
+            assert((16 <= index && index < 24 && byte == ((word >> 16) & 0xff)) ==>
+                bit(word, index) == bit(byte, index & 7u64)) by (bit_vector);
+        } else if index < 32 {
+            assert(24 <= index && index < 32 ==> (index >> 3u64) == 3) by (bit_vector);
+            assert((index / 8) == 3);
+            let byte = bytes[3] as u64;
+            assert((word >> 24) & 0xff < 256) by (bit_vector);
+            assert(byte == (word >> 24) & 0xff);
+            assert((24 <= index && index < 32 && byte == ((word >> 24) & 0xff)) ==>
+                bit(word, index) == bit(byte, index & 7u64)) by (bit_vector);
+        } else if index < 40 {
+            assert(32 <= index && index < 40 ==> (index >> 3u64) == 4) by (bit_vector);
+            assert((index / 8) == 4);
+            let byte = bytes[4] as u64;
+            assert((word >> 32) & 0xff < 256) by (bit_vector);
+            assert(byte == (word >> 32) & 0xff);
+            assert((32 <= index && index < 40 && byte == ((word >> 32) & 0xff)) ==>
+                bit(word, index) == bit(byte, index & 7u64)) by (bit_vector);
+        } else if index < 48 {
+            assert(40 <= index && index < 48 ==> (index >> 3u64) == 5) by (bit_vector);
+            assert((index / 8) == 5);
+            let byte = bytes[5] as u64;
+            assert((word >> 40) & 0xff < 256) by (bit_vector);
+            assert(byte == (word >> 40) & 0xff);
+            assert((40 <= index && index < 48 && byte == ((word >> 40) & 0xff)) ==>
+                bit(word, index) == bit(byte, index & 7u64)) by (bit_vector);
+        } else if index < 56 {
+            assert(48 <= index && index < 56 ==> (index >> 3u64) == 6) by (bit_vector);
+            assert((index / 8) == 6);
+            let byte = bytes[6] as u64;
+            assert((word >> 48) & 0xff < 256) by (bit_vector);
+            assert(byte == (word >> 48) & 0xff);
+            assert((48 <= index && index < 56 && byte == ((word >> 48) & 0xff)) ==>
+                bit(word, index) == bit(byte, index & 7u64)) by (bit_vector);
+        } else {
+            assert(56 <= index && index < 64 ==> (index >> 3u64) == 7) by (bit_vector);
+            assert((index / 8) == 7);
+            let byte = bytes[7] as u64;
+            assert((word >> 56) & 0xff < 256) by (bit_vector);
+            assert(byte == (word >> 56) & 0xff);
+            assert((56 <= index && index < 64 && byte == ((word >> 56) & 0xff)) ==>
+                bit(word, index) == bit(byte, index & 7u64)) by (bit_vector);
+        }
+    }
+
+    pub proof fn lemma_low_mask_bits(word: u64, width: u64)
+        requires
+            0 < width < 64,
+        ensures
+            forall|i: u64| i < 64 ==> (
+                #[trigger] bit(word & sub(1u64 << width, 1), i) == 1
+                    <==> bit(word, i) == 1 && i < width
+            ),
+    {
+        assert forall|i: u64| i < 64 implies (
+            #[trigger] bit(word & sub(1u64 << width, 1), i) == 1
+                <==> bit(word, i) == 1 && i < width
+        ) by {
+            assert((bit(word & sub(1u64 << width, 1), i) == 1)
+                <==> (bit(word, i) == 1 && i < width)) by (bit_vector);
+        }
+    }
+
+    pub proof fn lemma_high_mask_bits(word: u64, width: u64)
+        requires
+            width < 64,
+        ensures
+            forall|i: u64| i < 64 ==> (
+                #[trigger] bit(word & (u64::MAX << width), i) == 1
+                    <==> bit(word, i) == 1 && width <= i
+            ),
+    {
+        assert forall|i: u64| i < 64 implies (
+            #[trigger] bit(word & (u64::MAX << width), i) == 1
+                <==> bit(word, i) == 1 && width <= i
+        ) by {
+            assert((bit(word & (u64::MAX << width), i) == 1)
+                <==> (bit(word, i) == 1 && width <= i)) by (bit_vector);
+        }
+    }
+
+    pub proof fn lemma_chunk_word(
+        chunk: Seq<u8>,
+        bytes: Seq<u8>,
+        off: int,
+        take: int,
+        index: u64,
+    )
+        requires
+            0 <= off < chunk.len(),
+            take == if chunk.len() - off < 8 { chunk.len() - off } else { 8 },
+            bytes.len() == 8,
+            forall|j: int| 0 <= j < 8 ==> #[trigger] bytes[j]
+                == if j < take { chunk[off + j] } else { 0 },
+            index < 64,
+        ensures
+            bit(spec_u64_from_le_bytes(bytes), index) == 1
+                <==> chunk_bit(chunk, off * 8 + index as int),
+    {
+        lemma_u64_from_le_bytes_bit(bytes, index);
+        let j = (index / 8) as int;
+        let k = (index % 8) as int;
+        assert(index / 8 == index >> 3u64) by (bit_vector);
+        assert(index < 64 ==> index >> 3u64 < 8) by (bit_vector);
+        assert(index % 8 == index & 7u64) by (bit_vector);
+        assert(index & 7u64 < 8) by (bit_vector);
+        assert(0 <= j < 8);
+        assert(0 <= k < 8);
+        assert(bytes[j] == if j < take { chunk[off + j] } else { 0 });
+        lemma_fundamental_div_mod(index as int, 8);
+        assert(index as int == 8 * j + k);
+        lemma_fundamental_div_mod_converse(
+            off * 8 + index as int,
+            8,
+            off + j,
+            k,
+        );
+        assert((off * 8 + index as int) / 8 == off + j);
+        assert((off * 8 + index as int) % 8 == k);
+        assert(k as u64 == index % 8);
+        assert(bit(spec_u64_from_le_bytes(bytes), index)
+            == bit(bytes[j] as u64, index % 8));
+        if j < take {
+            if chunk.len() - off < 8 {
+                assert((j < take && take == chunk.len() - off) ==>
+                    off + j < chunk.len()) by (nonlinear_arith);
+            } else {
+                assert((j < take && take == 8 && chunk.len() - off >= 8) ==>
+                    off + j < chunk.len()) by (nonlinear_arith);
+            }
+            assert((off + j < chunk.len() && index as int == 8 * j + k && k < 8) ==>
+                off * 8 + (index as int) < chunk.len() * 8) by (nonlinear_arith);
+            assert(bytes[j] == chunk[off + j]);
+            assert(chunk_bit(chunk, off * 8 + index as int)
+                <==> bit(chunk[off + j] as u64, index % 8) == 1);
+            assert(bit(spec_u64_from_le_bytes(bytes), index) == 1
+                <==> chunk_bit(chunk, off * 8 + index as int));
+        } else {
+            if chunk.len() - off < 8 {
+                assert((j >= take && take == chunk.len() - off) ==>
+                    chunk.len() <= off + j) by (nonlinear_arith);
+            } else {
+                assert((j >= take && take == 8 && j < 8) ==> false) by (nonlinear_arith);
+            }
+            assert((chunk.len() <= off + j && index as int == 8 * j + k && k >= 0) ==>
+                chunk.len() * 8 <= off * 8 + (index as int)) by (nonlinear_arith);
+            assert(bytes[j] == 0);
+            assert(bit(0, index % 8) == 0) by (bit_vector);
+            assert(!chunk_bit(chunk, off * 8 + index as int));
+            assert(bit(spec_u64_from_le_bytes(bytes), index) == 1
+                <==> chunk_bit(chunk, off * 8 + index as int));
+        }
+    }
+
     }
 }

@@ -120,6 +120,13 @@ benchmark-tracking mode='generate' *args='':
 test *args='':
     cargo nextest run $@
 
+# Run Verus proofs
+test-verus:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    verus_dir="$(dirname "$(command -v "${VERUS_BIN:-verus}")")"
+    RUSTC_WRAPPER='' RUSTUP_TOOLCHAIN=1.97.1 "$verus_dir/cargo-verus" verus focus --package commonware-utils --features verus --no-default-features --locked --lib -- --no-cheating
+
 # Run loom tests
 test-loom *args='':
     #!/usr/bin/env bash

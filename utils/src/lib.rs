@@ -5,6 +5,7 @@
     html_favicon_url = "https://commonware.xyz/favicon.ico"
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
+#![cfg_attr(verus_keep_ghost, feature(proc_macro_hygiene))]
 
 commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub use rng::{Entropy, FuzzRng, ScriptedRng, TestRng, test_rng};
