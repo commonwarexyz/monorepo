@@ -17,9 +17,9 @@ use core::iter::zip;
 /// [`Ssse3`] is an optimized engine that follows the same algorithm as
 /// [`NoSimd`] but takes advantage of the x86 SSSE3 SIMD instructions.
 ///
-/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
-///
 /// Construction and [`Engine::eval_poly`] panic if SSSE3 is unavailable.
+///
+/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
 #[derive(Clone, Copy)]
 pub struct Ssse3 {
     mul128: &'static Mul128,
@@ -32,6 +32,10 @@ impl Ssse3 {
     ///
     /// Currently only difference between encoding/decoding is
     /// [`LogWalsh`] (128 kiB) which is only needed for decoding.
+    ///
+    /// # Panics
+    ///
+    /// If SSSE3 is unavailable.
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {

@@ -17,9 +17,9 @@ use core::iter::zip;
 /// [`Avx2`] is an optimized engine that follows the same algorithm as
 /// [`NoSimd`] but takes advantage of the x86 AVX2 SIMD instructions.
 ///
-/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
-///
 /// Construction and [`Engine::eval_poly`] panic if AVX2 is unavailable.
+///
+/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
 #[derive(Clone, Copy)]
 pub struct Avx2 {
     mul128: &'static Mul128,
@@ -32,6 +32,10 @@ impl Avx2 {
     ///
     /// Currently only difference between encoding/decoding is
     /// [`LogWalsh`] (128 kiB) which is only needed for decoding.
+    ///
+    /// # Panics
+    ///
+    /// If AVX2 is unavailable.
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {

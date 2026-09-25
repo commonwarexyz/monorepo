@@ -3,12 +3,16 @@ use crate::reed_solomon::engine::{GF_ORDER, GfElement, utils};
 // ======================================================================
 // FWHT (fast Walsh-Hadamard transform) - CRATE
 
-/// Decimation in time (DIT) Fast Walsh-Hadamard Transform.
-/// `m_truncated`: Number of non-zero elements in `data` (at the front).
+/// Decimation in time (DIT) Fast Walsh-Hadamard Transform modulo `GF_MODULUS`.
+///
+/// Entries at and after `m_truncated` must be zero. `data.len()` must be a power of two no
+/// larger than `GF_ORDER`. The transform is unnormalized. Applying it twice multiplies every
+/// entry by `data.len()` modulo `GF_MODULUS`.
 #[inline(always)]
 pub(crate) fn fwht(data: &mut [GfElement], m_truncated: usize) {
     debug_assert!(data.len().is_power_of_two() && data.len() <= GF_ORDER);
     debug_assert!(m_truncated <= data.len());
+
     // Note to self: fwht_8 is slightly faster on x86 (AMD Ryzen 5 3600),
     // but slower on ARM (Apple silicon M1).
     // fwht_16 is always slower. See branch: AndersTrier/FWHT_8_and_16
@@ -24,7 +28,8 @@ pub(crate) fn fwht(data: &mut [GfElement], m_truncated: usize) {
         dist = dist4;
         dist4 <<= 2;
     }
-    // A power-of-two domain with an odd logarithm has one remaining layer.
+
+    // An odd log2(data.len()) leaves one radix-2 layer at dist == data.len() / 2.
     if dist < data.len() {
         for r in (0..m_truncated).step_by(2 * dist) {
             for i in r..r + dist {
@@ -48,8 +53,8 @@ fn fwht_2(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
 
 #[inline(always)]
 fn fwht_4(data: &mut [GfElement], offset: u16, dist: u16) {
-    // Indices. u16 additions and multiplication to avoid bounds checks
-    // on array access. (GF_ORDER == (u16::MAX+1))
+    // Indices. u16 arithmetic keeps each index below GF_ORDER (u16::MAX + 1), so bounds
+    // checks can be elided when `data.len() == GF_ORDER`.
     let i0 = usize::from(offset);
     let i1 = usize::from(offset + dist);
     let i2 = usize::from(offset + dist * 2);

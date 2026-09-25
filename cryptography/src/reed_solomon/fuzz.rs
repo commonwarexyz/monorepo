@@ -5,7 +5,7 @@ use super::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use super::engine::{Avx2, Avx512, Ssse3};
 use super::{
-    Decoder, Error, RecoveryPlan,
+    Decoder, Error, Plan,
     engine::{
         CANTOR_BASIS, DefaultEngine, Engine, GF_MODULUS, GF_ORDER, GF_POLYNOMIAL, GfElement, Naive,
         NoSimd, SHARD_CHUNK_BYTES, ShardsRefMut,
@@ -25,8 +25,6 @@ macro_rules! each_engine {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
             if std::arch::is_x86_feature_detected!("avx512f")
-                && std::arch::is_x86_feature_detected!("avx512vl")
-                && std::arch::is_x86_feature_detected!("avx512bw")
                 && std::arch::is_x86_feature_detected!("gfni")
             {
                 $runner::<Avx512>($($arg,)* Avx512::new);
@@ -45,7 +43,7 @@ macro_rules! each_engine {
     }};
 }
 
-/// Bounded engine comparisons against independent field arithmetic and the naive engine.
+/// Bounded comparisons of engines and engine-independent kernels against references.
 #[derive(Clone, Copy, Debug, arbitrary::Arbitrary)]
 pub enum EnginePlan {
     /// Compare multiplication, including empty and multi-chunk operands.
@@ -54,12 +52,15 @@ pub enum EnginePlan {
     Transform,
     /// Compare short Walsh locator convolution with the full-field evaluator.
     Locator,
-    /// Compare the fused formal derivative with the original pass schedule.
+    /// Compare the fused formal derivative with the unfused pass schedule.
     Derivative,
 }
 
 impl EnginePlan {
-    /// Run the selected check on every engine supported by this host.
+    /// Run the selected check.
+    ///
+    /// `Mul` and `Transform` compare every engine supported by this host. `Locator` and
+    /// `Derivative` check engine-independent kernels once.
     pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         match self {
             Self::Mul => fuzz_mul(u),
@@ -135,10 +136,15 @@ fn fuzz_transform(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
 }
 
 fn fuzz_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-    let bits = u.int_in_range(0..=15)?;
-    let n = 1usize << bits;
+    let n = 1usize << u.int_in_range(0..=15)?;
     let end = u.int_in_range(1..=n)?;
-    let seed = u.arbitrary::<u16>()?;
+    compare_short_locator(n, end, u.arbitrary()?);
+    Ok(())
+}
+
+fn compare_short_locator(n: usize, end: usize, seed: u16) {
+    // The convolution is linear modulo GF_MODULUS, so inputs need not be 0/1 flags. Mix zero,
+    // GF_MODULUS (the other encoding of zero), and seeded residues.
     let mut short = [0; GF_ORDER];
     for (i, value) in short[..end].iter_mut().enumerate() {
         *value = match (i ^ usize::from(seed)) % 5 {
@@ -149,15 +155,22 @@ fn fuzz_locator(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     }
     let mut full = short;
     Naive::eval_poly(&mut full, end);
+
+    // The sentinel detects a write past the domain.
     short[n] = 0xa5a5;
-    super::engine::utils::eval_poly_short(&mut short, end, n);
+    super::engine::utils::eval_poly_short(&mut short[..n], end);
     for i in 0..n {
-        assert_eq!(short[i] % GF_MODULUS, full[i] % GF_MODULUS);
+        assert_eq!(
+            short[i] % GF_MODULUS,
+            full[i] % GF_MODULUS,
+            "n={n} end={end} seed={seed} i={i}"
+        );
     }
-    assert_eq!(short[n], 0xa5a5);
-    Ok(())
+    assert_eq!(short[n], 0xa5a5, "n={n} end={end} wrote past the domain");
 }
 
+/// Counts bracket the four- and sixteen-shard leaf blocks and each pass width. Chunk counts
+/// bracket the AVX-512 leaf's 8-chunk (512-byte) minimum and its 64-chunk (4 KiB) exclusion.
 const DERIVATIVE_COUNTS: [usize; 21] = [
     0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129,
 ];
@@ -177,8 +190,9 @@ fn fuzz_derivative(u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
 }
 
 fn compare_derivative(input: &[[u8; SHARD_CHUNK_BYTES]], count: usize, chunks: usize) {
-    // Zero extension makes the original full-block pass schedule a reference
-    // for truncated shard counts as well.
+    // The reference runs the unclamped pass schedule over a zero-padded power-of-two block.
+    // Padding shards only absorb higher padding shards and stay zero, so the first `count`
+    // shards match the schedule with passes clamped at `count`.
     let padded_count = count.max(1).next_power_of_two();
     let mut expected = vec![[0; SHARD_CHUNK_BYTES]; padded_count * chunks];
     expected[..input.len()].copy_from_slice(input);
@@ -212,7 +226,7 @@ pub enum RateKind {
 #[derive(Clone, Copy, Debug, arbitrary::Arbitrary)]
 pub enum RatePlan {
     /// Compare encoding with the naive engine and decode its recovery shards.
-    MatchesPortable(RateKind),
+    MatchesNaive(RateKind),
     /// Check roundtrips, automatic reuse, and reset with the same backend.
     Contract(RateKind),
     /// Check the public recovery decoder's reuse and missing recovery shards.
@@ -224,7 +238,8 @@ pub enum RatePlan {
 }
 
 impl RatePlan {
-    /// Run rate checks on every supported engine, or exercise the public recovery decoder.
+    /// Run rate checks on every supported engine, exercise the public recovery decoder, or
+    /// compare a rate's shortened erasure locator with the naive evaluator.
     pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         if matches!(self, Self::Locator) {
             return fuzz_rate_locator(u);
@@ -235,10 +250,10 @@ impl RatePlan {
         let shard_bytes_b = SHARD_SIZES[u.int_in_range(0..=5)?];
 
         let (counts_a, counts_b) = match self {
-            Self::MatchesPortable(RateKind::High) | Self::Contract(RateKind::High) => {
+            Self::MatchesNaive(RateKind::High) | Self::Contract(RateKind::High) => {
                 ((large, small), (large - 1, small + 1))
             }
-            Self::MatchesPortable(RateKind::Low) | Self::Contract(RateKind::Low) => {
+            Self::MatchesNaive(RateKind::Low) | Self::Contract(RateKind::Low) => {
                 ((small, large), (small + 1, large - 1))
             }
             _ => ((large, small), (small, large)),
@@ -248,8 +263,8 @@ impl RatePlan {
         let case_b = RateCase::new(counts_b.0, counts_b.1, shard_bytes_b, &mut input);
 
         match self {
-            Self::MatchesPortable(kind) => {
-                each_engine!(rate_matches_portable(kind, &case_a, &case_b))
+            Self::MatchesNaive(kind) => {
+                each_engine!(rate_matches_naive(kind, &case_a, &case_b))
             }
             Self::Contract(kind) => {
                 rate_contract::<Naive>(kind, &case_a, &case_b, Naive::new);
@@ -257,7 +272,7 @@ impl RatePlan {
             }
             Self::Recovery => exercise_recovery_reuse(&case_a, &case_b),
             Self::PreparedRecovery => exercise_prepared_reuse(&case_a, &case_b),
-            Self::Locator => unreachable!(),
+            Self::Locator => unreachable!("returned before case generation"),
         }
         Ok(())
     }
@@ -283,8 +298,12 @@ fn compare_rate_locator(
     high: bool,
     original_count: usize,
     recovery_count: usize,
-    received: &fixedbitset::FixedBitSet,
+    received: &FixedBitSet,
 ) {
+    // The reference marks erased positions over the full field. High rate places recovery
+    // shards from 0 and originals from `chunk`, erases the padding between them, and truncates
+    // at `end`. Low rate places originals from 0 and recovery shards from `chunk`, keeps the
+    // padding known, and erases every position from `end`.
     let chunk = if high { recovery_count } else { original_count }.next_power_of_two();
     let end = chunk + if high { original_count } else { recovery_count };
     let mut expected = [0; GF_ORDER];
@@ -315,7 +334,7 @@ fn compare_rate_locator(
             received,
         );
     } else {
-        super::rate::rate_low::eval_full::<NoSimd>(
+        super::rate::rate_low::eval_walsh::<NoSimd>(
             &mut actual,
             original_count,
             recovery_count,
@@ -331,6 +350,7 @@ fn compare_rate_locator(
     }
 }
 
+/// Cyclic byte source over fuzz input. Reads zeros when the input is empty.
 struct Input<'a> {
     bytes: &'a [u8],
     offset: usize,
@@ -351,6 +371,7 @@ impl<'a> Input<'a> {
     }
 }
 
+/// Chunk and lane offsets vary the bytes when a short input repeats.
 fn fill_chunks(chunks: &mut [[u8; SHARD_CHUNK_BYTES]], input: &mut Input<'_>) {
     for (chunk_index, chunk) in chunks.iter_mut().enumerate() {
         let (low, high) = chunk.split_at_mut(SHARD_CHUNK_BYTES / 2);
@@ -402,6 +423,11 @@ fn check_mul<E: Engine>(
     );
 }
 
+/// Multiplies `value` by the element with logarithm `log_m` without the engine tables.
+///
+/// Elements are Cantor-basis coordinates. The oracle converts `value` to the polynomial basis,
+/// multiplies by x^log_m reduced modulo GF_POLYNOMIAL, and converts back. It builds x^log_m by
+/// square-and-multiply, so a table bug cannot cancel against the same bug in the engines.
 fn independent_mul(value: GfElement, log_m: GfElement) -> GfElement {
     let mut coefficient = 1;
     let mut alpha = 2;
@@ -416,10 +442,12 @@ fn independent_mul(value: GfElement, log_m: GfElement) -> GfElement {
     independent_mul_coefficient(value, coefficient)
 }
 
+/// Multiplies Cantor-basis `value` by polynomial-basis `coefficient`.
 fn independent_mul_coefficient(value: GfElement, coefficient: GfElement) -> GfElement {
     polynomial_to_cantor(polynomial_mul(cantor_to_polynomial(value), coefficient))
 }
 
+/// Bit `i` of `value` selects `CANTOR_BASIS[i]`, written in the polynomial basis.
 fn cantor_to_polynomial(value: GfElement) -> GfElement {
     let mut polynomial = 0;
     for (bit, basis) in CANTOR_BASIS.iter().enumerate() {
@@ -431,6 +459,10 @@ fn cantor_to_polynomial(value: GfElement) -> GfElement {
 }
 
 fn polynomial_to_cantor(value: GfElement) -> GfElement {
+    // Invert the basis change by Gauss-Jordan elimination over GF(2). Row `r` keeps
+    // `values[r]` equal to the XOR of `CANTOR_BASIS[j]` over the set bits `j` of
+    // `coordinates[r]`. Once `values[r] == 1 << r`, `coordinates[r]` holds the Cantor
+    // coordinates of x^r. A pivot always exists because the basis is linearly independent.
     static INVERSE: std::sync::OnceLock<[GfElement; 16]> = std::sync::OnceLock::new();
     let inverse = INVERSE.get_or_init(|| {
         let mut values = CANTOR_BASIS;
@@ -461,6 +493,7 @@ fn polynomial_to_cantor(value: GfElement) -> GfElement {
     coordinates
 }
 
+/// Carry-less multiply, then reduce the degree-30 product modulo GF_POLYNOMIAL from the top bit.
 fn polynomial_mul(left: GfElement, right: GfElement) -> GfElement {
     let mut product = 0u32;
     for bit in 0..16 {
@@ -574,7 +607,8 @@ fn check_transform<E: Engine>(
                 "{name} changed sentinel shard {shard}"
             );
         } else if inverse || shard < pos + truncated_size {
-            // FFT specifies a prefix; IFFT specifies the entire block after zeroing its input suffix.
+            // FFT specifies a prefix. IFFT specifies the entire block after zeroing its input
+            // suffix.
             assert_eq!(
                 actual[chunks.clone()],
                 expected[chunks],
@@ -643,6 +677,9 @@ impl RateCase {
         }
     }
 
+    /// Number of originals dropped and recovery shards provided in each round, so every
+    /// decode receives exactly `original_count` shards. With at least two recovery shards, the
+    /// cap leaves at least one recovery shard unprovided.
     fn missing_count(&self) -> usize {
         self.original_count.min(self.recovery_count - 1).max(1)
     }
@@ -814,7 +851,7 @@ fn rate_contract<E: Engine>(
     }
 }
 
-fn rate_matches_portable<E: Engine>(
+fn rate_matches_naive<E: Engine>(
     kind: RateKind,
     case_a: &RateCase,
     case_b: &RateCase,
@@ -921,7 +958,7 @@ fn prepared_round(
     let provided = case.provided_recoveries(start_delta);
     let originals = (0..case.original_count).filter(|&i| !missing[i]);
     let recoveries = (0..case.recovery_count).filter(|&i| provided[i]);
-    let plan = RecoveryPlan::new(
+    let plan = Plan::new(
         case.original_count,
         case.recovery_count,
         originals,
@@ -936,7 +973,7 @@ fn prepared_round_with_plan(
     case: &RateCase,
     recovery: &[Vec<u8>],
     start_delta: usize,
-    plan: &RecoveryPlan,
+    plan: &Plan,
 ) {
     let missing = case.missing_originals(start_delta);
     let provided = case.provided_recoveries(start_delta);
@@ -956,7 +993,7 @@ fn prepared_round_with_plan(
     }
 
     // A wrong count and a changed mask must leave the submitted shards usable for a retry.
-    let other_counts = RecoveryPlan::new(
+    let other_counts = Plan::new(
         case.original_count + 1,
         case.recovery_count,
         0..case.original_count + 1,
@@ -964,11 +1001,11 @@ fn prepared_round_with_plan(
     )
     .unwrap();
     assert!(matches!(
-        decoder.decode_with_recovery_plan(&other_counts),
-        Err(Error::RecoveryPlanMismatch)
+        decoder.decode_with_plan(&other_counts),
+        Err(Error::PlanMismatch)
     ));
     let additional = provided.iter().position(|present| !present).unwrap();
-    let changed = RecoveryPlan::new(
+    let changed = Plan::new(
         case.original_count,
         case.recovery_count,
         (0..case.original_count).filter(|&i| !missing[i]),
@@ -977,7 +1014,7 @@ fn prepared_round_with_plan(
     .unwrap();
     assert!(matches!(
         decoder.decode_with_recovery_plan(&changed),
-        Err(Error::RecoveryPlanMismatch)
+        Err(Error::PlanMismatch)
     ));
     let result = decoder.decode_with_recovery_plan(plan).unwrap().unwrap();
     let ordinary = reference.decode_with_recovery().unwrap().unwrap();
@@ -1006,11 +1043,15 @@ fn exercise_prepared_reuse(case_a: &RateCase, case_b: &RateCase) {
         case_a.shard_bytes,
     )
     .unwrap();
+
+    // Decode two received masks in sequence without a reset.
     prepared_round(&mut decoder, case_a, &recovery_a, 0);
     prepared_round(&mut decoder, case_a, &recovery_a, 1);
+
+    // A plan does not depend on shard bytes. Reuse the first mask's plan for 2-byte shards.
     let missing = case_a.missing_originals(0);
     let provided = case_a.provided_recoveries(0);
-    let shared = RecoveryPlan::new(
+    let shared = Plan::new(
         case_a.original_count,
         case_a.recovery_count,
         (0..case_a.original_count).filter(|&i| !missing[i]),
@@ -1027,6 +1068,8 @@ fn exercise_prepared_reuse(case_a: &RateCase, case_b: &RateCase) {
         .reset(short.original_count, short.recovery_count, 2)
         .unwrap();
     prepared_round_with_plan(&mut decoder, &short, &short_recovery, 0, &shared);
+
+    // A matching plan with every original present returns None.
     decoder
         .reset(
             case_a.original_count,
@@ -1034,7 +1077,7 @@ fn exercise_prepared_reuse(case_a: &RateCase, case_b: &RateCase) {
             case_a.shard_bytes,
         )
         .unwrap();
-    let all = RecoveryPlan::new(
+    let all = Plan::new(
         case_a.original_count,
         case_a.recovery_count,
         0..case_a.original_count,
@@ -1045,6 +1088,8 @@ fn exercise_prepared_reuse(case_a: &RateCase, case_b: &RateCase) {
         decoder.add_original_shard(i, original).unwrap();
     }
     assert!(decoder.decode_with_recovery_plan(&all).unwrap().is_none());
+
+    // Reset to the second shape and decode both of its masks.
     decoder
         .reset(
             case_b.original_count,
@@ -1059,6 +1104,7 @@ fn exercise_prepared_reuse(case_a: &RateCase, case_b: &RateCase) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reed_solomon::{engine::GF_BITS, rate::rate_low::DIRECT_EVALUATION_LIMIT};
     use commonware_invariants::minifuzz;
 
     fn fixed_case(
@@ -1099,7 +1145,8 @@ mod tests {
 
     #[test]
     fn derivative_boundary_schedule() {
-        // Keep the same shard boundaries under Miri with a smaller width sweep.
+        // Chunk counts around 8 and 64 straddle the AVX-512 leaf guards, which Miri never
+        // takes. Miri keeps every shard count with fewer chunk counts.
         let chunk_counts: &[usize] = if cfg!(miri) {
             &[0, 1, 8]
         } else {
@@ -1139,6 +1186,17 @@ mod tests {
     }
 
     #[test]
+    fn locator_every_short_level() {
+        // Build each cached short Walsh kernel and check it at the domain edges.
+        for bits in 0..GF_BITS {
+            let n = 1usize << bits;
+            for end in [1, n / 2 + 1, n] {
+                compare_short_locator(n, end, 0x5a5a);
+            }
+        }
+    }
+
+    #[test]
     fn minifuzz_rate_locator() {
         minifuzz::Builder::default()
             .with_seed(0)
@@ -1148,6 +1206,9 @@ mod tests {
 
     #[test]
     fn locator_domain_boundaries() {
+        // Straddle several Walsh size changes and the switch to the full field above 32768.
+        // The low-rate check calls `eval_walsh` directly, which does not use
+        // DIRECT_EVALUATION_LIMIT.
         for high in [false, true] {
             for end in [
                 2, 3, 4, 7, 8, 15, 16, 127, 128, 129, 511, 512, 513, 32767, 32768, 32769, 65535,
@@ -1170,12 +1231,12 @@ mod tests {
     }
 
     #[test]
-    fn minifuzz_rate_matches_portable() {
+    fn minifuzz_rate_matches_naive() {
         for kind in [RateKind::High, RateKind::Low, RateKind::Default] {
             minifuzz::Builder::default()
                 .with_seed(0)
                 .with_search_limit(32)
-                .test(|u| RatePlan::MatchesPortable(kind).run(u));
+                .test(|u| RatePlan::MatchesNaive(kind).run(u));
         }
     }
 
@@ -1218,7 +1279,11 @@ mod tests {
     #[test]
     fn prepared_low_locator_boundaries() {
         let high = fixed_case(11, 3, 2, 23);
-        for recovery_count in [123, 124, 125, 510] {
+
+        // Three originals pad to a chunk of 4, so the decoding domain ends at 4 + recovery_count.
+        // Straddle DIRECT_EVALUATION_LIMIT, then take the transform path with a larger domain.
+        let limit = DIRECT_EVALUATION_LIMIT - 4;
+        for recovery_count in [limit - 1, limit, limit + 1, 510] {
             let low = fixed_case(3, recovery_count, 66, 21);
             exercise_prepared_reuse(&low, &high);
         }
@@ -1287,6 +1352,12 @@ mod tests {
 
     #[test]
     fn engines_match_naive_on_offset_truncated_and_skewed_transforms() {
+        // Size-4 cases pick butterfly branches through `skew_delta`. The transform reads
+        // `log_m01`, `log_m02`, and `log_m23` from `skew[skew_delta..skew_delta + 3]`, and
+        // `skew` holds `GF_MODULUS` (a zero coefficient) exactly at indices `2^k - 1`.
+        // `skew_delta` 4 zeroes none and reaches the fused AVX-512 path. 0 zeroes `log_m01`
+        // and `log_m02`, 1 zeroes `log_m01` and `log_m23`, 2 zeroes `log_m02`, and 3 and 7
+        // zero `log_m01`.
         for (pos, size, truncated_size, skew_delta, shard_chunks) in [
             (0, 1, 0, GF_ORDER - 1, 1),
             (1, 2, 1, 0, 2),
@@ -1341,18 +1412,18 @@ mod tests {
     fn rate_engines_match_naive_with_partial_chunks_and_mixed_erasures() {
         let high_a = fixed_case(11, 3, 66, 3);
         let high_b = fixed_case(9, 4, 130, 5);
-        each_engine!(rate_matches_portable(RateKind::High, &high_a, &high_b));
+        each_engine!(rate_matches_naive(RateKind::High, &high_a, &high_b));
 
         let low_a = fixed_case(3, 11, 126, 7);
         let low_b = fixed_case(4, 9, 62, 11);
-        each_engine!(rate_matches_portable(RateKind::Low, &low_a, &low_b));
+        each_engine!(rate_matches_naive(RateKind::Low, &low_a, &low_b));
     }
 
     #[test]
     fn default_rate_switches_and_recovery_decoder_reuses_work() {
         let high = fixed_case(11, 3, 66, 13);
         let low = fixed_case(3, 11, 130, 17);
-        each_engine!(rate_matches_portable(RateKind::Default, &high, &low));
+        each_engine!(rate_matches_naive(RateKind::Default, &high, &low));
         exercise_recovery_reuse(&high, &low);
     }
 }

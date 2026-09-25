@@ -49,10 +49,12 @@ impl Drop for DecoderResult<'_> {
 // ======================================================================
 // RecoveryDecoderResult - PUBLIC
 
-/// The restored shards from a successful [`Decoder::decode_with_recovery`], exposing both the
-/// restored original shards (like [`DecoderResult`]) and the reconstructed recovery shards.
+/// The restored shards from a successful [`Decoder::decode_with_recovery`] or
+/// [`Decoder::decode_with_recovery_plan`], exposing both the restored original shards (like
+/// [`DecoderResult`]) and the reconstructed recovery shards.
 ///
 /// [`Decoder::decode_with_recovery`]: crate::reed_solomon::Decoder::decode_with_recovery
+/// [`Decoder::decode_with_recovery_plan`]: crate::reed_solomon::Decoder::decode_with_recovery_plan
 pub struct RecoveryDecoderResult<'a> {
     inner: DecoderResult<'a>,
 }

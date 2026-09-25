@@ -36,7 +36,7 @@ pub use self::{
 };
 use crate::reed_solomon::{
     DecoderResult, EncoderResult, Error,
-    engine::{Engine, SHARD_CHUNK_BYTES},
+    engine::{self, Engine, GF_ORDER, GfElement, SHARD_CHUNK_BYTES},
 };
 
 mod decoder_work;
@@ -52,6 +52,19 @@ const fn validate_work_size(shard_bytes: usize, work_count: usize) -> Result<(),
         return Err(Error::InvalidShardSize { shard_bytes });
     }
     Ok(())
+}
+
+/// XOR-convolve `erasures` with the field logarithm table, exact on `..end`.
+///
+/// Entries at and after `end` must be zero. With `n = end.next_power_of_two()`, `i ^ j < n`
+/// for all `i, j < n`, so an `n`-point transform matches the full-field one on `..n`.
+fn eval_locator<E: Engine>(erasures: &mut [GfElement; GF_ORDER], end: usize) {
+    let n = end.next_power_of_two();
+    if n == GF_ORDER {
+        E::eval_poly(erasures, end);
+    } else {
+        engine::utils::eval_poly_short(&mut erasures[..n], end);
+    }
 }
 
 // ======================================================================
@@ -160,6 +173,14 @@ where
         shard_bytes: usize,
     ) -> Result<(), Error>;
 
+    /// Checks that the shard counts are supported, the shard size is nonzero and even, and
+    /// this encoder's working space fits in a single allocation.
+    fn validate(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error>;
+
     // ============================================================
     // PROVIDED
 
@@ -169,16 +190,6 @@ where
     /// This is same as [`Rate::supports`].
     fn supports(original_count: usize, recovery_count: usize) -> bool {
         Self::Rate::supports(original_count, recovery_count)
-    }
-
-    /// Returns `Ok(())` if given `original_count` / `recovery_count`
-    /// combination is supported and given `shard_bytes` is valid.
-    fn validate(
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-    ) -> Result<(), Error> {
-        Self::Rate::validate(original_count, recovery_count, shard_bytes)
     }
 }
 
@@ -237,6 +248,14 @@ where
         shard_bytes: usize,
     ) -> Result<(), Error>;
 
+    /// Checks that the shard counts are supported, the shard size is nonzero and even, and
+    /// this decoder's working space fits in a single allocation.
+    fn validate(
+        original_count: usize,
+        recovery_count: usize,
+        shard_bytes: usize,
+    ) -> Result<(), Error>;
+
     // ============================================================
     // PROVIDED
 
@@ -246,16 +265,6 @@ where
     /// This is same as [`Rate::supports`].
     fn supports(original_count: usize, recovery_count: usize) -> bool {
         Self::Rate::supports(original_count, recovery_count)
-    }
-
-    /// Returns `Ok(())` if given `original_count` / `recovery_count`
-    /// combination is supported and given `shard_bytes` is valid.
-    fn validate(
-        original_count: usize,
-        recovery_count: usize,
-        shard_bytes: usize,
-    ) -> Result<(), Error> {
-        Self::Rate::validate(original_count, recovery_count, shard_bytes)
     }
 }
 
@@ -276,6 +285,8 @@ mod tests {
         );
     }
 
+    // (9, 3) and (3, 9) encode with 12 work shards (9 rounded up to a multiple of the chunk
+    // of 4) and decode with 16 (4 + 9 rounded up to a power of two).
     fn check_rate_capacity<R: Rate<NoSimd>>(original_count: usize, recovery_count: usize) {
         check_capacity(
             |shard_bytes| R::RateEncoder::validate(original_count, recovery_count, shard_bytes),
@@ -393,6 +404,8 @@ mod tests {
                 ));
             }
 
+            // Hand the next phase work with a shard still pending. Reuse must drop the stale
+            // received state and keep the stale bytes out of its results.
             let pending = vec![255; shard_bytes];
             encoder.add_original_shard(&pending).unwrap();
             decoder.add_original_shard(0, &pending).unwrap();

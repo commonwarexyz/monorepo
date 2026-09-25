@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryDecoderResult, RecoveryPlan,
+    DecoderResult, EncoderResult, Error, Plan, RecoveryDecoderResult,
     engine::DefaultEngine,
     rate::{DefaultRate, DefaultRateDecoder, DefaultRateEncoder, Rate, RateDecoder, RateEncoder},
 };
@@ -134,15 +134,14 @@ impl Decoder {
         self.0.decode(false)
     }
 
-    /// Decode using coefficients prepared for the exact received indices.
+    /// Like [`decode`](Decoder::decode), but reads erasure coefficients from `plan` instead of
+    /// computing them.
     ///
-    /// The plan can be shared between decoders with different valid shard byte lengths.
-    /// A mismatched plan returns [`Error::RecoveryPlanMismatch`] before changing shard data;
-    /// the decoder may then be used with the correct plan or regular [`decode`](Self::decode).
-    pub fn decode_with_plan(
-        &mut self,
-        plan: &RecoveryPlan,
-    ) -> Result<Option<DecoderResult<'_>>, Error> {
+    /// `plan` must match this decoder's shard counts and received shard indices. Shard byte
+    /// length is not part of the plan. A mismatched plan returns
+    /// [`Error::PlanMismatch`] and leaves the added shards in place, so the decoder can
+    /// retry with the matching plan or [`decode`](Decoder::decode).
+    pub fn decode_with_plan(&mut self, plan: &Plan) -> Result<Option<DecoderResult<'_>>, Error> {
         self.0.decode_with_plan(false, plan)
     }
 
@@ -157,12 +156,11 @@ impl Decoder {
         Ok(self.0.decode(true)?.map(RecoveryDecoderResult::new))
     }
 
-    /// Decode and reconstruct missing recovery shards using a matching prepared plan.
-    ///
-    /// A mismatched plan returns [`Error::RecoveryPlanMismatch`] before changing shard data.
+    /// Like [`decode_with_recovery`](Decoder::decode_with_recovery), but reads erasure
+    /// coefficients from `plan` as [`decode_with_plan`](Decoder::decode_with_plan) does.
     pub fn decode_with_recovery_plan(
         &mut self,
-        plan: &RecoveryPlan,
+        plan: &Plan,
     ) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
         Ok(self
             .0

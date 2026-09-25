@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryPlan,
+    DecoderResult, EncoderResult, Error, Plan,
     engine::{Engine, GF_ORDER},
     rate::{
         DecoderWork, EncoderWork, HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder,
@@ -9,7 +9,7 @@ use crate::reed_solomon::{
 use core::{cmp::Ordering, marker::PhantomData};
 
 // ======================================================================
-// FUNCTIONS - PRIVATE
+// FUNCTIONS - CRATE
 
 pub(crate) fn use_high_rate(original_count: usize, recovery_count: usize) -> Result<bool, Error> {
     if original_count > GF_ORDER || recovery_count > GF_ORDER {
@@ -249,20 +249,6 @@ enum InnerDecoder<E: Engine> {
 /// [`Decoder`]: crate::reed_solomon::Decoder
 pub struct DefaultRateDecoder<E: Engine>(InnerDecoder<E>);
 
-impl<E: Engine> DefaultRateDecoder<E> {
-    pub(crate) fn decode_with_plan(
-        &mut self,
-        compute_recovery: bool,
-        plan: &RecoveryPlan,
-    ) -> Result<Option<DecoderResult<'_>>, Error> {
-        match &mut self.0 {
-            InnerDecoder::High(high) => high.decode_with_plan(compute_recovery, plan),
-            InnerDecoder::Low(low) => low.decode_with_plan(compute_recovery, plan),
-            InnerDecoder::None => unreachable!(),
-        }
-    }
-}
-
 impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
     type Rate = DefaultRate<E>;
 
@@ -398,6 +384,23 @@ impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
         };
 
         Ok(())
+    }
+}
+
+// ======================================================================
+// DefaultRateDecoder - CRATE
+
+impl<E: Engine> DefaultRateDecoder<E> {
+    pub(crate) fn decode_with_plan(
+        &mut self,
+        compute_recovery: bool,
+        plan: &Plan,
+    ) -> Result<Option<DecoderResult<'_>>, Error> {
+        match &mut self.0 {
+            InnerDecoder::High(high) => high.decode_with_plan(compute_recovery, plan),
+            InnerDecoder::Low(low) => low.decode_with_plan(compute_recovery, plan),
+            InnerDecoder::None => unreachable!(),
+        }
     }
 }
 

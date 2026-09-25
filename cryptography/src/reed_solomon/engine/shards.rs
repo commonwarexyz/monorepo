@@ -185,7 +185,8 @@ impl<'a> ShardsRefMut<'a> {
     }
 
     /// Creates new [`ShardsRefMut`] that references given `data`.
-    /// Each shard contains `shard_chunk_count` chunks; zero-length shards are supported.
+    ///
+    /// Each shard contains `shard_chunk_count` chunks. Zero-length shards are supported.
     ///
     /// # Panics
     ///

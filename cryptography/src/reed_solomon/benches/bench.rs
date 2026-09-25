@@ -375,11 +375,7 @@ fn benchmarks_engine(c: &mut Criterion) {
         if is_x86_feature_detected!("avx2") {
             benchmarks_engine_one(c, "avx2", Avx2::new());
         }
-        if is_x86_feature_detected!("avx512f")
-            && is_x86_feature_detected!("avx512vl")
-            && is_x86_feature_detected!("avx512bw")
-            && is_x86_feature_detected!("gfni")
-        {
+        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("gfni") {
             benchmarks_engine_one(c, "avx512", Avx512::new());
         }
     }

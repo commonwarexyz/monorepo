@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryPlan,
+    DecoderResult, EncoderResult, Error, Plan,
     engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, tables},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
@@ -9,7 +9,8 @@ use fixedbitset::FixedBitSet;
 // Bound the quadratic calculation and its stack storage.
 pub(crate) const DIRECT_EVALUATION_LIMIT: usize = 128;
 
-/// Evaluate the erasure coefficients and borrow them for the supplied operation.
+/// Evaluate the log erasure locator for each position below `end` and pass those entries to
+/// `f`, where `end = original_count.next_power_of_two() + recovery_count`.
 pub(crate) fn with_erasures<E: Engine, T>(
     original_count: usize,
     recovery_count: usize,
@@ -23,18 +24,14 @@ pub(crate) fn with_erasures<E: Engine, T>(
         f(&erasures[..end])
     } else {
         let mut erasures = [0; GF_ORDER];
-        eval_full::<E>(&mut erasures, original_count, recovery_count, received);
+        eval_walsh::<E>(&mut erasures, original_count, recovery_count, received);
         f(&erasures[..end])
     }
 }
 
 /// Compute log erasure factors directly from the known positions in a small decoding domain.
-/// This avoids evaluating the erasure polynomial over the entire field.
-pub(crate) fn eval_direct(
-    erasures: &mut [GfElement],
-    original_count: usize,
-    received: &FixedBitSet,
-) {
+/// This avoids the zeroed `GF_ORDER` buffer and the Walsh transforms of `eval_walsh`.
+fn eval_direct(erasures: &mut [GfElement], original_count: usize, received: &FixedBitSet) {
     let chunk_size = original_count.next_power_of_two();
     let mut known = [0; DIRECT_EVALUATION_LIMIT];
     let mut count = 0;
@@ -60,8 +57,12 @@ pub(crate) fn eval_direct(
     }
 }
 
-// The caller supplies a zeroed GF_ORDER buffer.
-pub(crate) fn eval_full<E: Engine>(
+/// Write the log erasure locator for each position in `erasures[..end]` with Walsh
+/// transforms, where `end = original_count.next_power_of_two() + recovery_count`.
+///
+/// Missing shards and every position at and after `end` are erased. `erasures` must be
+/// zeroed on entry. Entries at and after `end` are unspecified.
+pub(crate) fn eval_walsh<E: Engine>(
     erasures: &mut [GfElement; GF_ORDER],
     original_count: usize,
     recovery_count: usize,
@@ -69,33 +70,19 @@ pub(crate) fn eval_full<E: Engine>(
 ) {
     let chunk_size = original_count.next_power_of_two();
     let end = chunk_size + recovery_count;
-    let n = end.next_power_of_two();
-    if n < GF_ORDER {
-        // The product of all nonzero field elements is one, so the erased
-        // locator is the reciprocal of the product over known positions.
-        for i in 0..end {
-            if received[i] || (original_count..chunk_size).contains(&i) {
-                erasures[i] = 1;
-            }
-        }
-        engine::utils::eval_poly_short(erasures, end, n);
-        for value in &mut erasures[..end] {
-            *value = GF_MODULUS - *value;
-        }
-        return;
-    }
-    for i in 0..original_count {
-        if !received[i] {
+
+    // Every position at and after `end` is erased. For each `i`, the values `i ^ j` with
+    // `j != i` cover every nonzero field element, whose product is one. So evaluate the
+    // known positions, which lie below `end`, and negate the logarithm.
+    for i in 0..end {
+        if received[i] || (original_count..chunk_size).contains(&i) {
             erasures[i] = 1;
         }
     }
-    for i in chunk_size..end {
-        if !received[i] {
-            erasures[i] = 1;
-        }
+    super::eval_locator::<E>(erasures, end);
+    for value in &mut erasures[..end] {
+        *value = GF_MODULUS - *value;
     }
-    erasures[end..].fill(1);
-    E::eval_poly(erasures, GF_ORDER);
 }
 
 // ======================================================================
@@ -316,21 +303,26 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
 }
 
 // ======================================================================
-// LowRateDecoder - PRIVATE
+// LowRateDecoder - CRATE
 
 impl<E: Engine> LowRateDecoder<E> {
     pub(crate) fn decode_with_plan(
         &mut self,
         compute_recovery: bool,
-        plan: &RecoveryPlan,
+        plan: &Plan,
     ) -> Result<Option<DecoderResult<'_>>, Error> {
         self.decode_impl(compute_recovery, Some(plan))
     }
+}
 
+// ======================================================================
+// LowRateDecoder - PRIVATE
+
+impl<E: Engine> LowRateDecoder<E> {
     fn decode_impl(
         &mut self,
         compute_recovery: bool,
-        plan: Option<&RecoveryPlan>,
+        plan: Option<&Plan>,
     ) -> Result<Option<DecoderResult<'_>>, Error> {
         if let Some(plan) = plan {
             self.work.validate_plan(plan, false)?;
@@ -348,12 +340,17 @@ impl<E: Engine> LowRateDecoder<E> {
         let recovery_end = chunk_size + recovery_count;
         let work_count = work.len();
 
+        // ERASURE LOCATIONS
+        //
+        // `with_erasures` lends coefficients from its own stack buffer, so the rest of decoding
+        // is a closure over either those or the plan's coefficients.
+
         let mut decode = |erasures: &[GfElement]| {
             // MULTIPLY SHARDS
 
             // work[               .. original_count] = original * erasures
             // work[original_count .. chunk_size    ] = 0
-            // work[chunk_size     .. original_end  ] = recovery * erasures
+            // work[chunk_size     .. recovery_end  ] = recovery * erasures
             // work[recovery_end   ..               ] = 0
 
             for i in 0..original_count {
@@ -464,9 +461,17 @@ mod tests {
     #[test]
     fn direct_matches_transform() {
         let mut rng = test_rng();
-        for (original_count, recovery_count) in
-            [(1usize, 1), (3, 5), (7, 13), (16, 32), (31, 95), (32, 96)]
-        {
+
+        // The last two domains end one short of and exactly at DIRECT_EVALUATION_LIMIT.
+        let quarter = DIRECT_EVALUATION_LIMIT / 4;
+        for (original_count, recovery_count) in [
+            (1usize, 1),
+            (3, 5),
+            (7, 13),
+            (quarter / 2, quarter),
+            (quarter - 1, 3 * quarter - 1),
+            (quarter, 3 * quarter),
+        ] {
             let chunk_size = original_count.next_power_of_two();
             let end = chunk_size + recovery_count;
             for pattern in 0..18 {

@@ -3,7 +3,7 @@ use bytes::{BufMut, Bytes};
 use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
     Digest, Hasher,
-    reed_solomon::{Decoder, Encoder, Error as RsError, RecoveryPlan, SHARD_CHUNK_BYTES},
+    reed_solomon::{Decoder, Encoder, Error as RsError, Plan, SHARD_CHUNK_BYTES},
 };
 use commonware_parallel::{Batches, Strategy};
 use commonware_storage::bmt::{self, Builder};
@@ -27,6 +27,8 @@ commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
 
 /// Target transform storage per tile within a scheduled stripe.
+///
+/// Only striped work is tiled. Unbatched coding runs one full-width instance.
 const MAX_TILE_WORK_BYTES: usize = 2 * 1024 * 1024;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
@@ -498,13 +500,21 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 /// Both decode paths reuse this per-stripe layout. With all originals present,
 /// [`decode`](striped::decode) re-encodes the recovery stripes and verifies them against the
 /// commitment. With an original missing, [`decode_reveal`](striped::decode_reveal)
-/// feeds exactly `k` shards and recovers the missing original and recovery stripes from a single
+/// feeds exactly `k` shards and recovers the missing original and recovery stripes from the same
 /// Reed-Solomon decode (no re-encode).
+///
+/// Each stripe task codes its range in tiles that target [`MAX_TILE_WORK_BYTES`] of transform
+/// storage. Tiles start on [`SHARD_CHUNK_BYTES`] boundaries, so tiling does not change the coded
+/// bytes.
 mod striped {
     use super::*;
 
-    // The transform has at most twice the rounded total shard count. Keep a
-    // stripe intact unless it contains at least two full cache-sized tiles.
+    /// Width in bytes of each tile coded within a stripe of `stripe_len` bytes.
+    ///
+    /// The transform holds at most `2 * (k + m).next_power_of_two()` shards, so a tile targets
+    /// [`MAX_TILE_WORK_BYTES`] of transform storage. A stripe with fewer than two full tiles is
+    /// coded as one tile. A tiled width is a multiple of [`SHARD_CHUNK_BYTES`], so every tile but
+    /// the last ends on a symbol-block boundary (see [`byte_ranges`]).
     fn tile_width(k: usize, m: usize, stripe_len: usize) -> usize {
         let work_count = 2 * (k + m).next_power_of_two();
         let chunks = (MAX_TILE_WORK_BYTES / (work_count * SHARD_CHUNK_BYTES)).max(1);
@@ -512,14 +522,17 @@ mod striped {
             return stripe_len.max(1);
         }
         let width = chunks * SHARD_CHUNK_BYTES;
-        // Avoid page-multiple strides in the sixteen-way derivative.
+
+        // The decoder's sixteen-shard AVX-512 derivative leaf skips shard lengths that are a
+        // multiple of 4 KiB. Shrink such widths by two blocks so full tiles can use it.
         if width.is_multiple_of(4096) {
-            width - 128
+            width - 2 * SHARD_CHUNK_BYTES
         } else {
             width
         }
     }
 
+    /// Split `range` into consecutive tiles of `width` bytes. The last tile may be shorter.
     fn tiles(range: Range<usize>, width: usize) -> impl Iterator<Item = Range<usize>> {
         let end = range.end;
         (range.start..end)
@@ -562,6 +575,15 @@ mod striped {
         recoveries: &'a [usize],
     }
 
+    /// The shards a recover-all stripe task decodes from, with the [`Plan`] built from
+    /// their indices.
+    #[derive(Clone, Copy)]
+    struct Provided<'a> {
+        originals: &'a [(usize, &'a [u8])],
+        recoveries: &'a [(usize, &'a [u8])],
+        plan: &'a Plan,
+    }
+
     /// Convert batches of complete symbol blocks into byte ranges, attaching any partial
     /// final block to the last batch.
     ///
@@ -589,12 +611,13 @@ mod striped {
     /// both missing originals and missing recoveries straight out of the decoder (the decode
     /// reveals all positions), so no separate re-encode is needed. Writes each restored shard's
     /// stripe into the matching `out.originals` / `out.recoveries` column slice.
+    ///
+    /// Every tile decodes with `provided.plan`.
     fn recover_all_into(
-        (k, m): (usize, usize),
+        k: usize,
+        m: usize,
         range: Range<usize>,
-        provided_originals: &[(usize, &[u8])],
-        provided_recoveries: &[(usize, &[u8])],
-        plan: &RecoveryPlan,
+        provided: Provided<'_>,
         missing: Missing<'_>,
         mut out: StripeOut<'_>,
     ) -> Result<(), Error> {
@@ -609,26 +632,30 @@ mod striped {
             |dec| dec.reset(k, m, width),
         )
         .map_err(Error::ReedSolomon)?;
-        for range in tiles(range, width) {
-            let local = range.start - offset..range.end - offset;
-            if range.len() != width {
+
+        // Dropping a decode result clears the received shards, so full-width tiles reuse the
+        // decoder as is and only a shorter final tile resets it. The plan does not depend on
+        // shard length, so every tile shares it.
+        for tile in tiles(range, width) {
+            let local = tile.start - offset..tile.end - offset;
+            if tile.len() != width {
                 decoder
-                    .reset(k, m, range.len())
+                    .reset(k, m, tile.len())
                     .map_err(Error::ReedSolomon)?;
             }
 
-            for (idx, shard) in provided_originals {
+            for (idx, shard) in provided.originals {
                 decoder
-                    .add_original_shard(*idx, &shard[range.clone()])
+                    .add_original_shard(*idx, &shard[tile.clone()])
                     .map_err(Error::ReedSolomon)?;
             }
-            for (idx, shard) in provided_recoveries {
+            for (idx, shard) in provided.recoveries {
                 decoder
-                    .add_recovery_shard(*idx, &shard[range.clone()])
+                    .add_recovery_shard(*idx, &shard[tile.clone()])
                     .map_err(Error::ReedSolomon)?;
             }
             let decoding = decoder
-                .decode_with_recovery_plan(plan)
+                .decode_with_recovery_plan(provided.plan)
                 .map_err(Error::ReedSolomon)?
                 .expect("decode runs only when an original is missing");
 
@@ -664,18 +691,21 @@ mod striped {
             |enc| enc.reset(k, m, width),
         )
         .map_err(Error::ReedSolomon)?;
-        for range in tiles(range, width) {
-            let local = range.start - offset..range.end - offset;
-            if range.len() != width {
+
+        // Dropping an encode result clears the added originals, so full-width tiles reuse the
+        // encoder as is and only a shorter final tile resets it.
+        for tile in tiles(range, width) {
+            let local = tile.start - offset..tile.end - offset;
+            if tile.len() != width {
                 encoder
-                    .reset(k, m, range.len())
+                    .reset(k, m, tile.len())
                     .map_err(Error::ReedSolomon)?;
             }
 
             for shard in originals.iter().take(k) {
                 let shard = shard.as_ref();
                 encoder
-                    .add_original_shard(&shard[range.clone()])
+                    .add_original_shard(&shard[tile.clone()])
                     .map_err(Error::ReedSolomon)?;
             }
             let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
@@ -758,12 +788,21 @@ mod striped {
 
         let mut restored_originals = vec![0u8; missing_originals.len() * shard_len];
         let mut restored_recoveries = vec![0u8; missing_recoveries.len() * shard_len];
-        let plan = RecoveryPlan::new(
+
+        // Erasure coefficients depend only on the shard counts and provided indices, so every
+        // stripe shares one plan.
+        let plan = Plan::new(
             k,
             m,
             provided_originals.iter().map(|&(index, _)| index),
             provided_recoveries.iter().map(|&(index, _)| index),
-        )?;
+        )
+        .map_err(Error::ReedSolomon)?;
+        let provided = Provided {
+            originals: &provided_originals,
+            recoveries: &provided_recoveries,
+            plan: &plan,
+        };
         let missing = Missing {
             originals: &missing_originals,
             recoveries: &missing_recoveries,
@@ -786,17 +825,7 @@ mod striped {
                         )
                     })
             },
-            |(range, out)| {
-                recover_all_into(
-                    (k, m),
-                    range,
-                    &provided_originals,
-                    &provided_recoveries,
-                    &plan,
-                    missing,
-                    out,
-                )
-            },
+            |(range, out)| recover_all_into(k, m, range, provided, missing, out),
         )?;
 
         let mut original_refs: Vec<&[u8]> = vec![&[]; k];
@@ -2067,7 +2096,8 @@ mod tests {
     /// `2 * MIN_STRIPE_BYTES`, so this sweeps payload sizes and shard counts that land on
     /// several stripe-count boundaries under a parallel `Strategy`, decoding from a
     /// set with as many recoveries as possible and checking the result
-    /// against the original data on both the sequential and parallel paths.
+    /// against the original data on both the sequential and parallel paths. Larger payloads
+    /// also split stripes into multiple cache-sized tiles.
     #[test]
     fn test_striped_recovery_matches_sequential() {
         for &data_len in &[
@@ -2138,8 +2168,9 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
-    /// Splitting a shard into stripes and encoding each must reproduce the single full-width
-    /// encode byte-for-byte.
+    /// Splitting a shard into stripes, and stripes into cache-sized tiles, must reproduce a
+    /// single full-width `Encoder` pass byte-for-byte. `(32, 64)` at `17 * MIN_STRIPE_BYTES + 2`
+    /// splits stripes into multiple tiles.
     #[test]
     fn test_striped_encode_into_matches_full_width() {
         let strategy = Rayon::new(NZUsize!(4)).unwrap().manual();

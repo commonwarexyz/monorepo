@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    Error, RecoveryPlan,
+    Error, Plan,
     engine::{SHARD_CHUNK_BYTES, Shards, ShardsRefMut},
 };
 use fixedbitset::FixedBitSet;
@@ -26,19 +26,6 @@ pub struct DecoderWork {
 }
 
 impl DecoderWork {
-    pub(crate) fn validate_plan(&self, plan: &RecoveryPlan, high_rate: bool) -> Result<(), Error> {
-        if plan.matches(
-            self.original_count,
-            self.recovery_count,
-            high_rate,
-            &self.received,
-        ) {
-            Ok(())
-        } else {
-            Err(Error::RecoveryPlanMismatch)
-        }
-    }
-
     /// Creates new [`DecoderWork`] which initially
     /// has no working space allocated.
     pub const fn new() -> Self {
@@ -71,6 +58,21 @@ impl Default for DecoderWork {
 // DecoderWork - CRATE
 
 impl DecoderWork {
+    /// Returns [`Error::PlanMismatch`] unless `plan` was built for these shard counts,
+    /// this rate, and these received shard indices.
+    pub(crate) fn validate_plan(&self, plan: &Plan, high_rate: bool) -> Result<(), Error> {
+        if plan.matches(
+            self.original_count,
+            self.recovery_count,
+            high_rate,
+            &self.received,
+        ) {
+            Ok(())
+        } else {
+            Err(Error::PlanMismatch)
+        }
+    }
+
     pub(crate) fn add_original_shard<T: AsRef<[u8]>>(
         &mut self,
         index: usize,

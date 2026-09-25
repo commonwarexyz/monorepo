@@ -7,12 +7,36 @@ use crate::reed_solomon::{
 use alloc::vec::Vec;
 use fixedbitset::FixedBitSet;
 
-/// Immutable erasure coefficients reusable across decoders with the same received shard indices.
+/// Erasure coefficients prepared once for a fixed set of received shard indices.
 ///
-/// A plan depends on shard counts and indices, but not shard contents or byte length. Build it
-/// once and share it across independent stripes, including stripes with different even lengths.
-/// All supplied shards must still belong to the same codeword for their respective stripe.
-pub struct RecoveryPlan {
+/// A plan depends only on the shard counts and the received original and recovery indices.
+/// It does not depend on shard contents or shard byte length, so decoders that receive the
+/// same indices can share one plan, even with different shard byte lengths. Each decoder's
+/// shards must still belong to one codeword.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_cryptography::reed_solomon::{Decoder, Encoder, Plan};
+///
+/// // Original 0 and recovery 0 arrive for both codewords. Original 1 is missing.
+/// let plan = Plan::new(2, 1, [0], [0])?;
+/// let codewords: [[&[u8]; 2]; 2] = [[&[1, 2], &[3, 4]], [&[5, 6, 7, 8], &[9, 10, 11, 12]]];
+/// for [first, second] in codewords {
+///     let mut encoder = Encoder::new(2, 1, first.len())?;
+///     encoder.add_original_shard(first)?;
+///     encoder.add_original_shard(second)?;
+///     let encoded = encoder.encode()?;
+///
+///     let mut decoder = Decoder::new(2, 1, first.len())?;
+///     decoder.add_original_shard(0, first)?;
+///     decoder.add_recovery_shard(0, encoded.recovery(0).unwrap())?;
+///     let decoded = decoder.decode_with_plan(&plan)?.unwrap();
+///     assert_eq!(decoded.original(1), Some(second));
+/// }
+/// # Ok::<(), commonware_cryptography::reed_solomon::Error>(())
+/// ```
+pub struct Plan {
     original_count: usize,
     recovery_count: usize,
     high_rate: bool,
@@ -20,11 +44,16 @@ pub struct RecoveryPlan {
     coefficients: Vec<GfElement>,
 }
 
-impl RecoveryPlan {
-    /// Prepare the coefficients for the distinct original and recovery indices to be decoded.
+impl Plan {
+    /// Prepares coefficients for the received original and recovery shard indices.
     ///
-    /// At least `original_count` total shards must be supplied. Extra recovery shards are allowed.
-    /// The plan is valid for any nonzero even shard byte length accepted by [`Decoder`](super::Decoder).
+    /// A [`Decoder`](super::Decoder) accepts the plan only when it has the same counts and has
+    /// received exactly these indices. At least `original_count` indices must be given in total.
+    /// Extra recovery indices are allowed.
+    ///
+    /// Returns [`Error::UnsupportedShardCount`] for unsupported counts, an index error for an
+    /// out-of-range or repeated index, and [`Error::NotEnoughShards`] when too few indices are
+    /// given.
     pub fn new(
         original_count: usize,
         recovery_count: usize,
@@ -32,6 +61,9 @@ impl RecoveryPlan {
         recovery_indices: impl IntoIterator<Item = usize>,
     ) -> Result<Self, Error> {
         let high_rate = use_high_rate(original_count, recovery_count)?;
+
+        // Mirror the received-bit layout that each rate's `reset_work` gives `DecoderWork`,
+        // which `matches` compares bit for bit.
         let (original_base, recovery_base) = if high_rate {
             (recovery_count.next_power_of_two(), 0)
         } else {
@@ -77,6 +109,7 @@ impl RecoveryPlan {
             });
         }
 
+        // With every original received, `decode_begin` returns before reading coefficients.
         let coefficients = if original_received == original_count {
             Vec::new()
         } else if high_rate {
@@ -109,6 +142,11 @@ impl RecoveryPlan {
         &self.coefficients
     }
 
+    /// Returns whether this plan was built for these counts, rate, and received positions.
+    ///
+    /// `DecoderWork::reset` never shrinks `received`, so it may have more words than the plan's
+    /// bitset. With matching counts and rate, `DecoderWork` sets no bit at or past the plan's
+    /// length because it rejects out-of-range indices. A prefix comparison is therefore exact.
     pub(crate) fn matches(
         &self,
         original_count: usize,
@@ -119,7 +157,6 @@ impl RecoveryPlan {
         self.original_count == original_count
             && self.recovery_count == recovery_count
             && self.high_rate == high_rate
-            // Decoder work may retain extra zero words after shrinking.
             && received.as_slice().starts_with(self.received.as_slice())
     }
 }
@@ -132,23 +169,23 @@ mod tests {
     fn rejects_invalid_received_indices() {
         for (k, m) in [(3, 5), (5, 3)] {
             assert!(matches!(
-                RecoveryPlan::new(k, m, [k], []),
+                Plan::new(k, m, [k], []),
                 Err(Error::InvalidOriginalShardIndex { .. })
             ));
             assert!(matches!(
-                RecoveryPlan::new(k, m, [], [m]),
+                Plan::new(k, m, [], [m]),
                 Err(Error::InvalidRecoveryShardIndex { .. })
             ));
             assert!(matches!(
-                RecoveryPlan::new(k, m, [0, 0], []),
+                Plan::new(k, m, [0, 0], []),
                 Err(Error::DuplicateOriginalShardIndex { index: 0 })
             ));
             assert!(matches!(
-                RecoveryPlan::new(k, m, [], [0, 0]),
+                Plan::new(k, m, [], [0, 0]),
                 Err(Error::DuplicateRecoveryShardIndex { index: 0 })
             ));
             assert!(matches!(
-                RecoveryPlan::new(k, m, [0], [0]),
+                Plan::new(k, m, [0], [0]),
                 Err(Error::NotEnoughShards {
                     original_received_count: 1,
                     recovery_received_count: 1,

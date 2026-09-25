@@ -22,13 +22,14 @@ A shard consists of complete blocks followed by an optional partial block:
 ```
 
 For a tail of `2 * n` bytes, the first `n` bytes are the low parts and the last `n`
-bytes are the high parts. The engine places these at offsets `0..n` and `32..32+n`
-in its final working block, then packs the result back into `2 * n` bytes.
-Unused positions do not contribute to the returned elements.
+bytes are the high parts. Encoders and decoders copy them to offsets `0..n` and
+`32..32+n` of a full working block and pack output tails back into `2 * n` bytes.
+Other positions in that block do not affect the returned elements.
 
-Field elements are independent across these positions. Splitting a shard into
-independent encoding or decoding jobs must therefore preserve complete 64-byte
-blocks, with only the last job containing the original partial block.
+Field elements are independent across positions, so a shard can be split into
+independent encoding or decoding jobs. Splits on 64-byte block boundaries keep
+every low/high byte pairing, so the jobs together produce the same bytes as one
+job. Other even splits pair different bytes into field elements.
 
 # Rate
 

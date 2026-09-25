@@ -95,6 +95,10 @@ impl Engine for DefaultEngine {
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
+            if super::cpu_features::avx512() {
+                return Avx512::eval_poly(erasures, truncated_size);
+            }
+
             if super::cpu_features::avx2() {
                 return Avx2::eval_poly(erasures, truncated_size);
             }

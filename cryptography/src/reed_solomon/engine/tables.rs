@@ -9,10 +9,15 @@
 //! | [`Exp`]      | 128 kiB | yes              | yes              | all                |
 //! | [`Log`]      | 128 kiB | yes              | yes              | all                |
 //! | [`LogWalsh`] | 128 kiB | -                | yes              | all                |
+//! | Short Walsh  | < 128 kiB | -              | yes              | all                |
 //! | [`Mul16`]    | 8 MiB   | yes              | yes              | [`NoSimd`]         |
 //! | [`Mul128`]   | 8 MiB   | yes              | yes              | `Neon` `Avx2` `Ssse3` |
 //! | `MulGfni`    | 2 MiB   | yes              | yes              | `Avx512` |
 //! | [`Skew`]     | 128 kiB | yes              | yes              | all                |
+//!
+//! [`LogWalsh`] serves decoding domains of `GF_ORDER` positions. A smaller power-of-two
+//! domain of `n` positions uses an `n`-entry short Walsh kernel, built on first use for
+//! each `n`.
 //!
 //! [`NoSimd`]: crate::reed_solomon::engine::NoSimd
 //! [`Engine`]: crate::reed_solomon::engine
@@ -49,17 +54,20 @@ pub type Exp = [GfElement; GF_ORDER];
 /// [`Engine`]: crate::reed_solomon::engine
 pub type Log = [GfElement; GF_ORDER];
 
-/// Nibble multiplication tables for SIMD engines.
+/// Used by `Neon`, `Avx2`, and `Ssse3` engines for multiplications.
 pub type Mul128 = [Multiply128lutT; GF_ORDER];
 
-/// GFNI affine matrices for all field multipliers.
+/// GFNI affine matrices indexed by multiplier logarithm.
+///
+/// Entry `GF_MODULUS` duplicates the identity at entry zero.
 #[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
 pub(crate) type MulGfni = [MultiplyGfni; GF_ORDER];
 
-/// Canonical affine matrices for one field multiplier.
+/// GF2P8AFFINEQB matrices for multiplication by one field element.
 ///
 /// Multiplication is a 16 x 16 binary linear map, split into four 8 x 8 maps between
-/// the input and output byte halves.
+/// the input and output byte halves. In each matrix, byte `7 - i` holds the row for output
+/// bit `i`, and bit `j` of that row selects input bit `j`.
 #[cfg(any(test, target_arch = "x86", target_arch = "x86_64"))]
 #[derive(Clone, Debug)]
 pub(crate) struct MultiplyGfni {
@@ -75,7 +83,8 @@ pub(crate) struct MultiplyGfni {
 
 /// Multiplication lookup bytes for the four nibbles of a field element.
 ///
-/// Each `u128` stores 16 bytes in native byte order, indexed by the nibble value.
+/// Byte `x` of `lo[i].to_ne_bytes()` and `hi[i].to_ne_bytes()` holds the low and high byte
+/// of the product of `x << (4 * i)` and the multiplier.
 #[derive(Clone, Debug)]
 pub struct Multiply128lutT {
     /// Low product bytes for each nibble position.
@@ -142,7 +151,15 @@ pub fn get_log_walsh() -> &'static LogWalsh {
     }
 }
 
-/// Walsh kernel for the first `n` Cantor coordinates, normalized by `n^-1`.
+/// Lazily initialized logarithmic Walsh transform table over the first `n` positions.
+///
+/// Entries are scaled by `n^-1` modulo [`GF_MODULUS`] because the unnormalized transform
+/// applied twice multiplies by `n`. [`LogWalsh`] needs no scaling since `GF_ORDER` is 1
+/// modulo [`GF_MODULUS`].
+///
+/// # Panics
+///
+/// If `n` is not a power of two below `GF_ORDER`.
 pub(crate) fn get_short_log_walsh(n: usize) -> &'static [GfElement] {
     assert!(n.is_power_of_two() && n < GF_ORDER);
     let level = n.trailing_zeros() as usize;
@@ -287,11 +304,11 @@ fn initialize_short_log_walsh(n: usize) -> Vec<GfElement> {
     let mut kernel = log[..n].to_vec();
     kernel[0] = 0;
     fwht::fwht(&mut kernel, n);
-    // n * (GF_ORDER / n) = 1 modulo GF_ORDER - 1.
-    let inverse = (GF_ORDER / n) as u32;
+
+    // Scale by n^-1 = GF_ORDER / n modulo GF_MODULUS. Multiplying by 2^j modulo 2^16 - 1
+    // rotates left by j bits, so the scale is a right rotation by log2(n).
     for factor in &mut kernel {
-        let product = u32::from(*factor) * inverse;
-        *factor = utils::add_mod(product as GfElement, (product >> GF_BITS) as GfElement);
+        *factor = factor.rotate_right(n.trailing_zeros());
     }
     kernel
 }
@@ -373,6 +390,7 @@ fn initialize_mul_gfni() -> Box<MulGfni> {
         for input_bit in 0..16 {
             let product = mul(1u16 << input_bit, log_m, exp, log);
             for output_bit in 0..16 {
+                // Blocks follow the `MultiplyGfni` field order: 2 * output byte + input byte.
                 let block = (output_bit / 8) * 2 + input_bit / 8;
                 rows[block][output_bit % 8] |=
                     (((product >> output_bit) & 1) as u8) << (input_bit % 8);
@@ -389,17 +407,17 @@ fn initialize_mul_gfni() -> Box<MulGfni> {
     let mut current = [0u64; 4];
     for step in 1..GF_ORDER {
         let toggled_bit = step.trailing_zeros() as usize;
-        for (row, basis_row) in current.iter_mut().zip(basis_matrices[toggled_bit]) {
-            *row ^= basis_row;
+        for (block, basis) in current.iter_mut().zip(basis_matrices[toggled_bit]) {
+            *block ^= basis;
         }
 
         let coefficient = step ^ (step >> 1);
-        let [a, b, c, d] = current;
+        let [low_from_low, low_from_high, high_from_low, high_from_high] = current;
         table[log[coefficient] as usize] = MultiplyGfni {
-            low_from_low: a,
-            low_from_high: b,
-            high_from_low: c,
-            high_from_high: d,
+            low_from_low,
+            low_from_high,
+            high_from_low,
+            high_from_high,
         };
     }
 

@@ -19,8 +19,7 @@
 //! - `Avx2`
 //!     - Optimized engine that takes advantage of the x86(-64) AVX2 SIMD instructions.
 //! - `Avx512`
-//!     - Optimized engine that takes advantage of AVX-512F, AVX-512VL, and AVX-512BW.
-//!       Requires GFNI for field multiplication.
+//!     - Optimized engine that takes advantage of the x86(-64) AVX-512F and GFNI instructions.
 //! - `Ssse3`
 //!     - Optimized engine that takes advantage of the x86(-64) SSSE3 SIMD instructions.
 //! - `Neon`
@@ -45,7 +44,7 @@
 )]
 mod cpu_features {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    cpufeatures::new!(has_avx512, "avx512f", "avx512vl", "avx512bw", "gfni");
+    cpufeatures::new!(has_avx512, "avx512f", "gfni");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     cpufeatures::new!(has_avx2, "avx2");
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -191,7 +190,13 @@ pub trait Engine {
     // ============================================================
     // PROVIDED
 
-    /// Evaluate a polynomial whose entries at and after `truncated_size` are zero.
+    /// Replace `erasures` with its XOR convolution against the field logarithm table.
+    ///
+    /// On return, `erasures[i]` is congruent modulo [`GF_MODULUS`] to the sum over `j != i`
+    /// of `erasures[j] * log(i ^ j)`. For a 0/1 erasure indicator, this is the logarithm of
+    /// the product of `i ^ j` over erased `j != i`.
+    ///
+    /// Entries at and after `truncated_size` must be zero.
     ///
     /// # Panics
     ///
@@ -204,6 +209,10 @@ pub trait Engine {
     }
 }
 
+// ======================================================================
+// FUNCTIONS - PRIVATE
+
+/// Assert the [`Engine::fft`] and [`Engine::ifft`] preconditions.
 #[inline]
 fn validate_transform(
     data: &ShardsRefMut<'_>,
@@ -215,6 +224,9 @@ fn validate_transform(
     assert!(size.is_power_of_two() && size <= GF_ORDER);
     assert!(truncated_size <= size);
     assert!(pos <= data.len() && size <= data.len() - pos);
+
+    // Butterflies read skew entries up to `size + skew_delta - 2`, and `Skew` has
+    // `GF_ORDER - 1` entries. A size-one transform has no butterflies.
     assert!(size == 1 || skew_delta <= GF_ORDER - size);
 }
 
@@ -226,6 +238,29 @@ mod tests {
     use super::*;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
+    /// Every engine the host supports.
+    fn engines() -> Vec<Box<dyn Engine>> {
+        let mut engines: Vec<Box<dyn Engine>> =
+            vec![Box::new(NoSimd::new()), Box::new(Naive::new())];
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if cpu_features::avx512() {
+                engines.push(Box::new(Avx512::new()));
+            }
+            if cpu_features::avx2() {
+                engines.push(Box::new(Avx2::new()));
+            }
+            if cpu_features::ssse3() {
+                engines.push(Box::new(Ssse3::new()));
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        if cpu_features::neon() {
+            engines.push(Box::new(Neon::new()));
+        }
+        engines
+    }
+
     fn invalid_transform(
         shard_count: usize,
         pos: usize,
@@ -233,8 +268,7 @@ mod tests {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        let engines: [&dyn Engine; 2] = [&NoSimd::new(), &Naive::new()];
-        for engine in engines {
+        for engine in engines() {
             for inverse in [false, true] {
                 let mut shards = ShardsRefMut::new(shard_count, 0, &mut []);
                 let result = catch_unwind(AssertUnwindSafe(|| {
@@ -288,8 +322,7 @@ mod tests {
 
     #[test]
     fn transform_empty_shards_and_identity() {
-        let engines: [&dyn Engine; 2] = [&NoSimd::new(), &Naive::new()];
-        for engine in engines {
+        for engine in engines() {
             let mut empty = ShardsRefMut::new(GF_ORDER + 3, 0, &mut []);
             engine.fft(&mut empty, 3, GF_ORDER, 0, 0);
             engine.ifft(&mut empty, 3, GF_ORDER, 0, 0);

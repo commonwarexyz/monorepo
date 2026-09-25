@@ -1,12 +1,17 @@
 use crate::reed_solomon::{
-    DecoderResult, EncoderResult, Error, RecoveryPlan,
+    DecoderResult, EncoderResult, Error, Plan,
     engine::{self, Engine, GF_MODULUS, GF_ORDER, GfElement, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
 };
 use core::marker::PhantomData;
 use fixedbitset::FixedBitSet;
 
-// The caller supplies a zeroed GF_ORDER buffer.
+/// Write the log erasure locator for each position in `erasures[..end]`, where
+/// `end = recovery_count.next_power_of_two() + original_count`.
+///
+/// Missing recovery shards, the padding in `recovery_count..recovery_count.next_power_of_two()`,
+/// and missing originals are erased. `erasures` must be zeroed on entry. Entries at and after
+/// `end` are unspecified.
 pub(crate) fn eval_erasures<E: Engine>(
     erasures: &mut [GfElement; GF_ORDER],
     original_count: usize,
@@ -26,12 +31,7 @@ pub(crate) fn eval_erasures<E: Engine>(
             erasures[i] = 1;
         }
     }
-    let n = end.next_power_of_two();
-    if n == GF_ORDER {
-        E::eval_poly(erasures, end);
-    } else {
-        engine::utils::eval_poly_short(erasures, end, n);
-    }
+    super::eval_locator::<E>(erasures, end);
 }
 
 // ======================================================================
@@ -252,21 +252,26 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
 }
 
 // ======================================================================
-// HighRateDecoder - PRIVATE
+// HighRateDecoder - CRATE
 
 impl<E: Engine> HighRateDecoder<E> {
     pub(crate) fn decode_with_plan(
         &mut self,
         compute_recovery: bool,
-        plan: &RecoveryPlan,
+        plan: &Plan,
     ) -> Result<Option<DecoderResult<'_>>, Error> {
         self.decode_impl(compute_recovery, Some(plan))
     }
+}
 
+// ======================================================================
+// HighRateDecoder - PRIVATE
+
+impl<E: Engine> HighRateDecoder<E> {
     fn decode_impl(
         &mut self,
         compute_recovery: bool,
-        plan: Option<&RecoveryPlan>,
+        plan: Option<&Plan>,
     ) -> Result<Option<DecoderResult<'_>>, Error> {
         if let Some(plan) = plan {
             self.work.validate_plan(plan, true)?;
@@ -283,6 +288,8 @@ impl<E: Engine> HighRateDecoder<E> {
         let chunk_size = recovery_count.next_power_of_two();
         let original_end = chunk_size + original_count;
         let work_count = work.len();
+
+        // ERASURE LOCATIONS
 
         let mut owned_erasures;
         #[expect(

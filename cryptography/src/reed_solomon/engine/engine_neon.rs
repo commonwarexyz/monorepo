@@ -13,9 +13,9 @@ use core::{arch::aarch64::*, iter::zip};
 /// [`Neon`] is an optimized engine that follows the same algorithm as
 /// [`NoSimd`] but takes advantage of the Arm Neon SIMD instructions.
 ///
-/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
-///
 /// Construction and [`Engine::eval_poly`] panic if NEON is unavailable.
+///
+/// [`NoSimd`]: crate::reed_solomon::engine::NoSimd
 #[derive(Clone, Copy)]
 pub struct Neon {
     mul128: &'static Mul128,
@@ -28,6 +28,10 @@ impl Neon {
     ///
     /// Currently only difference between encoding/decoding is
     /// [`LogWalsh`] (128 kiB) which is only needed for decoding.
+    ///
+    /// # Panics
+    ///
+    /// If NEON is unavailable.
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
