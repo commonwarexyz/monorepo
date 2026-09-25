@@ -6,13 +6,15 @@ use crate::reed_solomon::engine::{GF_ORDER, GfElement, utils};
 /// Decimation in time (DIT) Fast Walsh-Hadamard Transform.
 /// `m_truncated`: Number of non-zero elements in `data` (at the front).
 #[inline(always)]
-pub(crate) fn fwht(data: &mut [GfElement; GF_ORDER], m_truncated: usize) {
+pub(crate) fn fwht(data: &mut [GfElement], m_truncated: usize) {
+    debug_assert!(data.len().is_power_of_two() && data.len() <= GF_ORDER);
+    debug_assert!(m_truncated <= data.len());
     // Note to self: fwht_8 is slightly faster on x86 (AMD Ryzen 5 3600),
     // but slower on ARM (Apple silicon M1).
     // fwht_16 is always slower. See branch: AndersTrier/FWHT_8_and_16
     let mut dist = 1;
     let mut dist4 = 4;
-    while dist4 <= GF_ORDER {
+    while dist4 <= data.len() {
         for r in (0..m_truncated).step_by(dist4) {
             for offset in r..r + dist {
                 fwht_4(data, offset as u16, dist as u16);
@@ -21,6 +23,16 @@ pub(crate) fn fwht(data: &mut [GfElement; GF_ORDER], m_truncated: usize) {
 
         dist = dist4;
         dist4 <<= 2;
+    }
+    // A power-of-two domain with an odd logarithm has one remaining layer.
+    if dist < data.len() {
+        for r in (0..m_truncated).step_by(2 * dist) {
+            for i in r..r + dist {
+                let (sum, difference) = fwht_2(data[i], data[i + dist]);
+                data[i] = sum;
+                data[i + dist] = difference;
+            }
+        }
     }
 }
 
@@ -35,7 +47,7 @@ fn fwht_2(a: GfElement, b: GfElement) -> (GfElement, GfElement) {
 }
 
 #[inline(always)]
-fn fwht_4(data: &mut [GfElement; GF_ORDER], offset: u16, dist: u16) {
+fn fwht_4(data: &mut [GfElement], offset: u16, dist: u16) {
     // Indices. u16 additions and multiplication to avoid bounds checks
     // on array access. (GF_ORDER == (u16::MAX+1))
     let i0 = usize::from(offset);
@@ -66,7 +78,7 @@ mod tests {
     use rand_chacha::ChaCha8Rng;
 
     // Reference implementation
-    fn fwht_naive(data: &mut [GfElement; GF_ORDER]) {
+    fn fwht_naive(data: &mut [GfElement]) {
         let mut dist = 1;
         let mut dist2 = 2;
         while dist2 <= data.len() {
@@ -145,6 +157,23 @@ mod tests {
             fwht_naive(&mut data2);
 
             assert_eq!(data1, data2);
+        }
+    }
+
+    #[test]
+    fn test_short_odd_and_even_lengths() {
+        let mut rng = ChaCha8Rng::from_seed([7; 32]);
+        for n in [1, 2, 4, 8, 16, 512, 1024] {
+            for nonzero in [0, 1, n / 2, n] {
+                let mut actual = (0..n)
+                    .map(|_| rng.random::<GfElement>())
+                    .collect::<Vec<_>>();
+                actual[nonzero..].fill(0);
+                let mut expected = actual.clone();
+                fwht(&mut actual, nonzero);
+                fwht_naive(&mut expected);
+                assert_eq!(actual, expected, "n={n} nonzero={nonzero}");
+            }
         }
     }
 }

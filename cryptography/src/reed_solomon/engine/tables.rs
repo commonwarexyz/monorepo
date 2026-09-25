@@ -26,9 +26,11 @@ use alloc::boxed::Box;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 #[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
 use once_cell::race::OnceBox;
 #[cfg(feature = "std")]
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 // ======================================================================
 // TYPE ALIASES - PUBLIC
@@ -137,6 +139,22 @@ pub fn get_log_walsh() -> &'static LogWalsh {
     {
         static LOG_WALSH: OnceBox<LogWalsh> = OnceBox::new();
         LOG_WALSH.get_or_init(initialize_log_walsh)
+    }
+}
+
+/// Walsh kernel for the first `n` Cantor coordinates, normalized by `n^-1`.
+pub(crate) fn get_short_log_walsh(n: usize) -> &'static [GfElement] {
+    assert!(n.is_power_of_two() && n < GF_ORDER);
+    let level = n.trailing_zeros() as usize;
+    #[cfg(feature = "std")]
+    {
+        static KERNELS: [OnceLock<Vec<GfElement>>; GF_BITS] = [const { OnceLock::new() }; GF_BITS];
+        KERNELS[level].get_or_init(|| initialize_short_log_walsh(n))
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        static KERNELS: [OnceBox<Vec<GfElement>>; GF_BITS] = [const { OnceBox::new() }; GF_BITS];
+        KERNELS[level].get_or_init(|| Box::new(initialize_short_log_walsh(n)))
     }
 }
 
@@ -262,6 +280,20 @@ fn initialize_log_walsh() -> Box<LogWalsh> {
     fwht::fwht(log_walsh.as_mut(), GF_ORDER);
 
     log_walsh
+}
+
+fn initialize_short_log_walsh(n: usize) -> Vec<GfElement> {
+    let log = &get_exp_log().log;
+    let mut kernel = log[..n].to_vec();
+    kernel[0] = 0;
+    fwht::fwht(&mut kernel, n);
+    // n * (GF_ORDER / n) = 1 modulo GF_ORDER - 1.
+    let inverse = (GF_ORDER / n) as u32;
+    for factor in &mut kernel {
+        let product = u32::from(*factor) * inverse;
+        *factor = utils::add_mod(product as GfElement, (product >> GF_BITS) as GfElement);
+    }
+    kernel
 }
 
 fn initialize_mul16() -> Box<Mul16> {

@@ -26,7 +26,12 @@ pub(crate) fn eval_erasures<E: Engine>(
             erasures[i] = 1;
         }
     }
-    E::eval_poly(erasures, end);
+    let n = end.next_power_of_two();
+    if n == GF_ORDER {
+        E::eval_poly(erasures, end);
+    } else {
+        engine::utils::eval_poly_short(erasures, end, n);
+    }
 }
 
 // ======================================================================

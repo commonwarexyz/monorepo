@@ -69,6 +69,21 @@ pub(crate) fn eval_full<E: Engine>(
 ) {
     let chunk_size = original_count.next_power_of_two();
     let end = chunk_size + recovery_count;
+    let n = end.next_power_of_two();
+    if n < GF_ORDER {
+        // The product of all nonzero field elements is one, so the erased
+        // locator is the reciprocal of the product over known positions.
+        for i in 0..end {
+            if received[i] || (original_count..chunk_size).contains(&i) {
+                erasures[i] = 1;
+            }
+        }
+        engine::utils::eval_poly_short(erasures, end, n);
+        for value in &mut erasures[..end] {
+            *value = GF_MODULUS - *value;
+        }
+        return;
+    }
     for i in 0..original_count {
         if !received[i] {
             erasures[i] = 1;

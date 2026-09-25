@@ -37,6 +37,20 @@ pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
     fwht::fwht(erasures, GF_ORDER);
 }
 
+/// Evaluate an XOR locator on a shorter power-of-two coordinate domain.
+/// Entries in `data[nonzero..n]` must be zero; entries at and after `n` are untouched.
+pub(crate) fn eval_poly_short(data: &mut [GfElement; GF_ORDER], nonzero: usize, n: usize) {
+    assert!(n.is_power_of_two() && n < GF_ORDER && nonzero <= n);
+    let kernel = tables::get_short_log_walsh(n);
+    let values = &mut data[..n];
+    fwht::fwht(values, nonzero);
+    for (value, factor) in zip(values.iter_mut(), kernel) {
+        let product = u32::from(*value) * u32::from(*factor);
+        *value = add_mod(product as GfElement, (product >> GF_BITS) as GfElement);
+    }
+    fwht::fwht(values, n);
+}
+
 /// `x[] ^= y[]`
 #[inline(always)]
 pub fn xor(xs: &mut [[u8; SHARD_CHUNK_BYTES]], ys: &[[u8; SHARD_CHUNK_BYTES]]) {
