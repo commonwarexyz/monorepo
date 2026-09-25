@@ -275,8 +275,24 @@ where
     /// Pending mutations. `Some(value)` for upsert, `None` for delete.
     mutations: BTreeMap<U::Key, Option<U::Value>>,
 
+    /// Explicit floor selected by the caller, disabling the automatic raise for this batch.
+    manual_floor: Option<Location<F>>,
+
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
+}
+
+/// A live entry evicted by [`UnmerkleizedBatch::pop_floor`].
+///
+/// Write its key and value back to the batch to preserve it at a new location. Ordered
+/// databases regenerate its successor link from the final key set.
+pub struct Evicted<F: Family, K, V> {
+    /// The location of the evicted update.
+    pub location: Location<F>,
+    /// The evicted key.
+    pub key: K,
+    /// The value associated with the key before eviction.
+    pub value: V,
 }
 
 /// Pending mutations whose old locations were already resolved by staged reads, sorted
@@ -414,6 +430,7 @@ where
     base_state: Commitment<F, H::Digest>,
     db_state: Commitment<F, H::Digest>,
     base_inactivity_floor_loc: Location<F>,
+    manual_floor: Option<Location<F>>,
     base_active_keys: usize,
 }
 
@@ -1028,7 +1045,7 @@ where
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
         let total_steps = user_steps + 1;
         let total_active_keys = self.base_active_keys as isize + active_keys_delta;
-        let mut floor = self.base_inactivity_floor_loc;
+        let mut floor = self.manual_floor.unwrap_or(self.base_inactivity_floor_loc);
 
         // Key-sort the diff as one job on the strategy: candidate classification (after the
         // first floor-raise read below) is the earliest consumer that needs it sorted, so the
@@ -1047,7 +1064,7 @@ where
 
         // New diff entries for keys moved by the floor raise, merged into `diff` below.
         let mut floor_diff = Vec::new();
-        if total_active_keys > 0 {
+        if total_active_keys > 0 && self.manual_floor.is_none() {
             // Floor raise: advance the inactivity floor by `total_steps` active operations.
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
             let strategy = db.strategy();
@@ -1239,7 +1256,7 @@ where
                     }
                 }
             }
-        } else {
+        } else if total_active_keys == 0 {
             // DB is empty after this batch; raise floor to tip.
             floor = self.base_state.size + ops.len() as u64;
             debug!(tip = ?floor, "db is empty, raising floor to tip");
@@ -1654,7 +1671,11 @@ where
             .chain(prepared.mutations.keys())
             .filter(|&key| db.snapshot.get(key).next().is_some())
             .count();
-        let steps_bound = resolved_updates + existing_writes + 1;
+        let steps_bound = if prepared.merkleizer.manual_floor.is_some() {
+            0
+        } else {
+            resolved_updates + existing_writes + 1
+        };
 
         // Overlap the serial update resolution with the candidate prefetch: the
         // committed-prefix candidate set depends only on the base floor, the candidate
@@ -1753,6 +1774,96 @@ where
         self
     }
 
+    /// Disable automatic floor raising for this batch.
+    ///
+    /// The floor stays at its inherited boundary until [`Self::pop_floor`] advances it.
+    /// If the final state is empty, merkleization sets the floor to the new commit location.
+    /// New batches created from the merkleized result use the automatic policy by default.
+    pub fn with_manual_floor(mut self) -> Self {
+        self.manual_floor
+            .get_or_insert_with(|| self.base.inactivity_floor_loc());
+        self
+    }
+
+    /// Evict the next live entry in location order and advance the floor past it.
+    ///
+    /// Skips inactive operations and keys already written or deleted in this batch. The scan
+    /// stops at the batch's original tip: new writes and reinserted entries cannot be popped
+    /// again in the same batch. Returns `None` after advancing through the remaining prefix.
+    ///
+    /// Calling this method selects [`Self::with_manual_floor`], even when it returns `None`.
+    /// Merkleization performs no additional automatic floor raise. Eviction records a deletion;
+    /// write the returned key and value back to preserve the entry, or write a replacement value.
+    /// Changes remain speculative until the batch is applied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
+    /// Reading an entry can also return a journal error. Cancellation or an error consumes
+    /// the batch without modifying `db`.
+    #[allow(clippy::type_complexity)]
+    pub async fn pop_floor<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<(Self, Option<Evicted<F, U::Key, U::Value>>), crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let ancestors = self.validate_commitment(db.commitment())?;
+        let mut batch = self.with_manual_floor();
+        let mut floor = batch.manual_floor.expect("manual floor selected");
+        let tip = batch.base.base_state().size;
+        let db_size = db.log.size();
+        let mut candidates = Vec::with_capacity(1);
+        while floor < tip {
+            candidates.clear();
+            let next = fill_candidates(&db.bitmap, floor, *tip, 1, &mut candidates);
+            let Some(&location) = candidates.first() else {
+                floor = tip;
+                break;
+            };
+            floor = next;
+            let op = if location < db_size {
+                db.log.read(*location).await?
+            } else {
+                read_op_from_ancestors(&ancestors, *location, *db_size).clone()
+            };
+            let Operation::Update(update) = op else {
+                continue;
+            };
+            let key = update::Update::key(&update);
+            if batch.mutations.contains_key(key) {
+                continue;
+            }
+            let active = resolve_in_ancestors(&ancestors, key).map_or_else(
+                || db.snapshot.get(key).any(|&loc| loc == location),
+                |entry| entry.loc() == Some(location),
+            );
+            if !active {
+                continue;
+            }
+            let key = key.clone();
+            let value = update::Update::into_value(update);
+            batch.mutations.insert(key.clone(), None);
+            batch.manual_floor = Some(floor);
+            // Ancestors must remain alive until every operation read has completed.
+            drop(ancestors);
+            return Ok((
+                batch,
+                Some(Evicted {
+                    location,
+                    key,
+                    value,
+                }),
+            ));
+        }
+        batch.manual_floor = Some(floor);
+        drop(ancestors);
+        Ok((batch, None))
+    }
+
     /// Validate that `current` is a state on this batch's live chain, returning strong ancestor
     /// references that keep the validated chain stable through subsequent asynchronous work.
     pub(crate) fn validate_commitment(
@@ -1791,6 +1902,7 @@ where
             base_state: self.base.base_state(),
             db_state,
             base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
+            manual_floor: self.manual_floor,
             base_active_keys: self.base.active_keys(),
         };
         (self.mutations, m)
@@ -2873,6 +2985,7 @@ where
         UnmerkleizedBatch {
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
+            manual_floor: None,
             base: Base::Child(Arc::clone(self)),
         }
     }
@@ -3031,6 +3144,7 @@ where
         UnmerkleizedBatch {
             journal_batch: self.log.new_batch(),
             mutations: BTreeMap::new(),
+            manual_floor: None,
             base: Base::Db {
                 state: self.commitment(),
                 inactivity_floor_loc: self.inactivity_floor_loc,
@@ -3257,6 +3371,17 @@ mod trait_impls {
             Self::write(self, key, value)
         }
 
+        fn with_manual_floor(self) -> Self {
+            Self::with_manual_floor(self)
+        }
+
+        async fn pop_floor(
+            self,
+            db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        ) -> Result<(Self, Option<Evicted<F, K, V::Value>>), crate::qmdb::Error<F>> {
+            Self::pop_floor(self, db).await
+        }
+
         fn merkleize(
             self,
             db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -3288,6 +3413,17 @@ mod trait_impls {
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
+        }
+
+        fn with_manual_floor(self) -> Self {
+            Self::with_manual_floor(self)
+        }
+
+        async fn pop_floor(
+            self,
+            db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        ) -> Result<(Self, Option<Evicted<F, K, V::Value>>), crate::qmdb::Error<F>> {
+            Self::pop_floor(self, db).await
         }
 
         fn merkleize(

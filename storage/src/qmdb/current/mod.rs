@@ -4752,4 +4752,201 @@ pub mod tests {
             db.destroy().await.unwrap();
         });
     }
+
+    #[test_traced("INFO")]
+    fn test_current_ordered_pop_floor_reinsert_and_ancestor_proofs() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let partition = "current-ordered-pop-floor-ancestor";
+            let db: OrderedFixedDb = OrderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>(partition, &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let mut keys = [key(1), key(2), key(3)];
+            keys.sort();
+            let seed = keys
+                .into_iter()
+                .enumerate()
+                .fold(db.new_batch().with_manual_floor(), |batch, (i, key)| {
+                    batch.write(key, Some(val(i as u64)))
+                });
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // A pending ancestor supersedes the middle base operation. The child must pop
+            // the oldest base operation, then skip the reinsert and the ancestor update.
+            let parent = db
+                .new_batch()
+                .with_manual_floor()
+                .write(keys[1], Some(val(11)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (child, first) = parent.new_batch::<Sha256>().pop_floor(&db).await.unwrap();
+            let first = first.expect("oldest key should be evicted");
+            assert_eq!(first.key, keys[0]);
+            assert_eq!(first.value, val(0));
+            let (child, second) = child
+                .write(first.key, Some(val(10)))
+                .pop_floor(&db)
+                .await
+                .unwrap();
+            let second = second.expect("last base key should be evicted");
+            assert_eq!(second.key, keys[2]);
+            assert_eq!(second.value, val(2));
+            assert!(first.location < second.location);
+
+            let child = child.merkleize(&db, None).await.unwrap();
+            let speculative_root = child.root();
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
+            let root = db.root();
+            assert_eq!(root, speculative_root);
+            let proof = db.key_value_proof(keys[0]).await.unwrap();
+            assert_eq!(proof.next_key, keys[1]);
+            assert!(
+                proof.verify::<Sha256, crate::qmdb::any::value::FixedEncoding<Digest>>(
+                    keys[0],
+                    val(10),
+                    &root
+                )
+            );
+            let proof = db.key_value_proof(keys[1]).await.unwrap();
+            assert_eq!(proof.next_key, keys[0]);
+            assert!(
+                proof.verify::<Sha256, crate::qmdb::any::value::FixedEncoding<Digest>>(
+                    keys[1],
+                    val(11),
+                    &root
+                )
+            );
+            let exclusion = db.exclusion_proof(&keys[2]).await.unwrap();
+            assert!(exclusion.verify::<Sha256>(&keys[2], &root));
+
+            let db = db.sync().await.unwrap();
+            assert_eq!(db.root(), root);
+            drop(db);
+            let reopened: OrderedFixedDb = OrderedFixedDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>(partition, &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), root);
+            assert!(
+                reopened
+                    .exclusion_proof(&keys[2])
+                    .await
+                    .unwrap()
+                    .verify::<Sha256>(&keys[2], &root)
+            );
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_ordered_pop_floor_to_empty_proves_exclusion() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let db: OrderedFixedDb = OrderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>("current-ordered-pop-empty", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+            let k = key(7);
+            let seed = db
+                .new_batch()
+                .write(k, Some(val(7)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let (batch, evicted) = db.new_batch().pop_floor(&db).await.unwrap();
+            let evicted = evicted.expect("one live key");
+            assert_eq!((evicted.key, evicted.value), (k, val(7)));
+            let (batch, none) = batch.pop_floor(&db).await.unwrap();
+            assert!(none.is_none());
+            let batch = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(batch).await.unwrap();
+            assert_eq!(db.get(&k).await.unwrap(), None);
+            let proof = db.exclusion_proof(&k).await.unwrap();
+            assert!(matches!(
+                proof,
+                ordered::proof::constant::ExclusionProof::Commit(..)
+            ));
+            assert!(proof.verify::<Sha256>(&k, &db.root()));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_current_unordered_staged_update_preserves_manual_pop_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let ctx = context.child("db");
+            let partition = "current-unordered-staged-pop-floor";
+            let db: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("storage"),
+                fixed_config::<OneCap>(partition, &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let mut keys = [key(31), key(32), key(33)];
+            keys.sort();
+            let seed = keys
+                .into_iter()
+                .enumerate()
+                .fold(db.new_batch().with_manual_floor(), |batch, (i, key)| {
+                    batch.write(key, Some(val(i as u64)))
+                })
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let (batch, evicted) = db.new_batch().pop_floor(&db).await.unwrap();
+            let evicted = evicted.expect("oldest committed key");
+            assert_eq!((evicted.key, evicted.value), (keys[0], val(0)));
+            let expected_floor = Location::new(*evicted.location + 1);
+            let staged_keys = [&keys[2]];
+            let (read, staged) = batch.stage(&staged_keys, &db).await.unwrap();
+            assert_eq!(read, vec![Some(val(2))]);
+            let staged = staged
+                .merkleize(vec![(0, Some(val(30)))], Vec::new(), None, &db)
+                .await
+                .unwrap();
+            let staged_root = staged.root();
+
+            let (db, _) = db.apply_batch(staged).await.unwrap();
+            assert_eq!(db.root(), staged_root);
+            assert_eq!(db.inactivity_floor_loc(), expected_floor);
+            assert_eq!(db.get(&keys[0]).await.unwrap(), None);
+            assert_eq!(db.get(&keys[1]).await.unwrap(), Some(val(1)));
+            assert_eq!(db.get(&keys[2]).await.unwrap(), Some(val(30)));
+
+            let db = db.sync().await.unwrap();
+            drop(db);
+            let reopened: UnorderedFixedDb = UnorderedFixedDb::init(
+                ctx.child("reopen"),
+                fixed_config::<OneCap>(partition, &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.root(), staged_root);
+            assert_eq!(reopened.inactivity_floor_loc(), expected_floor);
+            assert_eq!(reopened.get(&keys[1]).await.unwrap(), Some(val(1)));
+            reopened.destroy().await.unwrap();
+        });
+    }
 }

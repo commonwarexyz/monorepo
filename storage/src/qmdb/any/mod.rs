@@ -62,6 +62,22 @@
 //! let (db, _) = db.apply_batch(a2).await?;   // OK -- includes a1
 //! assert!(db.validate_batch(&b2).is_err());  // StaleBatch
 //! ```
+//!
+//! ```ignore
+//! // 6. Keep the floor fixed for a batch with no pops, or move it one entry at a time.
+//! let batch = db.new_batch().with_manual_floor().write(key, Some(value));
+//! let merkleized = batch.merkleize(&db, None).await?;
+//! let (db, _) = db.apply_batch(merkleized).await?;
+//!
+//! let (batch, popped) = db.new_batch().pop_floor(&db).await?;
+//! let batch = if let Some(entry) = popped {
+//!     batch.write(entry.key, Some(entry.value)) // Preserve the entry at a new location.
+//! } else {
+//!     batch
+//! };
+//! let merkleized = batch.merkleize(&db, None).await?;
+//! let (db, _) = db.apply_batch(merkleized).await?;
+//! ```
 
 use crate::{
     Context,
@@ -1671,9 +1687,287 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
+    test_for_all_variants!(with_make_value: test_any_pop_floor_manual_zero_steps, "WARN");
+    test_for_all_variants!(with_reopen: test_any_pop_floor_reinsert_and_recover, "WARN");
     with_mmr_variants!(
         test_for_variant!(with_cap: test_any_db_bounded_initialization_recovery, "WARN")
     );
+
+    /// A manual batch with mutations but no pops must not move unrelated live keys.
+    pub(crate) async fn test_any_pop_floor_manual_zero_steps<F: Family, D>(
+        _context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+    {
+        let mut batch = db.new_batch().with_manual_floor();
+        for i in 0..4 {
+            batch = batch.write(to_digest(i), Some(make_value(i)));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let floor = db.inactivity_floor_loc();
+
+        let batch = db
+            .new_batch()
+            .with_manual_floor()
+            .write(to_digest(0), Some(make_value(100)))
+            .write(to_digest(1), None)
+            .write(to_digest(4), Some(make_value(4)));
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+
+        assert_eq!(db.inactivity_floor_loc(), floor);
+        for (key, expected) in [
+            (0, Some(make_value(100))),
+            (1, None),
+            (2, Some(make_value(2))),
+            (3, Some(make_value(3))),
+            (4, Some(make_value(4))),
+        ] {
+            assert_eq!(db.get(&to_digest(key)).await.unwrap(), expected);
+        }
+        db.destroy().await.unwrap();
+    }
+
+    /// Pops traverse the original live prefix once, even when mutations replace or delete keys.
+    pub(crate) async fn test_any_pop_floor_reinsert_and_recover<F: Family, D>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+    {
+        let mut original: Vec<_> = (0..4).map(|i| (to_digest(i), make_value(i))).collect();
+        original.sort_by_key(|(key, _)| *key);
+        let mut seed = db.new_batch().with_manual_floor();
+        for &(key, value) in &original {
+            seed = seed.write(key, Some(value));
+        }
+        let seed = seed.merkleize(&db, None).await.unwrap();
+        let (db, range) = db.apply_batch(seed).await.unwrap();
+        let floor = db.inactivity_floor_loc();
+
+        // All entries were created together in an empty DB. Both variants emit creates in
+        // key order, so their expected locations follow from the applied operation range.
+        let original: Vec<_> = original
+            .into_iter()
+            .enumerate()
+            .map(|(i, (key, value))| (range.start + i as u64, key, value))
+            .collect();
+
+        let batch = db
+            .new_batch()
+            .write(original[1].1, Some(make_value(101)))
+            .write(original[2].1, None)
+            .write(to_digest(4), Some(make_value(4)));
+        let (batch, first) = batch.pop_floor(&db).await.unwrap();
+        let first = first.expect("first original entry is live");
+        assert_eq!(first.location, original[0].0);
+        assert_eq!(first.key, original[0].1);
+        assert_eq!(first.value, original[0].2);
+
+        let (batch, second) = batch.pop_floor(&db).await.unwrap();
+        let second = second.expect("pending update and deletion must be skipped");
+        assert_eq!(second.location, original[3].0);
+        assert_eq!(second.key, original[3].1);
+        assert_eq!(second.value, original[3].2);
+
+        let batch = batch.write(first.key, Some(first.value));
+        let (batch, third) = batch.pop_floor(&db).await.unwrap();
+        assert!(
+            third.is_none(),
+            "new writes and reinserts are outside the original prefix"
+        );
+        let (batch, fourth) = batch.pop_floor(&db).await.unwrap();
+        assert!(
+            fourth.is_none(),
+            "an exhausted batch must not revisit a reinserted key"
+        );
+
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        assert!(db.inactivity_floor_loc() > floor);
+        let expected = [
+            (original[0].1, Some(original[0].2)),
+            (original[1].1, Some(make_value(101))),
+            (original[2].1, None),
+            (original[3].1, None),
+            (to_digest(4), Some(make_value(4))),
+        ];
+        for (key, value) in expected {
+            assert_eq!(db.get(&key).await.unwrap(), value);
+        }
+
+        let db = db.commit().await.unwrap();
+        let root = db.root();
+        let size = db.size();
+        let floor = db.inactivity_floor_loc();
+        drop(db);
+
+        let db = reopen_db(context.child("reopen_after_commit")).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.size(), size);
+        assert_eq!(db.inactivity_floor_loc(), floor);
+        for (key, value) in expected {
+            assert_eq!(db.get(&key).await.unwrap(), value);
+        }
+
+        let db = db.sync().await.unwrap();
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        let root = db.root();
+        let size = db.size();
+        let floor = db.inactivity_floor_loc();
+        drop(db);
+
+        let db = reopen_db(context.child("reopen_after_pop")).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.size(), size);
+        assert_eq!(db.inactivity_floor_loc(), floor);
+        for (key, value) in expected {
+            assert_eq!(db.get(&key).await.unwrap(), value);
+        }
+        db.destroy().await.unwrap();
+    }
+
+    /// Child pops include speculative ancestor writes and reject a stale sibling.
+    #[test_traced("INFO")]
+    fn test_any_pop_floor_speculative_ancestors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pop-chain", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let seeded = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(0), Some(val(0)))
+                .write(key(1), Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (mut db, _) = db.apply_batch(seeded).await.unwrap();
+            let original_db_size = db.size();
+
+            let parent = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(0), Some(val(100)))
+                .write(key(2), Some(val(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let mut child = parent.new_batch::<Sha256>();
+            let mut seen = Vec::new();
+            let mut last_location = None;
+            for i in 0..3 {
+                let (next, popped) = child.pop_floor(&db).await.unwrap();
+                let popped = popped.expect("the parent's three keys are live");
+                assert!(!seen.contains(&popped.key));
+                if let Some(previous) = last_location {
+                    assert!(popped.location > previous);
+                }
+                last_location = Some(popped.location);
+                let expected = if popped.key == key(0) {
+                    val(100)
+                } else if popped.key == key(1) {
+                    val(1)
+                } else {
+                    assert_eq!(popped.key, key(2));
+                    assert!(
+                        popped.location >= original_db_size,
+                        "the new key lives in the ancestor"
+                    );
+                    val(2)
+                };
+                assert_eq!(popped.value, expected);
+                seen.push(popped.key);
+                child = if popped.key == key(1) {
+                    next
+                } else {
+                    next.write(popped.key, Some(popped.value))
+                };
+                if i == 0 {
+                    (db, _) = db.apply_batch(parent.clone()).await.unwrap();
+                }
+            }
+            let (child, exhausted) = child.pop_floor(&db).await.unwrap();
+            assert!(exhausted.is_none());
+            let mut sibling = parent.new_batch::<Sha256>();
+            for _ in 0..3 {
+                let (next, popped) = sibling.pop_floor(&db).await.unwrap();
+                assert!(popped.is_some());
+                sibling = next;
+            }
+            let (sibling, exhausted) = sibling.pop_floor(&db).await.unwrap();
+            assert!(exhausted.is_none());
+            let child = child.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
+
+            assert!(matches!(
+                sibling.pop_floor(&db).await,
+                Err(crate::qmdb::Error::StaleBatch)
+            ));
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), None);
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Eviction records a delete, including when it empties the database.
+    #[test_traced("INFO")]
+    fn test_any_pop_floor_last_key_emits_delete() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pop-last", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let seed = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(0), Some(val(0)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let (batch, popped) = db.new_batch().pop_floor(&db).await.unwrap();
+            let popped = popped.expect("the sole key is live");
+            assert_eq!((popped.key, popped.value), (key(0), val(0)));
+
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (start, operations) = merkleized.operations();
+            assert!(operations.iter().any(|operation| {
+                matches!(operation, operation::Operation::Delete(deleted) if *deleted == key(0))
+            }));
+            let commit_location = start + (operations.len() as u64 - 1);
+            assert!(matches!(
+                operations.last(),
+                Some(operation::Operation::CommitFloor(None, floor)) if *floor == commit_location
+            ));
+
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.get(&key(0)).await.unwrap(), None);
+            assert_eq!(db.inactivity_floor_loc(), commit_location);
+            db.destroy().await.unwrap();
+        });
+    }
 
     fn key(i: u64) -> Digest {
         Sha256::hash(&[&i.to_be_bytes()])
