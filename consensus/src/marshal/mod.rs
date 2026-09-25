@@ -78,6 +78,7 @@ mod config;
 pub use config::{Config, Start};
 
 pub mod ancestry;
+pub mod blocks;
 pub mod core;
 pub mod resolver;
 pub mod standard;
