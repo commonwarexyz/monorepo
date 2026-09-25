@@ -127,6 +127,21 @@ test-loom *args='':
     packages=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.features | has("loom")) | "-p " + .name')
     cargo nextest run --release --features loom --lib $packages {{ args }} loom_tests
 
+# Run tests without std, one package at a time so other packages cannot re-enable it
+test-no-std *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    packages=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.features | has("std")) | .name')
+    for package in $packages; do
+        features=$(cargo tree --locked -p "$package" --no-default-features -e features -i "$package" --prefix none)
+        if grep -q "^$package feature \"std\"" <<< "$features"; then
+            echo "$package: a dependency re-enables std" >&2
+            exit 1
+        fi
+        cargo nextest run -p "$package" --no-default-features "$@"
+        cargo test --doc --locked -p "$package" --no-default-features
+    done
+
 # Test the Rust documentation
 test-docs *args='--all':
     cargo test --doc --locked $@

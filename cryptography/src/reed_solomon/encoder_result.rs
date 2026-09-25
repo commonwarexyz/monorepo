@@ -91,8 +91,6 @@ impl<'a> Recovery<'a> {
 mod tests {
     use super::*;
     use crate::reed_solomon::{Encoder, test_util};
-    #[cfg(not(feature = "std"))]
-    use alloc::vec::Vec;
 
     /// Covers `EncoderResult::recovery`, `EncoderResult::recovery_iter`, and `Recovery`.
     #[test]

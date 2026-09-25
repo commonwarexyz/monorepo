@@ -108,15 +108,11 @@ jobs:
         partition: [1, 2]
         flags:
           - "--features commonware-runtime/iouring"
-          - "--no-default-features"
           - ""
         exclude:
           # Only run io_uring features on Ubuntu
           - os: macos-latest
             flags: "--features commonware-runtime/iouring"
-          # Only run --no-default-features on Ubuntu
-          - os: macos-latest
-            flags: "--no-default-features"
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -158,6 +154,11 @@ jobs:
             package: commonware-cryptography
             flags: "--cargo-profile release --profile avx512 -p commonware-coding -p commonware-cryptography-curve25519"
             sde: icx
+          # Test each package with a std feature without std, one package at a time.
+          - os: ubuntu-latest
+            package: all
+            flags: "--no-default-features"
+            no-std: true
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -190,10 +191,14 @@ jobs:
     - name: Check emulated AVX-512
       if: ${{ matrix.sde }}
       run: just test --cargo-profile release -p commonware-cryptography -p commonware-cryptography-curve25519 --run-ignored only -E 'test(/::avx512_available$/)'
+    - name: Run no-std tests
+      if: ${{ matrix.no-std }}
+      run: just test-no-std --verbose
     - name: Run subset tests
+      if: ${{ !matrix.no-std }}
       run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
     - name: Run subset doc tests
-      if: ${{ !matrix.sde }}
+      if: ${{ !matrix.sde && !matrix.no-std }}
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
   Stability:
