@@ -774,6 +774,7 @@ pub mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -815,6 +816,7 @@ pub mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: page_cache.clone(),
             },
             journal_config: VConfig {
@@ -1737,6 +1739,7 @@ pub mod tests {
                     write_buffer: NZUsize!(1024),
                     replay_buffer: NZUsize!(1024),
                     strategy: Sequential,
+                    node_cache_size: None,
                     page_cache: page_cache.clone(),
                 },
                 journal_config: VConfig {

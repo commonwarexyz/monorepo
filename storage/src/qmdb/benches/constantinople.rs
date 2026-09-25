@@ -349,6 +349,7 @@ fn main() {
             write_buffer: WRITE_BUFFER,
             replay_buffer: REPLAY_BUFFER,
             strategy: ctx.strategy(threads),
+            node_cache_size: None,
             page_cache: pc.clone(),
         };
         let journal_config = FConfig {
