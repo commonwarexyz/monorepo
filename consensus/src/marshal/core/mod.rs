@@ -28,7 +28,7 @@
 //!     blocks_archive,
 //!     config,
 //! ).await;
-//! // `floor.height()` is `None` until the application acknowledges a block.
+//! // `floor.height()` records durable progress from acknowledgements or an installed floor.
 //!
 //! // Start with application and buffer
 //! actor.start(application, buffer, resolver);

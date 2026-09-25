@@ -288,9 +288,8 @@ where
 /// Returns the archived block that covers marshal's durable processed position.
 ///
 /// Glue cannot reopen below this position because marshal will not redeliver acknowledged blocks.
-/// An acknowledgement-derived position retains its own block. Installing a floor instead records
-/// and prunes the anchor's predecessor so marshal redispatches the anchor, leaving `height.next()`
-/// as the block that covers the processed position.
+/// An acknowledgement-derived position retains its own block. A floor installed without local
+/// history can leave only its anchor available, with `height.next()` identifying that block.
 async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, height: Height) -> V::Block
 where
     S: Scheme,
@@ -323,7 +322,16 @@ where
     let block = if let Some(height) = floor.height()
         && floor.round() >= finalization.round()
     {
-        V::into_shared(processed_anchor(marshal, height).await)
+        if let Some(next) = height.get().checked_add(1)
+            && let Some(block) = marshal
+                .get_block(Identifier::Height(Height::new(next)))
+                .await
+            && V::commitment(&block) == finalization.proposal.payload
+        {
+            V::into_shared(block)
+        } else {
+            V::into_shared(processed_anchor(marshal, height).await)
+        }
     } else {
         // Marshal's configured startup floor fetches its anchor when needed. This local-only
         // subscription observes that result without starting a separate fetch.

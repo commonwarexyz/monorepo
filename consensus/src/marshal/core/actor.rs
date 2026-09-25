@@ -1421,8 +1421,8 @@ where
             exact_retirements: commitments,
         });
 
-        // The floor is durable, so cache/finalized data below it can be pruned.
-        self = self.prune_after_floor(height).await;
+        // Retain the recorded predecessor as the application recovery anchor.
+        self = self.prune_after_floor(dispatch_floor).await;
 
         // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
         // stops obsolete network work, but later local ingress can still satisfy these waiters,

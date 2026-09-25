@@ -70,10 +70,19 @@ pub(crate) struct FlushControl {
     pub(crate) flushes: Arc<Mutex<Vec<FlushRelease>>>,
     pub(crate) pruned: Arc<Mutex<Vec<u64>>>,
     pub(crate) applied: Arc<AtomicUsize>,
+    /// Notified once the next flush's release handle is available.
+    flush_started: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     prune_gate: Arc<Mutex<Option<PruneGate>>>,
 }
 
 impl FlushControl {
+    /// Reports when the next flush has parked its release handle.
+    pub(crate) fn observe_next_flush(&self) -> oneshot::Receiver<()> {
+        let (started, receiver) = oneshot::channel();
+        assert!(self.flush_started.lock().replace(started).is_none());
+        receiver
+    }
+
     /// Gates the next prune. The receiver reports entry, and sending on the
     /// returned sender lets pruning continue. Only one gate may be active.
     pub(crate) fn gate_prune(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
@@ -153,6 +162,9 @@ impl<E: Send> ManagedDb<E> for TestDb {
         if let Some(control) = &self.control {
             let (release, released) = oneshot::channel();
             control.flushes.lock().push(release);
+            if let Some(started) = control.flush_started.lock().take() {
+                let _ = started.send(());
+            }
             return Ok((self, Handle::from_receiver(released)));
         }
         let handle = self
