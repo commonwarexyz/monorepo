@@ -9,7 +9,7 @@ use commonware_actor::{
 };
 use commonware_consensus::{
     Heightable as _, Reporter,
-    marshal::{
+    simplex::marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
     },
