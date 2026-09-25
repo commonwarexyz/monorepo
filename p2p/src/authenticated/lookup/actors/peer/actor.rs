@@ -1,123 +1,41 @@
 use super::{Config, Error, Mailbox, Message};
-use crate::{
-    Channel,
-    authenticated::{
-        channels::{self, Channels},
-        data::EncodedData,
-        lookup::{metrics, types},
-        relay::{self, Message as RelayMessage, Prioritized, Relay},
-        throttle::Throttle,
-    },
+use crate::authenticated::{
+    channels::Channels,
+    connection::{self, Inbox, Outbox},
+    data::EncodedData,
+    lookup::{metrics, types},
+    relay::{Receivers, Relay},
+    throttle::Throttle,
 };
-use commonware_actor::mailbox;
 use commonware_codec::Decode;
 use commonware_cryptography::PublicKey;
-use commonware_macros::{select, select_loop};
+use commonware_macros::select_loop;
 use commonware_runtime::{
-    BufferPool, BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner,
-    iobuf::EncodeExt,
-    telemetry::metrics::{CounterFamily, raw::Counter},
+    BufferPooler, Clock, IoBufs, Metrics, Quota, RateLimiter, Spawner, iobuf::EncodeExt,
+    telemetry::metrics::CounterFamily,
 };
 use commonware_stream::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
-use std::{collections::BTreeMap, time::Duration, vec::Drain};
+use std::{future::Future, time::Duration};
 use tracing::debug;
 
-/// Send counters for one connection.
-struct Sent {
-    ping: Counter,
-    data: BTreeMap<Channel, Counter>,
-}
+impl connection::Control for ring::Receiver<Message> {
+    type Message = Message;
 
-/// Outbound queues, send counters and the pending batch for one connection.
-struct Outbox<C: PublicKey> {
-    peer: C,
-    pool: BufferPool,
-
-    control: ring::Receiver<Message>,
-    high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-    low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-
-    sent: Sent,
-    batch: Vec<IoBufs>,
-    size: usize,
-}
-
-impl<C: PublicKey> Outbox<C> {
-    /// Records a ping as sent and appends its payload to the batch.
-    fn ping(&mut self) {
-        self.sent.ping.inc();
-        let ping = types::Message::Ping.encode_with_pool(&self.pool);
-        self.batch.push(ping);
+    fn recv(&mut self) -> impl Future<Output = Option<Message>> + Send {
+        self.next()
     }
 
-    /// Awaits the next outbound message.
-    ///
-    /// Priority order: control > high > low.
-    async fn recv(&mut self) -> Prioritized<Message, EncodedData> {
-        select! {
-            msg = self.control.next() => msg.map_or(Prioritized::Closed, Prioritized::Control),
-            msg = self.high.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
-                msg.into_inner()
-            )),
-            msg = self.low.recv() => msg.map_or(Prioritized::Closed, |msg| Prioritized::Data(
-                msg.into_inner()
-            )),
+    fn try_recv(&mut self) -> Option<Message> {
+        self.next().now_or_never().flatten()
+    }
+
+    fn encode(&self, msg: Message) -> Option<IoBufs> {
+        match msg {
+            Message::Kill => None,
         }
-    }
-
-    /// Returns the next already-queued outbound message, if any.
-    ///
-    /// Priority order: control > high > low.
-    fn try_recv(&mut self) -> Option<Prioritized<Message, EncodedData>> {
-        if let Some(msg) = self.control.next().now_or_never().flatten() {
-            return Some(Prioritized::Control(msg));
-        }
-        relay::try_recv(&mut self.high)
-            .or_else(|| relay::try_recv(&mut self.low))
-            .map(Prioritized::Data)
-    }
-
-    /// Records a message as sent and appends its payload to the batch.
-    ///
-    /// Returns `Err` if `msg` terminates the connection (`Closed` or `Kill`).
-    fn push<S, R>(&mut self, msg: Prioritized<Message, EncodedData>) -> Result<(), Error<S, R>> {
-        let payload = match msg {
-            Prioritized::Closed => return Err(Error::PeerDisconnected),
-            Prioritized::Control(msg) => match msg {
-                Message::Kill => return Err(Error::PeerKilled(self.peer.to_string())),
-            },
-            Prioritized::Data(msg) => {
-                self.sent
-                    .data
-                    .get(&msg.channel)
-                    .expect("outbound message on invalid channel")
-                    .inc();
-                msg.payload
-            }
-        };
-        self.batch.push(payload);
-        Ok(())
-    }
-
-    /// Appends already-queued messages to the batch until it is full.
-    ///
-    /// Only consumes messages that are already ready, so batching adds no
-    /// buffering latency.
-    fn fill<S, R>(&mut self) -> Result<(), Error<S, R>> {
-        while self.batch.len() < self.size
-            && let Some(msg) = self.try_recv()
-        {
-            self.push(msg)?;
-        }
-        Ok(())
-    }
-
-    /// Removes and returns the batched payloads.
-    fn drain(&mut self) -> Drain<'_, IoBufs> {
-        self.batch.drain(..)
     }
 }
 
@@ -128,8 +46,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     send_batch_size: usize,
 
     control: ring::Receiver<Message>,
-    high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
-    low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
+    receivers: Receivers<EncodedData>,
 
     sent_messages: CounterFamily<metrics::Message<C>>,
     received_messages: CounterFamily<metrics::Message<C>>,
@@ -147,8 +64,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 ping_frequency: cfg.ping_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
                 control: control_receiver,
-                high: receivers.high,
-                low: receivers.low,
+                receivers,
                 sent_messages: cfg.sent_messages,
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
@@ -168,35 +84,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         // Create per-connection counters and rate limiters
         let sent_messages = &self.sent_messages;
         let (received, rate_limited) = (&self.received_messages, &self.rate_limited);
-        let mut sent = Sent {
-            ping: sent_messages.get_or_create_owned(&metrics::Message::new_ping(&peer)),
-            data: BTreeMap::new(),
-        };
-        let mut inbound = BTreeMap::new();
-        for (channel, (rate, sender)) in channels.collect() {
-            let label = metrics::Message::new_data(&peer, channel);
-            sent.data
-                .insert(channel, sent_messages.get_or_create_owned(&label));
-            let limiter = RateLimiter::direct_with_clock(
-                rate,
-                self.context
-                    .child("rate_limiter")
-                    .with_attribute("channel", channel),
-            );
-            let throttle = Throttle::new(limiter, received, rate_limited, &label);
-            inbound.insert(channel, (throttle, sender));
-        }
-        let received_invalid = received.get_or_create_owned(&metrics::Message::new_invalid(&peer));
-        let mut outbox = Outbox {
-            peer: peer.clone(),
-            pool: self.context.network_buffer_pool().clone(),
-            control: self.control,
-            high: self.high,
-            low: self.low,
-            sent,
-            batch: Vec::with_capacity(self.send_batch_size),
-            size: self.send_batch_size,
-        };
+        let ping = sent_messages.get_or_create_owned(&metrics::Message::new_ping(&peer));
+        let inbox = Inbox::new(
+            &self.context,
+            peer.clone(),
+            channels,
+            received,
+            rate_limited,
+        );
 
         // Use half the ping frequency for rate limiting to allow for timing
         // jitter at message boundaries.
@@ -206,9 +101,17 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
             RateLimiter::direct_with_clock(ping_rate, self.context.child("ping_rate_limiter"));
         let label = metrics::Message::new_ping(&peer);
         let ping_throttle = Throttle::new(limiter, received, rate_limited, &label);
+        let mut outbox = Outbox::new(
+            peer.clone(),
+            self.control,
+            self.receivers,
+            inbox.channels(),
+            sent_messages,
+            self.send_batch_size,
+        );
 
         // Send/Receive messages from the peer
-        let mut send_handler = self
+        let send_handler = self
             .context
             .child("sender")
             .spawn(move |context| async move {
@@ -222,7 +125,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     _ = context.sleep_until(deadline) => {
                         // Periodically send a ping to the peer, batching
                         // any already-queued messages into the same batch.
-                        outbox.ping();
+                        ping.inc();
+                        outbox.append(types::Message::Ping.encode_with_pool(
+                            context.network_buffer_pool()
+                        ));
                         outbox.fill()?;
                         conn_sender
                             .send_many(outbox.drain())
@@ -244,7 +150,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 
                 Ok(())
             });
-        let mut receive_handler = self.context.child("receiver").spawn(move |_| async move {
+        let receive_handler = self.context.child("receiver").spawn(move |_| async move {
             loop {
                 // Receive a message from the peer
                 let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
@@ -255,28 +161,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                     Ok(msg) => msg,
                     Err(err) => {
                         debug!(?err, ?peer, "failed to decode message");
-                        received_invalid.inc();
+                        inbox.invalid();
                         return Err(Error::DecodeFailed(err));
                     }
                 };
 
                 match msg {
-                    types::Message::Data(data) => {
-                        let Some((throttle, sender)) = inbound.get(&data.channel) else {
-                            debug!(?peer, channel = data.channel, "invalid channel");
-                            received_invalid.inc();
-                            return Err(Error::InvalidChannel);
-                        };
-                        throttle.receive(true).await;
-
-                        // Send message to application without blocking.
-                        //
-                        // We intentionally drop messages when the application buffer is
-                        // full rather than blocking. Blocking here would also block
-                        // processing of Ping messages, causing the peer connection to
-                        // stall and potentially disconnect.
-                        let _ = sender.enqueue(channels::Inbound((peer.clone(), data.message)));
-                    }
+                    types::Message::Data(data) => inbox.deliver(data).await?,
                     types::Message::Ping => {
                         ping_throttle.receive(true).await;
 
@@ -288,22 +179,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         });
 
         // Wait for one of the handlers to finish or shutdown
-        let mut shutdown = self.context.stopped();
-        let result = select! {
-            _ = &mut shutdown => {
-                debug!("context shutdown, stopping peer");
-                Ok(Ok(()))
-            },
-            send_result = &mut send_handler => send_result,
-            receive_result = &mut receive_handler => receive_result,
-        };
-
-        // Parse result
-        match result {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(e),
-            Err(e) => Err(Error::UnexpectedFailure(e)),
-        }
+        connection::wait(&self.context, send_handler, receive_handler)
+            .await
+            .map_err(Error::UnexpectedFailure)?
     }
 }
 

@@ -1,8 +1,11 @@
 //! Peer
 
-use crate::authenticated::discovery::{
-    metrics,
-    types::{self, InfoVerifier},
+use crate::authenticated::{
+    connection,
+    discovery::{
+        metrics,
+        types::{self, InfoVerifier},
+    },
 };
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
@@ -53,4 +56,14 @@ pub enum Error<S, R> {
     DuplicateGreeting,
     #[error("greeting public key mismatch")]
     GreetingMismatch,
+}
+
+impl<S, R> From<connection::Error> for Error<S, R> {
+    fn from(err: connection::Error) -> Self {
+        match err {
+            connection::Error::Killed(peer) => Self::PeerKilled(peer),
+            connection::Error::Disconnected => Self::PeerDisconnected,
+            connection::Error::InvalidChannel => Self::InvalidChannel,
+        }
+    }
 }

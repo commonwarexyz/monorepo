@@ -1,6 +1,6 @@
 //! Peer
 
-use crate::authenticated::lookup::metrics;
+use crate::authenticated::{connection, lookup::metrics};
 use commonware_codec::Error as CodecError;
 use commonware_cryptography::PublicKey;
 use commonware_runtime::telemetry::metrics::CounterFamily;
@@ -38,4 +38,14 @@ pub enum Error<S, R> {
     UnexpectedFailure(commonware_runtime::Error),
     #[error("invalid channel")]
     InvalidChannel,
+}
+
+impl<S, R> From<connection::Error> for Error<S, R> {
+    fn from(err: connection::Error) -> Self {
+        match err {
+            connection::Error::Killed(peer) => Self::PeerKilled(peer),
+            connection::Error::Disconnected => Self::PeerDisconnected,
+            connection::Error::InvalidChannel => Self::InvalidChannel,
+        }
+    }
 }

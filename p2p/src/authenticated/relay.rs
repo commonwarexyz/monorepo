@@ -69,11 +69,6 @@ pub enum Prioritized<C, D> {
     Closed,
 }
 
-/// Attempts to receive one data message from a relay receiver.
-pub(crate) fn try_recv<T>(receiver: &mut mailbox::UnreliableReceiver<Message<T>>) -> Option<T> {
-    receiver.try_recv().ok().map(Message::into_inner)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
