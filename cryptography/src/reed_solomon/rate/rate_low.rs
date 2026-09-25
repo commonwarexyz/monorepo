@@ -457,6 +457,7 @@ impl<E: Engine> LowRateDecoder<E> {
 mod tests {
     use super::*;
     use crate::reed_solomon::{engine::Scalar, test_util};
+    use commonware_macros::test_group;
     use commonware_utils::test_rng;
     use rand::RngExt as _;
 
@@ -549,8 +550,8 @@ mod tests {
         }
     }
 
+    #[test_group("slow")]
     #[test]
-    #[ignore]
     fn roundtrip_3000_60000() {
         roundtrip_single!(
             LowRate,
@@ -564,8 +565,8 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
     #[test]
-    #[ignore]
     fn roundtrip_30000_3000() {
         roundtrip_single!(
             LowRate,
@@ -579,8 +580,8 @@ mod tests {
         );
     }
 
+    #[test_group("slow")]
     #[test]
-    #[ignore]
     fn roundtrip_32768_32768() {
         roundtrip_single!(
             LowRate,

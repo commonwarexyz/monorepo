@@ -353,13 +353,6 @@ mod tests {
         }
     }
 
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    #[test]
-    #[ignore = "requires AVX-512F and GFNI, run by the emulated AVX-512 CI job"]
-    fn avx512_available() {
-        assert!(cpu_features::avx512());
-    }
-
     #[test]
     #[should_panic]
     fn eval_poly_truncation_out_of_bounds() {

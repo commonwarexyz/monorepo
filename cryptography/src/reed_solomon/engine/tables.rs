@@ -1,6 +1,7 @@
 //! Lookup tables used by [`Engine`] implementations.
 //!
-//! All tables are global and each is initialized at most once.
+//! All tables are global. With `std` each is initialized at most once. Without `std`, threads
+//! racing on first use may each initialize a table, but all of them read the one copy that is kept.
 //!
 //! # Tables
 //!
