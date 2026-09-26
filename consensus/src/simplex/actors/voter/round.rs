@@ -56,11 +56,15 @@ pub struct Round<S: Scheme, D: Digest> {
     leader: Option<Leader<S::PublicKey>>,
 
     proposal: ProposalSlot<D>,
-    // Deadlines armed when entering a view.
+
+    // Deadlines armed by set_deadlines when entering a view.
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
     stall_deadline: Option<SystemTime>,
+
+    // Nullify retry, scheduled by next_timeout and reset by construct_nullify.
     retry_deadline: Option<SystemTime>,
+
     // First explicit timeout latched for this round (see latch_timeout).
     // Unlike retry_deadline, this is first-wins and never moves.
     latched_timeout: Option<(SystemTime, TimeoutReason)>,
@@ -401,7 +405,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         }
         self.proposal.record_verified(proposal);
         self.proposed_at = Some(now);
-        self.leader_deadline = None;
         true
     }
 
@@ -418,7 +421,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             // If we receive a certificate for some proposal, we ignore our verification.
             return false;
         }
-        self.leader_deadline = None;
         true
     }
 
@@ -430,10 +432,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return false;
         }
         match self.proposal.update_vote(&proposal) {
-            Some(ProposalChange::New) => {
-                self.leader_deadline = None;
-                true
-            }
+            Some(ProposalChange::New) => true,
             Some(ProposalChange::Unchanged | ProposalChange::Equivocated { .. }) | None => false,
         }
     }
@@ -501,13 +500,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return None;
         }
         let retry = replace(&mut self.broadcast_nullify, true);
-        self.leader_deadline = None;
-        self.certification_deadline = None;
         self.retry_deadline = None;
-        // The latch governed the first timeout, which has now fired; clear it
-        // so no stale (deadline, reason) outlives the transition (re-latching
-        // is blocked by `broadcast_nullify` in `latch_timeout`).
-        self.latched_timeout = None;
         Some(retry)
     }
 
@@ -563,7 +556,6 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         match self.proposal.update_certificate(&proposal) {
             ProposalChange::New => {
                 debug!(?proposal, "setting proposal from certificate");
-                self.leader_deadline = None;
                 None
             }
             ProposalChange::Unchanged => None,
