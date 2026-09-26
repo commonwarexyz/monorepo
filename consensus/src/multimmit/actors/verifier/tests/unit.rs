@@ -225,8 +225,9 @@ fn verified_votes_retain_a_bounded_window_per_view() {
 #[test]
 fn a_panicked_worker_is_fatal() {
     deterministic::Runner::default().start(|context| async move {
+        let voter_context = context.child("voter");
         let (voter, _inbox) = voter::Mailbox::<ed25519::PublicKey, MinPk, Digest>::new(
-            &context.child("voter"),
+            &voter_context,
             &context,
             NonZeroUsize::MIN,
         );
