@@ -19,6 +19,8 @@ pub struct Floor {
 
 impl Floor {
     /// Returns the latest durably processed height, if any.
+    ///
+    /// See [super::Mailbox::get_processed_height] for which block remains available at this height.
     pub const fn height(&self) -> Option<Height> {
         self.height
     }

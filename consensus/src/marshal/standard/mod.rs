@@ -4745,6 +4745,11 @@ mod tests {
                 floor_block.digest()
             );
 
+            // Without local history, the processed height has no stored block and the floor
+            // block at the next height backs it instead.
+            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(4)));
+            assert!(mailbox.get_block(Height::new(4)).await.is_none());
+
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
             assert!(mailbox.verified(next_round, next.clone()).await);

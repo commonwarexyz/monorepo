@@ -713,6 +713,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     }
 
     /// Retrieve the latest processed height.
+    ///
+    /// The block at this height stays in local storage if marshal stored it. A floor installed
+    /// without local history records its predecessor as processed without storing that block, so
+    /// the floor block at the next height is available instead.
     pub async fn get_processed_height(&self) -> Option<Height> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetProcessedHeight {

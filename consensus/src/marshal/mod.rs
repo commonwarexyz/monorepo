@@ -21,11 +21,10 @@
 //!
 //! ## Delivery
 //!
-//! The actor delivers finalized blocks at or above its starting height at least once. Within a run,
-//! reports are consecutive and increase in height between floor installations. A new floor can skip
-//! earlier heights. Restarts and floor installations can redeliver a previously reported suffix
-//! with fresh acknowledgements, even when the starting height is unchanged, so reporters must
-//! handle duplicates.
+//! The actor delivers each finalized block from its starting height onward, in height order and
+//! at least once. Installing a floor can skip ahead. A restart or a floor installation can
+//! redeliver already reported blocks with fresh acknowledgements, so reporters must handle
+//! duplicates.
 //!
 //! ## Finalization
 //!
@@ -135,10 +134,9 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 /// An update reported to the application, either a new finalized tip or a finalized block.
 ///
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
-/// Finalized blocks are reported at or above the starting height, without gaps and in increasing
-/// height order within each run between floor installations. A new floor can skip earlier heights.
-/// Restarts and floor installations can redeliver a suffix with fresh acknowledgements, including
-/// when the starting height is unchanged.
+/// Finalized blocks are reported from the starting height onward, in height order without gaps.
+/// Installing a floor can skip ahead. A restart or a floor installation can redeliver already
+/// reported blocks with fresh acknowledgements.
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip and the finalization round.
@@ -155,8 +153,9 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// Cloning the update shares the immutable block, so applications can fan it out without requiring
     /// block clones. Marshal only considers the block delivered once every acknowledgement is handled.
     ///
-    /// Marshal only emits a block after it has durably persisted the said block. This ensures applications
-    /// that make stateful changes based on a block in other locations can access the same block on restart (often
-    /// some logic on startup attempts on infallible read on the last processed block).
+    /// Marshal only emits a block after durably persisting it, so applications that keep state
+    /// derived from a block can read the same block after a restart. See
+    /// [core::Mailbox::get_processed_height] for which block remains available at the processed
+    /// height.
     Block(Arc<B>, A),
 }
