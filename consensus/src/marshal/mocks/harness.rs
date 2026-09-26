@@ -13,7 +13,7 @@ use crate::{
             types::{CodedBlock, coding_config_for_participants, hash_context},
         },
         config::{Config, Start},
-        core::{Actor, CommitmentFallback, DigestFallback, Mailbox},
+        core::{Actor, CommitmentFallback, DigestFallback, Mailbox, Processed},
         mocks::{application::Application, block::Block},
         resolver::p2p as resolver,
         standard::Standard,
@@ -2013,7 +2013,7 @@ impl TestHarness for StandardHarness {
             application,
             mailbox,
             extra: buffer,
-            height: floor.height(),
+            height: floor.processed().map(Processed::height),
             actor_handle,
         }
     }
@@ -2811,7 +2811,7 @@ impl TestHarness for CodingHarness {
             application,
             mailbox,
             extra: shard_mailbox,
-            height: floor.height(),
+            height: floor.processed().map(Processed::height),
             actor_handle,
         }
     }
@@ -3426,12 +3426,12 @@ pub fn genesis_emitted_once<H: TestHarness>() {
         )
         .await;
         assert_eq!(setup.height, None);
-        assert_eq!(setup.mailbox.get_processed_height().await, None);
+        assert_eq!(setup.mailbox.get_processed().await, None);
         assert_eq!(setup.application.acknowledged().await, Height::zero());
         context.sleep(Duration::from_millis(10)).await;
         assert_eq!(
-            setup.mailbox.get_processed_height().await,
-            Some(Height::zero())
+            setup.mailbox.get_processed().await,
+            Some(Processed::Block(Height::zero()))
         );
         assert!(setup.application.blocks().contains_key(&Height::zero()));
 
@@ -3717,7 +3717,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         while application.tip().map(|(height, _)| height) != Some(Height::new(20)) {
             context.sleep(Duration::from_millis(10)).await;
         }
-        while mailbox.get_processed_height().await != Some(Height::new(20)) {
+        while mailbox.get_processed().await.map(Processed::height) != Some(Height::new(20)) {
             context.sleep(Duration::from_millis(10)).await;
         }
 
@@ -3885,14 +3885,18 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
                 floor = Some(finalization);
             }
         }
-        while mailbox.get_processed_height().await != Some(Height::new(19)) {
+        while mailbox.get_processed().await.map(Processed::height) != Some(Height::new(19)) {
             context.sleep(Duration::from_millis(10)).await;
         }
+        assert_eq!(
+            mailbox.get_processed().await,
+            Some(Processed::Block(Height::new(19)))
+        );
 
         // Installing the floor prunes before it dispatches block 20, so processing 20 means
         // pruning finished.
         mailbox.set_floor(floor.unwrap());
-        while mailbox.get_processed_height().await != Some(Height::new(20)) {
+        while mailbox.get_processed().await.map(Processed::height) != Some(Height::new(20)) {
             context.sleep(Duration::from_millis(10)).await;
         }
 

@@ -154,8 +154,7 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// block clones. Marshal only considers the block delivered once every acknowledgement is handled.
     ///
     /// Marshal only emits a block after durably persisting it, so applications that keep state
-    /// derived from a block can read the same block after a restart. See
-    /// [core::Mailbox::get_processed_height] for which block remains available at the processed
-    /// height.
+    /// derived from a block can read the same block after a restart. See [core::Processed] for
+    /// the block that backs the processed height.
     Block(Arc<B>, A),
 }

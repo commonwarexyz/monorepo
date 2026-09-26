@@ -238,7 +238,7 @@ mod tests {
     };
     use commonware_consensus::{
         Heightable as _, Reporter as _,
-        marshal::ancestry::Ancestry,
+        marshal::{ancestry::Ancestry, core::Processed},
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Activity, Context as SimplexContext},
@@ -430,7 +430,7 @@ mod tests {
             )
             .await;
 
-            while marshal.get_processed_height().await != Some(Height::new(1)) {
+            while marshal.get_processed().await.map(Processed::height) != Some(Height::new(1)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert!(marshal.get_finalization(Height::new(1)).await.is_none());
@@ -488,7 +488,10 @@ mod tests {
                     fixtures::finalization(&fixture, block.height().get(), block.digest());
                 assert!(marshal.verified(finalization.round(), block.clone()).await);
                 marshal.report(Activity::Finalization(finalization));
-                assert_eq!(marshal.get_processed_height().await, Some(block.height()));
+                assert_eq!(
+                    marshal.get_processed().await,
+                    Some(Processed::Block(block.height()))
+                );
             }
             first.abort().await;
             drop(marshal);
@@ -508,8 +511,8 @@ mod tests {
             )
             .await;
             assert_eq!(
-                second.mailbox.get_processed_height().await,
-                Some(predecessor)
+                second.mailbox.get_processed().await,
+                Some(Processed::Block(predecessor))
             );
             second.abort().await;
 
@@ -524,7 +527,7 @@ mod tests {
                 false,
             )
             .await;
-            assert_eq!(third.floor.height(), Some(predecessor));
+            assert_eq!(third.floor.processed(), Some(Processed::Block(predecessor)));
             assert_eq!(third.floor.round(), installed.round());
             assert!(third.mailbox.get_block(predecessor).await.is_some());
             assert!(third.mailbox.get_finalization(predecessor).await.is_some());
@@ -588,9 +591,13 @@ mod tests {
             )
             .await;
 
-            while marshal.get_processed_height().await != Some(Height::new(1)) {
+            while marshal.get_processed().await.map(Processed::height) != Some(Height::new(1)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
+            assert_eq!(
+                marshal.get_processed().await,
+                Some(Processed::Floor(Height::new(1)))
+            );
             assert!(marshal.get_block(Height::new(1)).await.is_none());
             assert!(marshal.get_block(Height::new(2)).await.is_some());
 
@@ -634,9 +641,13 @@ mod tests {
             )
             .await;
 
-            while marshal.get_processed_height().await != Some(Height::new(2)) {
+            while marshal.get_processed().await.map(Processed::height) != Some(Height::new(2)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
+            assert_eq!(
+                marshal.get_processed().await,
+                Some(Processed::Floor(Height::new(2)))
+            );
             assert!(marshal.get_block(Height::new(2)).await.is_none());
             assert!(marshal.get_block(Height::new(3)).await.is_some());
 
@@ -690,12 +701,15 @@ mod tests {
                 assert!(marshal.verified(finalization.proposal.round, block).await);
                 let _ = marshal.report(Activity::Finalization(finalization));
                 for _ in 0..100 {
-                    if marshal.get_processed_height().await == Some(height) {
+                    if marshal.get_processed().await.map(Processed::height) == Some(height) {
                         break;
                     }
                     context.sleep(Duration::from_millis(1)).await;
                 }
-                assert_eq!(marshal.get_processed_height().await, Some(height));
+                assert_eq!(
+                    marshal.get_processed().await,
+                    Some(Processed::Block(height))
+                );
             }
 
             let newer_floor = TestBlock::new(10, 10);
@@ -714,12 +728,15 @@ mod tests {
             }
             assert!(marshal.get_block(Height::new(1)).await.is_none());
             for _ in 0..100 {
-                if marshal.get_processed_height().await == Some(Height::new(10)) {
+                if marshal.get_processed().await.map(Processed::height) == Some(Height::new(10)) {
                     break;
                 }
                 context.sleep(Duration::from_millis(1)).await;
             }
-            assert_eq!(marshal.get_processed_height().await, Some(Height::new(10)));
+            assert_eq!(
+                marshal.get_processed().await.map(Processed::height),
+                Some(Height::new(10))
+            );
 
             first.abort().await;
             drop(marshal);
@@ -739,7 +756,10 @@ mod tests {
                 true,
             )
             .await;
-            assert_eq!(floor.height(), Some(Height::new(10)));
+            assert_eq!(
+                floor.processed().map(Processed::height),
+                Some(Height::new(10))
+            );
             assert!(floor.round() > selected_finalization.proposal.round);
             assert!(
                 marshal
@@ -796,7 +816,7 @@ mod tests {
                 let height = block.height();
                 assert!(marshal.verified(finalization.proposal.round, block).await);
                 let _ = marshal.report(Activity::Finalization(finalization));
-                while marshal.get_processed_height().await != Some(height) {
+                while marshal.get_processed().await.map(Processed::height) != Some(height) {
                     context.sleep(Duration::from_millis(1)).await;
                 }
             }
@@ -817,7 +837,7 @@ mod tests {
             )
             .await;
             let marshal = second.mailbox.clone();
-            while marshal.get_processed_height().await != Some(Height::new(7)) {
+            while marshal.get_processed().await.map(Processed::height) != Some(Height::new(7)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert!(
@@ -846,7 +866,10 @@ mod tests {
                 true,
             )
             .await;
-            assert_eq!(floor.height(), Some(Height::new(7)));
+            assert_eq!(
+                floor.processed().map(Processed::height),
+                Some(Height::new(7))
+            );
             assert_eq!(floor.round(), newer_finalization.proposal.round);
             assert!(
                 marshal

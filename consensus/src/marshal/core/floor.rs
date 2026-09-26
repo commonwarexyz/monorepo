@@ -7,22 +7,47 @@ use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
 use commonware_utils::vec::NonEmptyVec;
 
+/// Marshal's durable processed height and the stored block that backs it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Processed {
+    /// The block at this height is stored.
+    Block(Height),
+    /// A floor was installed at the next height on a node that never stored the block at this
+    /// height. The floor block at the next height is stored instead.
+    Floor(Height),
+}
+
+impl Processed {
+    /// Returns the processed height.
+    pub const fn height(self) -> Height {
+        match self {
+            Self::Block(height) | Self::Floor(height) => height,
+        }
+    }
+
+    /// Returns the height of the stored block that backs the processed height.
+    pub const fn anchor(self) -> Height {
+        match self {
+            Self::Block(height) => height,
+            Self::Floor(height) => height.next(),
+        }
+    }
+}
+
 /// Durable height and round bounds restored when marshal initializes.
 ///
 /// The components are independent retention bounds and need not identify the
 /// same finalization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Floor {
-    height: Option<Height>,
+    processed: Option<Processed>,
     round: Round,
 }
 
 impl Floor {
-    /// Returns the latest durably processed height, if any.
-    ///
-    /// See [super::Mailbox::get_processed_height] for which block remains available at this height.
-    pub const fn height(&self) -> Option<Height> {
-        self.height
+    /// Returns the latest durably processed position, if any.
+    pub const fn processed(&self) -> Option<Processed> {
+        self.processed
     }
 
     /// Returns the latest durable finalization round floor.
@@ -33,27 +58,27 @@ impl Floor {
 
 /// Durable floor state plus any update awaiting its anchor block.
 pub(super) struct State<S: Scheme, C: Digest> {
-    height: Option<Height>,
+    processed: Option<Processed>,
     round: Round,
     pending: Option<Finalization<S, C>>,
 }
 
 impl<S: Scheme, C: Digest> State<S, C> {
-    pub(super) const fn resolved(height: Option<Height>, round: Round) -> Self {
+    pub(super) const fn resolved(processed: Option<Processed>, round: Round) -> Self {
         Self {
-            height,
+            processed,
             round,
             pending: None,
         }
     }
 
     pub(super) const fn awaiting_anchor(
-        height: Option<Height>,
+        processed: Option<Processed>,
         round: Round,
         finalization: Finalization<S, C>,
     ) -> Self {
         Self {
-            height,
+            processed,
             round,
             pending: Some(finalization),
         }
@@ -61,9 +86,14 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     pub(super) const fn snapshot(&self) -> Floor {
         Floor {
-            height: self.height,
+            processed: self.processed,
             round: self.round,
         }
+    }
+
+    /// Returns the durable processed position, if any.
+    pub(super) const fn processed(&self) -> Option<Processed> {
+        self.processed
     }
 
     /// Returns the inclusive height floor. Finalized data at or below it is
@@ -74,8 +104,8 @@ impl<S: Scheme, C: Digest> State<S, C> {
     /// finalization. Delivery uses the stream cursor, which keeps that state
     /// distinct.
     pub(super) const fn processed_height(&self) -> Height {
-        match self.height {
-            Some(height) => height,
+        match self.processed {
+            Some(processed) => processed.height(),
             None => Height::zero(),
         }
     }
@@ -84,8 +114,8 @@ impl<S: Scheme, C: Digest> State<S, C> {
         self.round
     }
 
-    pub(super) const fn set_processed_height(&mut self, height: Height) {
-        self.height = Some(height);
+    pub(super) const fn set_processed(&mut self, processed: Processed) {
+        self.processed = Some(processed);
     }
 
     pub(super) const fn set_processed_round(&mut self, round: Round) {
@@ -129,8 +159,8 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     /// Returns true when the resolver request is above all processed floors.
     fn permits(&self, fetch: &Request<C>) -> bool {
-        if let Some(height) = self.height
-            && !fetch.above_height_floor(height)
+        if let Some(processed) = self.processed
+            && !fetch.above_height_floor(processed.height())
         {
             return false;
         }
@@ -302,7 +332,7 @@ mod tests {
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
-        State::resolved(Some(Height::new(5)), round(5))
+        State::resolved(Some(Processed::Block(Height::new(5))), round(5))
     }
 
     #[test]

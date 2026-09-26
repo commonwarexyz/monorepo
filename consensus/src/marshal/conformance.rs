@@ -8,6 +8,7 @@ use super::mocks::{
     },
 };
 use crate::{
+    marshal::core::Processed,
     simplex::{scheme::bls12381_threshold::vrf as bls12381_threshold_vrf, types::Proposal},
     types::{Epoch, Height, Round, View},
 };
@@ -114,7 +115,7 @@ async fn wait_processed<H: TestHarness>(
     height: Height,
 ) {
     loop {
-        if setup.mailbox.get_processed_height().await == Some(height) {
+        if setup.mailbox.get_processed().await.map(Processed::height) == Some(height) {
             break;
         }
         context.sleep(Duration::from_millis(1)).await;

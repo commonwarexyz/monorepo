@@ -50,7 +50,8 @@ mod tests {
             application::gates::{GateOutcome, Gates},
             config::{Config, Start},
             core::{
-                Actor, CommitmentFallback, DigestFallback, Mailbox, cache, durability::Durable as _,
+                Actor, CommitmentFallback, DigestFallback, Mailbox, Processed, cache,
+                durability::Durable as _,
             },
             mocks::{
                 application::Application,
@@ -1615,7 +1616,9 @@ mod tests {
 
             // Wait for the application to process the anchor so the processed
             // floors advance past the subscriptions' fetch coordinates.
-            while mailbox.get_processed_height().await != Some(Height::new(ANCHOR_HEIGHT)) {
+            while mailbox.get_processed().await.map(Processed::height)
+                != Some(Height::new(ANCHOR_HEIGHT))
+            {
                 context.sleep(Duration::from_millis(50)).await;
             }
 
@@ -1639,7 +1642,7 @@ mod tests {
                 },
             );
             let mut late_parent = Box::pin(mailbox.subscribe_parent(&child));
-            let _ = mailbox.get_processed_height().await;
+            let _ = mailbox.get_processed().await;
             assert!(matches!(late_by_round.try_recv(), Err(TryRecvError::Empty)));
             select! {
                 result = &mut late_parent => {
@@ -2777,7 +2780,7 @@ mod tests {
                 // This request is ordered after the verification subscription and
                 // certification hint in the marshal mailbox. Once it returns, the
                 // one-shot buffer hit and eviction have both occurred.
-                case.marshal.get_processed_height().await;
+                case.marshal.get_processed().await;
                 assert!(
                     !case.buffer.contains(digest),
                     "{kind:?}: the buffered block must be evicted before verification completes"
@@ -4747,7 +4750,10 @@ mod tests {
 
             // Without local history, the processed height has no stored block and the floor
             // block at the next height backs it instead.
-            assert_eq!(mailbox.get_processed_height().await, Some(Height::new(4)));
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Floor(Height::new(4)))
+            );
             assert!(mailbox.get_block(Height::new(4)).await.is_none());
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);

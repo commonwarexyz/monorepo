@@ -1,4 +1,4 @@
-use super::{Variant, durability::Durable as _};
+use super::{Processed, Variant, durability::Durable as _};
 use crate::{
     Reporter,
     marshal::{
@@ -63,12 +63,12 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
     },
-    /// A request to retrieve the latest processed height.
-    GetProcessedHeight {
+    /// A request to retrieve the latest processed position.
+    GetProcessed {
         /// The span carried with this request.
         span: Span,
-        /// A channel to send the latest processed height.
-        response: oneshot::Sender<Option<Height>>,
+        /// A channel to send the latest processed position.
+        response: oneshot::Sender<Option<Processed>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -304,7 +304,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
             | Self::Certification { span, .. }
-            | Self::GetProcessedHeight { span, .. }
+            | Self::GetProcessed { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -318,7 +318,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetInfo { .. } => "get_info",
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
-            Self::GetProcessedHeight { .. } => "get_processed_height",
+            Self::GetProcessed { .. } => "get_processed",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -361,7 +361,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             }
-            | Self::GetProcessedHeight { .. } => false,
+            | Self::GetProcessed { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -382,7 +382,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 response.is_closed()
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
-            Self::GetProcessedHeight { response, .. } => response.is_closed(),
+            Self::GetProcessed { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -713,16 +713,14 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Retrieve the latest processed height.
+    /// Retrieve the latest processed position, if any.
     ///
-    /// The block at this height can be read with [Self::get_block], with one exception. After a
-    /// floor is installed on a node that never stored the block below it, this height is the
-    /// floor's predecessor and has no block. The floor block, one height higher, is available
-    /// instead.
-    pub async fn get_processed_height(&self) -> Option<Height> {
+    /// [Processed::anchor] identifies the stored block that backs it, which can be read with
+    /// [Self::get_block].
+    pub async fn get_processed(&self) -> Option<Processed> {
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::GetProcessedHeight {
-            span: info_span!("marshal.mailbox.get_processed_height"),
+        let _ = self.sender.enqueue(Message::GetProcessed {
+            span: info_span!("marshal.mailbox.get_processed"),
             response,
         });
         receiver.await.ok().flatten()
@@ -1503,7 +1501,7 @@ mod tests {
             response,
         };
         let (response, _processed_rx) = oneshot::channel();
-        let processed = TestMessage::GetProcessedHeight {
+        let processed = TestMessage::GetProcessed {
             span: Span::none(),
             response,
         };
@@ -1538,10 +1536,7 @@ mod tests {
             &drained[2],
             TestMessage::HintNotarized { round: hinted, .. } if *hinted == round(1)
         ));
-        assert!(matches!(
-            &drained[3],
-            TestMessage::GetProcessedHeight { .. }
-        ));
+        assert!(matches!(&drained[3], TestMessage::GetProcessed { .. }));
     }
 
     #[test]

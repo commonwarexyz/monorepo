@@ -12,7 +12,10 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
-    marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
+    marshal::{
+        ancestry::BoxedAncestry,
+        core::{Processed, Variant as MarshalVariant},
+    },
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
@@ -692,13 +695,13 @@ where
         // to blocks not yet reflected in storage. Queued ancestries remain lazy
         // until the sole verifier is free.
         let mut served_at: Option<Height> = None;
-        let mut finalized_tip = match self.marshal.get_processed_height().await {
-            Some(height) => self
+        let mut finalized_tip = match self.marshal.get_processed().await {
+            Some(Processed::Block(height)) => self
                 .marshal
                 .get_info(height)
                 .await
                 .map(|(_, digest)| FinalizedTip { height, digest }),
-            None => None,
+            Some(Processed::Floor(_)) | None => None,
         };
         let mut work = ArtifactWork::default();
         let mut scan = ArtifactScan::default();

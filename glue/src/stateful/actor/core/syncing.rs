@@ -431,7 +431,10 @@ mod tests {
     use commonware_actor::{Feedback, mailbox as actor_mailbox};
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable, Reporter as _,
-        marshal::{self, Update, ancestry, core::Mailbox as MarshalMailbox},
+        marshal::{
+            self, Update, ancestry,
+            core::{Mailbox as MarshalMailbox, Processed},
+        },
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::Height,
     };
@@ -946,8 +949,8 @@ mod tests {
             assert_eq!(block.height(), Height::new(1));
             acknowledgement.acknowledge();
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(1))
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(1)))
             );
 
             // Start syncing from block 1.
@@ -1001,8 +1004,8 @@ mod tests {
             // fresh receipts.
             marshal.mailbox.set_floor(floor_finalization);
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(1))
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(1)))
             );
             let Some(Message::Finalized {
                 block,
@@ -1056,8 +1059,8 @@ mod tests {
             assert_eq!(control.applied.load(Ordering::Relaxed), 2);
             assert_eq!(control.flushes.lock().len(), 1);
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(1))
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(1)))
             );
             let release = control.flushes.lock().remove(0);
             if !succeeds {
@@ -1074,7 +1077,10 @@ mod tests {
                     fixtures::FixtureReporter::new(false),
                 )
                 .await;
-                assert_eq!(restarted.floor.height(), Some(Height::new(1)));
+                assert_eq!(
+                    restarted.floor.processed(),
+                    Some(Processed::Block(Height::new(1)))
+                );
                 let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
                     context.child("metadata"),
                     "syncing-test",
@@ -1090,8 +1096,8 @@ mod tests {
             release.send(Ok(())).unwrap();
             drop(reporter.subscribe_databases().await);
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(3))
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(3)))
             );
             assert_eq!(control.applied.load(Ordering::Relaxed), 2);
             assert!(control.flushes.lock().is_empty());

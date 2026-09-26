@@ -201,7 +201,7 @@ where
     S: commonware_cryptography::certificate::Scheme,
     V: MarshalVariant,
 {
-    let height = marshal.get_processed_height().await?.next();
+    let height = marshal.get_processed().await?.height().next();
     Some(
         epocher
             .containing(height)

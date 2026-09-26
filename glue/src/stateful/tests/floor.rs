@@ -10,7 +10,12 @@ use crate::stateful::{
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Reporter,
-    marshal::{self, core::Actor as MarshalActor, resolver::handler, standard::Standard},
+    marshal::{
+        self,
+        core::{Actor as MarshalActor, Processed},
+        resolver::handler,
+        standard::Standard,
+    },
     simplex::{mocks::scheme as scheme_mocks, types::Activity},
     types::{FixedEpocher, Height, ViewDelta},
 };
@@ -169,7 +174,8 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
 
             // The first boot waits for genesis and finalizes blocks 1 through F.
             if boot == 0 {
-                while marshal.get_processed_height().await != Some(Height::zero()) {}
+                while marshal.get_processed().await.map(Processed::height) != Some(Height::zero()) {
+                }
                 for block in &blocks {
                     assert!(marshal.verified(block.context.round, block.clone()).await);
                     marshal.report(Activity::Finalization(fixtures::finalization(
@@ -188,7 +194,10 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     &report,
                     marshal::Update::Block(block, _) if block.height == floor_height
                 ));
-                assert_eq!(marshal.get_processed_height().await, Some(predecessor));
+                assert_eq!(
+                    marshal.get_processed().await,
+                    Some(Processed::Block(predecessor))
+                );
                 assert_eq!(
                     SingleDatabaseSet::<deterministic::Context>::committed_targets(&databases)
                         .await,
@@ -202,18 +211,26 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                         floor_height.get(),
                         floor_block.digest(),
                     ));
-                    assert_eq!(marshal.get_processed_height().await, Some(predecessor));
+                    assert_eq!(
+                        marshal.get_processed().await,
+                        Some(Processed::Block(predecessor))
+                    );
                     assert!(marshal.get_block(floor_height).await.is_some());
                 }
                 if boot == 2 {
                     // Release F to the application, then wait for its acknowledgement to
                     // advance marshal's durable processed height.
                     application.report(report);
-                    while marshal.get_processed_height().await != Some(floor_height) {}
+                    while marshal.get_processed().await.map(Processed::height) != Some(floor_height)
+                    {
+                    }
                 }
             }
             if boot >= 2 {
-                assert_eq!(marshal.get_processed_height().await, Some(floor_height));
+                assert_eq!(
+                    marshal.get_processed().await,
+                    Some(Processed::Block(floor_height))
+                );
                 assert_eq!(
                     SingleDatabaseSet::<deterministic::Context>::committed_targets(&databases)
                         .await,

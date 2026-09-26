@@ -560,6 +560,7 @@ mod tests {
         marshal::{
             Update,
             ancestry::{self, Ancestry},
+            core::Processed,
         },
         simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::Height,
@@ -3129,14 +3130,14 @@ mod tests {
             let actor = context.child("loop").spawn(move |_| processing.start());
 
             // Marshal reports genesis on startup. Cases with a processed genesis acknowledge it.
-            assert_eq!(marshal.mailbox.get_processed_height().await, None);
+            assert_eq!(marshal.mailbox.get_processed().await, None);
             drop(mailbox.subscribe_databases().await);
             assert_eq!(observer.pending_ack_heights(), [Height::zero()]);
             if genesis_processed {
                 assert_eq!(observer.acknowledge_next(), Some(Height::zero()));
                 assert_eq!(
-                    marshal.mailbox.get_processed_height().await,
-                    Some(Height::zero())
+                    marshal.mailbox.get_processed().await,
+                    Some(Processed::Block(Height::zero()))
                 );
             }
 
@@ -3155,7 +3156,7 @@ mod tests {
                     fixtures::finalization(&fixture, block.height().get(), block.digest())
                 };
                 ingress.report(Activity::Finalization(finalization));
-                let _ = marshal.mailbox.get_processed_height().await;
+                let _ = marshal.mailbox.get_processed().await;
                 drop(mailbox.subscribe_databases().await);
                 assert_eq!(control.flushes.lock().len(), 1);
                 if block.height().get() <= floor_height {
@@ -3167,8 +3168,8 @@ mod tests {
             // The observer holds every receipt, so marshal has not advanced.
             assert_eq!(observer.pending_ack_heights(), heights);
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                genesis_processed.then_some(Height::zero())
+                marshal.mailbox.get_processed().await,
+                genesis_processed.then_some(Processed::Block(Height::zero()))
             );
 
             assert_eq!(
@@ -3194,8 +3195,8 @@ mod tests {
             // receipts. Nothing is applied again and no flush is added.
             marshal.mailbox.set_floor(floor_finalization);
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(floor_height - 1))
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(floor_height - 1)))
             );
             drop(mailbox.subscribe_databases().await);
             let mut expected = heights.clone();
@@ -3222,8 +3223,8 @@ mod tests {
 
             // Retired receipts cannot advance the active processed prefix.
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(floor_height - 1))
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(floor_height - 1)))
             );
 
             // Release the observer's copies of the fresh receipts. Glue still holds F+1 and F+2.
@@ -3233,16 +3234,16 @@ mod tests {
 
             // The floor block is durable. Its two successors await separate flushes.
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(floor_height))
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(floor_height)))
             );
 
             // Releasing F+1's flush acknowledges it and starts the flush for F+2.
             control.flushes.lock().remove(0).send(Ok(())).unwrap();
             drop(mailbox.subscribe_databases().await);
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(floor_height + 1)),
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(floor_height + 1))),
             );
             assert_eq!(control.flushes.lock().len(), 1);
 
@@ -3250,8 +3251,8 @@ mod tests {
             control.flushes.lock().remove(0).send(Ok(())).unwrap();
             drop(mailbox.subscribe_databases().await);
             assert_eq!(
-                marshal.mailbox.get_processed_height().await,
-                Some(Height::new(floor_height + 2)),
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(floor_height + 2))),
             );
             assert_eq!(
                 control.applied.load(Ordering::Relaxed),

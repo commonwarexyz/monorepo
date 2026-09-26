@@ -7,7 +7,7 @@ use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
     marshal::{
         Identifier,
-        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Variant},
+        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Processed, Variant},
     },
     simplex::types::Finalization,
     types::Height,
@@ -285,23 +285,18 @@ where
     }
 }
 
-/// Returns the archived block that covers marshal's durable processed position.
+/// Returns the stored block that backs marshal's durable processed position.
 ///
 /// Glue cannot reopen below this position because marshal does not redeliver blocks at or below it.
-/// An acknowledgement-derived position retains its own block. A floor installed without local
-/// history can leave only its anchor available, with `height.next()` identifying that block.
-async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, height: Height) -> V::Block
+async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, processed: Processed) -> V::Block
 where
     S: Scheme,
     V: Variant,
 {
-    if let Some(block) = marshal.get_block(Identifier::Height(height)).await {
-        return block;
-    }
     marshal
-        .get_block(Identifier::Height(height.next()))
+        .get_block(Identifier::Height(processed.anchor()))
         .await
-        .expect("marshal must return floor anchor after processed height")
+        .expect("marshal must store the block backing its processed position")
 }
 
 /// Resolves a state sync floor that covers both the selected finalization and marshal's
@@ -319,12 +314,13 @@ where
 {
     // Marshal skips installing a startup floor whose round is already processed. Its block may
     // have been pruned, so apply the same rule before registering a local-only waiter.
-    let block = if let Some(height) = floor.height()
+    let block = if let Some(processed) = floor.processed()
         && floor.round() >= finalization.round()
     {
         // A retained successor can be the selected floor block. Prefer it to its processed
         // predecessor so the resolved target covers the selected finalization.
-        if let Some(next) = height.get().checked_add(1)
+        if let Processed::Block(height) = processed
+            && let Some(next) = height.get().checked_add(1)
             && let Some(block) = marshal
                 .get_block(Identifier::Height(Height::new(next)))
                 .await
@@ -332,7 +328,7 @@ where
         {
             V::into_shared(block)
         } else {
-            V::into_shared(processed_anchor(marshal, height).await)
+            V::into_shared(processed_anchor(marshal, processed).await)
         }
     } else {
         // Marshal's configured startup floor fetches its anchor when needed. This local-only
@@ -347,9 +343,9 @@ where
 
         // Marshal does not redeliver blocks at or below its durable processed position.
         // A newly installed floor records its predecessor, leaving the anchor for delivery.
-        match marshal.get_processed_height().await {
-            Some(height) if height > selected.height() => {
-                V::into_shared(processed_anchor(marshal, height).await)
+        match marshal.get_processed().await {
+            Some(processed) if processed.height() > selected.height() => {
+                V::into_shared(processed_anchor(marshal, processed).await)
             }
             _ => selected,
         }
@@ -385,14 +381,16 @@ where
     // A completed state sync may be ahead of marshal's processed height. Recover from the
     // later anchor while marshal catches up.
     let sync_height = sync_metadata.sync_height();
-    let processed_height = marshal.get_processed_height().await;
+    let processed = marshal.get_processed().await;
     let marshal_floor = sync_height
         .into_iter()
-        .chain(processed_height)
+        .chain(processed.map(Processed::height))
         .max()
         .unwrap_or_else(Height::zero);
-    let floor_block = if processed_height == Some(marshal_floor) {
-        V::into_shared(processed_anchor(marshal, marshal_floor).await)
+    let floor_block = if let Some(processed) = processed
+        && processed.height() == marshal_floor
+    {
+        V::into_shared(processed_anchor(marshal, processed).await)
     } else {
         V::into_shared(
             marshal
