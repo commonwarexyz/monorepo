@@ -124,7 +124,11 @@ impl<V: Variant> Subscriptions<V> {
 mod tests {
     use super::*;
     use crate::{
-        simplex::marshal::{core::variant::NoBuffer, mocks::block::EmptyBlock, standard::Standard},
+        simplex::marshal::{
+            core::{Retirement, variant::NoBuffer},
+            mocks::block::EmptyBlock,
+            standard::Standard,
+        },
         types::{Height, Round},
     };
     use commonware_cryptography::{
@@ -190,7 +194,7 @@ mod tests {
             Some(receiver)
         }
 
-        fn retire(&self, _update: crate::simplex::marshal::core::Retirement<Digest>) {}
+        fn retire(&self, _update: Retirement<Digest>) {}
 
         fn send(&self, _round: Round, _block: Arc<TestBlock>, _recipients: Recipients<PublicKey>) {}
     }
@@ -205,6 +209,14 @@ mod tests {
             .expect("receiver should be ready")
             .expect("sender should deliver block");
         assert_eq!(received.digest(), expected.digest());
+    }
+
+    #[test]
+    fn test_buffer_ignores_retirements() {
+        TestBuffer::default().retire(Retirement {
+            round_floor: Round::zero(),
+            exact_retirements: vec![Sha256::fill(1)],
+        });
     }
 
     #[test]
