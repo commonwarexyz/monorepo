@@ -9,8 +9,10 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Participants, Payload, SchemeInfo},
 };
 use commonware_consensus::{
-    marshal::{Identifier, core::Variant as MarshalVariant},
-    simplex::scheme::Scheme as SimplexScheme,
+    simplex::{
+        marshal::{Identifier, core::Variant as MarshalVariant},
+        scheme::Scheme as SimplexScheme,
+    },
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
 use commonware_cryptography::{

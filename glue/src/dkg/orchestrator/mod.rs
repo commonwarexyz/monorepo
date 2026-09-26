@@ -85,8 +85,10 @@ mod tests {
     use commonware_actor::Feedback;
     use commonware_consensus::{
         Heightable, Reporter, Reporters,
-        marshal::{self, Start as MarshalStart, resolver::p2p as marshal_resolver},
-        simplex::types::{Activity, Finalization, Finalize, Proposal},
+        simplex::{
+            marshal::{self, Start as MarshalStart, resolver::p2p as marshal_resolver},
+            types::{Activity, Finalization, Finalize, Proposal},
+        },
         types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
     };
     use commonware_cryptography::{

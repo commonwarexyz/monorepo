@@ -13,8 +13,11 @@ use commonware_codec::{
 };
 use commonware_consensus::{
     Epochable as _,
-    marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{
+        marshal::core::{Mailbox as MarshalMailbox, Variant as MarshalVariant},
+        scheme::Scheme,
+        types::Finalization,
+    },
     types::{Epoch, Epocher, FixedEpocher},
 };
 #[cfg(feature = "arbitrary")]

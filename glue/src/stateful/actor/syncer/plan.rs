@@ -1,7 +1,9 @@
 use super::StateSyncMetadata;
 use commonware_consensus::{
-    marshal::{Start, core::Variant},
-    simplex::types::Finalization,
+    simplex::{
+        marshal::{Start, core::Variant},
+        types::Finalization,
+    },
     types::Height,
 };
 use commonware_cryptography::certificate::Scheme;
@@ -164,8 +166,8 @@ mod tests {
         tests::mocks::{TestScheme, TestVariant},
     };
     use commonware_consensus::{
-        marshal::Start,
         simplex::{
+            marshal::Start,
             mocks::scheme as scheme_mocks,
             types::{Finalization, Finalize, Proposal},
         },

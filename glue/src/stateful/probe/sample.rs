@@ -9,11 +9,14 @@
 //! verification, and peer blocking.
 
 use commonware_consensus::{
-    marshal::{
-        Identifier,
-        core::{Mailbox as MarshalMailbox, Variant},
+    simplex::{
+        marshal::{
+            Identifier,
+            core::{Mailbox as MarshalMailbox, Variant},
+        },
+        scheme::Scheme,
+        types::Finalization,
     },
-    simplex::{scheme::Scheme, types::Finalization},
     types::Epoch,
 };
 use commonware_cryptography::Digest;

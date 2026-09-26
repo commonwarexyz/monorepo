@@ -5,7 +5,10 @@ use crate::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
-use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::FixedEpocher};
+use commonware_consensus::{
+    simplex::{marshal::core::Variant, scheme::Scheme},
+    types::FixedEpocher,
+};
 use commonware_cryptography::Signer;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
