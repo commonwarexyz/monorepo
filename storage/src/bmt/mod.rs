@@ -111,10 +111,10 @@ impl<H: Hasher> Builder<H> {
     /// It is valid to build a tree with no leaves, in which case
     /// just an "empty" node is included (no leaves will be provable).
     pub fn build(self) -> Tree<H::Digest> {
-        // Hash each leaf with its position, a window at a time so the hasher can
-        // work on many leaves at once (see `Hasher::hash_many_parts`).
-        let mut digests = Vec::with_capacity(self.leaves.len());
-        for (index, window) in self.leaves.chunks(WINDOW).enumerate() {
+        // Hash each leaf with its position in place, a window at a time so the
+        // hasher can work on many leaves at once (see `Hasher::hash_many_parts`).
+        let mut leaves = self.leaves;
+        for (index, window) in leaves.chunks_mut(WINDOW).enumerate() {
             let first = (index * WINDOW) as u32;
             let mut positions = [[0u8; 4]; WINDOW];
             for (offset, position) in positions.iter_mut().take(window.len()).enumerate() {
@@ -122,12 +122,13 @@ impl<H: Hasher> Builder<H> {
             }
             let messages: Vec<[&[u8]; 2]> = positions
                 .iter()
-                .zip(window)
+                .zip(window.iter())
                 .map(|(position, leaf)| [position.as_slice(), leaf.as_ref()])
                 .collect();
-            digests.extend(H::hash_many_parts(&messages));
+            let digests = H::hash_many_parts(&messages);
+            window.copy_from_slice(&digests);
         }
-        Tree::new::<H>(digests)
+        Tree::new::<H>(leaves)
     }
 }
 
