@@ -846,7 +846,7 @@ pub(crate) mod test {
 
             let (batch, retained_ancestors) = prepared
                 .merkleize_with_floor_scan(
-                    None,
+                    |stats| (stats.default_budget(), None),
                     updates,
                     Some(prefetched),
                     |floor, tip, limit, out| {

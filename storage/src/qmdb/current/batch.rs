@@ -20,6 +20,7 @@ use crate::{
         },
         bitmap::{Shared, fill_from},
         chain::Bounds,
+        compaction::{CompactionBudget, CompactionStats},
         current::{
             db::{compute_db_root, partial_chunk, read_graft_inputs},
             grafting,
@@ -555,7 +556,7 @@ where
             .await?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                metadata,
+                |stats| (stats.default_budget(), metadata),
                 staged_updates,
                 Some(prefetched),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
@@ -619,9 +620,11 @@ where
         let (inner, staged_updates) = inner.resolve_updates(updates, upserts, db.any.strategy());
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
-            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
-                fill_candidates(&bitmap_parent, floor, tip, limit, out)
-            })
+            .merkleize_with_floor_scan(
+                |stats| (stats.default_budget(), metadata),
+                staged_updates,
+                |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
+            )
             .await?;
         let result = compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await;
         drop(retained_ancestors);
@@ -659,6 +662,48 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
+        self.merkleize_with_plan(db, |stats| (stats.default_budget(), metadata))
+            .await
+    }
+
+    /// Like [`merkleize`](Self::merkleize), but `plan` chooses the compaction budget and the
+    /// CommitFloor metadata from the batch's resolved [`CompactionStats`].
+    ///
+    /// `plan` runs once, after mutations are resolved and before compaction. See
+    /// [`crate::qmdb::compaction`] for how the budget bounds compaction work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    #[tracing::instrument(
+        name = "qmdb.current.unordered.batch.merkleize_with_compaction_plan",
+        level = "info",
+        skip_all
+    )]
+    pub async fn merkleize_with_compaction_plan<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with_plan(db, plan).await
+    }
+
+    async fn merkleize_with_plan<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
         let Self {
             inner,
             grafted_parent,
@@ -669,7 +714,7 @@ where
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                metadata,
+                plan,
                 StagedUpdates::<F, update::Unordered<K, V>>::new(),
                 None,
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
@@ -711,6 +756,48 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
+        self.merkleize_with_plan(db, |stats| (stats.default_budget(), metadata))
+            .await
+    }
+
+    /// Like [`merkleize`](Self::merkleize), but `plan` chooses the compaction budget and the
+    /// CommitFloor metadata from the batch's resolved [`CompactionStats`].
+    ///
+    /// `plan` runs once, after mutations are resolved and before compaction. See
+    /// [`crate::qmdb::compaction`] for how the budget bounds compaction work.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` is not on the batch's live chain or is not the
+    /// database instance that created the batch.
+    #[tracing::instrument(
+        name = "qmdb.current.ordered.batch.merkleize_with_compaction_plan",
+        level = "info",
+        skip_all
+    )]
+    pub async fn merkleize_with_compaction_plan<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
+        self.merkleize_with_plan(db, plan).await
+    }
+
+    async fn merkleize_with_plan<E, C, I>(
+        self,
+        db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+        plan: impl FnOnce(CompactionStats<F>) -> (CompactionBudget, Option<V::Value>),
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, N, S>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        I: crate::index::Ordered<Value = Location<F>> + 'static,
+    {
         let Self {
             inner,
             grafted_parent,
@@ -721,7 +808,7 @@ where
         let prepared = inner.prepare(&db.any)?;
         let (inner, retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                metadata,
+                plan,
                 StagedUpdates::<F, update::Ordered<K, V>>::new(),
                 |floor, tip, limit, out| fill_candidates(&bitmap_parent, floor, tip, limit, out),
             )
