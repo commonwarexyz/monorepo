@@ -456,10 +456,15 @@ pub fn listen_end(state: ListenState, msg: Ack) -> Result<(SendCipher, RecvCiphe
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Signer, ed25519::PrivateKey};
-    use commonware_codec::{Codec, DecodeExt};
+    use crate::{Signer, ed25519::PrivateKey, secp256r1::standard};
+    use commonware_codec::{Codec, Copying, DecodeExt};
     use commonware_math::algebra::Random;
-    use commonware_utils::test_rng;
+    use commonware_utils::{test_rng, union_unique};
+    use p256::{
+        AffinePoint, FieldBytes, ProjectivePoint, Scalar,
+        elliptic_curve::{ops::Reduce, sec1::ToSec1Point as _},
+    };
+    use sha2::{Digest, Sha256};
 
     const VERSIONS: [Version; 2] = [Version::V0, Version::V1];
 
@@ -706,19 +711,13 @@ mod test {
     ///
     /// Replacing the signature's nonce point `R` with `-R` yields `Q' = -Q - 2 e r^-1 G`.
     fn substitute(
-        key: &crate::secp256r1::standard::PublicKey,
+        key: &standard::PublicKey,
         summary: &Summary,
-        sig: &crate::secp256r1::standard::Signature,
-    ) -> crate::secp256r1::standard::PublicKey {
-        use p256::{
-            AffinePoint, FieldBytes, ProjectivePoint, Scalar,
-            elliptic_curve::{ops::Reduce, sec1::ToSec1Point as _},
-        };
-        use sha2::{Digest, Sha256};
-
+        sig: &standard::Signature,
+    ) -> standard::PublicKey {
         // Transcript signatures use an empty namespace, so the signed payload is the summary
         // behind a zero-length namespace prefix.
-        let payload = commonware_utils::union_unique(b"", summary.as_ref());
+        let payload = union_unique(b"", summary.as_ref());
         let hash: [u8; 32] = Sha256::digest(&payload).into();
         let e = <Scalar as Reduce<FieldBytes>>::reduce(&FieldBytes::from(hash));
         let sig = p256::ecdsa::Signature::from_slice(&sig.encode()).unwrap();
@@ -728,10 +727,7 @@ mod test {
             .unwrap()
             .to_projective();
         let derived: AffinePoint = (-q - ProjectivePoint::GENERATOR * (e * r_inv).double()).into();
-        crate::secp256r1::standard::PublicKey::decode(commonware_codec::Copying(
-            derived.to_sec1_point(true).as_bytes(),
-        ))
-        .unwrap()
+        standard::PublicKey::decode(Copying(derived.to_sec1_point(true).as_bytes())).unwrap()
     }
 
     /// V1 rejects a [Syn] whose signature verifies under a derived identity.
@@ -742,12 +738,10 @@ mod test {
     /// key. V1 commits the dialer identity before signing, so the claim fails verification.
     #[test]
     fn test_v1_rejects_derived_identity() {
-        use crate::secp256r1::standard::PrivateKey;
-
         for version in VERSIONS {
             let mut rng = test_rng();
-            let dialer = PrivateKey::random(&mut rng);
-            let listener = PrivateKey::random(&mut rng);
+            let dialer = standard::PrivateKey::random(&mut rng);
+            let listener = standard::PrivateKey::random(&mut rng);
 
             // The dialer signs a Syn with its own key.
             let (state, syn) = dial_start(
