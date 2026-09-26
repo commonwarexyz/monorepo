@@ -10,7 +10,7 @@
 
 use crate::{Channel, CheckedSender, LimitedSender, Message, Receiver, Recipients, Sender};
 use commonware_actor::{Feedback, Unreliable};
-use commonware_codec::{Encode, Error as CodecError, ReadExt, varint::UInt};
+use commonware_codec::{Error as CodecError, ReadExt, varint::UInt};
 use commonware_macros::select_loop;
 use commonware_runtime::{ContextCell, Handle, IoBuf, IoBufs, Spawner, spawn_cell};
 use commonware_utils::channel::{
@@ -350,7 +350,7 @@ impl<'a, S: Sender> CheckedSender for CheckedGlobalSender<'a, S> {
     fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
         let subchannel = UInt(self.subchannel.expect("subchannel not set"));
         let mut message = message.into();
-        message.prepend(subchannel.encode().into());
+        message.prepend(IoBuf::encode(&subchannel));
         self.inner.send(message, priority)
     }
 }

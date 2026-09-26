@@ -16,7 +16,7 @@ use crate::{
     },
 };
 use commonware_actor::{Feedback, Unreliable};
-use commonware_codec::{DecodeExt, FixedSize};
+use commonware_codec::{DecodeExt, FixedSize, ReadExt as _};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_runtime::{
@@ -1414,11 +1414,11 @@ impl<P: PublicKey> Peer<P> {
 
                         // Continually receive messages from the dialer and send them to the inbox
                         while let Ok(data) = recv_frame(&mut stream, max_frame_size).await {
-                            let data = data.coalesce();
-                            let channel = Channel::from_be_bytes(
-                                data.as_ref()[..Channel::SIZE].try_into().unwrap(),
-                            );
-                            let message = data.slice(Channel::SIZE..);
+                            let mut message = data.coalesce();
+                            let Ok(channel) = Channel::read(&mut message) else {
+                                error!("received message without a channel");
+                                break;
+                            };
                             if let Err(err) =
                                 inbox_sender.send((channel, (dialer.clone(), message)))
                             {
@@ -1486,8 +1486,7 @@ impl Link {
         context.child("link").spawn(move |context| async move {
             // Dial the peer and handshake by sending it the dialer's public key
             let (mut sink, _) = context.dial(socket).await.unwrap();
-            if let Err(err) = send_frame(&mut sink, dialer.as_ref().to_vec(), max_frame_size).await
-            {
+            if let Err(err) = send_frame(&mut sink, IoBuf::encode(&dialer), max_frame_size).await {
                 error!(?err, "failed to send public key to listener");
                 return;
             }
@@ -1498,10 +1497,7 @@ impl Link {
                 context.sleep_until(receive_complete_at).await;
 
                 // Send the message
-                let channel_bytes = channel.to_be_bytes();
-                let mut data = Vec::with_capacity(channel_bytes.len() + message.len());
-                data.extend_from_slice(&channel_bytes);
-                data.extend_from_slice(message.as_ref());
+                let data = [IoBuf::encode(&channel), message];
                 let _ = send_frame(&mut sink, data, max_frame_size).await;
 
                 // Bump received messages metric

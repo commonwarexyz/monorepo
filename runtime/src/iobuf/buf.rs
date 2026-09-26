@@ -13,7 +13,7 @@ use super::{
 };
 use bytes::{BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{
-    Buf, BufsMut, EncodeSize, Error, Input, RangeCfg, Read, Write, util::at_least,
+    Buf, BufsMut, Encode, EncodeSize, Error, Input, RangeCfg, Read, Write, util::at_least,
 };
 use std::{
     mem::ManuallyDrop,
@@ -100,6 +100,24 @@ impl IoBuf {
     /// header, so the result supports zero-copy [`IoBuf::try_into_mut`].
     pub fn copy_from_slice(data: &[u8]) -> Self {
         IoBufMut::from(data).freeze()
+    }
+
+    /// Create a buffer by encoding `value` into exactly
+    /// [`EncodeSize::encode_size`] bytes.
+    ///
+    /// Like [`IoBuf::copy_from_slice`], the result is one native heap
+    /// allocation, so it supports zero-copy [`IoBuf::try_into_mut`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`Write::write`] writes a different number of bytes than
+    /// [`EncodeSize::encode_size`].
+    pub fn encode(value: &impl Encode) -> Self {
+        let len = value.encode_size();
+        let mut buf = IoBufMut::with_capacity(len);
+        value.write(&mut buf);
+        assert_eq!(buf.len(), len, "write() did not write expected bytes");
+        buf.freeze()
     }
 
     #[inline]
@@ -1202,6 +1220,50 @@ mod tests {
         assert_eq!(src.slice(6..), b"world");
         assert_eq!(src.slice(3..8), b"lo wo");
         assert!(src.slice(5..5).is_empty());
+    }
+
+    #[test]
+    fn test_iobuf_encode_matches_codec_encode() {
+        let value = vec![1u8, 2, 3, 4, 5, 6];
+        let buf = IoBuf::encode(&value);
+        assert_eq!(buf.as_ref(), value.encode().as_ref());
+        // A native heap buffer, not a wrapped `Bytes`, supports mutable recovery.
+        let buf = buf.try_into_mut().unwrap();
+        assert_eq!(buf.capacity(), value.encode_size());
+    }
+
+    #[test]
+    fn test_iobuf_encode_empty() {
+        let buf = IoBuf::encode(&[0u8; 0]);
+        assert!(buf.is_empty());
+        assert_eq!(buf.try_into_mut().unwrap().capacity(), 0);
+    }
+
+    /// Claims a 4-byte encoding but writes the given number of bytes.
+    struct Misreported(usize);
+
+    impl Write for Misreported {
+        fn write(&self, buf: &mut impl BufMut) {
+            buf.put_bytes(0, self.0);
+        }
+    }
+
+    impl EncodeSize for Misreported {
+        fn encode_size(&self) -> usize {
+            4
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "write() did not write expected bytes")]
+    fn test_iobuf_encode_rejects_short_write() {
+        let _ = IoBuf::encode(&Misreported(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot advance past end of buffer")]
+    fn test_iobuf_encode_rejects_long_write() {
+        let _ = IoBuf::encode(&Misreported(5));
     }
 
     #[test]

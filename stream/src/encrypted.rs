@@ -53,7 +53,7 @@
 //! - **Future Secrecy**: If a peer's static private key is compromised, future sessions will be exposed.
 //! - **0-RTT**: The protocol does not support 0-RTT handshakes (resumed sessions).
 
-use crate::utils::codec::{append_frame, framed_len, recv_frame, send_frame};
+use crate::utils::codec::{append_frame, framed_len, recv_frame};
 use commonware_codec::{DecodeExt, Encode, Error as CodecError, FixedSize};
 use commonware_cryptography::{
     Signer,
@@ -156,7 +156,12 @@ where
     T: Sink,
 {
     let max_size = u32::try_from(M::SIZE).expect("handshake frame should fit in u32");
-    send_frame(sink, message.encode(), max_size).await
+    let mut frame = IoBufMut::with_capacity(framed_len(M::SIZE, max_size)?);
+    append_frame(&mut frame, M::SIZE, max_size, |frame, _| {
+        message.write(frame);
+        Ok(())
+    })?;
+    sink.send(frame.freeze()).await.map_err(Error::SendFailed)
 }
 
 /// Receives and decodes a handshake message bounded by its fixed encoded size.
@@ -650,6 +655,26 @@ mod test {
             self.chunk_counts.lock().push(bufs.chunk_count());
             self.inner.send(bufs).await
         }
+    }
+
+    #[test]
+    fn test_handshake_frame_is_contiguous() {
+        deterministic::Runner::default().start(|_| async move {
+            let (sink, mut stream) = mocks::Channel::init();
+            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
+            let mut sink = CountingSink::new(sink, Arc::default(), chunk_counts.clone());
+            let message = [7u8; 128];
+
+            send_handshake_frame(&mut sink, message).await.unwrap();
+
+            let mut expected = UInt(128u32).encode().to_vec();
+            expected.extend_from_slice(&message);
+            assert_eq!(
+                stream.recv(expected.len()).await.unwrap().coalesce(),
+                expected.as_slice()
+            );
+            assert_eq!(*chunk_counts.lock(), vec![1]);
+        });
     }
 
     /// Wraps a stream to return each read as a fresh, uniquely-owned pooled
