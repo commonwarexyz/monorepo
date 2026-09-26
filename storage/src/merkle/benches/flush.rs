@@ -86,7 +86,7 @@ fn bench_flush_family<F: Family>(c: &mut Criterion, family: &'static str) {
                         for _ in 0..n {
                             batch = batch.add(&hasher, &sha256::Digest::random(&mut rng));
                         }
-                        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+                        let batch = batch.merkleize(merkle.mem(), &hasher);
                         merkle = merkle.apply_batch(&batch).unwrap();
 
                         // Timed: flush the freshly applied nodes to the journal.

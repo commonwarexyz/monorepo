@@ -126,7 +126,7 @@ mod tests {
             let element = hasher.digest(&seed.wrapping_add(i as u64).to_be_bytes());
             batch = batch.add(&hasher, &element);
         }
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
         let merkle = merkle.apply_batch(&batch)?;
         let merkle = merkle.sync().await?;
 

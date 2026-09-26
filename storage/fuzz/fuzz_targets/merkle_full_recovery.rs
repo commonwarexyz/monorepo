@@ -192,7 +192,7 @@ async fn run_operations<F: MerkleFamily>(
         merkle = match op {
             MerkleOperation::Add { data } => {
                 let batch = merkle.new_batch().add(hasher, data);
-                let batch = merkle.with_mem(|mem| batch.merkleize(mem, hasher));
+                let batch = batch.merkleize(merkle.mem(), hasher);
                 let merkle = merkle.apply_batch(&batch).unwrap();
                 leaves.push(*data);
                 unsynced_nodes = true;
@@ -534,7 +534,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
         // and reopen to the same root.
         let test_data = [0xABu8; DATA_SIZE];
         let batch = merkle.new_batch().add(&hasher, &test_data);
-        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        let batch = batch.merkleize(merkle.mem(), &hasher);
         let merkle = merkle.apply_batch(&batch).unwrap();
         let merkle = merkle.sync().await.expect("post-recovery sync failed");
         let root = merkle.root(&hasher, 0).expect("post-recovery root missing");
