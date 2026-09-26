@@ -97,21 +97,23 @@ impl Faults for N3f1 {
 
 /// Fault model requiring `n >= 5f + 1` participants.
 ///
-/// Tolerates up to `f = (n-1)/5` faults with quorum size `q = n - f` (also
-/// provided as [`l_quorum`](Self::l_quorum)).
+/// Tolerates up to `f = (n-1)/5` faults with quorum size `q = n - f`, the size of a Multimmit
+/// L-QC or V-QC.
 ///
-/// Also provides the [`f_plus_one`](Self::f_plus_one), [`m_quorum`](Self::m_quorum)
-/// (`2f + 1`), [`three_f_plus_one`](Self::three_f_plus_one), and
-/// [`n_minus_two_f`](Self::n_minus_two_f) thresholds used by `n >= 5f + 1` protocols.
+/// Also provides the other thresholds named in the
+/// [Multimmit specification](https://arxiv.org/abs/2607.21021v5):
+/// [`safe_rank`](Self::safe_rank) (`f + 1`),
+/// [`nullification_quorum`](Self::nullification_quorum) (`2f + 1`),
+/// [`final_rank`](Self::final_rank) (`3f + 1`), and [`da_quorum`](Self::da_quorum) (`n - 2f`).
 ///
 /// # Example
 ///
-/// | n  | f  | quorum (n-f) | m-quorum (2f+1) |
-/// |----|----| -------------|-----------------|
-/// | 6  | 1  | 5            | 3               |
-/// | 11 | 2  | 9            | 5               |
-/// | 16 | 3  | 13           | 7               |
-/// | 21 | 4  | 17           | 9               |
+/// | n  | f  | quorum (n-f) | nullification quorum (2f+1) |
+/// |----|----|--------------|-----------------------------|
+/// | 6  | 1  | 5            | 3                           |
+/// | 11 | 2  | 9            | 5                           |
+/// | 16 | 3  | 13           | 7                           |
+/// | 21 | 4  | 17           | 9                           |
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct N5f1;
 
@@ -131,7 +133,8 @@ impl N5f1 {
         (n - 1) / 5
     }
 
-    /// Compute `f + 1`.
+    /// Compute `f + 1`, the number of votes that must endorse a position for it to be a
+    /// safe-to-extend tip of a V-QC.
     ///
     /// Any set of this size contains at least one correct participant.
     ///
@@ -139,20 +142,24 @@ impl N5f1 {
     ///
     /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
     #[commonware_macros::stability(ALPHA)]
-    pub fn f_plus_one(n: impl ToPrimitive) -> u32 {
+    pub fn safe_rank(n: impl ToPrimitive) -> u32 {
         Self::max_faults(n) + 1
     }
 
-    /// Compute `2f + 1`.
+    /// Compute `2f + 1`, the number of nullify messages in a nullification.
+    ///
+    /// Any set of this size shares at least one correct participant with every set of `n - f`.
     ///
     /// # Panics
     ///
     /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
-    pub fn m_quorum(n: impl ToPrimitive) -> u32 {
+    #[commonware_macros::stability(ALPHA)]
+    pub fn nullification_quorum(n: impl ToPrimitive) -> u32 {
         2 * Self::max_faults(n) + 1
     }
 
-    /// Compute `3f + 1`.
+    /// Compute `3f + 1`, the number of votes that must endorse a position for it to be a
+    /// finalized tip of an L-QC.
     ///
     /// Any set of this size contains at least `2f + 1` correct participants.
     ///
@@ -160,22 +167,11 @@ impl N5f1 {
     ///
     /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
     #[commonware_macros::stability(ALPHA)]
-    pub fn three_f_plus_one(n: impl ToPrimitive) -> u32 {
+    pub fn final_rank(n: impl ToPrimitive) -> u32 {
         3 * Self::max_faults(n) + 1
     }
 
-    /// Compute `n - f`.
-    ///
-    /// This is equivalent to [`Self::quorum`].
-    ///
-    /// # Panics
-    ///
-    /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
-    pub fn l_quorum(n: impl ToPrimitive) -> u32 {
-        Self::quorum(n)
-    }
-
-    /// Compute `n - 2f`.
+    /// Compute `n - 2f`, the number of DA-votes in a DA-certificate.
     ///
     /// Any two sets of this size share at least `n - 4f >= f + 1` participants, so at least one
     /// correct participant.
@@ -184,7 +180,7 @@ impl N5f1 {
     ///
     /// Panics if `n` is zero, negative, or exceeds `u32::MAX`.
     #[commonware_macros::stability(ALPHA)]
-    pub fn n_minus_two_f(n: impl ToPrimitive) -> u32 {
+    pub fn da_quorum(n: impl ToPrimitive) -> u32 {
         let n = n
             .to_u32()
             .expect("n must be a non-negative integer that fits in u32");
@@ -259,32 +255,26 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
-    fn test_bft5f1_m_quorum_zero_panics() {
-        N5f1::m_quorum(0);
+    fn test_bft5f1_nullification_quorum_zero_panics() {
+        N5f1::nullification_quorum(0);
     }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
-    fn test_bft5f1_l_quorum_zero_panics() {
-        N5f1::l_quorum(0);
+    fn test_bft5f1_safe_rank_zero_panics() {
+        N5f1::safe_rank(0);
     }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
-    fn test_bft5f1_f_plus_one_zero_panics() {
-        N5f1::f_plus_one(0);
+    fn test_bft5f1_final_rank_zero_panics() {
+        N5f1::final_rank(0);
     }
 
     #[test]
     #[should_panic(expected = "n must not be zero")]
-    fn test_bft5f1_three_f_plus_one_zero_panics() {
-        N5f1::three_f_plus_one(0);
-    }
-
-    #[test]
-    #[should_panic(expected = "n must not be zero")]
-    fn test_bft5f1_n_minus_two_f_zero_panics() {
-        N5f1::n_minus_two_f(0);
+    fn test_bft5f1_da_quorum_zero_panics() {
+        N5f1::da_quorum(0);
     }
 
     #[rstest]
@@ -327,26 +317,25 @@ mod tests {
     fn test_bft5f1_quorums(
         #[case] n: u32,
         #[case] expected_f: u32,
-        #[case] expected_l_quorum: u32,
-        #[case] expected_m_quorum: u32,
-        #[case] expected_f_plus_one: u32,
-        #[case] expected_three_f_plus_one: u32,
-        #[case] expected_n_minus_two_f: u32,
+        #[case] expected_quorum: u32,
+        #[case] expected_nullification_quorum: u32,
+        #[case] expected_safe_rank: u32,
+        #[case] expected_final_rank: u32,
+        #[case] expected_da_quorum: u32,
     ) {
         assert_eq!(N5f1::max_faults(n), expected_f);
-        assert_eq!(N5f1::quorum(n), expected_l_quorum);
-        assert_eq!(N5f1::l_quorum(n), expected_l_quorum);
-        assert_eq!(N5f1::m_quorum(n), expected_m_quorum);
-        assert_eq!(N5f1::f_plus_one(n), expected_f_plus_one);
-        assert_eq!(N5f1::three_f_plus_one(n), expected_three_f_plus_one);
-        assert_eq!(N5f1::n_minus_two_f(n), expected_n_minus_two_f);
+        assert_eq!(N5f1::quorum(n), expected_quorum);
+        assert_eq!(N5f1::nullification_quorum(n), expected_nullification_quorum);
+        assert_eq!(N5f1::safe_rank(n), expected_safe_rank);
+        assert_eq!(N5f1::final_rank(n), expected_final_rank);
+        assert_eq!(N5f1::da_quorum(n), expected_da_quorum);
 
         // Verify invariants
-        assert_eq!(n, expected_f + expected_l_quorum); // n = f + q
-        assert_eq!(expected_m_quorum, 2 * expected_f + 1); // m = 2f + 1
-        assert_eq!(expected_f_plus_one, expected_f + 1);
-        assert_eq!(expected_three_f_plus_one, 3 * expected_f + 1);
-        assert_eq!(expected_n_minus_two_f, n - 2 * expected_f);
+        assert_eq!(n, expected_f + expected_quorum); // n = f + q
+        assert_eq!(expected_nullification_quorum, 2 * expected_f + 1);
+        assert_eq!(expected_safe_rank, expected_f + 1);
+        assert_eq!(expected_final_rank, 3 * expected_f + 1);
+        assert_eq!(expected_da_quorum, n - 2 * expected_f);
     }
 
     #[test]
@@ -369,11 +358,10 @@ mod tests {
 
         assert_eq!(N5f1::max_faults(10u64), 1);
         assert_eq!(N5f1::quorum(10usize), 9);
-        assert_eq!(N5f1::m_quorum(10i32), 3);
-        assert_eq!(N5f1::l_quorum(10i64), 9);
-        assert_eq!(N5f1::f_plus_one(10u8), 2);
-        assert_eq!(N5f1::three_f_plus_one(10u16), 4);
-        assert_eq!(N5f1::n_minus_two_f(10u64), 8);
+        assert_eq!(N5f1::nullification_quorum(10i32), 3);
+        assert_eq!(N5f1::safe_rank(10u8), 2);
+        assert_eq!(N5f1::final_rank(10u16), 4);
+        assert_eq!(N5f1::da_quorum(10u64), 8);
     }
 
     #[test]
@@ -382,12 +370,12 @@ mod tests {
             assert!(catch_unwind(f).is_err());
         }
 
-        assert_panics(|| N5f1::f_plus_one(-1i32));
-        assert_panics(|| N5f1::three_f_plus_one(-1i32));
-        assert_panics(|| N5f1::n_minus_two_f(-1i32));
-        assert_panics(|| N5f1::f_plus_one(u64::MAX));
-        assert_panics(|| N5f1::three_f_plus_one(u64::MAX));
-        assert_panics(|| N5f1::n_minus_two_f(u64::MAX));
+        assert_panics(|| N5f1::safe_rank(-1i32));
+        assert_panics(|| N5f1::final_rank(-1i32));
+        assert_panics(|| N5f1::da_quorum(-1i32));
+        assert_panics(|| N5f1::safe_rank(u64::MAX));
+        assert_panics(|| N5f1::final_rank(u64::MAX));
+        assert_panics(|| N5f1::da_quorum(u64::MAX));
     }
 
     #[test]
@@ -423,22 +411,22 @@ mod tests {
         #[test]
         fn test_n5f1_quorum_relationships(n in 6u32..10_000) {
             let f = N5f1::max_faults(n);
-            let smallest = N5f1::f_plus_one(n);
-            let m = N5f1::m_quorum(n);
-            let three_f_plus_one = N5f1::three_f_plus_one(n);
-            let availability = N5f1::n_minus_two_f(n);
-            let l = N5f1::l_quorum(n);
+            let safe = N5f1::safe_rank(n);
+            let nullification = N5f1::nullification_quorum(n);
+            let finalized = N5f1::final_rank(n);
+            let da = N5f1::da_quorum(n);
+            let quorum = N5f1::quorum(n);
 
-            prop_assert_eq!(smallest, f + 1);
-            prop_assert_eq!(m, 2 * f + 1);
-            prop_assert_eq!(three_f_plus_one, 3 * f + 1);
-            prop_assert_eq!(availability, n - 2 * f);
-            prop_assert_eq!(l, n - f);
-            prop_assert!(smallest <= m);
-            prop_assert!(m <= three_f_plus_one);
-            prop_assert!(three_f_plus_one <= availability);
-            prop_assert!(availability <= l);
-            prop_assert!(l <= n);
+            prop_assert_eq!(safe, f + 1);
+            prop_assert_eq!(nullification, 2 * f + 1);
+            prop_assert_eq!(finalized, 3 * f + 1);
+            prop_assert_eq!(da, n - 2 * f);
+            prop_assert_eq!(quorum, n - f);
+            prop_assert!(safe <= nullification);
+            prop_assert!(nullification <= finalized);
+            prop_assert!(finalized <= da);
+            prop_assert!(da <= quorum);
+            prop_assert!(quorum <= n);
         }
 
         /// BFT safety property: two quorums must intersect in at least one honest node.
