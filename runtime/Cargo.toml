@@ -102,6 +102,11 @@ harness = false
 path = "src/utils/buffer/benches/bench.rs"
 
 [[bench]]
+name = "telemetry"
+harness = false
+path = "src/telemetry/metrics/benches/bench.rs"
+
+[[bench]]
 name = "iobuf"
 harness = false
 path = "src/iobuf/benches/bench.rs"
