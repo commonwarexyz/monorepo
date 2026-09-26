@@ -2,8 +2,8 @@ use crate::{
     simplex::{
         scheme::Scheme,
         types::{
-            Certificate, Finalization, Kind, Notarization, Notarize, Nullification, Proposal, Subject,
-            Vote,
+            Certificate, Finalization, Kind, Notarization, Notarize, Nullification, Proposal,
+            Subject, Vote,
         },
     },
     types::{Attributable, Participant, Round as Rnd},
