@@ -92,6 +92,8 @@ pub trait Certificates: Send + Sync + Sized + 'static {
 
     /// Prune the store to the provided minimum height (inclusive).
     ///
+    /// Heights below `min` may also remain.
+    ///
     /// # Arguments
     ///
     /// * `min`: The lowest height that must remain after pruning.
@@ -170,6 +172,8 @@ pub trait Blocks: Send + Sync + Sized + 'static {
     ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
 
     /// Prune the store to the provided minimum height (inclusive).
+    ///
+    /// Heights below `min` may also remain.
     ///
     /// # Arguments
     ///

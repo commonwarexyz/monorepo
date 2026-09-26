@@ -187,8 +187,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the floor is above the processed height, marshal records the preceding height as
-    /// processed, prunes below it, and delivers blocks starting at the floor. Stale or
-    /// superseded floors may be ignored.
+    /// processed, prunes below it as [Message::Prune] would, and delivers blocks starting at
+    /// the floor. Stale or superseded floors may be ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -200,8 +200,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// Requests pruning finalized blocks and certificates below the given height.
     ///
-    /// Unlike [Message::SetFloor], this does not affect the sync starting
-    /// point. Requests above marshal's current floor are ignored.
+    /// The block at the given height is kept, and storage may keep some older blocks.
+    /// Requests above the processed height are ignored, so the processed block is never
+    /// pruned. Unlike [Message::SetFloor], this does not affect the sync starting point.
     Prune {
         /// The span carried with this request.
         span: Span,
@@ -714,9 +715,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Retrieve the latest processed height.
     ///
-    /// The block at this height stays in local storage if marshal stored it. A floor installed
-    /// without local history records its predecessor as processed without storing that block, so
-    /// the floor block at the next height is available instead.
+    /// The block at this height can be read with [Self::get_block], with one exception. After a
+    /// floor is installed on a node that never stored the block below it, this height is the
+    /// floor's predecessor and has no block. The floor block, one height higher, is available
+    /// instead.
     pub async fn get_processed_height(&self) -> Option<Height> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetProcessedHeight {
@@ -965,8 +967,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
     /// If the floor is above the processed height, marshal records the preceding height as
-    /// processed, prunes below it, and delivers blocks starting at the floor. Stale or
-    /// superseded floors may be ignored.
+    /// processed, prunes below it as [Self::prune] would, and delivers blocks starting at the
+    /// floor. Stale or superseded floors may be ignored.
     ///
     /// Callers must have recoverable application state through the height preceding the floor.
     /// Installing a floor may retire outstanding acknowledgements and redeliver already reported
@@ -984,8 +986,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Requests pruning finalized blocks and certificates below the given height.
     ///
-    /// Unlike [Self::set_floor], this does not affect the sync starting point.
-    /// Requests above marshal's current floor are ignored.
+    /// The block at the given height is kept, and storage may keep some older blocks.
+    /// Requests above the processed height are ignored, so the processed block is never
+    /// pruned. Unlike [Self::set_floor], this does not affect the sync starting point.
     pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune {
             span: info_span!("marshal.mailbox.prune", height = height.traced()),

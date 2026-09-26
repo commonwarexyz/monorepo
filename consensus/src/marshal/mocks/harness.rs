@@ -3717,6 +3717,9 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         while application.tip().map(|(height, _)| height) != Some(Height::new(20)) {
             context.sleep(Duration::from_millis(10)).await;
         }
+        while mailbox.get_processed_height().await != Some(Height::new(20)) {
+            context.sleep(Duration::from_millis(10)).await;
+        }
 
         for i in 1..=20u64 {
             assert!(
@@ -3729,6 +3732,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
+        // Requests above the processed height are ignored.
         mailbox.prune(Height::new(25));
         context.sleep(Duration::from_millis(50)).await;
         for i in 1..=20u64 {
@@ -3738,6 +3742,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
+        // Pruning keeps the requested height and removes older sections.
         mailbox.prune(Height::new(10));
         context.sleep(Duration::from_millis(100)).await;
         for i in 1..10u64 {
@@ -3762,6 +3767,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
             );
         }
 
+        // Pruning at the processed height keeps the processed block.
         mailbox.prune(Height::new(20));
         context.sleep(Duration::from_millis(100)).await;
         for i in 10..20u64 {
