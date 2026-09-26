@@ -437,14 +437,17 @@ mod test {
         let b = Lazy::<Counted>::deferred(&mut Counted(7).encode(), ());
         let c = Lazy::<Counted>::deferred(&mut Counted(9).encode(), ());
         let eager = Lazy::new(Counted(7));
+        // Without `std`, `deferred` decodes up front, so count only the decodes that follow.
+        let decodes = DECODES.load(SeqCst);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a, eager);
         assert!(a < c);
         assert_eq!(hash_of(&a), hash_of(&eager));
-        assert_eq!(DECODES.load(SeqCst), 0);
+        assert_eq!(DECODES.load(SeqCst), decodes);
         assert_eq!(a.get(), Some(&Counted(7)));
-        assert_eq!(DECODES.load(SeqCst), 1);
+        #[cfg(feature = "std")]
+        assert_eq!(DECODES.load(SeqCst), decodes + 1);
     }
 
     proptest! {
