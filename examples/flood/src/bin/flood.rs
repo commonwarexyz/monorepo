@@ -4,7 +4,7 @@ use commonware_cryptography::{
     Signer as _,
     ed25519::{PrivateKey, PublicKey},
 };
-use commonware_deployer::aws::{Hosts, METRICS_PORT};
+use commonware_deployer::aws::{Hosts, METRICS_PORT, TRACES_PORT};
 use commonware_flood::Config;
 use commonware_formatting::from_hex;
 use commonware_p2p::{
@@ -81,7 +81,10 @@ fn main() {
         // Configure telemetry
         let traces = if config.instrument {
             Some(tokio::tracing::Config {
-                endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring.private),
+                endpoint: format!(
+                    "http://{}:{TRACES_PORT}/v1/traces",
+                    hosts.monitoring.private
+                ),
                 name: public_key.to_string(),
                 rate: probability!(1.0),
             })
