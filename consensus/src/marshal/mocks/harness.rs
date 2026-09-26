@@ -3795,6 +3795,12 @@ pub fn prune_finalized_archives<H: TestHarness>() {
         drop(extra);
         let (mailbox, _extra, _application) = init_marshal(context.child("restart")).await;
 
+        // Startup classifies the stored processed block.
+        assert_eq!(
+            mailbox.get_processed().await,
+            Some(Processed::Block(Height::new(20)))
+        );
+
         for i in 1..20u64 {
             assert!(
                 mailbox.get_block(Height::new(i)).await.is_none(),
@@ -3894,7 +3900,7 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
             Some(Processed::Block(Height::new(19)))
         );
         assert_eq!(
-            mailbox.get_anchor().await.map(|block| block.height()),
+            mailbox.get_anchor().await.map(|(_, block)| block.height()),
             Some(Height::new(19))
         );
 

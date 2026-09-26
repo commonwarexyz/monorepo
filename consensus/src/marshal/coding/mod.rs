@@ -74,7 +74,7 @@ mod tests {
                 },
             },
             config::{Config, Start},
-            core,
+            core::{self, Processed},
             mocks::{
                 application::Application,
                 harness::{
@@ -778,13 +778,7 @@ mod tests {
 
             // The height-2 floor makes height 1 durable application progress. Heights 2 and 3
             // are re-dispatched, so their coding-buffer commitments remain live.
-            while setup
-                .mailbox
-                .get_processed()
-                .await
-                .map(core::Processed::height)
-                != Some(Height::new(1))
-            {
+            while setup.mailbox.get_processed().await != Some(Processed::Block(Height::new(1))) {
                 context.sleep(Duration::from_millis(10)).await;
             }
             assert!(setup.extra.get(commitments[0]).await.is_none());
@@ -2722,8 +2716,7 @@ mod tests {
                 QUORUM,
             ));
 
-            while marshal.get_processed().await.map(core::Processed::height) != Some(Height::new(2))
-            {
+            while marshal.get_processed().await != Some(Processed::Block(Height::new(2))) {
                 context.sleep(Duration::from_millis(10)).await;
             }
 
@@ -4134,9 +4127,7 @@ mod tests {
                 &schemes,
                 QUORUM,
             )));
-            while mailbox.get_processed().await.map(core::Processed::height)
-                != Some(candidate.height())
-            {
+            while mailbox.get_processed().await != Some(Processed::Block(candidate.height())) {
                 reschedule().await;
             }
             for block in &chain {
@@ -4333,7 +4324,7 @@ mod tests {
                 mailbox
                     .get_processed()
                     .await
-                    .map_or(Height::zero(), core::Processed::height)
+                    .map_or(Height::zero(), Processed::height)
                     < grandparent.height()
             );
             let annotations: Vec<_> = resolver

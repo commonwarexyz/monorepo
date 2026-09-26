@@ -874,11 +874,13 @@ where
             }
             Message::GetAnchor { response, .. } => {
                 let anchor = match self.floor.processed() {
-                    Some(processed) => Some(
-                        self.get_finalized_block(processed.anchor())
+                    Some(processed) => {
+                        let block = self
+                            .get_finalized_block(processed.anchor())
                             .await
-                            .expect("processed position must be backed by a stored block"),
-                    ),
+                            .expect("processed position must be backed by a stored block");
+                        Some((processed, block))
+                    }
                     None => None,
                 };
                 response.send_lossy(anchor);

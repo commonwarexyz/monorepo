@@ -317,9 +317,9 @@ where
         } else {
             V::into_shared(
                 marshal
-                    .get_anchor()
+                    .get_block(Identifier::Height(processed.anchor()))
                     .await
-                    .expect("processed floor must have an anchor"),
+                    .expect("marshal must store the block backing its processed position"),
             )
         }
     } else {
@@ -335,13 +335,10 @@ where
 
         // Marshal does not redeliver blocks at or below its durable processed position.
         // A newly installed floor records its predecessor, leaving the anchor for delivery.
-        match marshal.get_processed().await {
-            Some(processed) if processed.height() > selected.height() => V::into_shared(
-                marshal
-                    .get_anchor()
-                    .await
-                    .expect("processed height must have an anchor"),
-            ),
+        match marshal.get_anchor().await {
+            Some((processed, block)) if processed.height() > selected.height() => {
+                V::into_shared(block)
+            }
             _ => selected,
         }
     };
@@ -376,21 +373,16 @@ where
     // A completed state sync may be ahead of marshal's processed height. Recover from the
     // later anchor while marshal catches up.
     let sync_height = sync_metadata.sync_height();
-    let processed = marshal.get_processed().await;
+    let anchor = marshal.get_anchor().await;
     let marshal_floor = sync_height
         .into_iter()
-        .chain(processed.map(Processed::height))
+        .chain(anchor.as_ref().map(|(processed, _)| processed.height()))
         .max()
         .unwrap_or_else(Height::zero);
-    let floor_block = if let Some(processed) = processed
+    let floor_block = if let Some((processed, block)) = anchor
         && processed.height() == marshal_floor
     {
-        V::into_shared(
-            marshal
-                .get_anchor()
-                .await
-                .expect("processed height must have an anchor"),
-        )
+        V::into_shared(block)
     } else {
         V::into_shared(
             marshal

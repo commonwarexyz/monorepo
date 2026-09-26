@@ -70,12 +70,12 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the latest processed position.
         response: oneshot::Sender<Option<Processed>>,
     },
-    /// A request to retrieve the stored block that backs the latest processed position.
+    /// A request to retrieve the latest processed position and the stored block that backs it.
     GetAnchor {
         /// The span carried with this request.
         span: Span,
-        /// A channel to send the backing block.
-        response: oneshot::Sender<Option<V::Block>>,
+        /// A channel to send the processed position and its backing block.
+        response: oneshot::Sender<Option<(Processed, V::Block)>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -726,7 +726,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Retrieve the latest processed position, if any.
     ///
-    /// Use [Self::get_anchor] to read the stored block that backs it.
+    /// Use [Self::get_anchor] to also read the stored block that backs it.
     pub async fn get_processed(&self) -> Option<Processed> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetProcessed {
@@ -736,11 +736,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Retrieve the stored block that backs the latest processed position, if any.
+    /// Retrieve the latest processed position and the stored block that backs it, if any.
     ///
-    /// This is the block at [Processed::anchor]: the processed block, or the floor block at the
-    /// next height when the processed block is [Processed::Absent].
-    pub async fn get_anchor(&self) -> Option<V::Block> {
+    /// The block is at [Processed::anchor]: the processed block, or the floor block at the next
+    /// height when the processed block is [Processed::Absent]. Both come from one request, so
+    /// they always describe the same position.
+    pub async fn get_anchor(&self) -> Option<(Processed, V::Block)> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetAnchor {
             span: info_span!("marshal.mailbox.get_anchor"),

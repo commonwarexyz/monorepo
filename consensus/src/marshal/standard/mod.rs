@@ -1616,9 +1616,8 @@ mod tests {
 
             // Wait for the application to process the anchor so the processed
             // floors advance past the subscriptions' fetch coordinates.
-            while mailbox.get_processed().await.map(Processed::height)
-                != Some(Height::new(ANCHOR_HEIGHT))
-            {
+            let anchored = Some(Processed::Block(Height::new(ANCHOR_HEIGHT)));
+            while mailbox.get_processed().await != anchored {
                 context.sleep(Duration::from_millis(50)).await;
             }
 
@@ -4756,7 +4755,7 @@ mod tests {
             );
             assert!(mailbox.get_block(Height::new(4)).await.is_none());
             assert_eq!(
-                mailbox.get_anchor().await.map(|block| block.digest()),
+                mailbox.get_anchor().await.map(|(_, block)| block.digest()),
                 Some(floor_block.digest())
             );
 
@@ -4790,7 +4789,7 @@ mod tests {
                 Some(Processed::Absent(Height::new(4)))
             );
             assert_eq!(
-                mailbox.get_anchor().await.map(|block| block.digest()),
+                mailbox.get_anchor().await.map(|(_, block)| block.digest()),
                 Some(floor_block.digest())
             );
         });
@@ -5901,6 +5900,73 @@ mod tests {
                 },
             )
             .await;
+        });
+    }
+
+    /// Installing a floor above a stored predecessor reports that predecessor as a stored block.
+    #[test_traced("WARN")]
+    fn test_standard_floor_with_stored_predecessor_reports_block() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let application = Application::<B>::manual_ack();
+            let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "floor-stored-predecessor",
+                ConstantProvider::new(schemes[0].clone()),
+                application.clone(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            )
+            .await;
+            assert_eq!(application.acknowledged().await, Height::zero());
+
+            // Finalize and acknowledge block 1.
+            let block1_round = Round::new(Epoch::zero(), View::new(1));
+            let block1 = make_raw_block(Sha256::hash(&[b"block1-parent"]), Height::new(1), 100);
+            let block1_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    block1_round,
+                    View::zero(),
+                    StandardHarness::commitment(&block1),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
+            assert_eq!(application.acknowledged().await, Height::new(1));
+            while mailbox.get_processed().await != Some(Processed::Block(Height::new(1))) {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            // Install a floor at block 2. Block 1 stays stored, so marshal reports it as the
+            // processed block while block 2 awaits acknowledgement.
+            let block2_round = Round::new(Epoch::zero(), View::new(2));
+            let block2 = make_raw_block(block1.digest(), Height::new(2), 200);
+            let block2_finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    block2_round,
+                    View::new(1),
+                    StandardHarness::commitment(&block2),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            assert!(mailbox.verified(block2_round, block2).await);
+            mailbox.set_floor(block2_finalization);
+            while application.pending_ack_heights() != vec![Height::new(2)] {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(1)))
+            );
+            assert_eq!(
+                mailbox.get_anchor().await.map(|(_, block)| block.digest()),
+                Some(block1.digest())
+            );
         });
     }
 

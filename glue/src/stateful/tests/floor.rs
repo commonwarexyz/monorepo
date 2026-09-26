@@ -174,8 +174,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
 
             // The first boot waits for genesis and finalizes blocks 1 through F.
             if boot == 0 {
-                while marshal.get_processed().await.map(Processed::height) != Some(Height::zero()) {
-                }
+                while marshal.get_processed().await != Some(Processed::Block(Height::zero())) {}
                 for block in &blocks {
                     assert!(marshal.verified(block.context.round, block.clone()).await);
                     marshal.report(Activity::Finalization(fixtures::finalization(
@@ -221,9 +220,7 @@ fn live_floor_preserves_application_recovery(#[case] floor_height: u64) {
                     // Release F to the application, then wait for its acknowledgement to
                     // advance marshal's durable processed height.
                     application.report(report);
-                    while marshal.get_processed().await.map(Processed::height) != Some(floor_height)
-                    {
-                    }
+                    while marshal.get_processed().await != Some(Processed::Block(floor_height)) {}
                 }
             }
             if boot >= 2 {
