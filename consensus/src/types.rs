@@ -22,6 +22,8 @@
 //!
 //! - [`Epocher`]: Mechanism for determining epoch boundaries.
 //!
+//! - [`Attributable`]: Access to the participant that signed a value.
+//!
 //! - [`coding::Commitment`]: A unique identifier combining a block digest, coding digest, context
 //!   hash, and encoded coding configuration. Used as the certificate payload for erasure-coded blocks.
 //!
@@ -912,6 +914,12 @@ impl ExactSizeIterator for HeightRange {
 
 /// Re-export [Participant] from commonware_utils for convenience.
 pub use commonware_utils::Participant;
+
+/// Provides access to the participant that signed a value.
+pub trait Attributable {
+    /// Returns the index of the participant that produced this value.
+    fn signer(&self) -> Participant;
+}
 
 commonware_macros::stability_scope!(ALPHA {
     pub mod coding {
