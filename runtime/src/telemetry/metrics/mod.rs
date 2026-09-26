@@ -980,9 +980,16 @@ node_syncs_total{kind=\"snapshot\",node=\"a\"} 5
 node_resyncs_total 7
 ";
         assert_eq!(metric_sum(metrics, "syncs_total", &[]), 10.0);
-        assert_eq!(metric_sum(metrics, "syncs_total", &[("kind", "journal")]), 5.0);
         assert_eq!(
-            metric_sum(metrics, "node_syncs_total", &[("kind", "journal"), ("node", "b")]),
+            metric_sum(metrics, "syncs_total", &[("kind", "journal")]),
+            5.0
+        );
+        assert_eq!(
+            metric_sum(
+                metrics,
+                "node_syncs_total",
+                &[("kind", "journal"), ("node", "b")]
+            ),
             3.0
         );
         assert_eq!(metric_sum(metrics, "missing_total", &[]), 0.0);
@@ -998,8 +1005,14 @@ latency_bucket{node=\"b\",le=\"0.001\"} 0
 latency_bucket{node=\"b\",le=\"0.01\"} 9
 latency_bucket{node=\"b\",le=\"+Inf\"} 10
 ";
-        assert_eq!(histogram_percentile(metrics, "latency", 10), Some((0.001, 20)));
-        assert_eq!(histogram_percentile(metrics, "latency", 85), Some((0.01, 20)));
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 10),
+            Some((0.001, 20))
+        );
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 85),
+            Some((0.01, 20))
+        );
         assert_eq!(
             histogram_percentile(metrics, "latency", 100),
             Some((f64::INFINITY, 20))
