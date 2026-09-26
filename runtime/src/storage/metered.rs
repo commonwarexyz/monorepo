@@ -253,34 +253,29 @@ mod tests {
         });
     }
 
-    #[rstest]
-    #[case::info(LevelFilter::INFO, false)]
-    #[case::debug(LevelFilter::DEBUG, true)]
-    #[tokio::test]
-    async fn test_metered_blob_span_levels(
-        #[case] filter: LevelFilter,
-        #[case] expect_spans: bool,
-    ) {
-        #[derive(Clone, Default)]
-        struct Spans(Arc<Mutex<Vec<(&'static str, Level)>>>);
+    /// Records the blob spans a subscriber opens and rejects writes to a parent span.
+    #[derive(Clone, Default)]
+    struct Spans(Arc<Mutex<Vec<(&'static str, Level)>>>);
 
-        impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Spans {
-            fn on_record(&self, id: &span::Id, _: &span::Record<'_>, ctx: Context<'_, S>) {
-                assert_ne!(
-                    ctx.span(id).unwrap().name(),
-                    "parent",
-                    "blob operations must not overwrite parent fields"
-                );
-            }
-
-            fn on_new_span(&self, attrs: &span::Attributes<'_>, _: &span::Id, _: Context<'_, S>) {
-                let metadata = attrs.metadata();
-                if metadata.name().starts_with("runtime.storage.blob.") {
-                    self.0.lock().push((metadata.name(), *metadata.level()));
-                }
-            }
+    impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Spans {
+        fn on_record(&self, id: &span::Id, _: &span::Record<'_>, ctx: Context<'_, S>) {
+            assert_ne!(
+                ctx.span(id).unwrap().name(),
+                "parent",
+                "blob operations must not overwrite parent fields"
+            );
         }
 
+        fn on_new_span(&self, attrs: &span::Attributes<'_>, _: &span::Id, _: Context<'_, S>) {
+            let metadata = attrs.metadata();
+            if metadata.name().starts_with("runtime.storage.blob.") {
+                self.0.lock().push((metadata.name(), *metadata.level()));
+            }
+        }
+    }
+
+    /// Runs blob operations under `filter` and checks which blob spans were opened.
+    async fn assert_blob_span_levels(filter: LevelFilter, expect_spans: bool) {
         let spans = Spans::default();
         let subscriber = tracing_subscriber::registry()
             .with(filter)
@@ -333,6 +328,16 @@ mod tests {
             vec![]
         };
         assert_eq!(*spans.0.lock(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_metered_blob_spans_hidden_at_info() {
+        assert_blob_span_levels(LevelFilter::INFO, false).await;
+    }
+
+    #[tokio::test]
+    async fn test_metered_blob_spans_emitted_at_debug() {
+        assert_blob_span_levels(LevelFilter::DEBUG, true).await;
     }
 
     #[tokio::test]
