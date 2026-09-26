@@ -36,9 +36,6 @@ pub enum Message<S: Scheme, D: Digest> {
         span: Span,
         /// The verified certificate.
         certificate: Certificate<S, D>,
-        /// Whether the certificate came from the resolver. When true, the voter
-        /// will not send it back to the resolver (to avoid "boomerang").
-        from_resolver: bool,
     },
 }
 
@@ -249,7 +246,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Send a recovered certificate.
+    /// Send a certificate verified by the batcher or resolver.
     pub fn recovered(&mut self, certificate: Certificate<S, D>) {
         let _ = self.sender.enqueue(Message::Verified {
             span: info_span!(
@@ -259,21 +256,6 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
                 certificate = %certificate.kind()
             ),
             certificate,
-            from_resolver: false,
-        });
-    }
-
-    /// Send a resolved certificate.
-    pub fn resolved(&mut self, certificate: Certificate<S, D>) {
-        let _ = self.sender.enqueue(Message::Verified {
-            span: info_span!(
-                "simplex.voter.mailbox.resolved",
-                epoch = certificate.epoch().traced(),
-                view = certificate.view().traced(),
-                certificate = %certificate.kind()
-            ),
-            certificate,
-            from_resolver: true,
         });
     }
 }
@@ -356,12 +338,10 @@ mod tests {
 
     fn verified_msg(
         certificate: Certificate<TestScheme, Sha256Digest>,
-        from_resolver: bool,
     ) -> Message<TestScheme, Sha256Digest> {
         Message::Verified {
             span: Span::none(),
             certificate,
-            from_resolver,
         }
     }
 
@@ -384,21 +364,15 @@ mod tests {
             &mut overflow,
             timeout_msg(View::new(2), TimeoutReason::LeaderTimeout),
         );
-        Message::handle(
-            &mut overflow,
-            verified_msg(nullification(View::new(2)), false),
-        );
+        Message::handle(&mut overflow, verified_msg(nullification(View::new(2))));
         Message::handle(&mut overflow, proposal_msg(View::new(4)));
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3)), false),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
@@ -411,14 +385,14 @@ mod tests {
     fn duplicate_certificate_is_ignored() {
         let mut overflow = Pending::default();
         let certificate = nullification(View::new(5));
-        Message::handle(&mut overflow, verified_msg(certificate.clone(), false));
-        Message::handle(&mut overflow, verified_msg(certificate, true));
+        Message::handle(&mut overflow, verified_msg(certificate.clone()));
+        Message::handle(&mut overflow, verified_msg(certificate));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Nullification(n), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Nullification(n), .. })
                 if n.view() == View::new(5)
         ));
     }
@@ -426,31 +400,22 @@ mod tests {
     #[test]
     fn queued_finalization_rejects_covered_messages() {
         let mut overflow = Pending::default();
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3)), false),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
 
         Message::handle(&mut overflow, proposal_msg(View::new(3)));
         Message::handle(
             &mut overflow,
             timeout_msg(View::new(2), TimeoutReason::LeaderTimeout),
         );
-        Message::handle(
-            &mut overflow,
-            verified_msg(nullification(View::new(2)), false),
-        );
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(2)), false),
-        );
+        Message::handle(&mut overflow, verified_msg(nullification(View::new(2))));
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(2))));
         Message::handle(&mut overflow, proposal_msg(View::new(4)));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 2);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
         assert!(matches!(
@@ -462,20 +427,14 @@ mod tests {
     #[test]
     fn duplicate_finalization_is_dropped() {
         let mut overflow = Pending::default();
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3)), false),
-        );
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3)), true),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(3)
         ));
     }
@@ -483,21 +442,15 @@ mod tests {
     #[test]
     fn newer_finalization_replaces_older_pruning_floor() {
         let mut overflow = Pending::default();
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(3)), false),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(3))));
         Message::handle(&mut overflow, proposal_msg(View::new(4)));
-        Message::handle(
-            &mut overflow,
-            verified_msg(finalization(View::new(5)), false),
-        );
+        Message::handle(&mut overflow, verified_msg(finalization(View::new(5))));
 
         let mut overflow = drain(overflow);
         assert_eq!(overflow.len(), 1);
         assert!(matches!(
             overflow.pop_front(),
-            Some(Message::Verified { certificate: Certificate::Finalization(f), from_resolver: false, .. })
+            Some(Message::Verified { certificate: Certificate::Finalization(f), .. })
                 if f.view() == View::new(5)
         ));
     }

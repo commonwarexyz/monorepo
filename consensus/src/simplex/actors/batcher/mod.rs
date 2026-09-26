@@ -6452,7 +6452,6 @@ mod tests {
                             message,
                             Some(voter::Message::Verified {
                                 certificate: Certificate::Notarization(ref notarization),
-                                from_resolver: false,
                                 ..
                             }) if notarization.view() == future_view
                         ) {

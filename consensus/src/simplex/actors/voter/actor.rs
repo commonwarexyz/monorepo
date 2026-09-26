@@ -46,19 +46,6 @@ use std::{
 };
 use tracing::{Instrument as _, Span, debug, info, info_span, trace, warn};
 
-/// Tracks which certificate type was received from the resolver in the current iteration.
-///
-/// Used to prevent "boomerang" where we send a certificate back to the resolver
-/// that we just received from it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Resolved {
-    #[default]
-    None,
-    Notarization,
-    Nullification,
-    Finalization,
-}
-
 /// Messages built and recorded during an event loop iteration, staged for
 /// broadcast after the journal sync barrier (see [Actor::construct] and
 /// [Actor::notify]).
@@ -566,7 +553,6 @@ impl<
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
-        resolved: Resolved,
     ) -> (Self, Option<Notarization<S, D>>) {
         // Construct a notarization certificate
         let Some(notarization) = self.state.broadcast_notarization(view) else {
@@ -582,11 +568,8 @@ impl<
         // For a certificate from the batcher, this update is enqueued before
         // the next loop iteration can emit any targeted ancestry repair it
         // exposes. The resolver's unrestricted backfill therefore cannot be
-        // narrowed by that later target. Skip if the resolver just sent us
-        // this certificate (avoid boomerang).
-        if resolved != Resolved::Notarization {
-            resolver.updated(Certificate::Notarization(notarization.clone()));
-        }
+        // narrowed by that later target.
+        resolver.updated(Certificate::Notarization(notarization.clone()));
         // Update our local round with the certificate.
         self = self.handle_notarization(notarization.clone()).await;
         (self, Some(notarization))
@@ -597,7 +580,6 @@ impl<
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
-        resolved: Resolved,
     ) -> (Self, Option<Nullification<S>>) {
         // Construct the nullification certificate.
         let Some(nullification) = self.state.broadcast_nullification(view) else {
@@ -605,10 +587,7 @@ impl<
         };
 
         // Notify resolver so dependent parents can progress.
-        // Skip if the resolver just sent us this certificate (avoid boomerang).
-        if resolved != Resolved::Nullification {
-            resolver.updated(Certificate::Nullification(nullification.clone()));
-        }
+        resolver.updated(Certificate::Nullification(nullification.clone()));
         // Track the certificate locally to avoid rebuilding it.
         self = self.handle_nullification(nullification.clone()).await;
         (self, Some(nullification))
@@ -633,7 +612,6 @@ impl<
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
-        resolved: Resolved,
     ) -> (Self, Option<Finalization<S, D>>) {
         // Construct the finalization certificate.
         let Some(finalization) = self.state.broadcast_finalization(view) else {
@@ -646,10 +624,7 @@ impl<
         }
 
         // Tell the resolver this view is complete so it can stop requesting it.
-        // Skip if the resolver just sent us this certificate (avoid boomerang).
-        if resolved != Resolved::Finalization {
-            resolver.updated(Certificate::Finalization(finalization.clone()));
-        }
+        resolver.updated(Certificate::Finalization(finalization.clone()));
         // Advance the consensus core with the finalization proof.
         self = self.handle_finalization(finalization.clone()).await;
         (self, Some(finalization))
@@ -771,9 +746,8 @@ impl<
 
     /// Processes a message from the resolver or batcher.
     ///
-    /// Returns the view to notify and whether the message was a certificate
-    /// from the resolver.
-    async fn process_message(mut self, msg: Message<S, D>) -> (Self, Option<(View, Resolved)>) {
+    /// Returns the view to notify.
+    async fn process_message(mut self, msg: Message<S, D>) -> (Self, Option<View>) {
         match msg {
             Message::Proposal { proposal, .. } => {
                 let view = proposal.view();
@@ -785,13 +759,9 @@ impl<
                 if !self.state.set_proposal(view, proposal) {
                     return (self, None);
                 }
-                (self, Some((view, Resolved::None)))
+                (self, Some(view))
             }
-            Message::Verified {
-                certificate,
-                from_resolver,
-                ..
-            } => {
+            Message::Verified { certificate, .. } => {
                 // Certificates can come from future views (they advance our view)
                 let view = certificate.view();
                 if !self.state.admits_certificate(view) {
@@ -799,38 +769,27 @@ impl<
                     return (self, None);
                 }
 
-                // Track resolved status to avoid sending back to resolver
-                let mut resolved = Resolved::None;
                 match certificate {
                     Certificate::Notarization(notarization) => {
-                        trace!(%view, from_resolver, "received notarization");
+                        trace!(%view, "received notarization");
                         self = self.handle_notarization(notarization).await;
-                        if from_resolver {
-                            resolved = Resolved::Notarization;
-                        }
                     }
                     Certificate::Nullification(nullification) => {
-                        trace!(%view, from_resolver, "received nullification");
+                        trace!(%view, "received nullification");
                         self = self.handle_nullification(nullification).await;
-                        if from_resolver {
-                            resolved = Resolved::Nullification;
-                        }
                     }
                     Certificate::Finalization(finalization) => {
-                        trace!(%view, from_resolver, "received finalization");
+                        trace!(%view, "received finalization");
                         self = self.handle_finalization(finalization).await;
-                        if from_resolver {
-                            resolved = Resolved::Finalization;
-                        }
                     }
                 }
-                (self, Some((view, resolved)))
+                (self, Some(view))
             }
             Message::Timeout { round, reason, .. } => {
                 let view = round.view();
                 debug!(%view, ?reason, "timing out view");
                 self.state.trigger_timeout(view, reason);
-                (self, Some((view, Resolved::None)))
+                (self, Some(view))
             }
         }
     }
@@ -849,14 +808,13 @@ impl<
         mut self,
         resolver: &mut resolver::Mailbox<S, D>,
         view: View,
-        resolved: Resolved,
     ) -> (Self, Staged<S, D>) {
         let (notarize, notarization, nullification, finalize, finalization);
         (self, notarize) = self.prepare_notarize(view).await;
-        (self, notarization) = self.prepare_notarization(resolver, view, resolved).await;
-        (self, nullification) = self.prepare_nullification(resolver, view, resolved).await;
+        (self, notarization) = self.prepare_notarization(resolver, view).await;
+        (self, nullification) = self.prepare_nullification(resolver, view).await;
         (self, finalize) = self.prepare_finalize(view).await;
-        (self, finalization) = self.prepare_finalization(resolver, view, resolved).await;
+        (self, finalization) = self.prepare_finalization(resolver, view).await;
         (
             self,
             Staged {
@@ -1156,7 +1114,6 @@ impl<
                 // Wait for a timeout to fire or for a message to arrive
                 let (deadline, reason) = self.state.next_timeout();
                 let start = self.state.current_view();
-                let mut resolved = Resolved::None;
                 let mut nullify = None;
                 let mut certification = None;
                 let view;
@@ -1221,11 +1178,10 @@ impl<
                 );
                 let processed;
                 (self, processed) = self.process_message(msg).instrument(span).await;
-                let Some((processed_view, processed_resolved)) = processed else {
+                let Some(processed_view) = processed else {
                     continue;
                 };
                 view = processed_view;
-                resolved = processed_resolved;
             },
             on_end => {
                 // Attempt to send any new view messages
@@ -1245,7 +1201,7 @@ impl<
                     // Build and record everything that became available for `view`.
                     let mut staged;
                     (self, staged) = self
-                        .construct(&mut resolver, view, resolved)
+                        .construct(&mut resolver, view)
                         .await;
                     staged.nullify = nullify;
                     staged.certification = certification;

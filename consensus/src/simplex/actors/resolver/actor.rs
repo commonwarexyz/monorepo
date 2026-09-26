@@ -592,7 +592,7 @@ impl<
                         view = view.traced(),
                         certificate_view = parsed.view().traced()
                     );
-                    resolved.in_scope(|| voter.resolved(parsed.clone()));
+                    resolved.in_scope(|| voter.recovered(parsed.clone()));
 
                     // Record the certificate, which settles whichever asks it
                     // answered and retires their fetches.
@@ -1374,6 +1374,62 @@ mod tests {
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(11));
             actor.updated(&mut resolver, Certificate::Nullification(nullification));
             assert_eq!(resolver.outstanding(), vec![16]);
+        });
+    }
+
+    /// The voter reports every certificate it adopts, including ones this actor
+    /// delivered and already recorded. Recording a certificate again must not
+    /// open fetches or recache a failed notarization, whatever arrived between
+    /// the two copies.
+    #[test_async]
+    async fn reapplied_certificates_emit_no_fetches() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, 4);
+            let mut actor = build_actor(context, verifier.clone(), TERM_LENGTH);
+            let mut resolver = RecordingResolver::default();
+            let nullification = Certificate::Nullification(build_nullification(
+                &schemes,
+                &verifier,
+                EPOCH,
+                View::new(20),
+            ));
+            let failed = View::new(22);
+            let notarization =
+                Certificate::Notarization(build_notarization(&schemes, &verifier, EPOCH, failed));
+            let finalization = Certificate::Finalization(build_finalization(
+                &schemes,
+                &verifier,
+                EPOCH,
+                View::new(23),
+            ));
+
+            // Record each certificate once, with a failed verdict in between.
+            actor.updated(&mut resolver, nullification.clone());
+            actor.updated(&mut resolver, notarization.clone());
+            actor.certified(&mut resolver, failed, false);
+            assert!(!resolver.outstanding().is_empty());
+            resolver.outstanding.lock().clear();
+
+            // Above finalization, copies open no fetch and the failed
+            // notarization stays uncached.
+            actor.updated(&mut resolver, nullification.clone());
+            actor.updated(&mut resolver, notarization.clone());
+            assert!(resolver.outstanding().is_empty());
+            assert!(!actor.pending_notarizations.contains_key(&failed));
+            assert!(!actor.certified_notarizations.contains_key(&failed));
+
+            // After finalization prunes them, copies still open no fetch.
+            actor.updated(&mut resolver, finalization.clone());
+            resolver.outstanding.lock().clear();
+            actor.updated(&mut resolver, finalization);
+            actor.updated(&mut resolver, nullification);
+            actor.updated(&mut resolver, notarization);
+            assert!(resolver.outstanding().is_empty());
+            assert!(actor.nullifications.is_empty());
+            assert!(actor.pending_notarizations.is_empty());
         });
     }
 
