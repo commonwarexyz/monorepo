@@ -426,10 +426,13 @@ impl EngineDefinition for SingleDbEngine {
         let broadcast_config = buffered::Config {
             public_key: public_key.clone(),
             mailbox_size: NZUsize!(100),
+            ingress_size: NZUsize!(100),
             deque_size: 10,
             priority: false,
             codec_config: (),
             peer_provider: oracle.manager(),
+            blocker: oracle.control(public_key.clone()),
+            strategy: Sequential,
         };
         let (broadcast_engine, buffer) =
             buffered::Engine::new(context.child("broadcast"), broadcast_config);
