@@ -70,7 +70,7 @@ use commonware_runtime::{
     Buf as _, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut,
     IoBufs, Sink, Stream,
 };
-use commonware_utils::{DurationExt, SystemTimeExt, union_unique};
+use commonware_utils::{DurationExt, SystemTimeExt, Widen, union_unique};
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -216,11 +216,12 @@ impl Version {
                 let plaintext_len = cipher.recv_in_place(&mut header)?;
                 assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
                 let len = u32::decode(Copying(&header[..V1_HEADER_PLAINTEXT_SIZE]))?;
+                let body_len = Widen::<usize>::widen(len) + sake::TAG_SIZE;
                 if len > max_message_size {
-                    return Err(Error::RecvTooLarge(len as usize + TAG_SIZE as usize));
+                    return Err(Error::RecvTooLarge(body_len));
                 }
                 stream
-                    .recv(skip + len as usize + TAG_SIZE as usize)
+                    .recv(skip + body_len)
                     .await
                     .map(|mut bufs| {
                         bufs.advance(skip);
@@ -779,7 +780,8 @@ mod test {
                 } else if length > MAX_MESSAGE_SIZE {
                     assert!(matches!(
                         result,
-                        Some(Err(Error::RecvTooLarge(n))) if n == length as usize + TAG_SIZE as usize
+                        Some(Err(Error::RecvTooLarge(n)))
+                            if n == Widen::<usize>::widen(length) + sake::TAG_SIZE
                     ));
                 } else {
                     assert!(result.is_none(), "a valid header must wait for its payload");

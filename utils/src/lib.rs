@@ -45,6 +45,14 @@ commonware_macros::stability_scope!(BETA {
         }
     }
 
+    impl Widen<usize> for u32 {
+        #[inline]
+        fn widen(self) -> usize {
+            const { assert!(Self::BITS <= usize::BITS) };
+            self as usize
+        }
+    }
+
     #[cfg(not(feature = "std"))]
     use alloc::{boxed::Box, vec::Vec};
     use bytes::{BufMut, BytesMut};
