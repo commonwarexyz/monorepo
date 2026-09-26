@@ -306,12 +306,6 @@ pub struct Sender<O> {
     pool: BufferPool,
 }
 
-/// Describes one contiguous sink chunk made up of one or more encrypted frames.
-struct ChunkPlan {
-    messages: Vec<IoBufs>,
-    total_len: usize,
-}
-
 impl<O: Sink> Sender<O> {
     /// Returns the total encoded size of one encrypted frame.
     ///
@@ -368,64 +362,52 @@ impl<O: Sink> Sender<O> {
         Ok(chunk.freeze())
     }
 
-    /// Plans `send_many` chunk boundaries without consuming cipher state.
+    /// Validates all messages before building encrypted chunks.
     ///
-    /// This validation pass ensures any oversize error is reported before
-    /// encryption advances nonces, so the sender remains usable after failure.
-    fn plan_chunks<B, I>(&self, bufs: I) -> Result<Vec<ChunkPlan>, Error>
+    /// Returns an empty [`IoBufs`] for an empty batch.
+    fn build_chunks<B, I>(&mut self, bufs: I) -> Result<IoBufs, Error>
     where
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
     {
-        let bufs = bufs.into_iter();
+        let mut bufs = bufs.into_iter().map(Into::<IoBufs>::into).peekable();
+        let Some(first) = bufs.next() else {
+            return Ok(IoBufs::default());
+        };
+        let first_len = self.encrypted_frame_len(first.len())?;
+        if bufs.peek().is_none() {
+            return Ok(self.build_chunk(std::iter::once(first), first_len)?.into());
+        }
+        // Validate every message before encryption advances nonces. Retain the
+        // encoded lengths so chunk sizing does not need to recompute them.
         let (lower, _) = bufs.size_hint();
-        let mut chunks = Vec::with_capacity(lower.max(1));
-        let mut batch = Vec::new();
-        let mut batch_total = 0usize;
-        let max_batch_size = self.pool.config().max_size().get();
-
-        for buf in bufs {
-            let msg = buf.into();
+        let mut messages = Vec::with_capacity(lower.saturating_add(1));
+        messages.push((first, first_len));
+        for msg in bufs {
             let frame_len = self.encrypted_frame_len(msg.len())?;
-
-            // If one framed message is larger than the pooled batch cap, keep
-            // current chunks intact and send that message as its own chunk.
-            if frame_len > max_batch_size {
-                if !batch.is_empty() {
-                    chunks.push(ChunkPlan {
-                        messages: std::mem::take(&mut batch),
-                        total_len: batch_total,
-                    });
-                    batch_total = 0;
-                }
-                chunks.push(ChunkPlan {
-                    messages: vec![msg],
-                    total_len: frame_len,
-                });
-                continue;
-            }
-
-            // Close the current chunk before it would exceed one network
-            // buffer-pool item.
-            if batch_total.saturating_add(frame_len) > max_batch_size {
-                chunks.push(ChunkPlan {
-                    messages: std::mem::take(&mut batch),
-                    total_len: batch_total,
-                });
-                batch_total = 0;
-            }
-
-            batch_total += frame_len;
-            batch.push(msg);
+            messages.push((msg, frame_len));
         }
-
-        if !batch.is_empty() {
-            chunks.push(ChunkPlan {
-                messages: batch,
-                total_len: batch_total,
-            });
+        let max_batch_size = self.pool.config().max_size().get();
+        let mut chunks = IoBufs::default();
+        let mut messages = messages.into_iter();
+        while let [(_, head_len), rest @ ..] = messages.as_slice() {
+            // Size one chunk before allocating it. An oversized first frame
+            // occupies its own chunk.
+            let mut total_len = *head_len;
+            let mut message_count = 1;
+            for (_, frame_len) in rest {
+                let Some(next_len) = total_len
+                    .checked_add(*frame_len)
+                    .filter(|&len| len <= max_batch_size)
+                else {
+                    break;
+                };
+                total_len = next_len;
+                message_count += 1;
+            }
+            let chunk_messages = messages.by_ref().take(message_count).map(|(msg, _)| msg);
+            chunks.append(self.build_chunk(chunk_messages, total_len)?);
         }
-
         Ok(chunks)
     }
 
@@ -440,28 +422,26 @@ impl<O: Sink> Sender<O> {
         self.sink.send(chunk).await.map_err(Error::SendFailed)
     }
 
-    /// Encrypts and sends multiple messages in a single sink call.
+    /// Encrypts and sends multiple messages in at most one sink call.
     ///
     /// Each message is framed independently so receivers still observe the
     /// original message boundaries. Aggregate writes are broken into contiguous
     /// chunks capped to one network buffer-pool item, then submitted together as
     /// a chunked `IoBufs`. An individual message larger than that cap is still
     /// sent as its own chunk.
+    ///
+    /// An empty batch succeeds without calling the sink. All message sizes are
+    /// validated before encryption advances any nonces, so a size validation
+    /// failure leaves the sender usable.
     pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
     where
         B: Into<IoBufs>,
         I: IntoIterator<Item = B>,
     {
-        let plans = self.plan_chunks(bufs)?;
-        if plans.is_empty() {
+        let chunks = self.build_chunks(bufs)?;
+        if chunks.is_empty() {
             return Ok(());
         }
-
-        let chunks = plans
-            .into_iter()
-            .map(|plan| self.build_chunk(plan.messages, plan.total_len))
-            .collect::<Result<IoBufs, Error>>()?;
-
         self.sink.send(chunks).await.map_err(Error::SendFailed)
     }
 }
@@ -552,14 +532,7 @@ mod test {
     };
     use commonware_utils::{NZU32, NZUsize, sync::Mutex};
     use futures::FutureExt as _;
-    use std::{
-        panic::AssertUnwindSafe,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::Duration,
-    };
+    use std::{panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
     const NAMESPACE: &[u8] = b"fuzz_transport";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
@@ -627,27 +600,26 @@ mod test {
         IoBuf::from(UInt(size + 1).encode())
     }
 
-    struct CountingSink<S> {
+    struct RecordingSink<S> {
         inner: S,
-        sends: Arc<AtomicUsize>,
-        chunk_counts: Arc<Mutex<Vec<usize>>>,
+        sent: Vec<Vec<usize>>,
     }
 
-    impl<S> CountingSink<S> {
-        fn new(inner: S, sends: Arc<AtomicUsize>, chunk_counts: Arc<Mutex<Vec<usize>>>) -> Self {
+    impl<S> RecordingSink<S> {
+        fn new(inner: S) -> Self {
             Self {
                 inner,
-                sends,
-                chunk_counts,
+                sent: Vec::new(),
             }
         }
     }
 
-    impl<S: commonware_runtime::Sink> commonware_runtime::Sink for CountingSink<S> {
+    impl<S: commonware_runtime::Sink> commonware_runtime::Sink for RecordingSink<S> {
         async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), RuntimeError> {
             let bufs = bufs.into();
-            self.sends.fetch_add(1, Ordering::Relaxed);
-            self.chunk_counts.lock().push(bufs.chunk_count());
+            let mut lengths = Vec::new();
+            bufs.for_each_chunk(|chunk| lengths.push(chunk.len()));
+            self.sent.push(lengths);
             self.inner.send(bufs).await
         }
     }
@@ -819,6 +791,19 @@ mod test {
     }
 
     #[test]
+    fn test_send_many_future_is_send() {
+        // Only the input must be Send. Its iterator and items need not be.
+        fn assert_send<O: Sink, I>(sender: &mut Sender<O>, messages: I) -> impl Send
+        where
+            I: IntoIterator + Send,
+            I::Item: Into<IoBufs>,
+        {
+            sender.send_many(messages)
+        }
+        let _ = assert_send::<mocks::Sink, Vec<IoBuf>>;
+    }
+
+    #[test]
     fn test_send_many_uses_single_runtime_send() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -827,8 +812,6 @@ mod test {
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
-            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
             let dialer_handshake = transport_handshake(dialer_signer.clone());
             let listener_handshake = transport_handshake(listener_signer.clone());
@@ -854,17 +837,21 @@ mod test {
                         MAX_MESSAGE_SIZE,
                         listener_signer.public_key(),
                         dialer_stream,
-                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                        RecordingSink::new(dialer_sink),
                     )
                     .await?;
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
-            sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().clear();
+            dialer_sender.sink.sent.clear();
 
-            // Three small messages should fit in one pooled chunk, so `send_many`
-            // still reaches the runtime as a single single-chunk send call.
+            // A single empty message still produces a 17-byte encrypted frame.
+            dialer_sender.send_many([IoBuf::default()]).await?;
+            assert_eq!(dialer_sender.sink.sent, [vec![17]]);
+            assert!(listener_receiver.recv().await?.is_empty());
+
+            // Three small frames total 65 bytes and fit in one pooled chunk.
+            dialer_sender.sink.sent.clear();
             dialer_sender
                 .send_many(vec![
                     IoBufs::from(IoBuf::from(b"alpha")),
@@ -873,8 +860,7 @@ mod test {
                 ])
                 .await?;
 
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock(), vec![1]);
+            assert_eq!(dialer_sender.sink.sent, [vec![65]]);
             assert_eq!(
                 listener_receiver.recv().await?.coalesce(),
                 IoBuf::from(b"alpha")
@@ -906,8 +892,6 @@ mod test {
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
-            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
             let dialer_handshake = transport_handshake(dialer_signer.clone());
             let listener_handshake = transport_handshake(listener_signer.clone());
@@ -933,32 +917,33 @@ mod test {
                         MAX_MESSAGE_SIZE,
                         listener_signer.public_key(),
                         dialer_stream,
-                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                        RecordingSink::new(dialer_sink),
                     )
                     .await?;
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
 
-            // Each frame is 117 bytes: 100 payload + 16 tag + 1 length prefix.
-            // Two fit under the 256-byte cap. Zero through nine messages cover
+            // Each frame is 128 bytes: 111 payload + 16 tag + 1 length prefix.
+            // Two fill the 256-byte cap. Zero through nine messages cover
             // empty, inline, and deque-backed batches with at most one sink call.
             for count in 0..=9usize {
-                sends.store(0, Ordering::Relaxed);
-                chunk_counts.lock().clear();
+                dialer_sender.sink.sent.clear();
                 dialer_sender
-                    .send_many((0..count).map(|index| IoBuf::from(vec![index as u8; 100])))
+                    .send_many((0..count).map(|index| IoBuf::from(vec![index as u8; 111])))
                     .await?;
 
                 if count == 0 {
-                    assert_eq!(sends.load(Ordering::Relaxed), 0);
-                    assert!(chunk_counts.lock().is_empty());
-                } else {
-                    assert_eq!(sends.load(Ordering::Relaxed), 1);
-                    assert_eq!(*chunk_counts.lock(), vec![count.div_ceil(2)]);
+                    assert!(dialer_sender.sink.sent.is_empty());
+                    continue;
                 }
+                let mut expected_lengths = vec![256; count / 2];
+                if !count.is_multiple_of(2) {
+                    expected_lengths.push(128);
+                }
+                assert_eq!(dialer_sender.sink.sent, [expected_lengths]);
                 for index in 0..count {
-                    let expected = [index as u8; 100];
+                    let expected = [index as u8; 111];
                     assert_eq!(
                         listener_receiver.recv().await?.coalesce(),
                         expected.as_slice()
@@ -970,8 +955,7 @@ mod test {
     }
 
     #[test]
-    fn test_send_many_sends_oversized_single_message_alone()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_send_many_sends_oversized_frames_alone() -> Result<(), Box<dyn std::error::Error>> {
         let executor = deterministic::Runner::new(
             deterministic::Config::new().with_network_buffer_pool_config(
                 BufferPoolConfig::for_network()
@@ -985,8 +969,6 @@ mod test {
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
-            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
             let dialer_handshake = transport_handshake(dialer_signer.clone());
             let listener_handshake = transport_handshake(listener_signer.clone());
@@ -1012,45 +994,49 @@ mod test {
                         MAX_MESSAGE_SIZE,
                         listener_signer.public_key(),
                         dialer_stream,
-                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                        RecordingSink::new(dialer_sink),
                     )
                     .await?;
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
-            sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().clear();
+            dialer_sender.sink.sent.clear();
 
-            // A single framed message larger than the cap still goes out, but it
-            // must occupy its own chunk instead of being rejected or merged.
-            let large = vec![3u8; 200];
-            let small = vec![9u8; 16];
-            dialer_sender
-                .send_many(vec![
-                    IoBufs::from(IoBuf::from(large.clone())),
-                    IoBufs::from(IoBuf::from(small.clone())),
-                ])
-                .await?;
+            // Small messages form pooled chunks around two oversized frames:
+            // [small, small], [large], [large], [small, small].
+            let messages = [
+                IoBuf::from(vec![1u8; 16]),
+                IoBuf::from(vec![2u8; 16]),
+                IoBuf::from(vec![3u8; 200]),
+                IoBuf::from(vec![4u8; 200]),
+                IoBuf::from(vec![5u8; 16]),
+                IoBuf::from(vec![6u8; 16]),
+            ];
+            dialer_sender.send_many(messages.iter().cloned()).await?;
 
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
-            assert_eq!(*chunk_counts.lock(), vec![2]);
-            assert_eq!(listener_receiver.recv().await?.coalesce(), large.as_slice());
-            assert_eq!(listener_receiver.recv().await?.coalesce(), small.as_slice());
+            assert_eq!(dialer_sender.sink.sent, [vec![66, 218, 218, 66]]);
+            for message in messages {
+                assert_eq!(listener_receiver.recv().await?.coalesce(), message);
+            }
             Ok(())
         })
     }
 
     #[test]
     fn test_send_many_too_large_preserves_sender_state() -> Result<(), Box<dyn std::error::Error>> {
-        let executor = deterministic::Runner::default();
+        let executor = deterministic::Runner::new(
+            deterministic::Config::new().with_network_buffer_pool_config(
+                BufferPoolConfig::for_network()
+                    .with_pool_min_size(128)
+                    .with_size_class_range(NZUsize!(128), NZUsize!(128), NZU32!(4096)),
+            ),
+        );
         executor.start(|context| async move {
             let dialer_signer = PrivateKey::from_seed(42);
             let listener_signer = PrivateKey::from_seed(24);
 
             let (dialer_sink, listener_stream) = mocks::Channel::init();
             let (listener_sink, dialer_stream) = mocks::Channel::init();
-            let sends = Arc::new(AtomicUsize::new(0));
-            let chunk_counts = Arc::new(Mutex::new(Vec::new()));
 
             let dialer_handshake = transport_handshake(dialer_signer.clone());
             let listener_handshake = transport_handshake(listener_signer.clone());
@@ -1076,20 +1062,32 @@ mod test {
                         MAX_MESSAGE_SIZE,
                         listener_signer.public_key(),
                         dialer_stream,
-                        CountingSink::new(dialer_sink, sends.clone(), chunk_counts.clone()),
+                        RecordingSink::new(dialer_sink),
                     )
                     .await?;
 
             let (_listener_peer, _listener_sender, mut listener_receiver) =
                 listener_handle.await.unwrap()?;
-            sends.store(0, Ordering::Relaxed);
-            chunk_counts.lock().clear();
+            dialer_sender.sink.sent.clear();
 
             let valid = vec![7u8; 32];
+            let large = vec![8u8; 200];
             let oversized = vec![9u8; MAX_MESSAGE_SIZE as usize + 1];
+            let invalid_first =
+                std::iter::once(IoBuf::from(oversized.clone())).chain(std::iter::once_with(|| {
+                    panic!("must reject the first message before reading more")
+                }));
+            assert!(matches!(
+                dialer_sender.send_many(invalid_first).await,
+                Err(Error::SendTooLarge(_))
+            ));
+
+            // A late validation error must not advance nonces for preceding chunks.
             assert!(matches!(
                 dialer_sender
                     .send_many(vec![
+                        IoBufs::from(IoBuf::from(valid.clone())),
+                        IoBufs::from(IoBuf::from(large)),
                         IoBufs::from(IoBuf::from(valid)),
                         IoBufs::from(IoBuf::from(oversized)),
                     ])
@@ -1097,12 +1095,11 @@ mod test {
                 Err(Error::SendTooLarge(_))
             ));
 
-            assert_eq!(sends.load(Ordering::Relaxed), 0);
-            assert!(chunk_counts.lock().is_empty());
+            assert!(dialer_sender.sink.sent.is_empty());
 
             let recovered = b"recovered";
             dialer_sender.send(&recovered[..]).await?;
-            assert_eq!(sends.load(Ordering::Relaxed), 1);
+            assert_eq!(dialer_sender.sink.sent.len(), 1);
             assert_eq!(listener_receiver.recv().await?.coalesce(), recovered);
             Ok(())
         })
