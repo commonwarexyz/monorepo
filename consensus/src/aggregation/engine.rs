@@ -984,31 +984,13 @@ mod tests {
         aggregation::{mocks, scheme::ed25519},
         simplex::mocks::wrapped::{Behavior, Scheme as WrappedScheme},
     };
-    use commonware_actor::Feedback;
     use commonware_cryptography::{Hasher as _, Sha256, certificate::mocks::Fixture};
-    use commonware_p2p::Blocker;
+    use commonware_p2p::utils::mocks::NoopBlocker;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
-
-    #[derive(Clone)]
-    struct NoopBlocker;
-
-    impl Blocker for NoopBlocker {
-        type PublicKey = commonware_cryptography::ed25519::PublicKey;
-
-        fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
-            Feedback::Ok
-        }
-
-        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<Self::PublicKey> {
-            let (_, receiver) =
-                commonware_utils::channel::ring::channel(commonware_utils::NZUsize!(1));
-            receiver
-        }
-    }
 
     #[test]
     #[should_panic(expected = "verified acknowledgement quorum must assemble")]
@@ -1036,7 +1018,7 @@ mod tests {
                     provider,
                     automaton: mocks::Application::new(mocks::Strategy::Correct),
                     reporter,
-                    blocker: NoopBlocker,
+                    blocker: NoopBlocker::default(),
                     priority_acks: false,
                     rebroadcast_timeout: NonZeroDuration::new_panic(Duration::from_secs(1)),
                     epoch_bounds: (EpochDelta::new(1), EpochDelta::new(1)),
