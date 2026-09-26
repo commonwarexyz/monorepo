@@ -15,23 +15,17 @@
 //! - [`bls12381_threshold`]: Non-attributable threshold signatures. Constant-size
 //!   certificates regardless of committee size.
 
-use super::types::Item;
+use super::types::{Item, RecoveryNamespace};
 use commonware_cryptography::{Digest, certificate};
-use commonware_utils::N3f1;
 
 /// Marker trait for signing schemes compatible with `aggregation`.
 ///
-/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type and
-/// [`N3f1`] fault model used by the aggregation protocol. It is automatically
-/// implemented for any compatible scheme.
-pub trait Scheme<D: Digest>:
-    for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>, Faults = N3f1>
-{
-}
-
-impl<D: Digest, S> Scheme<D> for S where
-    S: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>, Faults = N3f1>
-{
+/// This trait binds a [`certificate::Scheme`] to the [`Item`] subject type while
+/// retaining the certificate scheme's fault model. It is automatically implemented
+/// for any compatible scheme.
+pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = &'a Item<D>> {
+    /// Returns the recovery identity derived from this scheme's signing namespace.
+    fn recovery_namespace(&self) -> RecoveryNamespace;
 }
 
 pub mod bls12381_multisig {
@@ -46,6 +40,16 @@ pub mod bls12381_multisig {
     use commonware_utils::N3f1;
 
     impl_certificate_bls12381_multisig!(&'a Item<D>, Namespace, N3f1);
+
+    impl<D: commonware_cryptography::Digest, P: commonware_cryptography::PublicKey, V>
+        super::Scheme<D> for Scheme<P, V>
+    where
+        V: commonware_cryptography::bls12381::primitives::variant::Variant,
+    {
+        fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+            self.generic.namespace().recovery_namespace()
+        }
+    }
 }
 
 pub mod bls12381_threshold {
@@ -60,6 +64,16 @@ pub mod bls12381_threshold {
     use commonware_utils::N3f1;
 
     impl_certificate_bls12381_threshold!(&'a Item<D>, Namespace, N3f1);
+
+    impl<D: commonware_cryptography::Digest, P: commonware_cryptography::PublicKey, V>
+        super::Scheme<D> for Scheme<P, V>
+    where
+        V: commonware_cryptography::bls12381::primitives::variant::Variant,
+    {
+        fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+            self.generic.namespace().recovery_namespace()
+        }
+    }
 }
 
 pub mod ed25519 {
@@ -74,6 +88,12 @@ pub mod ed25519 {
     use commonware_utils::N3f1;
 
     impl_certificate_ed25519!(&'a Item<D>, Namespace, N3f1);
+
+    impl<D: commonware_cryptography::Digest> super::Scheme<D> for Scheme {
+        fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+            self.generic.namespace().recovery_namespace()
+        }
+    }
 }
 
 pub mod secp256r1 {
@@ -88,4 +108,12 @@ pub mod secp256r1 {
     use commonware_utils::N3f1;
 
     impl_certificate_secp256r1!(&'a Item<D>, Namespace, N3f1);
+
+    impl<D: commonware_cryptography::Digest, P: commonware_cryptography::PublicKey> super::Scheme<D>
+        for Scheme<P>
+    {
+        fn recovery_namespace(&self) -> crate::aggregation::types::RecoveryNamespace {
+            self.generic.namespace().recovery_namespace()
+        }
+    }
 }
