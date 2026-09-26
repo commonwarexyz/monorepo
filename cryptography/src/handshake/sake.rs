@@ -22,7 +22,8 @@
 //! data can be sent only after the three messages complete.
 //!
 //! The BLAKE3 transcript first commits the caller-provided application namespace as one packet,
-//! then forks it with the fixed `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` protocol namespace. Distinct
+//! then forks it with the protocol namespace of the [Version]: `_COMMONWARE_CRYPTOGRAPHY_SAKE` for
+//! [Version::V1] and the original `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` for [Version::V0]. Distinct
 //! labels derive the listener-to-dialer and dialer-to-listener traffic keys and confirmations.
 //! These namespace bytes, transcript order, and labels are protocol constants.
 //!
@@ -73,7 +74,6 @@ pub use cipher::{RecvCipher, SendCipher, TAG_SIZE};
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE";
 const LABEL_CIPHER_L2D: &[u8] = b"cipher_l2d";
 const LABEL_CIPHER_D2L: &[u8] = b"cipher_d2l";
 const LABEL_CONFIRMATION_L2D: &[u8] = b"confirmation_l2d";
@@ -94,6 +94,14 @@ pub enum Version {
 }
 
 impl Version {
+    /// Returns the protocol namespace forked from the application namespace.
+    const fn namespace(self) -> &'static [u8] {
+        match self {
+            Self::V0 => b"_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE",
+            Self::V1 => b"_COMMONWARE_CRYPTOGRAPHY_SAKE",
+        }
+    }
+
     /// Returns the transcript framing used by this version.
     ///
     /// V0 framing is safe for [Version::V0] because the application namespace is summarized as a
@@ -279,7 +287,7 @@ impl<S, P> Context<S, P> {
         my_identity: S,
         peer_identity: P,
     ) -> Self {
-        let transcript = Transcript::new(namespace, version.transcript()).fork(NAMESPACE);
+        let transcript = Transcript::new(namespace, version.transcript()).fork(version.namespace());
         Self {
             version,
             transcript,
@@ -643,7 +651,7 @@ mod test {
         dialer: Option<&P>,
     ) -> Transcript {
         let mut transcript =
-            Transcript::new(b"test_namespace", version.transcript()).fork(NAMESPACE);
+            Transcript::new(b"test_namespace", version.transcript()).fork(version.namespace());
         transcript
             .commit(syn.time_ms.encode())
             .commit(listener.encode());

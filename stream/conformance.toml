@@ -4,4 +4,4 @@ hash = "b17c25f55663c938bf57c2142f28e820e8cb8ebd61ec36c619a965ec7021f83e"
 
 ["commonware_stream::cups::conformance::CupsV1"]
 n_cases = 256
-hash = "fb3b5b0592110b0d7e2eb3872ea4d51d6f5c856c16cc5e7d46653a0044a22e0e"
+hash = "092c5124a2f2bf83f86d43a15029ad74350eb9114514b00211fb09f6b06488e8"

@@ -17,6 +17,10 @@
 //! listener's bouncer may reject that claim before authentication. Accepting it only permits the
 //! handshake to continue. A successful handshake authenticates the returned identity.
 //!
+//! Version 1 scopes the application namespace to CUPS with `_COMMONWARE_STREAM_CUPS` before SAKE
+//! commits it, so its handshakes never coincide with SAKE handshakes run for another protocol.
+//! Version 0 passes the application namespace to SAKE unchanged.
+//!
 //! Peers must agree on a unique, application-specific namespace, a [Version], and have clocks
 //! within the configured timestamp acceptance windows. The version is not negotiated: a mismatch
 //! fails the handshake. Callers must enforce a handshake deadline, for example with
@@ -25,18 +29,13 @@
 //!
 //! # Records
 //!
-//! Each message becomes one record. Every seal uses ChaCha20-Poly1305 with a 16-byte tag and empty
-//! associated data.
+//! Each message becomes one record, and batching writes preserves record boundaries. Every seal
+//! uses ChaCha20-Poly1305 with a 16-byte tag and empty associated data.
 //!
 //! - Version 0: a visible u32 varint holding the length of the encrypted payload and its tag,
 //!   then the encrypted payload and its tag.
 //! - Version 1: a 20-byte header holding the payload length as an encrypted 4-byte big-endian
 //!   integer and its tag, then the encrypted payload and its tag.
-//!
-//! A modified version 0 prefix either fails the length checks or makes the receiver authenticate
-//! the wrong span, which fails. A version 1 header is authenticated before the receiver
-//! requests the payload, so a forged length never sizes a read. Batching writes preserves
-//! individual record boundaries.
 //!
 //! Each direction uses a fixed session key and an implicit 96-bit counter nonce, starting at zero
 //! and encoded little-endian. The counter advances once per record in version 0 and twice
@@ -71,7 +70,7 @@ use commonware_runtime::{
     Buf as _, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut,
     IoBufs, Sink, Stream,
 };
-use commonware_utils::{DurationExt, SystemTimeExt};
+use commonware_utils::{DurationExt, SystemTimeExt, union_unique};
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -82,6 +81,7 @@ pub use config::Config;
 #[cfg(all(test, feature = "arbitrary"))]
 mod conformance;
 
+const NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";
 const TAG_SIZE: u32 = {
     assert!(sake::TAG_SIZE <= u32::MAX as usize);
     sake::TAG_SIZE as u32
@@ -148,6 +148,14 @@ impl Version {
         match self {
             Self::V0 => sake::Version::V0,
             Self::V1 => sake::Version::V1,
+        }
+    }
+
+    /// Returns the namespace SAKE commits for an application namespace.
+    fn namespace(self, namespace: &[u8]) -> Vec<u8> {
+        match self {
+            Self::V0 => namespace.to_vec(),
+            Self::V1 => union_unique(NAMESPACE, namespace),
         }
     }
 
@@ -323,7 +331,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let (state, syn) = dial_start(
             context,
             Context::new(
-                namespace,
+                &self.version.namespace(namespace),
                 self.version.sake(),
                 current_time,
                 ok_timestamps,
@@ -388,7 +396,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let (state, syn_ack) = listen_start(
             context,
             Context::new(
-                namespace,
+                &self.version.namespace(namespace),
                 self.version.sake(),
                 current_time,
                 ok_timestamps,

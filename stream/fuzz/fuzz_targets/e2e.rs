@@ -56,7 +56,6 @@ impl<'a> arbitrary::Arbitrary<'a> for Direction {
 enum Message {
     Authenticated(Direction, Vec<u8>),
     Unauthenticated(Direction, Vec<u8>),
-    /// A legitimate record with one byte flipped in transit.
     Tampered(Direction, Vec<u8>, usize, u8),
 }
 
