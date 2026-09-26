@@ -1048,7 +1048,7 @@ mod tests {
         },
     };
     use commonware_utils::{NZU16, NZUsize, Widen, probability};
-    use std::time::Duration;
+    use std::{future::Future, time::Duration};
 
     /// Convert offset + size to byte end position (for truncation tests).
     fn byte_end(offset: u64, size: u32) -> u64 {
@@ -1564,22 +1564,37 @@ mod tests {
         }
     }
 
-    /// Holds a borrowed batch across `append_many` the way callers do: compiling proves the
-    /// future stays `Send`.
-    #[test]
-    fn test_oversized_append_many_future_is_send() {
-        fn assert_send<T: Send>(_: T) {}
-        fn append_borrowed<E: Context>(
-            journal: Oversized<E, TestEntry, TestValue>,
-            batch: Vec<(TestEntry, TestValue)>,
-        ) {
-            assert_send(async move {
-                let _ = journal
-                    .append_many(0, batch.iter().map(|(entry, value)| (entry.clone(), value)))
-                    .await;
-            });
+    /// Holds a borrowed batch across `append_many` the way callers do. The `Send` bound on the
+    /// returned future must hold for any context, so compiling proves the future stays `Send`.
+    #[allow(clippy::manual_async_fn)]
+    fn append_borrowed<E: Context>(
+        journal: Oversized<E, TestEntry, TestValue>,
+        batch: Vec<(TestEntry, TestValue)>,
+    ) -> impl Future<Output = Oversized<E, TestEntry, TestValue>> + Send {
+        async move {
+            let (journal, _, locations) = journal
+                .append_many(0, batch.iter().map(|(entry, value)| (entry.clone(), value)))
+                .await
+                .unwrap();
+            assert_eq!(locations.len(), batch.len());
+            journal
         }
-        let _ = append_borrowed::<deterministic::Context>;
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_future_is_send() {
+        deterministic::Runner::default().start(|context| async move {
+            let oversized =
+                Oversized::<_, TestEntry, TestValue>::init(context.child("send"), test_cfg())
+                    .await
+                    .unwrap();
+            let batch = vec![
+                (TestEntry::new(0, 0, 0), [0; 16]),
+                (TestEntry::new(1, 0, 0), [1; 16]),
+            ];
+            let oversized = append_borrowed(oversized, batch).await;
+            oversized.destroy().await.unwrap();
+        });
     }
 
     #[test_traced]
