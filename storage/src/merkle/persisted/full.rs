@@ -671,25 +671,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Returns [`Error::ElementPruned`] for the first of `positions` that falls below the
     /// journal's pruning boundary.
     pub async fn get_nodes(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
-        assert!(
-            positions.is_sorted_by(|a, b| a < b),
-            "positions must be strictly increasing"
-        );
-        let bounds = self.journal.bounds();
-        let mut nodes = vec![None; positions.len()];
-        let mut journal_misses = Vec::with_capacity(positions.len());
-        for (slot, &position) in nodes.iter_mut().zip(positions) {
-            if let Some(node) = self.mem.get_node(position) {
-                *slot = Some(node);
-            } else if *position < bounds.start {
-                return Err(Error::ElementPruned(position));
-            } else if let Some(node) = self.node_cache.as_ref().and_then(|c| c.get(*position)) {
-                *slot = Some(node);
-            } else {
-                // In-subsequence order is preserved, so this stays strictly increasing.
-                journal_misses.push(*position);
-            }
-        }
+        let (nodes, journal_misses) = self.probe_nodes(positions)?;
 
         // Within-bounds reads are guaranteed not to return `ItemPruned` (see
         // [`crate::journal::contiguous::Contiguous::read`]).
@@ -713,13 +695,65 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
                 .await
                 .map_err(Error::Journal)?
         };
+        Ok(Self::fill_nodes(nodes, items))
+    }
 
-        // The unfilled slots are exactly the journal subsequence, in the order it was built.
+    /// Like [Self::get_nodes], but journal reads admit their pages into neither the page cache
+    /// nor the node cache. Suited to one-shot bulk reads of nodes that will not be read again
+    /// soon.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `positions` is not strictly increasing.
+    pub async fn get_nodes_uncached(&self, positions: &[Position<F>]) -> Result<Vec<D>, Error<F>> {
+        let (nodes, journal_misses) = self.probe_nodes(positions)?;
+        let items = if journal_misses.is_empty() {
+            Vec::new()
+        } else {
+            self.journal
+                .read_many_uncached(&journal_misses)
+                .await
+                .map_err(Error::Journal)?
+        };
+        Ok(Self::fill_nodes(nodes, items))
+    }
+
+    /// Resolve `positions` from memory and the node cache, returning the resolved slots and the
+    /// strictly increasing journal positions still to read.
+    fn probe_nodes(
+        &self,
+        positions: &[Position<F>],
+    ) -> Result<(Vec<Option<D>>, Vec<u64>), Error<F>> {
+        assert!(
+            positions.is_sorted_by(|a, b| a < b),
+            "positions must be strictly increasing"
+        );
+        let bounds = self.journal.bounds();
+        let mut nodes = vec![None; positions.len()];
+        let mut journal_misses = Vec::with_capacity(positions.len());
+        for (slot, &position) in nodes.iter_mut().zip(positions) {
+            if let Some(node) = self.mem.get_node(position) {
+                *slot = Some(node);
+            } else if *position < bounds.start {
+                return Err(Error::ElementPruned(position));
+            } else if let Some(node) = self.node_cache.as_ref().and_then(|c| c.get(*position)) {
+                *slot = Some(node);
+            } else {
+                // In-subsequence order is preserved, so this stays strictly increasing.
+                journal_misses.push(*position);
+            }
+        }
+        Ok((nodes, journal_misses))
+    }
+
+    /// Fill the unresolved slots of `nodes` with `items`, which hold the journal reads in slot
+    /// order.
+    fn fill_nodes(nodes: Vec<Option<D>>, items: Vec<D>) -> Vec<D> {
         let mut items = items.into_iter();
-        Ok(nodes
+        nodes
             .into_iter()
             .map(|node| node.unwrap_or_else(|| items.next().expect("one item per journal read")))
-            .collect())
+            .collect()
     }
 
     /// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`.
@@ -1651,9 +1685,9 @@ mod tests {
         mmr.destroy().await.unwrap();
     }
 
-    /// `get_nodes` must agree with per-position `get_node` on every available position
-    /// (journal-resident and memory-resident) and reject the positions `get_node` reports
-    /// as absent.
+    /// `get_nodes` and `get_nodes_uncached` must agree with per-position `get_node` on every
+    /// available position (journal-resident and memory-resident) and reject the positions
+    /// `get_node` reports as absent.
     async fn full_get_nodes_matches_get_node_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let cfg = test_config(&context);
@@ -1700,6 +1734,12 @@ mod tests {
             }
             other => panic!("expected ElementPruned, got {other:?}"),
         }
+        match mmr.get_nodes_uncached(&all).await {
+            Err(Error::ElementPruned(position)) => {
+                assert!(absent.contains(&position), "position {position}")
+            }
+            other => panic!("expected ElementPruned, got {other:?}"),
+        }
 
         // Every available position, then a sparse subset (slot correspondence), then empty.
         let positions: Vec<Position<F>> = available.iter().map(|&(pos, _)| pos).collect();
@@ -1708,6 +1748,7 @@ mod tests {
         for (slot, &(position, node)) in available.iter().enumerate() {
             assert_eq!(batched[slot], node, "position {position}");
         }
+        assert_eq!(mmr.get_nodes_uncached(&positions).await.unwrap(), batched);
 
         let sparse: Vec<Position<F>> = positions.iter().copied().step_by(7).collect();
         let batched = mmr.get_nodes(&sparse).await.unwrap();
@@ -1715,8 +1756,10 @@ mod tests {
             let single = mmr.get_node(position).await.unwrap().unwrap();
             assert_eq!(batched[slot], single, "position {position}");
         }
+        assert_eq!(mmr.get_nodes_uncached(&sparse).await.unwrap(), batched);
 
         assert!(mmr.get_nodes(&[]).await.unwrap().is_empty());
+        assert!(mmr.get_nodes_uncached(&[]).await.unwrap().is_empty());
         mmr.destroy().await.unwrap();
     }
 
