@@ -126,6 +126,23 @@ PLAN_TEMPLATE = """\
 |---|---|---|---|---|
 """
 
+# The first line of the fuzzer's own output: cargo fuzz's `Running` line, or libFuzzer's
+# banner. Crash evidence only counts after it, so build output (for example a panicking
+# build script) is never taken for a crash of the target.
+FUZZ_STARTED = re.compile(r"^\s*Running `|^INFO: (Running with|Seed:)")
+# Target output that shows a crash, and the line naming the saved input.
+FUZZ_CRASH = re.compile(
+    r"ERROR: libFuzzer:|SUMMARY: libFuzzer:|Test unit written to|\[statelens\]\[|panicked at"
+)
+FUZZ_ARTIFACT = re.compile(r"Test unit written to (\S+)")
+FUZZ_INTERRUPTED = re.compile(r"libFuzzer: run interrupted")
+# libFuzzer flags the campaign rejects: artifact paths move crashes out of ARTIFACTS, where
+# results are read, and `-handle_*` switches stop libFuzzer from reporting a crash and
+# saving the input that caused it.
+REJECTED_FLAG = re.compile(r"^-(artifact_prefix|exact_artifact_path|handle_[a-z0-9]+)(=|$)")
+# The tools a campaign runs besides the agent CLI (SPEC section 5.2).
+CAMPAIGN_TOOLS = ("cargo", "cargo-nextest", "cargo-fuzz", "just")
+
 PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 PLAN_HEADING = re.compile(r"^###\s+((?:INV|FALSE)-\d+)\b")
 PLAN_STATUS = re.compile(r"^-\s*\**Status\**\s*:\s*\**\s*`?(bound|partial|unbound)\b")
@@ -468,7 +485,9 @@ def paper_text(repo, sl_dir, source):
     path = location if location.is_absolute() else repo / location
     if path.suffix.lower() != ".pdf" or not path.is_file():
         return None
-    output = sl_dir / "extract" / "papers" / (path.stem + ".txt")
+    # The digest keeps papers with the same file name in different directories apart.
+    digest = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:10]
+    output = sl_dir / "extract" / "papers" / f"{path.stem}-{digest}.txt"
     output.parent.mkdir(parents=True, exist_ok=True)
     if shutil.which("pdftotext"):
         if subprocess.run(["pdftotext", "-layout", str(path), str(output)]).returncode == 0:
@@ -549,6 +568,8 @@ class Campaign:
         self.test_toolchain = self.config["STATELENS_TEST_TOOLCHAIN"]
         self.fuzz_toolchain = self.config["STATELENS_FUZZ_TOOLCHAIN"] or pinned_nightly(self.repo)
         self.dir = self.sl_dir / "campaign"
+        # Set once this run has created its own campaign directory.
+        self.initialized = False
         self.base = None
         self.invariants = []
         self.baseline = {}
@@ -620,6 +641,10 @@ class Campaign:
                 5: "PANIC (fuzz)",
             }.get(error.code, "SETUP FAILED")
             return self.finish(error.code, result)
+        except OSError as error:
+            # A command could not be started (the fuzz step handles its own).
+            self.reason = f"could not start a command: {error}"
+            return self.finish(2, "SETUP FAILED")
 
     def finish(self, code, result):
         lines = [f"checkout   {self.repo}"]
@@ -652,13 +677,19 @@ class Campaign:
             )
         text = "\n".join(f"statelens: {line}" for line in lines)
         print(text, flush=True)
-        if self.dir.is_dir():
+        # A run refused by the preconditions must not overwrite the summary of the
+        # campaign that instrumented this checkout.
+        if self.initialized:
             (self.dir / "summary.txt").write_text(text + "\n")
         return code
 
     # Section 7.1.
 
     def check_preconditions(self):
+        # Checked first, so a missing tool fails before any agent time is spent.
+        for tool in CAMPAIGN_TOOLS:
+            if shutil.which(tool) is None:
+                raise Abort(2, f"{tool} is not on PATH; see the prerequisites in README.md")
         for path in (STATELENS_RS, TARGET_RS):
             if (self.repo / path).exists():
                 raise Abort(
@@ -681,6 +712,7 @@ class Campaign:
             shutil.rmtree(self.dir)
         (self.dir / "logs").mkdir(parents=True)
         (self.dir / "prompts").mkdir()
+        self.initialized = True
         self.invariants = sorted((self.sl_dir / "invariants").glob("INV-*.md"), key=id_number)
         if os.environ.get("STATELENS_FALSE_INVARIANTS") == "1":
             self.invariants += sorted(
@@ -875,6 +907,14 @@ class Campaign:
         parsed = self.parse_statuses(text)
         statuses = {path.stem: parsed.get(path.stem) or "unbound" for path in self.invariants}
         self.statuses = statuses
+        # Files the agents created are untracked: mark them intent-to-add (no content is
+        # staged) so the diff and the site counts below include them.
+        created = git(
+            self.repo, "ls-files", "--others", "--exclude-standard", "-z", "--", SIMPLEX
+        ).split("\0")
+        created = [path for path in created if path]
+        if created:
+            git(self.repo, "add", "--intent-to-add", "--", *created)
         diff = git(self.repo, "diff", "--", "consensus/src/simplex", f":(exclude){STATELENS_RS}")
         added = [line for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")]
         assertions = sum(len(re.findall(r"\bsl_(?:assert|implies)!", line)) for line in added)
@@ -964,9 +1004,15 @@ class Campaign:
 
     # Section 7.8.
 
-    def fuzz(self):
+    def artifact_times(self):
+        """Modification time of every file in ARTIFACTS, so rewritten files count."""
         artifacts = self.repo / ARTIFACTS
-        before = set(os.listdir(artifacts)) if artifacts.is_dir() else set()
+        if not artifacts.is_dir():
+            return {}
+        return {path.name: path.stat().st_mtime_ns for path in artifacts.iterdir()}
+
+    def fuzz(self):
+        before = self.artifact_times()
         log = self.dir / "logs" / "fuzz.log"
         command = [
             "just",
@@ -980,16 +1026,45 @@ class Campaign:
         say("fuzz: running until a panic or Ctrl-C")
         previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
         try:
-            run_logged(command, log, self.repo / "consensus/fuzz", env=env, own_sigint=True)
+            code, _ = run_logged(
+                command, log, self.repo / "consensus/fuzz", env=env, own_sigint=True
+            )
+        except OSError as error:
+            self.reason = f"could not start `{shlex.join(command)}`: {error}"
+            return self.finish(6, "FUZZER FAILED")
         finally:
             signal.signal(signal.SIGINT, previous)
-        after = set(os.listdir(artifacts)) if artifacts.is_dir() else set()
-        new = sorted(after - before)
-        if not new:
+        lines = log.read_text(errors="replace").splitlines()
+        start = next((i for i, line in enumerate(lines) if FUZZ_STARTED.search(line)), None)
+        target = lines[start:] if start is not None else []
+
+        # A crash is any new or rewritten artifact, or crash output from the running
+        # target; the exit code alone cannot tell a crash from a failed build or launch.
+        after = self.artifact_times()
+        changed = sorted(name for name, stamp in after.items() if before.get(name) != stamp)
+        written = [match.group(1) for line in target if (match := FUZZ_ARTIFACT.search(line))]
+        if changed or written or any(FUZZ_CRASH.search(line) for line in target):
+            if written:
+                path = Path(written[0])
+                path = path if path.is_absolute() else self.repo / "consensus/fuzz" / path
+                self.artifact = os.path.relpath(path.resolve(), self.repo.resolve())
+            elif changed:
+                self.artifact = f"{ARTIFACTS}/{changed[0]}"
+            self.panic = first_panic(target) or next(
+                (line.strip() for line in target if "ERROR: libFuzzer:" in line), None
+            )
+            return self.finish(5, "PANIC (fuzz)")
+        if code == 0:
             return self.finish(0, "NO PANIC")
-        self.artifact = f"{ARTIFACTS}/{new[0]}"
-        self.panic = first_panic(log.read_text(errors="replace").splitlines())
-        return self.finish(5, "PANIC (fuzz)")
+        interrupted_codes = (-signal.SIGINT, 128 + signal.SIGINT)
+        if code in interrupted_codes or any(FUZZ_INTERRUPTED.search(line) for line in target):
+            self.reason = "stopped by the operator"
+            return self.finish(0, "NO PANIC")
+        self.reason = (
+            f"the fuzz command exited with code {code} and no crash; "
+            f"see {log.relative_to(self.repo)}"
+        )
+        return self.finish(6, "FUZZER FAILED")
 
 
 def first_panic(lines):
@@ -1025,6 +1100,13 @@ def main(argv):
 
     if libfuzzer_args and args.command != "campaign":
         parser.error("arguments after -- are only accepted by campaign")
+    for argument in libfuzzer_args:
+        if REJECTED_FLAG.match(argument):
+            parser.error(
+                f"{argument.split('=', 1)[0]} is not allowed: the campaign relies on "
+                f"libFuzzer's default crash handling and reads crash artifacts from "
+                f"{ARTIFACTS}/"
+            )
     try:
         if args.command == "lint":
             return cmd_lint(args)

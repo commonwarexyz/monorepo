@@ -1,11 +1,11 @@
 # StateLens for Simplex
 
-StateLens turns English invariants about the Simplex consensus implementation into
-runtime assertions and state probes, then fuzzes the instrumented code with the
-`TwinsMutator` harness until an invariant breaks. An LLM agent (Claude Code or Codex)
+StateLens turns informal (in English) or semi-formal invariants about the Simplex consensus protocol
+into runtime assertions and state probes, then fuzzes the instrumented code with the
+libfuzzer until an invariant breaks. An LLM agent (Claude Code or Codex)
 writes the invariants from issues, documents, code comments, specifications and papers
 (Phase 1), and binds them to the current code in a campaign (Phase 2). See
-[PRD.md](PRD.md) for the goals and [SPEC.md](SPEC.md) for the details.
+[PRD.md](docs/PRD.md) for the goals and [SPEC.md](docs/SPEC.md) for the details.
 
 ## Run campaigns safely
 
@@ -47,11 +47,14 @@ not want, and run `just check-invariants`. Logs and rendered prompts go to `extr
 
 ```
 git clone <repository> && cd <repository>/consensus/fuzz/statelens
-just campaign                                        # agent from config.env
-STATELENS_AGENT=codex just campaign                  # another agent
-python3 scripts/statelens.py campaign -- -fork=8     # extra libFuzzer arguments
-python3 scripts/statelens.py campaign --stop-after build
+just fuzz                          # agent from config.env
+just fuzz --agent codex            # another agent (or STATELENS_AGENT=codex just fuzz)
+just fuzz -- -fork=8               # extra libFuzzer arguments
+just fuzz --stop-after build       # stop after a step, for development
 ```
+
+In this directory `just fuzz` runs a StateLens campaign. In `consensus/fuzz/` and at the
+repository root, `just fuzz` is the existing recipe that runs a package's fuzz targets.
 
 A campaign copies the runtime module and the fuzz target into the tree, lets the agent
 bind every invariant and add beacon probes, builds, runs the engine-level Simplex tests,
@@ -74,12 +77,18 @@ statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 just run 
 
 | Exit code | Result |
 |---|---|
-| 0 | `NO PANIC` (the fuzzer stopped), or a `--stop-after` step finished |
+| 0 | `NO PANIC` (the fuzzer finished or you pressed Ctrl-C), or a `--stop-after` step finished |
 | 1 | usage or configuration error |
 | 2 | `SETUP FAILED`: checkout not fresh, agent failure, moved anchor, scope violation |
 | 3 | `BUILD FAILED` after 3 repair attempts |
 | 4 | `PANIC (tests)`: the test gate failed |
 | 5 | `PANIC (fuzz)`: the fuzzer found a crash |
+| 6 | `FUZZER FAILED`: the fuzz command failed without a crash, for example a failed launch |
+
+`-artifact_prefix`, `-exact_artifact_path` and the `-handle_*` flags are rejected: the
+campaign relies on libFuzzer's default crash handling and reads crashes from
+`consensus/fuzz/simplex/artifacts/simplex_statelens/`. A run refused because the checkout is
+not fresh prints its summary without touching the earlier campaign's `campaign/summary.txt`.
 
 `campaign/` holds the instrumentation plan (`plan.md`), every change the campaign made
 (`instrumentation.diff`), the logs and the rendered prompts.

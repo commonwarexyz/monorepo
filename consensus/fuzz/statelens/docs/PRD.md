@@ -6,7 +6,7 @@
 | Date | 2026-09-25 |
 | Scope | `consensus/src/simplex` (voter, batcher, resolver) |
 | Subproject root | `consensus/fuzz/statelens/` |
-| Specification | [SPEC.md](SPEC.md) |
+| Specification | [SPEC.md](../docs/SPEC.md) |
 | Reference | Wong et al., "State-Aware Fuzzing of JavaScript Engines with LLM-Guided Instrumentation" (StateLens), SOSP '26, [arXiv:2609.24550](https://arxiv.org/abs/2609.24550) |
 
 ---
@@ -126,7 +126,7 @@ PHASE 1: BUILD INVARIANTS  (repeatable, any time, committed to the repo)
 
 PHASE 2: RUN CAMPAIGN  (in place in a fresh clone of the repo; discard the clone afterwards)
 
-  operator: git clone <repo>; cd consensus/fuzz/statelens; just campaign
+  operator: git clone <repo>; cd consensus/fuzz/statelens; just fuzz
     -> materialize runtime support, fuzz target, runner hook
     -> instrumenter agent (claude|codex):
          registry invariants -> assertions + invariant probes + ghost state
@@ -150,7 +150,7 @@ consensus/fuzz/statelens/
   SPEC.md                     technical specification
   README.md                   how to run Phase 1 and Phase 2
   config.env                  defaults: agent, models, toolchains
-  justfile                    recipes: extract, campaign, check-invariants
+  justfile                    recipes: extract, fuzz, check-invariants
   .gitignore                  ignores the generated campaign/ and extract/ directories
   invariants/                 the registry: one file per invariant, all active
     INV-0001.md
@@ -280,7 +280,7 @@ R-P2-2. Steps, in order:
 6. **Test.** Run the engine-level Simplex tests of `commonware-consensus` (`simplex::tests`, including the `slow` group) on the instrumented code, together with the tests of the StateLens runtime module. The Twins tests are excluded, because they run two live engines under one replica identity. The gate is about 240 tests and takes about 2 minutes on 16 cores. Any failure stops the campaign for human investigation.
 7. **Fuzz.** Run the `simplex_statelens` target until it panics or the operator stops it.
 
-R-P2-3. The only output of a campaign is whether it panicked: one of `NO PANIC`, `PANIC (tests)`, `PANIC (fuzz)`, `BUILD FAILED`, or `SETUP FAILED`, printed with the checkout location, the first panic message, the crash artifact, and a replay command, together with the standard artifacts described in 7.8.
+R-P2-3. The only output of a campaign is whether it panicked: one of `NO PANIC`, `PANIC (tests)`, `PANIC (fuzz)`, `FUZZER FAILED` (the fuzz command failed without a crash), `BUILD FAILED`, or `SETUP FAILED`, printed with the checkout location, the first panic message, the crash artifact, and a replay command, together with the standard artifacts described in 7.8.
 
 R-P2-4. **Cryptography (decision).** StateLens fuzz targets use only the `cert_mock` certificate scheme: the mock scheme in `consensus/src/simplex/mocks/scheme.rs`, which `consensus/fuzz/core` imports as `cert_mock`. Every target instantiates the harness with a `cert_mock`-based Simplex type from `consensus/fuzz/core/src/simplex.rs`, such as `SimplexCertificateMock`. No target uses ed25519, BLS12-381, or secp256r1 schemes. A campaign refuses to materialize a target that breaks this rule. The rule covers fuzz targets only; the test gate (R-P2-2 step 6) runs the engine-level tests with their own fixtures.
 
@@ -506,7 +506,7 @@ AC-7. **Determinism test.** Replaying a crashing input with `just run simplex_st
 
 ## 11. Specification
 
-[SPEC.md](SPEC.md) specifies:
+[SPEC.md](../docs/SPEC.md) specifies:
 1. the committed files and the registry format, including `templates/invariant.md` and the lint rules;
 2. the `statelens.py` commands (`lint`, `extract`, `campaign`), their configuration, and exit codes;
 3. the exact edits a campaign makes to the source tree, with their anchors;

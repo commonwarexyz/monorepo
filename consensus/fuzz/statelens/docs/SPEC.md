@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Implements | [PRD.md](PRD.md) |
+| Implements | [PRD.md](../statelens/docs/PRD.md) |
 | Audience | The coding agent that implements `consensus/fuzz/statelens/`, and fuzz operators |
 | Verified against | commits `7cb6a3d583` and `2e56fa856e` (see section 1.2) |
 
@@ -299,8 +299,8 @@ set positional-arguments := true
 extract *args:
     python3 scripts/statelens.py extract "$@"
 
-# Instrument this checkout, test and fuzz: just campaign [--agent A] [-- <libFuzzer args>]
-campaign *args:
+# Run a campaign (instrument this checkout, test, fuzz): just fuzz [--agent A] [-- <libFuzzer args>]
+fuzz *args:
     python3 scripts/statelens.py campaign "$@"
 
 # Check invariant files: just check-invariants [path...]
@@ -318,7 +318,7 @@ prefixed with `statelens:`.
 |---|---|---|
 | `lint` | `lint [PATH...]` | 0 clean, 3 problems |
 | `extract` | `extract [--agent A] KIND SOURCE...` | 0 done (including zero files), 1 usage, 2 agent failed, 3 lint problems |
-| `campaign` | `campaign [--agent A] [--stop-after STEP] [-- LIBFUZZER_ARGS...]` | 0 no panic, 1 usage, 2 setup or agent failure (including a checkout that is not fresh), 3 build failed, 4 test gate failed, 5 fuzzer crash |
+| `campaign` | `campaign [--agent A] [--stop-after STEP] [-- LIBFUZZER_ARGS...]` | 0 no panic, 1 usage (including `-artifact_prefix`, `-exact_artifact_path` or a `-handle_*` flag among `LIBFUZZER_ARGS`), 2 setup or agent failure (including a missing tool or a checkout that is not fresh), 3 build failed, 4 test gate failed, 5 fuzzer crash, 6 fuzz command failed without a crash |
 
 `--stop-after` accepts `materialize`, `instrument`, `build` or `test`. It exists for
 development and acceptance testing and is not a campaign parameter in the PRD sense. A
@@ -351,7 +351,9 @@ the repository root, which is the agent's working directory.
 2. Record the content hash of every file in `SL/invariants/`.
 3. Compute `NEXT_ID` (section 4.1).
 4. For `paper`, convert each local `.pdf` source (ignoring a `#...` suffix) to text in
-   `SL/extract/papers/<stem>.txt` with `pdftotext -layout`, falling back to `pypdf`. When
+   `SL/extract/papers/<stem>-<digest>.txt`, where `<digest>` is the first 10 hex digits of
+   the SHA-256 of the resolved path, so papers with the same file name do not overwrite
+   each other. Convert with `pdftotext -layout`, falling back to `pypdf`. When
    neither is available, pass the PDF as is. List the text next to the source.
 5. Render the prompt: `prompts/analyst.md`, a blank line, then `prompts/analyst-<KIND>.md`.
    Placeholders: `KIND`, `NEXT_ID`, `AUTHOR` (`claude` or `claude/<model>`, and likewise
@@ -375,8 +377,10 @@ the repository root, which is the agent's working directory.
 A campaign runs in place in the checkout (D10); `repo` is its root
 (`git rev-parse --show-toplevel`). StateLens never makes another clone.
 
-1. Check the preconditions, in this order. Each failure exits with code 2 and a message
-   that asks for a fresh clone:
+1. Check the preconditions, in this order. Each failure exits with code 2; the last two
+   ask for a fresh clone:
+   - `cargo`, `cargo-nextest`, `cargo-fuzz` and `just` are on `PATH` (the agent CLI is
+     checked before), so a missing tool fails before any agent time is spent;
    - neither `consensus/src/simplex/statelens.rs` nor
      `consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs` exists (an earlier
      campaign already instrumented this checkout);
@@ -405,8 +409,9 @@ A campaign runs in place in the checkout (D10); `repo` is its root
 ~~~
 
 All steps run with working directory `repo` unless stated otherwise. The campaign never
-commits, stages, stashes or resets anything, apart from the `git add --intent-to-add` of
-section 7.2.
+commits, stages, stashes or resets anything, apart from `git add --intent-to-add` on the
+files the campaign creates (section 7.2) and on the files its agents create under
+`consensus/src/simplex/` (section 7.5).
 
 ### 7.2 Step 1: materialize
 
@@ -477,9 +482,11 @@ blank line, then `prompts/instrument-beacons.md`. Placeholders: `BASE`, `PLAN`, 
      updates for the new `sancov` dependency;
    - under `consensus/src/simplex/mocks/` or `consensus/src/simplex/scheme/` produces a
      warning.
-4. Count the deleted lines under `consensus/src/simplex/` (`git diff --numstat`), the
-   added `sl_assert!`, `sl_implies!` and `sl_probe!` call sites, and the beacon table
-   rows.
+4. Run `git add --intent-to-add` on every untracked file under `consensus/src/simplex/`
+   (files the agents created; no content is staged), so that `git diff` and the counts
+   include them. Then count the deleted lines under `consensus/src/simplex/`
+   (`git diff --numstat`), the added `sl_assert!`, `sl_implies!` and `sl_probe!` call
+   sites, and the beacon table rows.
 5. Append a `## Summary` section to the plan with the status counts, call-site counts,
    beacon count and deleted-line count. Deleted lines are expected to be 0; any other
    value must match the "Edited lines" entries of the plan.
@@ -525,15 +532,35 @@ NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
 - Tee the output to `SL/campaign/logs/fuzz.log`.
 - While the fuzzer runs, the script ignores `SIGINT`. The fuzzer receives Ctrl-C itself
   and exits, and then the script writes the summary.
-- Any new file in `consensus/fuzz/simplex/artifacts/simplex_statelens/` means a crash:
-  result `PANIC (fuzz)`, exit code 5. Otherwise the result is `NO PANIC`, exit code 0.
+- If the fuzz command cannot be started, the result is `FUZZER FAILED`, exit code 6.
+- Otherwise the result combines the exit code with the evidence. The target's output
+  starts at cargo fuzz's ``Running `...` `` line or libFuzzer's first `INFO: Running with`
+  or `INFO: Seed:` line; crash evidence only counts from there on, so build output (such
+  as a panicking build script) is never taken for a crash. In this order:
+  1. A crash, result `PANIC (fuzz)` and exit code 5: a new or rewritten file (by
+     modification time) in `consensus/fuzz/simplex/artifacts/simplex_statelens/`, or, in
+     the target's output, a `Test unit written to` line, a libFuzzer `ERROR:` or
+     `SUMMARY:` line, a `[statelens][` line, or a Rust `panicked at` line. The artifact is
+     the path the log names, else the changed file.
+  2. Otherwise, exit code 0 of the fuzz command: result `NO PANIC`, exit code 0.
+  3. Otherwise, a `libFuzzer: run interrupted` line, or an exit caused by SIGINT (the
+     operator pressed Ctrl-C): result `NO PANIC`, exit code 0, reason "stopped by the
+     operator".
+  4. Otherwise: result `FUZZER FAILED`, exit code 6. The fuzz command failed without a
+     crash, for example a failed build.
+- `-artifact_prefix`, `-exact_artifact_path` and every `-handle_*` flag are rejected with
+  a usage error (exit code 1). The first two would move crash artifacts out of the
+  directory the result is read from; the `-handle_*` switches stop libFuzzer from reporting
+  a crash and saving the input that caused it.
 - The operator MAY pass `-fork=<N>` among `LIBFUZZER_ARGS` to use N cores. libFuzzer's
   fork mode also stops at the first crash.
 
 ### 7.9 Result reporting
 
-`SL/campaign/summary.txt` and the console end with these lines (omit those that do not
-apply):
+The console, and `SL/campaign/summary.txt` for a campaign that passed its preconditions,
+end with these lines (omit those that do not apply). A run refused by the preconditions
+prints its summary to the console only, so it cannot overwrite the summary of the
+campaign that instrumented the checkout:
 
 ~~~
 statelens: checkout   <repo>
@@ -541,7 +568,7 @@ statelens: base       <base>
 statelens: agent      <agent>
 statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
 statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
-statelens: result     NO PANIC | PANIC (tests) | PANIC (fuzz) | BUILD FAILED | SETUP FAILED
+statelens: result     NO PANIC | PANIC (tests) | PANIC (fuzz) | FUZZER FAILED | BUILD FAILED | SETUP FAILED
 statelens: reason     <why the campaign stopped, for any result other than NO PANIC>
 statelens: panic      <first [statelens][...] line, or the first panic message>
 statelens: artifact   consensus/fuzz/simplex/artifacts/simplex_statelens/<file>
@@ -1156,9 +1183,9 @@ Last lines of its output:
 |---|---|---|
 | AC-1 | For each agent: `just extract issue <URL of a real Simplex bug>`. | At least one new `invariants/INV-*.md`; `just check-invariants` reports no problem for it. |
 | AC-2 | On `main` with the subproject committed: `git ls-files consensus/fuzz/statelens` contains no `Cargo.toml`; `just check-fmt`; `just lint`; `just test -p commonware-consensus`; the CI fuzz target listing for `consensus/fuzz/simplex`. | All behave exactly as without the subproject. |
-| AC-3 | With at least one invariant: `just campaign`. | Materialize, instrument, plan, build and test gate complete, and the fuzzer starts. |
+| AC-3 | With at least one invariant: `just fuzz`. | Materialize, instrument, plan, build and test gate complete, and the fuzzer starts. |
 | AC-4 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 8.3). |
-| AC-5 | `STATELENS_FALSE_INVARIANTS=1 just campaign`. | Result `PANIC (tests)` or `PANIC (fuzz)` with `[statelens][FALSE-0001]`. |
+| AC-5 | `STATELENS_FALSE_INVARIANTS=1 just fuzz`. | Result `PANIC (tests)` or `PANIC (fuzz)` with `[statelens][FALSE-0001]`. |
 | AC-6 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_statelens -- -max_total_time=120`, then the same without the variable. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
 | AC-7 | `just run simplex_statelens <artifact>` in the checkout of a crashing campaign. | The same `[statelens][...]` line as in the campaign. Verified for `BYZANTINE` (section 1.2). |
 | R-NF-3 | Same duration and flags: `simplex_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
@@ -1178,7 +1205,7 @@ Last lines of its output:
    materialize step and `--stop-after materialize`.
 4. Write `README.md` (Appendix D).
 5. Validate: `just check-invariants false-invariants/FALSE-0001.md`;
-   `STATELENS_FALSE_INVARIANTS=1 just campaign --stop-after build`; then AC-1 to AC-7.
+   `STATELENS_FALSE_INVARIANTS=1 just fuzz --stop-after build`; then AC-1 to AC-7.
 6. Change nothing outside `consensus/fuzz/statelens/`.
 
 ---
@@ -1858,8 +1885,9 @@ Workflow test, see SPEC.md section 13.
 4. Phase 1: `just extract <kind> <source>...` with one example per kind, then review:
    every file in `invariants/` is used by the next campaign; edit or delete drafts;
    `just check-invariants`.
-5. Phase 2: `just campaign`, `STATELENS_AGENT=codex just campaign`, passing libFuzzer
-   arguments (`python3 scripts/statelens.py campaign -- -fork=8`), `--stop-after`.
+5. Phase 2: `just fuzz`, `just fuzz --agent codex`, passing libFuzzer arguments
+   (`just fuzz -- -fork=8`), `--stop-after`. Note that `just fuzz` in `consensus/fuzz/`
+   or at the repository root is the existing recipe that runs a package's fuzz targets.
 6. Results: the summary lines, exit codes, and `campaign/` (plan, diff, logs, prompts).
 7. Investigating a panic (section 7.10).
 8. Testing the workflow itself: `STATELENS_FALSE_INVARIANTS=1` (the campaign must panic on

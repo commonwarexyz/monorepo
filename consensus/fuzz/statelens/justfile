@@ -6,8 +6,8 @@ set positional-arguments := true
 extract *args:
     python3 scripts/statelens.py extract "$@"
 
-# Instrument this checkout, test and fuzz: just campaign [--agent A] [-- <libFuzzer args>]
-campaign *args:
+# Run a campaign (instrument this checkout, test, fuzz): just fuzz [--agent A] [-- <libFuzzer args>]
+fuzz *args:
     python3 scripts/statelens.py campaign "$@"
 
 # Check invariant files: just check-invariants [path...]
