@@ -62,6 +62,23 @@
 //! let (db, _) = db.apply_batch(a2).await?;   // OK -- includes a1
 //! assert!(db.validate_batch(&b2).is_err());  // StaleBatch
 //! ```
+//!
+//! ```ignore
+//! // 6. Keep the floor fixed for a batch with no pops, or move it one entry at a time.
+//! let batch = db.new_batch().with_manual_floor().write(key, Some(value));
+//! let merkleized = batch.merkleize(&db, None).await?;
+//! let (db, _) = db.apply_batch(merkleized).await?;
+//!
+//! let (mut batch, popped) = db.new_batch().pop_floor(&db).await?;
+//! if let Some(entry) = popped {
+//!     if entry.active {
+//!         let operation::Operation::Update(update) = entry.operation else { unreachable!() };
+//!         batch = batch.write(update.key().clone(), Some(update.into_value()));
+//!     }
+//! }
+//! let merkleized = batch.merkleize(&db, None).await?;
+//! let (db, _) = db.apply_batch(merkleized).await?;
+//! ```
 
 use crate::{
     Context,
@@ -1671,9 +1688,509 @@ pub(crate) mod test {
     test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_start_sync_recovery, "WARN");
     test_for_all_variants!(with_reopen: test_any_db_prune_after_unsynced_floor_recovery, "WARN");
+    test_for_all_variants!(with_make_value: test_any_pop_floor_manual_zero_steps, "WARN");
+    test_for_all_variants!(with_reopen: test_any_pop_floor_reinsert_and_recover, "WARN");
     with_mmr_variants!(
         test_for_variant!(with_cap: test_any_db_bounded_initialization_recovery, "WARN")
     );
+
+    /// A manual batch with mutations but no pops must not move unrelated live keys.
+    pub(crate) async fn test_any_pop_floor_manual_zero_steps<F: Family, D>(
+        _context: Context,
+        db: D,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+    {
+        let mut batch = db.new_batch().with_manual_floor();
+        for i in 0..4 {
+            batch = batch.write(to_digest(i), Some(make_value(i)));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        let floor = db.inactivity_floor_loc();
+
+        let batch = db
+            .new_batch()
+            .with_manual_floor()
+            .write(to_digest(0), Some(make_value(100)))
+            .write(to_digest(1), None)
+            .write(to_digest(4), Some(make_value(4)));
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+
+        assert_eq!(db.inactivity_floor_loc(), floor);
+        for (key, expected) in [
+            (0, Some(make_value(100))),
+            (1, None),
+            (2, Some(make_value(2))),
+            (3, Some(make_value(3))),
+            (4, Some(make_value(4))),
+        ] {
+            assert_eq!(db.get(&to_digest(key)).await.unwrap(), expected);
+        }
+        db.destroy().await.unwrap();
+    }
+
+    /// Pops traverse each operation in the original prefix once, including inactive entries.
+    pub(crate) async fn test_any_pop_floor_reinsert_and_recover<F: Family, D>(
+        context: Context,
+        db: D,
+        reopen_db: impl Fn(Context) -> Pin<Box<dyn Future<Output = D> + Send>>,
+        make_value: impl Fn(u64) -> Digest,
+    ) where
+        D: DbAny<F, Key = Digest, Value = Digest, Digest = Digest>,
+    {
+        let mut original: Vec<_> = (0..4).map(|i| (to_digest(i), make_value(i))).collect();
+        original.sort_by_key(|(key, _)| *key);
+        let mut seed = db.new_batch().with_manual_floor();
+        for &(key, value) in &original {
+            seed = seed.write(key, Some(value));
+        }
+        let seed = seed.merkleize(&db, None).await.unwrap();
+        let (db, range) = db.apply_batch(seed).await.unwrap();
+        let floor = db.inactivity_floor_loc();
+
+        // All entries were created together in an empty DB. Both variants emit creates in
+        // key order, so their expected locations follow from the applied operation range.
+        let original: Vec<_> = original
+            .into_iter()
+            .enumerate()
+            .map(|(i, (key, value))| (range.start + i as u64, key, value))
+            .collect();
+
+        let mut batch = db
+            .new_batch()
+            .write(original[1].1, Some(make_value(101)))
+            .write(original[2].1, None)
+            .write(to_digest(4), Some(make_value(4)));
+        let mut location = floor;
+        while location < range.end {
+            let (next, popped) = batch.pop_floor(&db).await.unwrap();
+            let popped = popped.expect("one operation per location before the original tip");
+            assert_eq!(popped.location, location);
+            let expected = original.iter().find(|(loc, _, _)| *loc == location);
+            match (popped.operation, expected) {
+                (Operation::Update(update), Some((_, key, value))) => {
+                    assert_eq!(operation::Update::key(&update), key);
+                    assert_eq!(operation::Update::value(&update), value);
+                    let active = *key == original[0].1 || *key == original[3].1;
+                    assert_eq!(popped.active, active);
+                    batch = if *key == original[0].1 {
+                        next.write(
+                            *operation::Update::key(&update),
+                            Some(operation::Update::into_value(update)),
+                        )
+                    } else {
+                        next
+                    };
+                }
+                (Operation::CommitFloor(_, _), None) => {
+                    assert!(!popped.active);
+                    batch = next;
+                }
+                _ => panic!("unexpected operation at {location}"),
+            }
+            location += 1;
+        }
+        let (next, exhausted) = batch.pop_floor(&db).await.unwrap();
+        assert!(exhausted.is_none(), "None only at the original tip");
+        let (batch, exhausted) = next.pop_floor(&db).await.unwrap();
+        assert!(
+            exhausted.is_none(),
+            "reinserts are outside the original tip"
+        );
+
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        let (db, _) = db.apply_batch(merkleized).await.unwrap();
+        assert!(db.inactivity_floor_loc() > floor);
+        let expected = [
+            (original[0].1, Some(original[0].2)),
+            (original[1].1, Some(make_value(101))),
+            (original[2].1, None),
+            (original[3].1, None),
+            (to_digest(4), Some(make_value(4))),
+        ];
+        for (key, value) in expected {
+            assert_eq!(db.get(&key).await.unwrap(), value);
+        }
+
+        let db = db.commit().await.unwrap();
+        let root = db.root();
+        let size = db.size();
+        let floor = db.inactivity_floor_loc();
+        drop(db);
+
+        let db = reopen_db(context.child("reopen_after_commit")).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.size(), size);
+        assert_eq!(db.inactivity_floor_loc(), floor);
+        for (key, value) in expected {
+            assert_eq!(db.get(&key).await.unwrap(), value);
+        }
+
+        let db = db.sync().await.unwrap();
+        let boundary = db.sync_boundary();
+        let db = db.prune(boundary).await.unwrap();
+        let root = db.root();
+        let size = db.size();
+        let floor = db.inactivity_floor_loc();
+        drop(db);
+
+        let db = reopen_db(context.child("reopen_after_pop")).await;
+        assert_eq!(db.root(), root);
+        assert_eq!(db.size(), size);
+        assert_eq!(db.inactivity_floor_loc(), floor);
+        for (key, value) in expected {
+            assert_eq!(db.get(&key).await.unwrap(), value);
+        }
+        db.destroy().await.unwrap();
+    }
+
+    /// Child pops include speculative ancestor writes and reject a stale sibling.
+    #[test_traced("INFO")]
+    fn test_any_pop_floor_speculative_ancestors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pop-chain", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let seeded = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(0), Some(val(0)))
+                .write(key(1), Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (mut db, seed_range) = db.apply_batch(seeded).await.unwrap();
+            let original_db_size = db.size();
+            let floor = db.inactivity_floor_loc();
+
+            let parent = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(0), Some(val(100)))
+                .write(key(2), Some(val(2)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (parent_start, parent_operations) = parent.operations();
+            let tip = parent_start + parent_operations.len() as u64;
+            let mut child = parent.new_batch::<Sha256>();
+            let mut seen = Vec::new();
+            let mut location = floor;
+            while location < tip {
+                let (next, popped) = child.pop_floor(&db).await.unwrap();
+                let popped = popped.expect("every original location yields an operation");
+                assert_eq!(popped.location, location);
+                match popped.operation {
+                    Operation::Update(update) => {
+                        let k = operation::Update::key(&update);
+                        let expected = if location < seed_range.end {
+                            if *k == key(0) { val(0) } else { val(1) }
+                        } else if *k == key(0) {
+                            val(100)
+                        } else {
+                            assert_eq!(*k, key(2));
+                            val(2)
+                        };
+                        assert_eq!(*operation::Update::value(&update), expected);
+                        let active = location >= original_db_size || *k == key(1);
+                        assert_eq!(popped.active, active);
+                        if active {
+                            assert!(!seen.contains(k));
+                            seen.push(*k);
+                        }
+                        child = if active && *k != key(1) {
+                            next.write(*k, Some(operation::Update::into_value(update)))
+                        } else {
+                            next
+                        };
+                    }
+                    Operation::CommitFloor(_, _) => {
+                        assert!(!popped.active);
+                        child = next;
+                    }
+                    Operation::Delete(_) => panic!("no delete was seeded"),
+                }
+                if location == floor {
+                    (db, _) = db.apply_batch(parent.clone()).await.unwrap();
+                }
+                location += 1;
+            }
+            assert_eq!(seen.len(), 3);
+            let (child, exhausted) = child.pop_floor(&db).await.unwrap();
+            assert!(exhausted.is_none());
+            let mut sibling = parent.new_batch::<Sha256>();
+            for _ in *floor..*tip {
+                let (next, popped) = sibling.pop_floor(&db).await.unwrap();
+                assert!(popped.is_some());
+                sibling = next;
+            }
+            let (sibling, exhausted) = sibling.pop_floor(&db).await.unwrap();
+            assert!(exhausted.is_none());
+            let child = child.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(child).await.unwrap();
+
+            assert!(matches!(
+                sibling.pop_floor(&db).await,
+                Err(crate::qmdb::Error::StaleBatch)
+            ));
+            assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(100)));
+            assert_eq!(db.get(&key(1)).await.unwrap(), None);
+            assert_eq!(db.get(&key(2)).await.unwrap(), Some(val(2)));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Eviction records a delete, including when it empties the database.
+    #[test_traced("INFO")]
+    fn test_any_pop_floor_last_key_emits_delete() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pop-last", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+
+            let seed = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(0), Some(val(0)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(seed).await.unwrap();
+            let mut batch = db.new_batch();
+            let mut active_count = 0;
+            for location in *db.inactivity_floor_loc()..*db.size() {
+                let (next, popped) = batch.pop_floor(&db).await.unwrap();
+                let popped = popped.expect("an operation exists before the original tip");
+                assert_eq!(*popped.location, location);
+                if popped.active {
+                    let Operation::Update(update) = popped.operation else {
+                        panic!("only an update can be active");
+                    };
+                    assert_eq!(operation::Update::key(&update), &key(0));
+                    assert_eq!(operation::Update::value(&update), &val(0));
+                    active_count += 1;
+                } else {
+                    assert!(matches!(popped.operation, Operation::CommitFloor(_, _)));
+                }
+                batch = next;
+            }
+            assert_eq!(active_count, 1);
+            let (batch, exhausted) = batch.pop_floor(&db).await.unwrap();
+            assert!(exhausted.is_none());
+
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (start, operations) = merkleized.operations();
+            assert!(operations.iter().any(|operation| {
+                matches!(operation, operation::Operation::Delete(deleted) if *deleted == key(0))
+            }));
+            let commit_location = start + (operations.len() as u64 - 1);
+            assert!(matches!(
+                operations.last(),
+                Some(operation::Operation::CommitFloor(None, floor)) if *floor == commit_location
+            ));
+
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.get(&key(0)).await.unwrap(), None);
+            assert_eq!(db.inactivity_floor_loc(), commit_location);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// Each call consumes one old log position, even across updates, deletes, and commits.
+    #[test_traced("INFO")]
+    fn test_any_pop_floor_returns_inactive_operations_before_later_live_update() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pop-operations", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+            let floor = db.inactivity_floor_loc();
+            let first = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(0), Some(val(0)))
+                .write(key(3), Some(val(3)))
+                .merkleize(&db, Some(val(10)))
+                .await
+                .unwrap();
+            let (db, first) = db.apply_batch(first).await.unwrap();
+            let second = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(0), None)
+                .merkleize(&db, Some(val(11)))
+                .await
+                .unwrap();
+            let (db, second) = db.apply_batch(second).await.unwrap();
+            let third = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(1), Some(val(1)))
+                .merkleize(&db, Some(val(12)))
+                .await
+                .unwrap();
+            let (db, third) = db.apply_batch(third).await.unwrap();
+            let fourth = db
+                .new_batch()
+                .with_manual_floor()
+                .write(key(2), Some(val(2)))
+                .merkleize(&db, Some(val(13)))
+                .await
+                .unwrap();
+            let (db, fourth) = db.apply_batch(fourth).await.unwrap();
+            assert_eq!(*first.end - *first.start, 3);
+            assert_eq!(*second.end - *second.start, 2);
+            assert_eq!(*third.end - *third.start, 2);
+            assert_eq!(*fourth.end - *fourth.start, 2);
+            assert_eq!(first.end, second.start);
+            assert_eq!(second.end, third.start);
+            assert_eq!(third.end, fourth.start);
+
+            enum Expected {
+                Update(u64, bool),
+                Delete(u64),
+                Commit(Option<u64>),
+            }
+            let mut expected = Vec::new();
+            if floor < first.start {
+                assert_eq!(first.start, floor + 1);
+                expected.push((floor, Expected::Commit(None)));
+            }
+            let mut first_keys = [0, 3];
+            first_keys.sort_by_key(|&k| key(k));
+            expected.extend([
+                (
+                    first.start,
+                    Expected::Update(first_keys[0], first_keys[0] == 3),
+                ),
+                (
+                    first.start + 1,
+                    Expected::Update(first_keys[1], first_keys[1] == 3),
+                ),
+                (first.start + 2, Expected::Commit(Some(10))),
+                (second.start, Expected::Delete(0)),
+                (second.start + 1, Expected::Commit(Some(11))),
+                (third.start, Expected::Update(1, true)),
+                (third.start + 1, Expected::Commit(Some(12))),
+                (fourth.start, Expected::Update(2, true)),
+                (fourth.start + 1, Expected::Commit(Some(13))),
+            ]);
+
+            let mut batch = db.new_batch();
+            for (location, expected) in expected {
+                let (next, popped) = batch.pop_floor(&db).await.unwrap();
+                let popped = popped.expect("inactive operations are still returned");
+                assert_eq!(popped.location, location);
+                match (popped.operation, expected) {
+                    (Operation::Update(update), Expected::Update(k, active)) => {
+                        assert_eq!(*operation::Update::key(&update), key(k));
+                        assert_eq!(*operation::Update::value(&update), val(k));
+                        assert_eq!(popped.active, active);
+                    }
+                    (Operation::Delete(deleted), Expected::Delete(k)) => {
+                        assert_eq!(deleted, key(k));
+                        assert!(!popped.active);
+                    }
+                    (Operation::CommitFloor(value, _), Expected::Commit(metadata)) => {
+                        assert_eq!(value, metadata.map(val));
+                        assert!(!popped.active);
+                    }
+                    _ => panic!("wrong operation payload at {location}"),
+                }
+                batch = next;
+            }
+            let (batch, exhausted) = batch.pop_floor(&db).await.unwrap();
+            assert!(exhausted.is_none(), "None only after the original tip");
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.get(&key(0)).await.unwrap(), None);
+            assert_eq!(db.get(&key(1)).await.unwrap(), None);
+            assert_eq!(db.get(&key(2)).await.unwrap(), None);
+            assert_eq!(db.get(&key(3)).await.unwrap(), None);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    /// A bounded scan may commit after an inactive update without evicting the next live key.
+    #[test_traced("INFO")]
+    fn test_any_pop_floor_budget_stops_before_live_update() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("pop-budget", &ctx),
+                None,
+            )
+            .await
+            .unwrap();
+            let mut keys = [key(0), key(1)];
+            keys.sort();
+            let seed = db
+                .new_batch()
+                .with_manual_floor()
+                .write(keys[0], Some(val(0)))
+                .write(keys[1], Some(val(1)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, seed_range) = db.apply_batch(seed).await.unwrap();
+            let deleted = db
+                .new_batch()
+                .with_manual_floor()
+                .write(keys[0], None)
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(deleted).await.unwrap();
+
+            let mut batch = db.new_batch();
+            for location in *db.inactivity_floor_loc()..=*seed_range.start {
+                let (next, entry) = batch.pop_floor(&db).await.unwrap();
+                let entry = entry.expect("inactive positions precede the live update");
+                assert_eq!(*entry.location, location);
+                assert!(!entry.active);
+                if entry.location == seed_range.start {
+                    let Operation::Update(update) = entry.operation else {
+                        panic!("the deleted key was previously updated");
+                    };
+                    assert_eq!(operation::Update::key(&update), &keys[0]);
+                    assert_eq!(operation::Update::value(&update), &val(0));
+                }
+                batch = next;
+            }
+            // The caller stops here: the next original location holds the still-live key.
+            let expected_floor = seed_range.start + 1;
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            let (db, _) = db.apply_batch(merkleized).await.unwrap();
+            assert_eq!(db.inactivity_floor_loc(), expected_floor);
+            assert_eq!(db.get(&keys[0]).await.unwrap(), None);
+            assert_eq!(db.get(&keys[1]).await.unwrap(), Some(val(1)));
+            db.destroy().await.unwrap();
+        });
+    }
 
     fn key(i: u64) -> Digest {
         Sha256::hash(&[&i.to_be_bytes()])
