@@ -29,7 +29,7 @@ fn immediate_body_reads_keep_request_trace() {
         assert_eq!(
             client
                 .block(first.reference())
-                .instrument(info_span!("immediate_request"))
+                .instrument(info_span!("test.immediate_request"))
                 .await
                 .unwrap()
                 .as_deref(),
@@ -40,7 +40,7 @@ fn immediate_body_reads_keep_request_trace() {
     });
     let paths = paths.0.lock();
     assert!(paths.iter().any(|path| {
-        path[0] == "multimmit.marshal.materializer.read" && path.contains(&"immediate_request")
+        path[0] == "multimmit.marshal.materializer.read" && path.contains(&"test.immediate_request")
     }));
     assert!(
         !paths
@@ -69,7 +69,7 @@ fn queued_admissions_from_one_span_link_only_distinct_spans() {
             let blocks = (0..3)
                 .map(|chain| producer_block(&committee, chain, 10 + u64::from(chain)))
                 .collect::<Vec<_>>();
-            let origin = info_span!("shared_origin");
+            let origin = info_span!("test.shared_origin");
             let custodies = async {
                 futures::future::join_all(
                     blocks

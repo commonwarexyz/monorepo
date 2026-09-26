@@ -87,7 +87,7 @@ impl<S: TracingSubscriber + for<'a> LookupSpan<'a>> Layer<S> for Traces {
     }
 
     fn on_follows_from(&self, id: &span::Id, _: &span::Id, ctx: LayerContext<'_, S>) {
-        if ctx.span(id).unwrap().metadata().name() == "filter_ambient" {
+        if ctx.span(id).unwrap().metadata().name() == "test.filter_ambient" {
             self.0.lock().ambient_links += 1;
         }
     }
@@ -109,7 +109,7 @@ fn filtered_response_spans_do_not_capture_ambient(#[case] process: bool, #[case]
             (process || metadata.name() != PROCESS) && (stage || metadata.name() != STAGE)
         }));
     tracing::subscriber::with_default(subscriber, || {
-        tracing::info_span!("filter_ambient")
+        tracing::info_span!("test.filter_ambient")
             .in_scope(fetched_block_deliveries_share_one_catalog_admission_cut);
     });
     let recorded = traces.0.lock();
@@ -134,7 +134,7 @@ fn filtered_response_spans_do_not_capture_ambient(#[case] process: bool, #[case]
     assert_eq!(admissions.len(), 1);
     assert_eq!(
         admissions[0].1,
-        Some(if stage { STAGE } else { "filter_ambient" }),
+        Some(if stage { STAGE } else { "test.filter_ambient" }),
         "catalog admission must not retain a disabled staging span's ambient context"
     );
 }
@@ -584,7 +584,8 @@ impl Harness {
             &options,
         )
         .await;
-        let (actor, bridge, mailbox) = Actor::new(&context.child(label), parts.config);
+        let child_context = context.child(label);
+        let (actor, bridge, mailbox) = Actor::new(&child_context, parts.config);
         Self {
             bridge,
             mailbox,
@@ -1313,7 +1314,8 @@ fn consumer_overflow_is_unresolved_and_closure_is_ignored() {
         )
         .await;
         parts.config.mailbox_size = NZUsize!(1);
-        let (actor, mut bridge, mailbox) = Actor::new(&context.child("backfill"), parts.config);
+        let backfill_context = context.child("backfill");
+        let (actor, mut bridge, mailbox) = Actor::new(&backfill_context, parts.config);
         assert!(
             mailbox
                 .certified_block(BlockRef::new(
