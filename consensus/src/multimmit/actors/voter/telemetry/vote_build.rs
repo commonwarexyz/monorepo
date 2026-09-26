@@ -118,7 +118,7 @@ mod tests {
     fn completed_pass_records_its_statistics_under_the_current_span() {
         let recorder = SpanRecorder::default();
         recorder.capture(|| {
-            let round = info_span!("round");
+            let round = info_span!("test.round");
             let mut trace = VoteBuildTrace::default();
             round.in_scope(|| trace.observe(vec![STARTED]));
             trace.observe(vec![VoteBuild::Completed(STATS)]);
@@ -198,7 +198,7 @@ mod tests {
     fn span_opened_before_a_poll_covers_the_pass_it_begins() {
         let recorder = SpanRecorder::default();
         recorder.capture(|| {
-            let round = info_span!("round");
+            let round = info_span!("test.round");
             let mut trace = VoteBuildTrace::default();
             // The voter opens the span before the poll, the poll begins and completes the pass,
             // and the voter observes both events after it.

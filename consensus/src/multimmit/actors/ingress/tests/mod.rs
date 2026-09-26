@@ -228,8 +228,9 @@ impl ReadyHarness {
                 observation_capacity,
             ),
         );
+        let voter_context = context.child("voter");
         let (voter, Inbox { observations, .. }) =
-            voter::Mailbox::new(&context.child("voter"), context, observation_capacity);
+            voter::Mailbox::new(&voter_context, context, observation_capacity);
         let (verifier, verifier_mailbox) = verifier(context, committee, Sequential, Sequential);
         let endpoints = voter.into_endpoints();
         actor.start(
@@ -268,8 +269,8 @@ fn stalled_ingress_worker_does_not_block_control() {
                 NonZeroUsize::MIN,
             ),
         );
-        let (voter, _inbox) =
-            voter::Mailbox::new(&context.child("voter"), &context, NonZeroUsize::MIN);
+        let voter_context = context.child("voter");
+        let (voter, _inbox) = voter::Mailbox::new(&voter_context, &context, NonZeroUsize::MIN);
         let Endpoints {
             observations,
             completions,
@@ -484,11 +485,9 @@ impl Harness {
                 NonZeroUsize::new(8).unwrap(),
             ),
         );
-        let (voter, Inbox { observations, .. }) = voter::Mailbox::new(
-            &context.child("voter"),
-            context,
-            NonZeroUsize::new(8).unwrap(),
-        );
+        let voter_context = context.child("voter");
+        let (voter, Inbox { observations, .. }) =
+            voter::Mailbox::new(&voter_context, context, NonZeroUsize::new(8).unwrap());
         let (verifier, verifier_mailbox) = verifier(context, &committee, Sequential, Sequential);
         let endpoints = voter.into_endpoints();
         actor.start(

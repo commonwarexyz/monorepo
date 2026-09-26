@@ -80,8 +80,8 @@ fn lookup_dequeue_preserves_each_caller() {
             let client = promoter.mailbox.clone();
             let reference = committee.config.genesis().tips()[0];
             let callers = [
-                tracing::info_span!("first_lookup"),
-                tracing::info_span!("second_lookup"),
+                tracing::info_span!("test.first_lookup"),
+                tracing::info_span!("test.second_lookup"),
             ];
             let first = client.block(reference).instrument(callers[0].clone());
             let second = client
@@ -194,7 +194,8 @@ pub(super) async fn stalled(context: &deterministic::Context, prefix: &'static s
         ),
     );
     let bounds = config.actor_bounds().unwrap();
-    let stores = CatalogStore::<_, _, Sha256, MinPk, _>::open(&context.child("stores"), &config)
+    let stores_context = context.child("stores");
+    let stores = CatalogStore::<_, _, Sha256, MinPk, _>::open(&stores_context, &config)
         .await
         .unwrap();
     let checkpoint = stores.checkpoint().clone();
