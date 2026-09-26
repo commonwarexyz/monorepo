@@ -60,13 +60,18 @@ stability_scope!(BETA {
 
     impl<T: Epochable + Viewable> Roundable for T {}
 
-    /// Block is the interface for a block in the blockchain.
+    /// Block is the interface for an application-defined block.
     ///
     /// Blocks must use a canonical encoding: every byte sequence `bytes` accepted by the decoder
     /// must satisfy `encode(decode(bytes)) == bytes`. Decoders must reject alternate encodings of
     /// the same block.
+    ///
+    /// [`Digestible::digest`] identifies the block everywhere: consensus certifies it (directly or
+    /// inside a commitment), and attached services store, fetch, and deliver blocks by it. It must
+    /// therefore commit to the whole block, including its height and parent, so a block fetched by
+    /// digest cannot carry a different height or ancestry.
     pub trait Block: Heightable + Codec + Digestible + Send + Sync + 'static {
-        /// Get the parent block's digest.
+        /// Returns the parent block's canonical digest.
         fn parent(&self) -> Self::Digest;
     }
 
@@ -114,8 +119,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         0.5, 0.6, 0.7, 0.8, 0.9, 1.0,
     ];
 
-    /// Automaton is the interface responsible for driving the consensus forward by proposing new payloads
-    /// and verifying payloads proposed by other participants.
+    /// Automaton drives consensus forward by returning commitments for new application payloads and
+    /// validating commitments proposed by other participants.
     pub trait Automaton: Clone + Send + 'static {
         /// Context is metadata provided by the consensus engine associated with a given payload.
         ///
@@ -125,16 +130,16 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// Hash of an arbitrary payload.
         type Digest: Digest;
 
-        /// Generate a new payload for the given context.
+        /// Select or construct a payload for the given context and return its commitment.
         ///
         /// If it is possible to generate a payload, the Digest should be returned over the provided
         /// channel. If it is not possible to generate a payload, the channel can be dropped. If construction
         /// takes too long, the consensus engine may drop the provided proposal.
         ///
-        /// Returning a payload from `propose` commits the local proposer to verifying
+        /// Returning a commitment from `propose` commits the local proposer to verifying
         /// the same `(context, payload)`.
         ///
-        /// For [`CertifiableAutomaton`] implementations, returning a payload from
+        /// For [`CertifiableAutomaton`] implementations, returning a commitment from
         /// `propose` also commits the local proposer to certifying that same
         /// `(round, payload)` if it later becomes notarized.
         ///
@@ -224,12 +229,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         }
     }
 
-    /// Relay is the interface responsible for broadcasting payloads to the network.
+    /// Relay is the interface responsible for broadcasting items to the network.
     ///
-    /// The consensus engine is only aware of a payload's digest, not its contents. It is up
-    /// to the relay to efficiently broadcast the full payload to other participants.
+    /// The consensus engine supplies only an item's digest, never its contents. It is up to the
+    /// relay to efficiently broadcast the full item to other participants. In [`simplex`], the
+    /// item is the payload a leader proposed.
     pub trait Relay: Clone + Send + 'static {
-        /// Hash of an arbitrary payload.
+        /// Identity digest of the item to disseminate.
         type Digest: Digest;
 
         /// Identity key of a network participant.
@@ -242,8 +248,8 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// treat every broadcast identically can set this to `()`.
         type Plan: Send;
 
-        /// Broadcast a payload according to the given plan.
-        fn broadcast(&mut self, payload: Self::Digest, plan: Self::Plan) -> Feedback;
+        /// Request dissemination of the item identified by `digest`.
+        fn broadcast(&mut self, digest: Self::Digest, plan: Self::Plan) -> Feedback;
     }
 
     /// Reporter is the interface responsible for reporting activity to some external actor.
