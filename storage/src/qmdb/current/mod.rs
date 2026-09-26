@@ -460,10 +460,37 @@ where
     // prefetched concurrently with that rebuild: the reads depend only on the published log (the
     // graftable range is a function of the operation count), while the grafted leaves also need
     // the bitmap the rebuild produces, so hashing and assembly happen after.
+    //
+    // Reading a node costs page reads, checksums, and copies, so one reader task leaves the
+    // prefetch CPU-bound on a single core. Split the positions into one contiguous lane per unit
+    // of the database's configured parallelism and read each lane on its own shared-pool task.
+    // Lanes bypass the page and node caches, since every node is read once, so they share no
+    // lock. Lane order restores position order on join, and each task is guarded so cancelling
+    // init aborts it.
+    let graft_context = context.child("graft");
+    let lanes = strategy.manual().parallelism().max(1);
     let overlap = move |log: Arc<any::db::AuthenticatedLog<F, E, J, H, S>>| async move {
         let chunks = db::graft_chunk_range::<F, N>(pruned_chunks, *log.size());
         let positions = db::graft_node_positions::<F, N>(chunks);
-        Ok(log.merkle.get_nodes(&positions).await?)
+        let lane = positions.len().div_ceil(lanes).max(1);
+        let readers: Vec<_> = positions
+            .chunks(lane)
+            .map(|range| {
+                let range = range.to_vec();
+                let log = log.clone();
+                graft_context
+                    .child("graft_reader")
+                    .shared(true)
+                    .spawn(move |_| async move { log.merkle.get_nodes_uncached(&range).await })
+                    .abort_on_drop()
+            })
+            .collect();
+
+        // Join in lane order, aborting the rest on the first failure so no reader outlives a
+        // failed init.
+        let lanes =
+            commonware_runtime::AbortOnDrop::join_all::<crate::qmdb::Error<F>>(readers).await?;
+        Ok(lanes.into_iter().flatten().collect())
     };
     let (any, node_digests) = any::init_with_bitmap(
         context.child("any"),
