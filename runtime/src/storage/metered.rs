@@ -312,6 +312,10 @@ mod tests {
             }
             .instrument(parent)
             .await;
+
+            // Record into another span so the hook above runs and would catch a parent write.
+            let probe = tracing::info_span!("test.probe", value = tracing::field::Empty);
+            probe.record("value", 1_u64);
         }
         .with_subscriber(subscriber)
         .await;
