@@ -503,7 +503,8 @@ mod tests {
             let started = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
             let now = started + Duration::from_secs(2);
             tracing::subscriber::with_default(subscriber, || {
-                let mut quiet = ProposalLatency::new(&runtime.child("quiet"), NZUsize!(1), None);
+                let quiet_context = runtime.child("quiet");
+                let mut quiet = ProposalLatency::new(&quiet_context, NZUsize!(1), None);
                 quiet.start(
                     reference(0, 1),
                     parent(reference(0, 1)),
