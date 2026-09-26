@@ -282,17 +282,19 @@ where
     base: Base<F, H::Digest, U, S>,
 }
 
-/// A live entry evicted by [`UnmerkleizedBatch::pop_floor`].
-///
-/// Write its key and value back to the batch to preserve it at a new location. Ordered
-/// databases regenerate its successor link from the final key set.
-pub struct Evicted<F: Family, K, V> {
-    /// The location of the evicted update.
+/// An operation visited by [`UnmerkleizedBatch::pop_floor`].
+pub struct FloorEntry<F: Family, U: update::Update> {
+    /// The operation's original location.
     pub location: Location<F>,
-    /// The evicted key.
-    pub key: K,
-    /// The value associated with the key before eviction.
-    pub value: V,
+    /// The operation at this location, including inactive updates, deletes, and commits.
+    pub operation: Operation<F, U>,
+    /// Whether this was a live update immediately before the step.
+    ///
+    /// Pending writes or deletions make an update inactive. Deletes and commits are always
+    /// inactive for floor raising, including the previous commit that the new commit replaces.
+    /// An active update is evicted; write its key and value back to preserve it at the tip.
+    /// Ordered databases regenerate its successor link from the final key set.
+    pub active: bool,
 }
 
 /// Pending mutations whose old locations were already resolved by staged reads, sorted
@@ -1785,27 +1787,29 @@ where
         self
     }
 
-    /// Evict the next live entry in location order and advance the floor past it.
+    /// Advance the floor by one operation, evicting it if it is a live update.
     ///
-    /// Skips inactive operations and keys already written or deleted in this batch. The scan
-    /// stops at the batch's original tip: new writes and reinserted entries cannot be popped
-    /// again in the same batch. Returns `None` after advancing through the remaining prefix.
+    /// Returns the batch and the operation's location, payload, and activity before the step.
+    /// Inactive operations are returned without changing any key. The scan stops at the batch's
+    /// original tip: new writes and reinserted entries cannot be popped again in the same batch.
+    /// Returns `None` at that tip, without advancing the floor.
     ///
     /// Calling this method selects [`Self::with_manual_floor`], even when it returns `None`.
-    /// Merkleization performs no additional automatic floor raise. Eviction records a deletion;
-    /// write the returned key and value back to preserve the entry, or write a replacement value.
-    /// Changes remain speculative until the batch is applied.
+    /// Merkleization performs no additional automatic moves; an empty final state sets the floor
+    /// to the new commit location. Eviction records a deletion; write an active update's key and
+    /// value back to preserve it, or write a replacement value. Changes remain speculative until
+    /// the batch is applied.
     ///
     /// # Errors
     ///
     /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
-    /// Reading an entry can also return a journal error. Cancellation or an error consumes
+    /// Reading an operation can also return a journal error. Cancellation or an error consumes
     /// the batch without modifying `db`.
     #[allow(clippy::type_complexity)]
     pub async fn pop_floor<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Self, Option<Evicted<F, U::Key, U::Value>>), crate::qmdb::Error<F>>
+    ) -> Result<(Self, Option<FloorEntry<F, U>>), crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -1813,55 +1817,42 @@ where
     {
         let ancestors = self.validate_commitment(db.commitment())?;
         let mut batch = self.with_manual_floor();
-        let mut floor = batch.manual_floor.expect("manual floor selected");
+        let location = batch.manual_floor.expect("manual floor selected");
         let tip = batch.base.base_state().size;
-        let db_size = db.log.size();
-        let mut candidates = Vec::with_capacity(1);
-        while floor < tip {
-            candidates.clear();
-            let next = fill_candidates(&db.bitmap, floor, *tip, 1, &mut candidates);
-            let Some(&location) = candidates.first() else {
-                floor = tip;
-                break;
-            };
-            floor = next;
-            let op = if location < db_size {
-                db.log.read(*location).await?
-            } else {
-                read_op_from_ancestors(&ancestors, *location, *db_size).clone()
-            };
-            let Operation::Update(update) = op else {
-                continue;
-            };
-            let key = update::Update::key(&update);
-            if batch.mutations.contains_key(key) {
-                continue;
-            }
-            let active = resolve_in_ancestors(&ancestors, key).map_or_else(
-                || db.snapshot.get(key).any(|&loc| loc == location),
-                |entry| entry.loc() == Some(location),
-            );
-            if !active {
-                continue;
-            }
-            let key = key.clone();
-            let value = update::Update::into_value(update);
-            batch.mutations.insert(key.clone(), None);
-            batch.manual_floor = Some(floor);
-            // Ancestors must remain alive until every operation read has completed.
-            drop(ancestors);
-            return Ok((
-                batch,
-                Some(Evicted {
-                    location,
-                    key,
-                    value,
-                }),
-            ));
+        if location >= tip {
+            return Ok((batch, None));
         }
-        batch.manual_floor = Some(floor);
+        let db_size = db.log.size();
+        let operation = if location < db_size {
+            db.log.read(*location).await?
+        } else {
+            read_op_from_ancestors(&ancestors, *location, *db_size).clone()
+        };
+        let active = if let Operation::Update(update) = &operation {
+            let key = update::Update::key(update);
+            let active = !batch.mutations.contains_key(key)
+                && resolve_in_ancestors(&ancestors, key).map_or_else(
+                    || db.snapshot.get(key).any(|&loc| loc == location),
+                    |entry| entry.loc() == Some(location),
+                );
+            if active {
+                batch.mutations.insert(key.clone(), None);
+            }
+            active
+        } else {
+            false
+        };
+        batch.manual_floor = Some(location + 1);
+        // Ancestors must remain alive until every operation read has completed.
         drop(ancestors);
-        Ok((batch, None))
+        Ok((
+            batch,
+            Some(FloorEntry {
+                location,
+                operation,
+                active,
+            }),
+        ))
     }
 
     /// Validate that `current` is a state on this batch's live chain, returning strong ancestor
@@ -3366,6 +3357,7 @@ mod trait_impls {
         type V = V::Value;
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>;
+        type Update = update::Unordered<K, V>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
@@ -3378,7 +3370,7 @@ mod trait_impls {
         async fn pop_floor(
             self,
             db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        ) -> Result<(Self, Option<Evicted<F, K, V::Value>>), crate::qmdb::Error<F>> {
+        ) -> Result<(Self, Option<FloorEntry<F, Self::Update>>), crate::qmdb::Error<F>> {
             Self::pop_floor(self, db).await
         }
 
@@ -3410,6 +3402,7 @@ mod trait_impls {
         type V = V::Value;
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>;
+        type Update = update::Ordered<K, V>;
 
         fn write(self, key: K, value: Option<V::Value>) -> Self {
             Self::write(self, key, value)
@@ -3422,7 +3415,7 @@ mod trait_impls {
         async fn pop_floor(
             self,
             db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        ) -> Result<(Self, Option<Evicted<F, K, V::Value>>), crate::qmdb::Error<F>> {
+        ) -> Result<(Self, Option<FloorEntry<F, Self::Update>>), crate::qmdb::Error<F>> {
             Self::pop_floor(self, db).await
         }
 

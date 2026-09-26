@@ -17,6 +17,7 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     type V;
     type Metadata;
     type Merkleized: MerkleizedBatch;
+    type Update: super::operation::Update<Key = Self::K, Value = Self::V>;
 
     /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
     fn write(self, key: Self::K, value: Option<Self::V>) -> Self;
@@ -24,7 +25,7 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
     /// Disable automatic floor raising for this batch.
     fn with_manual_floor(self) -> Self;
 
-    /// Evict the next live entry and select manual floor raising.
+    /// Advance by one operation, returning its activity and evicting it if active.
     #[allow(clippy::type_complexity)]
     fn pop_floor(
         self,
@@ -33,7 +34,7 @@ pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
         Output = Result<
             (
                 Self,
-                Option<super::batch::Evicted<Self::Family, Self::K, Self::V>>,
+                Option<super::batch::FloorEntry<Self::Family, Self::Update>>,
             ),
             Error<Self::Family>,
         >,

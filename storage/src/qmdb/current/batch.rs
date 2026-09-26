@@ -386,9 +386,13 @@ where
         self
     }
 
-    /// Evict the oldest active operation at the floor and return its key, value, and location.
-    /// Pending writes and reinserts remain in the batch and are not selected for eviction.
+    /// Advance the floor by one original operation and return that operation and its activity.
+    /// Active updates are removed from the batch's view; write the update's key and value back
+    /// to preserve it. Inactive updates, deletes, and commits still consume one step.
+    /// Returns `None` at the batch's original tip, excluding its new writes and reinserts.
     /// Calling this method selects manual floor advancement even when it returns `None`.
+    /// Merkleization performs no additional automatic moves; an empty final state sets the floor
+    /// to the new commit location. See [`any::batch::FloorEntry`] for activity semantics.
     ///
     /// # Errors
     ///
@@ -397,7 +401,7 @@ where
     pub async fn pop_floor<E, C, I>(
         self,
         db: &super::db::Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Self, Option<any::batch::Evicted<F, U::Key, U::Value>>), Error<F>>
+    ) -> Result<(Self, Option<any::batch::FloorEntry<F, U>>), Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -409,14 +413,14 @@ where
             grafted_parent,
             bitmap_parent,
         } = self;
-        let (inner, evicted) = inner.pop_floor(&db.any).await?;
+        let (inner, entry) = inner.pop_floor(&db.any).await?;
         Ok((
             Self {
                 inner,
                 grafted_parent,
                 bitmap_parent,
             },
-            evicted,
+            entry,
         ))
     }
 
@@ -1353,6 +1357,7 @@ mod trait_impls {
         type Family = F;
         type K = K;
         type V = V::Value;
+        type Update = update::Unordered<K, V>;
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>;
 
@@ -1367,7 +1372,7 @@ mod trait_impls {
         async fn pop_floor(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        ) -> Result<(Self, Option<any::batch::Evicted<F, K, V::Value>>), Error<F>> {
+        ) -> Result<(Self, Option<any::batch::FloorEntry<F, Self::Update>>), Error<F>> {
             Self::pop_floor(self, db).await
         }
 
@@ -1397,6 +1402,7 @@ mod trait_impls {
         type Family = F;
         type K = K;
         type V = V::Value;
+        type Update = update::Ordered<K, V>;
         type Metadata = V::Value;
         type Merkleized = Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>;
 
@@ -1411,7 +1417,7 @@ mod trait_impls {
         async fn pop_floor(
             self,
             db: &CurrentDb<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-        ) -> Result<(Self, Option<any::batch::Evicted<F, K, V::Value>>), Error<F>> {
+        ) -> Result<(Self, Option<any::batch::FloorEntry<F, Self::Update>>), Error<F>> {
             Self::pop_floor(self, db).await
         }
 
