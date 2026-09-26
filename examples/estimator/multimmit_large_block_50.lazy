@@ -1,0 +1,19 @@
+# Multimmit (50 Validators, 50 Producers, 1MiB Transaction Blocks)
+
+## Every producer disseminates one transaction block. This overlaps consensus and models aggregate
+## chain-layer load; DA shares and certificates continue in the background and are omitted.
+broadcast{0, size=1048576}
+
+## The correct leader disseminates its leader block and referenced V-QC. The sizes interpolate the
+## paper's K=40 and K=100 good-case estimates to K=50.
+propose{1, size=11500}
+propose{2, size=15000}
+
+## Every validator receives both leader artifacts and disseminates one ordinary vote. The vote size
+## is the paper's upper estimate for K=50 with two extensions on every chain.
+wait{1, threshold=1} && wait{2, threshold=1}
+broadcast{3, size=3500}
+
+## Each validator finalizes locally after receiving n-f votes. For n>=5f+1, resilience=5 computes
+## f=floor((n-1)/5), so 50 validators require 41 votes.
+wait{3, threshold=n-f, resilience=5}
