@@ -21,12 +21,7 @@ use super::{Digest, gather};
 use alloc::vec::Vec;
 use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN};
 
-// The NEON words load and store little-endian lanes.
-#[cfg(all(
-    target_arch = "aarch64",
-    target_endian = "little",
-    any(target_feature = "neon", feature = "std"),
-))]
+#[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
 mod aarch64;
 #[cfg(any(test, target_arch = "aarch64"))]
 mod portable;
@@ -358,11 +353,7 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
 /// Returns `None` when no kernel is available.
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     cfg_if::cfg_if! {
-        if #[cfg(all(
-            target_arch = "aarch64",
-            target_endian = "little",
-            any(target_feature = "neon", feature = "std"),
-        ))] {
+        if #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))] {
             aarch64::hash_many(messages)
         } else if #[cfg(target_arch = "x86_64")] {
             x86_64::hash_many(messages)
@@ -447,6 +438,8 @@ fn batch<const L: usize, M: AsRef<[u8]>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::TestRng;
+    use rand::Rng as _;
 
     /// Message lengths around block, chunk, and tree-shape boundaries.
     pub(super) fn lengths() -> impl Iterator<Item = usize> {
@@ -477,18 +470,19 @@ mod tests {
         ])
     }
 
-    /// Byte `i` of lane `lane`'s test message. The sequence does not repeat
-    /// within a chunk or across chunks, so a kernel reading the wrong chunk,
+    /// Return lane `lane`'s `len`-byte test message. Random bytes do not
+    /// repeat within or across chunks, so a kernel reading the wrong chunk,
     /// block, or lane produces a different digest.
-    pub(super) fn byte(lane: usize, i: usize) -> u8 {
-        ((i as u32).wrapping_mul(0x9E37_79B1) >> 24) as u8 ^ (i >> 10) as u8 ^ lane as u8
+    fn message(lane: usize, len: usize) -> Vec<u8> {
+        let mut message = vec![0; len];
+        TestRng::new(lane as u64).fill_bytes(&mut message);
+        message
     }
 
     /// Check a lane hasher against the reference for every length in [`lengths`].
     pub(super) fn check_lanes<const L: usize>(hash: impl Fn([&[u8]; L]) -> [[u8; OUT_LEN]; L]) {
         for len in lengths() {
-            let messages: [Vec<u8>; L] =
-                core::array::from_fn(|lane| (0..len).map(|i| byte(lane, i)).collect());
+            let messages: [Vec<u8>; L] = core::array::from_fn(|lane| message(lane, len));
             let outputs = hash(messages.each_ref().map(Vec::as_slice));
             for (message, output) in messages.iter().zip(outputs) {
                 assert_eq!(output, *blake3::hash(message).as_bytes(), "len {len}");

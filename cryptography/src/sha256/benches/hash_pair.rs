@@ -23,6 +23,12 @@ fn bench_hash_pair(c: &mut Criterion) {
                 .each_ref()
                 .map(|message| vec![&message[..8], &message[8..40], &message[40..]]),
         ),
+        (
+            "leaf",
+            messages
+                .each_ref()
+                .map(|message| vec![&message[..8], &message[8..40]]),
+        ),
     ] {
         c.bench_function(&format!("{}/shape={shape}", module_path!()), |b| {
             b.iter(|| Sha256::hash_pair(black_box(&parts[0]), black_box(&parts[1])));

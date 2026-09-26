@@ -323,10 +323,19 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_utils::TestRng;
+    use rand::Rng as _;
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
     );
+
+    /// Return `len` random bytes, distinct per `seed`.
+    fn random(len: usize, seed: u64) -> Vec<u8> {
+        let mut bytes = vec![0; len];
+        TestRng::new(seed).fill_bytes(&mut bytes);
+        bytes
+    }
 
     #[test]
     fn test_blake3() {
@@ -441,15 +450,7 @@ mod tests {
         for len in lengths {
             // Bytes do not repeat across chunks, so a kernel reading the wrong
             // chunk, block, or lane produces a different digest.
-            let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| {
-                (0..len)
-                    .map(|i| {
-                        ((i as u32).wrapping_mul(0x9E37_79B1) >> 24) as u8
-                            ^ (i >> 10) as u8
-                            ^ lane as u8
-                    })
-                    .collect()
-            });
+            let messages: [Vec<u8>; 33] = core::array::from_fn(|lane| random(len, lane as u64));
             let refs = messages.each_ref().map(Vec::as_slice);
             for count in [0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33] {
                 let refs = &refs[..count];
@@ -469,9 +470,7 @@ mod tests {
 
     #[test]
     fn test_hash_many_aliased_unaligned_inputs_match_individual_hashes() {
-        let backing: Vec<u8> = (0..2100u32)
-            .map(|i| (i.wrapping_mul(0x9E37_79B1) >> 24) as u8 ^ (i >> 10) as u8)
-            .collect();
+        let backing = random(2100, 0);
         for len in [129, 1025, 2049] {
             let messages: [&[u8]; 16] = core::array::from_fn(|lane| &backing[lane..lane + len]);
             let expected: Vec<Digest> = messages
@@ -488,9 +487,7 @@ mod tests {
 
     #[test]
     fn test_hash_with_matches_hash() {
-        let data: Vec<u8> = (0..(1usize << 20) + 5)
-            .map(|i| ((i as u32).wrapping_mul(0x9E37_79B1) >> 24) as u8 ^ (i >> 10) as u8)
-            .collect();
+        let data = random((1 << 20) + 5, 0);
         let rayon =
             commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(4).unwrap()).unwrap();
         for len in [
@@ -533,9 +530,7 @@ mod tests {
 
     #[test]
     fn test_hash_many_parts_matches_hash() {
-        let data: Vec<u8> = (0..4096u32)
-            .map(|i| (i.wrapping_mul(0x9E37_79B1) >> 24) as u8 ^ (i >> 10) as u8)
-            .collect();
+        let data = random(4096, 0);
         for count in [0, 1, 2, 3, 4, 7, 8, 15, 16, 17, 33] {
             let nodes: Vec<[&[u8]; 3]> = (0..count)
                 .map(|i| [&data[i..i + 8], &data[i + 8..i + 40], &data[i + 40..i + 72]])

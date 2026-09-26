@@ -3,6 +3,9 @@ use super::{
     POSITION_LEN,
 };
 
+mod equal;
+pub use equal::hash_pair_equal;
+
 /// Wrapper that aligns the round-constant table for aligned vector loads.
 #[repr(align(16))]
 struct Align16<T>(T);

@@ -319,6 +319,8 @@ mod tests {
         mmr::{Location, Position, StandardHasher as Standard},
     };
     use commonware_cryptography::{Blake3, Hasher as CHasher, Sha256, sha256};
+    use commonware_utils::test_rng;
+    use rand::Rng as _;
 
     #[test]
     fn test_leaf_digest_sha256() {
@@ -357,9 +359,8 @@ mod tests {
 
     fn test_leaf_digests<H: CHasher>() {
         let hasher: Standard<H> = Standard::new(ForwardFold);
-        let data: Vec<u8> = (0..4096u32)
-            .map(|i| (i.wrapping_mul(0x9E37_79B1) >> 24) as u8)
-            .collect();
+        let mut data = vec![0u8; 4096];
+        test_rng().fill_bytes(&mut data);
         for count in [0, 1, 2, 3, 16, 17, 33] {
             // Equal lengths (fixed operations) and varying lengths (variable operations).
             for varying in [false, true] {

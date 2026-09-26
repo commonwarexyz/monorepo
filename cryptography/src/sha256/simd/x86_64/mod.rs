@@ -10,7 +10,9 @@ cfg_if! {
             target_feature = "sse4.1",
         ),
     ))] {
+        mod equal;
         mod pair;
+        pub(super) use equal::hash_pair_equal;
         pub(super) use pair::{hash_pair_64, hash_pair_72};
     }
 }

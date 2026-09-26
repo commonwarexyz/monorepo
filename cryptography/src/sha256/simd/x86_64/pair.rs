@@ -5,7 +5,7 @@ use super::{
 use crate::sha256::{DIGEST_LENGTH, Digest, IV};
 
 /// Shuffle mask converting between byte and word endianness.
-static BYTE_SWAP_MASK: Align16<[u8; 16]> =
+pub(super) static BYTE_SWAP_MASK: Align16<[u8; 16]> =
     Align16([3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12]);
 
 /// The `0x80` terminator following the 8-byte message tail in the MMR node's

@@ -27,7 +27,10 @@
 use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
-#[cfg(all(not(feature = "std"), target_arch = "x86_64"))]
+#[cfg(all(
+    not(feature = "std"),
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 use alloc::vec::Vec;
 use bytes::BufMut;
 use commonware_codec::{
@@ -199,35 +202,14 @@ impl Hasher for Sha256 {
         (Self::hash(left), Self::hash(right))
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Self::Digest> {
-        let Some(minimum) = simd::minimum_x16_batch_len() else {
-            return messages
-                .iter()
-                .map(|message| Self::hash(&[message.as_ref()]))
-                .collect();
-        };
+        simd::hash_many(messages)
+    }
 
-        // Adjacent equal-length runs satisfy the kernel's length requirement and
-        // keep the resulting digests in input order.
-        let mut digests = Vec::with_capacity(messages.len());
-        for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
-            for batch in run.chunks(simd::X16_LANES) {
-                if batch.len() >= minimum {
-                    // Spare lanes borrow the first input; only active lanes contribute output.
-                    let mut inputs = [batch[0].as_ref(); simd::X16_LANES];
-                    for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
-                        *input = message.as_ref();
-                    }
-                    if let Some(batch_digests) = simd::hash_x16(inputs) {
-                        digests.extend_from_slice(&batch_digests[..batch.len()]);
-                        continue;
-                    }
-                }
-                digests.extend(batch.iter().map(|message| Self::hash(&[message.as_ref()])));
-            }
-        }
-        digests
+    #[cfg(target_arch = "x86_64")]
+    fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Vec<Self::Digest> {
+        simd::hash_many_parts(messages).unwrap_or_else(|| crate::hash_pairs::<Self, P>(messages))
     }
 
     #[inline]
@@ -330,6 +312,8 @@ impl Zeroize for Digest {
 mod tests {
     use super::*;
     use commonware_codec::{Copying, DecodeExt, Encode};
+    use commonware_utils::TestRng;
+    use rand::Rng as _;
 
     const HELLO_DIGEST: [u8; DIGEST_LENGTH] = commonware_formatting::hex!(
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
@@ -462,6 +446,94 @@ mod tests {
         );
     }
 
+    /// Return `len` random bytes, distinct per `seed`.
+    fn message(len: usize, seed: u64) -> Vec<u8> {
+        let mut message = vec![0; len];
+        TestRng::new(seed).fill_bytes(&mut message);
+        message
+    }
+
+    /// Return `message` in several part decompositions: whole, split at
+    /// block and padding boundaries, with an empty part, and in 7-byte parts
+    /// that put block boundaries inside parts.
+    fn decompositions(message: &[u8]) -> Vec<Vec<&[u8]>> {
+        let len = message.len();
+        let mut decompositions = vec![vec![message], message.chunks(7).collect()];
+        for split in [0, 1, 8, 55, 63, 64, 65, len / 2, len] {
+            let split = split.min(len);
+            let (head, tail) = message.split_at(split);
+            decompositions.push(vec![head, tail]);
+            decompositions.push(vec![head, &[], tail]);
+        }
+        decompositions
+    }
+
+    /// Check the generic pair kernel against one-shot hashing for
+    /// equal-length messages across the block and padding boundaries, with
+    /// the two messages split into different parts.
+    #[test]
+    fn test_hash_pair_equal_lengths_match_hash() {
+        for len in (0..=300).chain([1000, 4099]) {
+            let left = message(len, 1);
+            let right = message(len, 2);
+            let expected = (Sha256::hash(&[&left]), Sha256::hash(&[&right]));
+            let left_parts = decompositions(&left);
+            let right_parts = decompositions(&right);
+            for (index, left) in left_parts.iter().enumerate() {
+                let right = &right_parts[(index + 1) % right_parts.len()];
+                assert_eq!(Sha256::hash_pair(left, right), expected, "len={len}");
+            }
+        }
+
+        // Messages of different lengths hash individually.
+        let left = message(100, 1);
+        let right = message(101, 2);
+        assert_eq!(
+            Sha256::hash_pair(&[&left], &[&right]),
+            (Sha256::hash(&[&left]), Sha256::hash(&[&right]))
+        );
+    }
+
+    /// Check batched hashing of multi-part messages against one-shot hashing
+    /// for the merkle node and leaf shapes, at batch counts around the x16
+    /// cutoff and lane count, and for runs of mixed lengths.
+    #[test]
+    fn test_hash_many_parts_matches_hash() {
+        fn check<const P: usize>(lens: [usize; P], count: usize, run: usize) {
+            let messages: Vec<[Vec<u8>; P]> = (0..count)
+                .map(|index| {
+                    // Every `run` messages, grow the last part by one byte.
+                    let grow = index / run;
+                    core::array::from_fn(|part| {
+                        let len = lens[part] + if part == P - 1 { grow } else { 0 };
+                        message(len, (index * P + part) as u64)
+                    })
+                })
+                .collect();
+            let parts: Vec<[&[u8]; P]> = messages
+                .iter()
+                .map(|message| message.each_ref().map(Vec::as_slice))
+                .collect();
+            let expected: Vec<_> = parts.iter().map(|parts| Sha256::hash(parts)).collect();
+            assert_eq!(
+                Sha256::hash_many_parts(&parts),
+                expected,
+                "lens={lens:?} count={count} run={run}"
+            );
+        }
+
+        for count in [0, 1, 2, 3, 9, 10, 11, 15, 16, 17, 25, 26, 31, 32, 33, 40] {
+            for run in [1, 5, usize::MAX] {
+                check([8, 32, 32], count, run);
+                check([32, 32], count, run);
+                check([8, 32], count, run);
+                check([4, 32], count, run);
+                check([8, 100], count, run);
+                check([8, 1000, 3], count, run);
+            }
+        }
+    }
+
     #[test]
     fn test_hash_many_boundaries_match_individual_hashes() {
         for len in (0..=129).chain([255, 256, 1024, 12_634, 50_534]) {
@@ -471,7 +543,7 @@ mod tests {
                     .collect()
             });
             let refs = messages.each_ref().map(Vec::as_slice);
-            for count in [0, 1, 2, 6, 7, 15, 16, 17, 31, 32, 33] {
+            for count in [0, 1, 2, 6, 7, 9, 10, 15, 16, 17, 25, 26, 31, 32, 33] {
                 let refs = &refs[..count];
                 let expected = refs
                     .iter()

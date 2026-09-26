@@ -6,23 +6,43 @@
 //! independent messages fills those latency slots, making progress on both
 //! digests at close to the unit's throughput limit.
 //!
-//! The kernels specialize the two merkle node shapes used across the
+//! The assembly kernels specialize the two merkle node shapes used across the
 //! Merkle-family primitives in this workspace: `position || left || right`
 //! (72 bytes, used by the MMR family) and `left || right` (64 bytes, used by
 //! the BMT). Both need one full block plus a fixed-layout padding block
 //! each. Callers passing one of these shapes as its exact constituent
 //! parts (a position and two digests, or two digests) load directly from
 //! those parts into vector registers, with no intermediate buffer. Any other
-//! shape, or the same shape split into a different part decomposition, falls
-//! back to serial hashing.
+//! pair of equal-length messages, in any part decomposition, uses a generic
+//! interleaved kernel. It reads each full block in place when a single part
+//! holds it, copies blocks that span parts, and pads the tail on the stack.
+//! Messages of different lengths fall back to serial hashing.
 //!
 //! AVX-512 hashes batches of 16 equal-length contiguous messages in independent
 //! SIMD lanes, producing the ordinary SHA-256 digest of each message.
 
-use super::{DIGEST_LENGTH, Digest};
+use super::{DIGEST_LENGTH, Digest, hash_specialized};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 #[cfg(all(target_arch = "aarch64", any(target_feature = "sha2", feature = "std")))]
 mod aarch64;
+#[cfg(any(
+    all(target_arch = "aarch64", any(target_feature = "sha2", feature = "std")),
+    all(
+        target_arch = "x86_64",
+        any(
+            all(
+                target_feature = "sha",
+                target_feature = "avx2",
+                target_feature = "ssse3",
+                target_feature = "sse4.1",
+            ),
+            feature = "std",
+        ),
+    ),
+))]
+mod blocks;
 #[cfg(all(
     target_arch = "x86_64",
     any(
@@ -80,14 +100,16 @@ fn supports_hash_x16() -> bool {
 
 /// Minimum active lanes for an available x16 kernel.
 ///
-/// Uses [ISA-L's shortage cutoffs]: keep up to six messages on SHA-NI, or one
-/// message on the software fallback. These are initial tuning choices for the
-/// local batch.
+/// With SHA-NI, smaller batches go to the interleaved pair kernel, and the
+/// cutoff is where the x16 kernel's fixed cost per batch drops below the pair
+/// kernel's cost for the same messages. Without SHA-NI, smaller batches hash
+/// one message at a time, and [ISA-L's shortage cutoff] keeps only one message
+/// off the x16 kernel.
 ///
-/// [ISA-L's shortage cutoffs]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
+/// [ISA-L's shortage cutoff]: https://github.com/intel/isa-l_crypto/blob/f22c49aef162d7632bde4f22dc7491b22f0a7fc2/sha256_mb/sha256_job.asm#L38-L46
 #[cfg(target_arch = "x86_64")]
 #[inline]
-pub(super) fn minimum_x16_batch_len() -> Option<usize> {
+fn minimum_x16_batch_len() -> Option<usize> {
     if !supports_hash_x16() {
         return None;
     }
@@ -98,7 +120,91 @@ pub(super) fn minimum_x16_batch_len() -> Option<usize> {
             let sha = cfg!(target_feature = "sha");
         }
     }
-    Some(if sha { 7 } else { 2 })
+    Some(if sha { 10 } else { 2 })
+}
+
+/// Hash independent contiguous messages.
+///
+/// Adjacent equal-length messages go to the x16 kernel when it is available
+/// and a batch is large enough, and to the pair kernel otherwise.
+pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Vec<Digest> {
+    #[cfg(target_arch = "x86_64")]
+    let minimum = minimum_x16_batch_len();
+    let mut digests = Vec::with_capacity(messages.len());
+
+    // Adjacent equal-length runs satisfy the kernels' length requirement and
+    // keep the resulting digests in input order.
+    for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
+        #[cfg(target_arch = "x86_64")]
+        if let Some(minimum) = minimum {
+            for batch in run.chunks(X16_LANES) {
+                if batch.len() >= minimum {
+                    // Spare lanes borrow the first input. Only active lanes
+                    // contribute output.
+                    let mut inputs = [batch[0].as_ref(); X16_LANES];
+                    for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
+                        *input = message.as_ref();
+                    }
+                    if let Some(batch_digests) = hash_x16(inputs) {
+                        digests.extend_from_slice(&batch_digests[..batch.len()]);
+                        continue;
+                    }
+                }
+                pairs(batch, &mut digests);
+            }
+            continue;
+        }
+        pairs(run, &mut digests);
+    }
+    digests
+}
+
+/// Hash equal-length contiguous `messages` two at a time with the pair
+/// kernel, hashing an odd trailing message alone.
+fn pairs<M: AsRef<[u8]>>(messages: &[M], digests: &mut Vec<Digest>) {
+    let (pairs, rest) = messages.as_chunks::<2>();
+    for [left, right] in pairs {
+        let (left, right) = ([left.as_ref()], [right.as_ref()]);
+        match hash_pair_equal(&left, &right) {
+            Some((left, right)) => digests.extend([left, right]),
+            None => digests.extend([hash_specialized(&left), hash_specialized(&right)]),
+        }
+    }
+    digests.extend(
+        rest.iter()
+            .map(|message| hash_specialized(&[message.as_ref()])),
+    );
+}
+
+/// Hash independent messages, each given as `P` parts, by gathering them into
+/// one buffer for [`hash_many`], so equal-length runs reach the x16 kernel.
+///
+/// Returns `None` when the x16 kernel is unavailable or there are fewer
+/// messages than one batch needs.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option<Vec<Digest>> {
+    if messages.len() < minimum_x16_batch_len()? {
+        return None;
+    }
+    let len = messages.iter().flatten().map(|part| part.len()).sum();
+    let mut buffer = Vec::with_capacity(len);
+    let mut ends = Vec::with_capacity(messages.len());
+    for parts in messages {
+        for part in parts {
+            buffer.extend_from_slice(part);
+        }
+        ends.push(buffer.len());
+    }
+    let mut start = 0;
+    let slices: Vec<&[u8]> = ends
+        .into_iter()
+        .map(|end| {
+            let slice = &buffer[start..end];
+            start = end;
+            slice
+        })
+        .collect();
+    Some(hash_many(&slices))
 }
 
 /// Hash 16 equal-length contiguous messages with AVX-512 software SHA-256.
@@ -129,35 +235,103 @@ pub(super) fn hash_x16(messages: [&[u8]; X16_LANES]) -> Option<[Digest; X16_LANE
     }
 }
 
-/// Hash two node-length messages, each given as parts, with the pair-hashing
-/// kernel for the current CPU.
+/// Hash two messages, each given as parts, with the pair-hashing kernel for
+/// the current CPU.
 ///
-/// Returns `None` when the kernel cannot be used: the required CPU features
-/// are unavailable, or the messages don't match one of the known node shapes
-/// (a position and two digests, or two digests) as their exact constituent
-/// parts.
+/// Messages matching one of the known node shapes (a position and two
+/// digests, or two digests) as their exact constituent parts use that shape's
+/// kernel. Any other equal-length messages use the generic kernel.
+///
+/// Returns `None` when no kernel can be used: the required CPU features are
+/// unavailable, or the messages differ in length.
 ///
 /// Inlined aggressively so the shape matching constant-folds at call sites
 /// with fixed-shape inputs (e.g. merkle nodes).
 #[inline(always)]
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
-    match (left, right) {
-        ([left_pos, left_left, left_right], [right_pos, right_left, right_right]) => dispatch_mmr(
-            (*left_pos).try_into().ok()?,
-            (*left_left).try_into().ok()?,
-            (*left_right).try_into().ok()?,
-            (*right_pos).try_into().ok()?,
-            (*right_left).try_into().ok()?,
-            (*right_right).try_into().ok()?,
-        ),
-        ([left_a, left_b], [right_a, right_b]) => dispatch_bmt(
-            (*left_a).try_into().ok()?,
-            (*left_b).try_into().ok()?,
-            (*right_a).try_into().ok()?,
-            (*right_b).try_into().ok()?,
-        ),
+    let node = match (left, right) {
+        ([left_pos, left_left, left_right], [right_pos, right_left, right_right]) => {
+            match (
+                (*left_pos).try_into(),
+                (*left_left).try_into(),
+                (*left_right).try_into(),
+                (*right_pos).try_into(),
+                (*right_left).try_into(),
+                (*right_right).try_into(),
+            ) {
+                (Ok(lp), Ok(ll), Ok(lr), Ok(rp), Ok(rl), Ok(rr)) => {
+                    dispatch_mmr(lp, ll, lr, rp, rl, rr)
+                }
+                _ => None,
+            }
+        }
+        ([left_a, left_b], [right_a, right_b]) => match (
+            (*left_a).try_into(),
+            (*left_b).try_into(),
+            (*right_a).try_into(),
+            (*right_b).try_into(),
+        ) {
+            (Ok(la), Ok(lb), Ok(ra), Ok(rb)) => dispatch_bmt(la, lb, ra, rb),
+            _ => None,
+        },
         _ => None,
+    };
+    node.or_else(|| hash_pair_equal(left, right))
+}
+
+/// Hash two equal-length messages, each given as parts, with the generic pair
+/// kernel for the current CPU.
+///
+/// Returns `None` when the kernel is unavailable or the messages differ in
+/// length. Outlined so it never bloats the inlined node-shape dispatch.
+#[inline(never)]
+fn hash_pair_equal(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
+    let len = message_len(left)?;
+    if message_len(right)? != len {
+        return None;
     }
+    cfg_if::cfg_if! {
+        if #[cfg(all(target_arch = "aarch64", target_feature = "sha2"))] {
+            // SAFETY: The sha2 target feature is statically enabled.
+            Some(unsafe { aarch64::hash_pair_equal(left, right, len) })
+        } else if #[cfg(all(target_arch = "aarch64", feature = "std"))] {
+            if std::arch::is_aarch64_feature_detected!("sha2") {
+                // SAFETY: The sha2 target feature was just detected.
+                return Some(unsafe { aarch64::hash_pair_equal(left, right, len) });
+            }
+            None
+        } else if #[cfg(all(
+            target_arch = "x86_64",
+            target_feature = "sha",
+            target_feature = "avx2",
+            target_feature = "ssse3",
+            target_feature = "sse4.1",
+        ))] {
+            // SAFETY: The required target features are statically enabled.
+            Some(unsafe { x86_64::hash_pair_equal(left, right, len) })
+        } else if #[cfg(all(target_arch = "x86_64", feature = "std"))] {
+            if std::arch::is_x86_feature_detected!("sha")
+                && std::arch::is_x86_feature_detected!("avx2")
+                && std::arch::is_x86_feature_detected!("ssse3")
+                && std::arch::is_x86_feature_detected!("sse4.1")
+            {
+                // SAFETY: The required target features were just detected.
+                return Some(unsafe { x86_64::hash_pair_equal(left, right, len) });
+            }
+            None
+        } else {
+            let _ = (left, right, len);
+            None
+        }
+    }
+}
+
+/// Return the total length of a message given as parts, or `None` if it
+/// overflows.
+fn message_len(parts: &[&[u8]]) -> Option<usize> {
+    parts
+        .iter()
+        .try_fold(0usize, |len, part| len.checked_add(part.len()))
 }
 
 /// Dispatch two node-length messages, given as their constituent parts, to

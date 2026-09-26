@@ -2,6 +2,7 @@ use criterion::criterion_main;
 
 mod append;
 mod append_additional;
+mod append_many;
 mod flush;
 mod position_to_location;
 mod prove_many_elements;
@@ -11,6 +12,7 @@ mod update;
 criterion_main!(
     append::benches,
     append_additional::benches,
+    append_many::benches,
     flush::benches,
     position_to_location::benches,
     prove_many_elements::benches,

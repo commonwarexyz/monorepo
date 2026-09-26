@@ -93,11 +93,33 @@ impl<H: Hasher> Debug for Plan<H> {
     }
 }
 
+/// Generate a message of `len` bytes split into three parts at arbitrary
+/// points.
+fn arbitrary_split(u: &mut Unstructured<'_>, len: usize) -> arbitrary::Result<Vec<Vec<u8>>> {
+    let data = u.bytes(len)?;
+    let first = u.int_in_range(0..=len)?;
+    let second = u.int_in_range(first..=len)?;
+    Ok(vec![
+        data[..first].to_vec(),
+        data[first..second].to_vec(),
+        data[second..].to_vec(),
+    ])
+}
+
 impl<H: Hasher> Arbitrary<'_> for Plan<H> {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+        let left = arbitrary_message(u)?;
+
+        // Pair kernels need equal lengths, so often give the right message
+        // the left's length with different parts.
+        let right = if u.arbitrary()? {
+            arbitrary_split(u, left.iter().map(Vec::len).sum())?
+        } else {
+            arbitrary_message(u)?
+        };
         Ok(Self {
-            left: arbitrary_message(u)?,
-            right: arbitrary_message(u)?,
+            left,
+            right,
             _hasher: PhantomData,
         })
     }
@@ -275,7 +297,7 @@ mod tests {
                 }
                 saw_empty_batch |= plan.messages.is_empty();
                 saw_equal_lengths |= equal_lengths && plan.messages.len() >= 16;
-                saw_partial_batch |= equal_lengths && (7..16).contains(&plan.messages.len());
+                saw_partial_batch |= equal_lengths && (10..16).contains(&plan.messages.len());
                 saw_equal_full_blocks |=
                     equal_lengths && plan.messages.len() >= 16 && first_len >= 64;
                 saw_equal_two_block_padding |=
