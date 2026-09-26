@@ -4755,8 +4755,11 @@ mod tests {
             );
             assert!(mailbox.get_block(Height::new(4)).await.is_none());
             assert_eq!(
-                mailbox.get_anchor().await.map(|(_, block)| block.digest()),
-                Some(floor_block.digest())
+                mailbox
+                    .get_anchor()
+                    .await
+                    .map(|(processed, block)| (processed, block.digest())),
+                Some((Processed::Absent(Height::new(4)), floor_block.digest()))
             );
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
@@ -4789,8 +4792,11 @@ mod tests {
                 Some(Processed::Absent(Height::new(4)))
             );
             assert_eq!(
-                mailbox.get_anchor().await.map(|(_, block)| block.digest()),
-                Some(floor_block.digest())
+                mailbox
+                    .get_anchor()
+                    .await
+                    .map(|(processed, block)| (processed, block.digest())),
+                Some((Processed::Absent(Height::new(4)), floor_block.digest()))
             );
         });
     }
@@ -5964,8 +5970,11 @@ mod tests {
                 Some(Processed::Block(Height::new(1)))
             );
             assert_eq!(
-                mailbox.get_anchor().await.map(|(_, block)| block.digest()),
-                Some(block1.digest())
+                mailbox
+                    .get_anchor()
+                    .await
+                    .map(|(processed, block)| (processed, block.digest())),
+                Some((Processed::Block(Height::new(1)), block1.digest()))
             );
         });
     }

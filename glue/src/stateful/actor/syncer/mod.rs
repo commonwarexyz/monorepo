@@ -300,9 +300,14 @@ where
 {
     // Marshal skips installing a startup floor whose round is already processed. Its block may
     // have been pruned, so apply the same rule before registering a local-only waiter.
-    let block = if let Some(processed) = floor.processed()
-        && floor.round() >= finalization.round()
-    {
+    let block = if floor.processed().is_some() && floor.round() >= finalization.round() {
+        // A live floor can advance the processed position after marshal's startup snapshot and
+        // prune the snapshot's anchor, so resolve from the current position.
+        let (processed, anchor) = marshal
+            .get_anchor()
+            .await
+            .expect("marshal must report the processed position it started with");
+
         // A retained successor can be the selected floor block. Prefer it to its processed
         // predecessor so the resolved target covers the selected finalization. An absent
         // block is already backed by the floor block at the next height.
@@ -315,12 +320,7 @@ where
         {
             V::into_shared(block)
         } else {
-            V::into_shared(
-                marshal
-                    .get_block(Identifier::Height(processed.anchor()))
-                    .await
-                    .expect("marshal must store the block backing its processed position"),
-            )
+            V::into_shared(anchor)
         }
     } else {
         // Marshal's configured startup floor fetches its anchor when needed. This local-only

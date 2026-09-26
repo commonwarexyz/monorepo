@@ -3900,8 +3900,11 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
             Some(Processed::Block(Height::new(19)))
         );
         assert_eq!(
-            mailbox.get_anchor().await.map(|(_, block)| block.height()),
-            Some(Height::new(19))
+            mailbox
+                .get_anchor()
+                .await
+                .map(|(processed, block)| (processed, block.height())),
+            Some((Processed::Block(Height::new(19)), Height::new(19)))
         );
 
         // Installing the floor prunes before it dispatches block 20, so processing 20 means
