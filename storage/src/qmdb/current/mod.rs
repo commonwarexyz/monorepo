@@ -517,6 +517,7 @@ pub mod tests {
         merkle::{self, mmb, mmr, storage::Storage as _},
         qmdb::{
             any::{
+                operation::{Operation, Update as _},
                 test::colliding_digest,
                 traits::{DbAny, MerkleizedBatch as _, UnmerkleizedBatch as _},
             },
@@ -4778,8 +4779,8 @@ pub mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            // A pending ancestor supersedes the middle base operation. The child must pop
-            // the oldest base operation, then skip the reinsert and the ancestor update.
+            // A pending ancestor supersedes the middle base operation. Every original
+            // operation consumes one call, including the inactive middle update.
             let parent = db
                 .new_batch()
                 .with_manual_floor()
@@ -4787,19 +4788,41 @@ pub mod tests {
                 .merkleize(&db, None)
                 .await
                 .unwrap();
-            let (child, first) = parent.new_batch::<Sha256>().pop_floor(&db).await.unwrap();
+            let (child, initial) = parent.new_batch::<Sha256>().pop_floor(&db).await.unwrap();
+            let initial = initial.expect("initial commit consumes a step");
+            assert_eq!(initial.location, db.inactivity_floor_loc());
+            assert!(!initial.active);
+            assert!(matches!(initial.operation, Operation::CommitFloor(None, _)));
+            let (child, first) = child.pop_floor(&db).await.unwrap();
             let first = first.expect("oldest key should be evicted");
-            assert_eq!(first.key, keys[0]);
-            assert_eq!(first.value, val(0));
-            let (child, second) = child
-                .write(first.key, Some(val(10)))
+            assert!(first.active);
+            let Operation::Update(first_update) = first.operation else {
+                panic!("expected first update");
+            };
+            assert_eq!(*first_update.key(), keys[0]);
+            assert_eq!(first_update.into_value(), val(0));
+            let (child, middle) = child
+                .write(keys[0], Some(val(10)))
                 .pop_floor(&db)
                 .await
                 .unwrap();
+            let middle = middle.expect("inactive ancestor update consumes a step");
+            assert!(!middle.active);
+            let Operation::Update(middle_update) = middle.operation else {
+                panic!("expected middle update");
+            };
+            assert_eq!(*middle_update.key(), keys[1]);
+            assert_eq!(middle_update.into_value(), val(1));
+            assert_eq!(middle.location, Location::new(*first.location + 1));
+            let (child, second) = child.pop_floor(&db).await.unwrap();
             let second = second.expect("last base key should be evicted");
-            assert_eq!(second.key, keys[2]);
-            assert_eq!(second.value, val(2));
-            assert!(first.location < second.location);
+            assert!(second.active);
+            let Operation::Update(second_update) = second.operation else {
+                panic!("expected last update");
+            };
+            assert_eq!(*second_update.key(), keys[2]);
+            assert_eq!(second_update.into_value(), val(2));
+            assert_eq!(second.location, Location::new(*middle.location + 1));
 
             let child = child.merkleize(&db, None).await.unwrap();
             let speculative_root = child.root();
@@ -4871,7 +4894,16 @@ pub mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let (batch, evicted) = db.new_batch().pop_floor(&db).await.unwrap();
             let evicted = evicted.expect("one live key");
-            assert_eq!((evicted.key, evicted.value), (k, val(7)));
+            assert!(evicted.active);
+            let Operation::Update(update) = evicted.operation else {
+                panic!("expected update");
+            };
+            assert_eq!((*update.key(), update.into_value()), (k, val(7)));
+            let (batch, commit) = batch.pop_floor(&db).await.unwrap();
+            let commit = commit.expect("commit consumes a step");
+            assert!(!commit.active);
+            assert!(matches!(commit.operation, Operation::CommitFloor(..)));
+            assert_eq!(commit.location, Location::new(*evicted.location + 1));
             let (batch, none) = batch.pop_floor(&db).await.unwrap();
             assert!(none.is_none());
             let batch = batch.merkleize(&db, None).await.unwrap();
@@ -4914,9 +4946,18 @@ pub mod tests {
             let (db, _) = db.apply_batch(seed).await.unwrap();
             let db = db.commit().await.unwrap();
 
-            let (batch, evicted) = db.new_batch().pop_floor(&db).await.unwrap();
+            let (batch, initial) = db.new_batch().pop_floor(&db).await.unwrap();
+            let initial = initial.expect("initial commit consumes a step");
+            assert_eq!(initial.location, db.inactivity_floor_loc());
+            assert!(!initial.active);
+            assert!(matches!(initial.operation, Operation::CommitFloor(None, _)));
+            let (batch, evicted) = batch.pop_floor(&db).await.unwrap();
             let evicted = evicted.expect("oldest committed key");
-            assert_eq!((evicted.key, evicted.value), (keys[0], val(0)));
+            assert!(evicted.active);
+            let Operation::Update(update) = evicted.operation else {
+                panic!("expected update");
+            };
+            assert_eq!((*update.key(), update.into_value()), (keys[0], val(0)));
             let expected_floor = Location::new(*evicted.location + 1);
             let staged_keys = [&keys[2]];
             let (read, staged) = batch.stage(&staged_keys, &db).await.unwrap();
