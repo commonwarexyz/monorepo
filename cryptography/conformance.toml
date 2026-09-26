@@ -152,11 +152,11 @@ hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 
 ["commonware_cryptography::handshake::sake::conformance::SakeV0"]
 n_cases = 4096
-hash = "057cc42a74390f0b43250b8fba2c42abad651bee6beacb510f2f2a950185a694"
+hash = "bea1070b8a090397b3cdf1e99794503755898c21f33efbed621b8d9b1dc6dd31"
 
 ["commonware_cryptography::handshake::sake::conformance::SakeV1"]
 n_cases = 4096
-hash = "564d2e1cdc69b2047bd75ed78ae89402371db5ea8d8abd9f647e4b134fcf98bf"
+hash = "1fd94dbec97e35f2cc9500f4d0615b94593c111d276c415337c6961a6d225382"
 
 ["commonware_cryptography::handshake::sake::key_exchange::conformance::CodecConformance<EphemeralPublicKey>"]
 n_cases = 65536

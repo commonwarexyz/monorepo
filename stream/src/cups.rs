@@ -2,7 +2,7 @@
 //!
 //! CUPS protects ordered message records using a separate key and implicit counter for each
 //! direction. "Packet" refers to a framed message on an ordered byte stream, not a datagram.
-//! The current construction uses ChaCha20-Poly1305; the construction name is independent of
+//! The current construction uses ChaCha20-Poly1305. The construction name is independent of
 //! this algorithm choice.
 //!
 //! # Handshake
@@ -15,7 +15,11 @@
 //! The core SAKE protocol receives both peer identities as inputs. This adapter first sends the
 //! dialer's public key in a framed, cleartext prelude, separate from SAKE's three messages. The
 //! listener's bouncer may reject that claim before authentication. Accepting it only permits the
-//! handshake to continue; a successful handshake authenticates the returned identity.
+//! handshake to continue. A successful handshake authenticates the returned identity.
+//!
+//! Version 1 scopes the application namespace to CUPS with `_COMMONWARE_STREAM_CUPS` before SAKE
+//! commits it, so its handshakes never coincide with SAKE handshakes run for another protocol.
+//! Version 0 passes the application namespace to SAKE unchanged.
 //!
 //! Peers must agree on a unique, application-specific namespace, a [Version], and have clocks
 //! within the configured timestamp acceptance windows. The version is not negotiated: a mismatch
@@ -25,16 +29,17 @@
 //!
 //! # Records
 //!
-//! Version 0 encrypts and authenticates each message with a 16-byte tag and empty AEAD
-//! associated data. A visible u32-varint length prefix frames the ciphertext and tag. Version 1
-//! uses a 4-byte encrypted big-endian body length followed by a 16-byte header tag, then the
-//! encrypted payload followed by its 16-byte body tag. The body length includes the body tag.
-//! V1 encrypts its length fields, while traffic sizes and timing remain observable. Batching
-//! writes preserves individual record boundaries.
+//! Each message becomes one record, and batching writes preserves record boundaries. Every seal
+//! uses ChaCha20-Poly1305 with a 16-byte tag and empty associated data.
+//!
+//! - Version 0: a visible u32 varint holding the length of the encrypted payload and its tag,
+//!   then the encrypted payload and its tag.
+//! - Version 1: a 20-byte header holding the payload length as an encrypted 4-byte big-endian
+//!   integer and its tag, then the encrypted payload and its tag.
 //!
 //! Each direction uses a fixed session key and an implicit 96-bit counter nonce, starting at zero
 //! and encoded little-endian. The counter advances once per record in version 0 and twice
-//! per record in version 1, first for the length header and then for the body. It is never
+//! per record in version 1, first for the header and then for the payload. It is never
 //! transmitted. Counter exhaustion requires a new connection. Counters bind records to their
 //! expected positions: replayed, reordered, or corrupted records fail authentication rather than
 //! being reordered for delivery. Callers must discard the connection after an authentication
@@ -43,10 +48,11 @@
 //! # Security
 //!
 //! SAKE provides mutual authentication and ephemeral session keys. CUPS protects record contents
-//! and integrity. Version 0 exposes lengths and boundaries; version 1 encrypts lengths, but
-//! traffic volume and timing remain observable. There is no padding, in-session key ratchet, or
-//! rekeying. Callers must discard the connection after an I/O error or cancellation, as required
-//! by [crate::Sender] and [crate::Receiver].
+//! and integrity. Version 0 exposes record lengths and boundaries in the byte stream. Version 1
+//! removes them from the byte stream, but message sizes and timing remain observable through
+//! transport segments. There is no padding, in-session key ratchet, or rekeying. Callers must
+//! discard the connection after an I/O error or cancellation, as required by [crate::Sender] and
+//! [crate::Receiver].
 
 use crate::utils::codec::{build_frame, recv_frame, send_frame, validate_frame_len};
 use commonware_codec::{
@@ -61,10 +67,10 @@ use commonware_cryptography::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
-    Stream,
+    Buf as _, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut,
+    IoBufs, Sink, Stream,
 };
-use commonware_utils::{DurationExt, SystemTimeExt};
+use commonware_utils::{DurationExt, SystemTimeExt, Widen, union_unique};
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -72,6 +78,10 @@ use thiserror::Error;
 mod config;
 pub use config::Config;
 
+#[cfg(all(test, feature = "arbitrary"))]
+mod conformance;
+
+const NAMESPACE: &[u8] = b"_COMMONWARE_STREAM_CUPS";
 const TAG_SIZE: u32 = {
     assert!(sake::TAG_SIZE <= u32::MAX as usize);
     sake::TAG_SIZE as u32
@@ -119,26 +129,33 @@ impl From<HandshakeError> for Error {
     }
 }
 
-/// Handshake protocol used by [Handshake].
+/// Protocol version used by [Handshake], selecting both the SAKE version and the record format.
 ///
 /// Both peers must use the same version. The version is not negotiated, so keep the older version
 /// until every peer has upgraded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Version {
-    /// [sake::Version::V0]: the first handshake message's signature does not cover the dialer
-    /// identity.
+    /// [sake::Version::V0] handshakes and records framed by a visible length prefix.
     V0,
-    /// [sake::Version::V1]: every handshake signature covers both identities, and record lengths
-    /// are encrypted and authenticated.
+    /// [sake::Version::V1] handshakes and records framed by an encrypted, authenticated length
+    /// header.
     V1,
 }
 
 impl Version {
-    /// Returns the SAKE version used by this handshake version.
+    /// Returns the SAKE version this protocol version runs.
     const fn sake(self) -> sake::Version {
         match self {
             Self::V0 => sake::Version::V0,
             Self::V1 => sake::Version::V1,
+        }
+    }
+
+    /// Returns the namespace SAKE commits for an application namespace.
+    fn namespace(self, namespace: &[u8]) -> Vec<u8> {
+        match self {
+            Self::V0 => namespace.to_vec(),
+            Self::V1 => union_unique(NAMESPACE, namespace),
         }
     }
 
@@ -161,7 +178,7 @@ impl Version {
             Self::V0 => UInt(body_len).write(chunk),
             Self::V1 => {
                 let offset = chunk.len();
-                body_len.write(chunk);
+                (body_len - TAG_SIZE).write(chunk);
                 let tag = cipher.send_in_place(&mut chunk.as_mut()[offset..])?;
                 chunk.put_slice(&tag);
             }
@@ -169,36 +186,47 @@ impl Version {
         Ok(())
     }
 
-    /// Receives an encrypted body, validating its header before requesting body bytes.
+    /// Receives an encrypted payload and its tag, validating any header before requesting them.
     async fn recv_frame(
         self,
         stream: &mut impl Stream,
         cipher: &mut RecvCipher,
-        pool: &BufferPool,
-        max_body_len: u32,
+        max_message_size: u32,
     ) -> Result<IoBufs, Error> {
         match self {
-            Self::V0 => recv_frame(stream, max_body_len).await,
+            Self::V0 => recv_frame(stream, max_message_size.saturating_add(TAG_SIZE)).await,
             Self::V1 => {
-                let header = stream
-                    .recv(V1_HEADER_SIZE)
-                    .await
-                    .map_err(Error::RecvFailed)?;
-                let mut header = mutable_frame(pool, header);
-                let plaintext_len = cipher.recv_in_place(header.as_mut())?;
-                debug_assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
+                // Decode the header from buffered bytes when possible, so the payload arrives in
+                // the same read.
+                let mut header = [0u8; V1_HEADER_SIZE];
+                let peeked = stream.peek(V1_HEADER_SIZE);
+                let skip = if peeked.len() == V1_HEADER_SIZE {
+                    header.copy_from_slice(peeked);
+                    V1_HEADER_SIZE
+                } else {
+                    stream
+                        .recv(V1_HEADER_SIZE)
+                        .await
+                        .map_err(Error::RecvFailed)?
+                        .copy_to_slice(&mut header);
+                    0
+                };
 
-                // Authenticate the header before decoding its length or requesting the body.
-                let body_len = u32::decode(Copying(&header.as_ref()[..V1_HEADER_PLAINTEXT_SIZE]))?;
-                if body_len < TAG_SIZE {
-                    return Err(HandshakeError::DecryptionFailed.into());
-                }
-                if body_len > max_body_len {
-                    return Err(Error::RecvTooLarge(body_len as usize));
+                // Authenticate the header before decoding its length or requesting the payload.
+                let plaintext_len = cipher.recv_in_place(&mut header)?;
+                assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
+                let len = u32::decode(Copying(&header[..V1_HEADER_PLAINTEXT_SIZE]))?;
+                let body_len = Widen::<usize>::widen(len) + sake::TAG_SIZE;
+                if len > max_message_size {
+                    return Err(Error::RecvTooLarge(body_len));
                 }
                 stream
-                    .recv(body_len as usize)
+                    .recv(skip + body_len)
                     .await
+                    .map(|mut bufs| {
+                        bufs.advance(skip);
+                        bufs
+                    })
                     .map_err(Error::RecvFailed)
             }
         }
@@ -213,7 +241,7 @@ pub struct Handshake<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
-    /// Handshake protocol version.
+    /// Protocol version, selecting the SAKE version and the record format.
     pub version: Version,
 
     /// Maximum time drift allowed for future timestamps.
@@ -304,7 +332,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let (state, syn) = dial_start(
             context,
             Context::new(
-                namespace,
+                &self.version.namespace(namespace),
                 self.version.sake(),
                 current_time,
                 ok_timestamps,
@@ -369,7 +397,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let (state, syn_ack) = listen_start(
             context,
             Context::new(
-                namespace,
+                &self.version.namespace(namespace),
                 self.version.sake(),
                 current_time,
                 ok_timestamps,
@@ -633,12 +661,7 @@ impl<I: Stream> Receiver<I> {
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
         let encrypted = self
             .version
-            .recv_frame(
-                &mut self.stream,
-                &mut self.cipher,
-                &self.pool,
-                self.max_message_size.saturating_add(TAG_SIZE),
-            )
+            .recv_frame(&mut self.stream, &mut self.cipher, self.max_message_size)
             .await?;
         let mut decryption_buf = mutable_frame(&self.pool, encrypted);
 
@@ -695,10 +718,10 @@ mod test {
 
                 let mut cipher = SendCipher::new(TestRng::new(0));
                 for message in messages {
-                    let body_len = message.len() as u32 + TAG_SIZE;
+                    let len = message.len() as u32;
                     let mut expected = match version {
-                        Version::V0 => UInt(body_len).encode().to_vec(),
-                        Version::V1 => cipher.send(&body_len.to_be_bytes()).unwrap(),
+                        Version::V0 => UInt(len + TAG_SIZE).encode().to_vec(),
+                        Version::V1 => cipher.send(&len.to_be_bytes()).unwrap(),
                     };
                     expected.extend(cipher.send(message).unwrap());
                     assert_eq!(
@@ -710,14 +733,25 @@ mod test {
         }
     }
 
+    /// Pins the SAKE version that each CUPS version runs.
     #[test]
-    fn test_invalid_header_rejected_before_body() {
+    fn test_version_selects_sake_version() {
+        assert_eq!(Version::V0.sake(), sake::Version::V0);
+        assert_eq!(Version::V1.sake(), sake::Version::V1);
+    }
+
+    /// Checks that a version 1 receiver acts on a header before any payload arrives.
+    ///
+    /// Corrupted headers and lengths above the limit are rejected immediately. Valid lengths,
+    /// including zero, wait for the payload.
+    #[test]
+    fn test_header_handled_before_payload() {
         for (length, corrupt) in [
-            (TAG_SIZE, Some(0)),
-            (TAG_SIZE, Some(V1_HEADER_PLAINTEXT_SIZE)),
+            (0, Some(0)),
+            (0, Some(V1_HEADER_PLAINTEXT_SIZE)),
             (0, None),
-            (TAG_SIZE - 1, None),
-            (MAX_MESSAGE_SIZE + TAG_SIZE + 1, None),
+            (MAX_MESSAGE_SIZE, None),
+            (MAX_MESSAGE_SIZE + 1, None),
             (u32::MAX, None),
         ] {
             deterministic::Runner::default().start(|context| async move {
@@ -736,21 +770,73 @@ mod test {
                 }
                 sink.send(header).await.unwrap();
 
-                // Keep the sink open without sending a body: rejection must not wait for it.
-                let result = receiver
-                    .recv()
-                    .now_or_never()
-                    .expect("header rejection must be immediate");
-                if corrupt.is_some() || length < TAG_SIZE {
+                // Keep the sink open without sending a payload: rejection must not wait for it.
+                let result = receiver.recv().now_or_never();
+                if corrupt.is_some() {
                     assert!(matches!(
                         result,
-                        Err(Error::HandshakeError(HandshakeError::DecryptionFailed))
+                        Some(Err(Error::HandshakeError(HandshakeError::DecryptionFailed)))
+                    ));
+                } else if length > MAX_MESSAGE_SIZE {
+                    assert!(matches!(
+                        result,
+                        Some(Err(Error::RecvTooLarge(n)))
+                            if n == Widen::<usize>::widen(length) + sake::TAG_SIZE
                     ));
                 } else {
-                    assert!(matches!(result, Err(Error::RecvTooLarge(n)) if n == length as usize));
+                    assert!(result.is_none(), "a valid header must wait for its payload");
                 }
             });
         }
+    }
+
+    /// Checks that version 1 headers split across reads are received intact.
+    ///
+    /// A header whose bytes have not reached the stream's buffer, and one only partly in the
+    /// buffer, both make the receiver read the rest from the stream before authenticating it.
+    #[test]
+    fn test_header_split_across_reads() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut sink, stream) = mocks::Channel::init();
+            let mut receiver = Receiver {
+                cipher: RecvCipher::new(TestRng::new(0)),
+                stream,
+                max_message_size: MAX_MESSAGE_SIZE,
+                pool: context.network_buffer_pool().clone(),
+                version: Version::V1,
+            };
+
+            // Encode two records the way a version 1 sender does.
+            let mut cipher = SendCipher::new(TestRng::new(0));
+            let mut encode = |message: &[u8]| {
+                let mut record = cipher.send(&(message.len() as u32).to_be_bytes()).unwrap();
+                record.extend(cipher.send(message).unwrap());
+                record
+            };
+            let first = encode(b"hello");
+            let second = encode(b"world");
+            let half = V1_HEADER_SIZE / 2;
+
+            // Deliver half of the first header: nothing is buffered yet, so the receiver waits.
+            // Then deliver the rest of the first record with half of the second header.
+            sink.send(first[..half].to_vec()).await.unwrap();
+            {
+                let mut recv = std::pin::pin!(receiver.recv());
+                assert!(futures::poll!(recv.as_mut()).is_pending());
+                let mut rest = first[half..].to_vec();
+                rest.extend_from_slice(&second[..half]);
+                sink.send(rest).await.unwrap();
+                assert_eq!(recv.await.unwrap().coalesce(), b"hello");
+            }
+
+            // The second header is now only partly buffered, so the receiver waits again. Then
+            // deliver the remainder: the second record decrypts intact.
+            assert_eq!(receiver.stream.peek(V1_HEADER_SIZE).len(), half);
+            let mut recv = std::pin::pin!(receiver.recv());
+            assert!(futures::poll!(recv.as_mut()).is_pending());
+            sink.send(second[half..].to_vec()).await.unwrap();
+            assert_eq!(recv.await.unwrap().coalesce(), b"world");
+        });
     }
 
     #[test]
@@ -1060,9 +1146,9 @@ mod test {
 
                 let (_, _, mut listener_receiver) = listener_handle.await.unwrap()?;
 
-                // Send both messages before receiving so the second legacy frame's varint
-                // is decoded from the peek buffer, exercising in-place decryption
-                // of a sliced frame in addition to a full one.
+                // Send both messages before receiving so the second record's length is decoded
+                // from the peek buffer, exercising in-place decryption of a sliced frame in
+                // addition to a full one.
                 dialer_sender.send(&b"hello"[..]).await?;
                 dialer_sender.send(&b"world"[..]).await?;
 

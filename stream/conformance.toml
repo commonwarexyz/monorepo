@@ -1,0 +1,7 @@
+["commonware_stream::cups::conformance::CupsV0"]
+n_cases = 256
+hash = "b17c25f55663c938bf57c2142f28e820e8cb8ebd61ec36c619a965ec7021f83e"
+
+["commonware_stream::cups::conformance::CupsV1"]
+n_cases = 256
+hash = "092c5124a2f2bf83f86d43a15029ad74350eb9114514b00211fb09f6b06488e8"
