@@ -13,6 +13,7 @@ use commonware_p2p::Recipients;
 use reqwest::blocking::Client;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    num::NonZeroUsize,
     time::Duration,
 };
 use tracing::debug;
@@ -24,6 +25,10 @@ use tracing::debug;
 const CLOUDPING_BASE: &str = "https://www.cloudping.co/api/latencies";
 const CLOUDPING_DIVISOR: f64 = 2.0; // cloudping.co reports ping times not latency
 const MILLISECONDS_TO_SECONDS: f64 = 1000.0;
+/// Divisor that converts a percentage threshold into a fraction of all peers.
+const PERCENT_DIVISOR: f64 = 100.0;
+/// Coefficient of `f` when a fault-bound threshold omits it (e.g. `f+1`, `n-f`).
+const DEFAULT_FAULT_MULTIPLIER: usize = 1;
 
 // =============================================================================
 // Type Definitions
@@ -74,10 +79,37 @@ pub enum Command {
     And(Box<Self>, Box<Self>),
 }
 
-#[derive(Clone)]
+/// Number of messages with a given ID that a `collect` or `wait` requires.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Threshold {
+    /// An absolute number of messages.
     Count(usize),
+    /// A fraction of all `n` peers (e.g. `0.8` for `80%`), rounded up.
     Percent(f64),
+    /// A bound derived from the maximum number of tolerated faults `f`.
+    Faults {
+        /// The protocol requires `n >= Rf+1` for `resilience=R`, so `f = floor((n-1)/R)`.
+        resilience: NonZeroUsize,
+        /// How the required number of messages is derived from `f`.
+        bound: FaultBound,
+    },
+}
+
+/// A required number of messages derived from the maximum number of tolerated faults `f`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaultBound {
+    /// Requires `multiplier*f + offset` messages (e.g. `2f+1`).
+    AtLeast {
+        /// Coefficient of `f`.
+        multiplier: usize,
+        /// Constant added to `multiplier*f`.
+        offset: usize,
+    },
+    /// Requires `n - multiplier*f` messages (e.g. `n-f`).
+    AllBut {
+        /// Coefficient of `f`.
+        multiplier: usize,
+    },
 }
 
 // =============================================================================
@@ -214,17 +246,10 @@ fn parse_single_command(line: &str) -> Command {
                     panic!("Missing threshold for {command}");
                 },
                 |thresh_str| {
-                    if thresh_str.ends_with('%') {
-                        let p = thresh_str
-                            .trim_end_matches('%')
-                            .parse::<f64>()
-                            .expect("Invalid percent")
-                            / 100.0;
-                        Threshold::Percent(p)
-                    } else {
-                        let c = thresh_str.parse::<usize>().expect("Invalid count");
-                        Threshold::Count(c)
-                    }
+                    parse_threshold(
+                        thresh_str,
+                        parsed_args.get("resilience").map(String::as_str),
+                    )
                 },
             );
 
@@ -251,6 +276,73 @@ fn parse_single_command(line: &str) -> Command {
         }
         _ => panic!("Unknown command: {command}"),
     }
+}
+
+/// Parses a `threshold` value and the optional `resilience` value of the same command.
+///
+/// Accepts a count (`5`), a percentage (`80%`), or a fault bound (`<a>f+<b>` or `n-<a>f`).
+/// A fault bound requires `resilience`, and a count or percentage rejects it.
+fn parse_threshold(threshold: &str, resilience: Option<&str>) -> Threshold {
+    let simple = if threshold.ends_with('%') {
+        let percent = threshold
+            .trim_end_matches('%')
+            .parse::<f64>()
+            .expect("Invalid percent")
+            / PERCENT_DIVISOR;
+        Some(Threshold::Percent(percent))
+    } else {
+        threshold.parse::<usize>().ok().map(Threshold::Count)
+    };
+    if let Some(simple) = simple {
+        assert!(
+            resilience.is_none(),
+            "resilience applies only to fault thresholds"
+        );
+        return simple;
+    }
+
+    let bound =
+        parse_fault_bound(threshold).unwrap_or_else(|| panic!("Invalid threshold: {threshold}"));
+    let resilience = resilience
+        .unwrap_or_else(|| panic!("Missing resilience for threshold {threshold}"))
+        .parse::<usize>()
+        .expect("Invalid resilience");
+    let resilience = NonZeroUsize::new(resilience).expect("resilience must be greater than zero");
+    Threshold::Faults { resilience, bound }
+}
+
+/// Parses `<a>f+<b>` into [FaultBound::AtLeast] or `n-<a>f` into [FaultBound::AllBut].
+///
+/// `<a>` defaults to [DEFAULT_FAULT_MULTIPLIER] when omitted. Returns `None` for any other input.
+fn parse_fault_bound(threshold: &str) -> Option<FaultBound> {
+    if let Some(multiplier) = threshold
+        .strip_prefix("n-")
+        .and_then(|rest| rest.strip_suffix('f'))
+    {
+        let multiplier = parse_fault_multiplier(multiplier)?;
+        return Some(FaultBound::AllBut { multiplier });
+    }
+    let (multiplier, offset) = threshold.split_once("f+")?;
+    Some(FaultBound::AtLeast {
+        multiplier: parse_fault_multiplier(multiplier)?,
+        offset: parse_digits(offset)?,
+    })
+}
+
+/// Parses the coefficient of `f`, which is [DEFAULT_FAULT_MULTIPLIER] when `multiplier` is empty.
+fn parse_fault_multiplier(multiplier: &str) -> Option<usize> {
+    if multiplier.is_empty() {
+        return Some(DEFAULT_FAULT_MULTIPLIER);
+    }
+    parse_digits(multiplier)
+}
+
+/// Parses a non-empty string of ASCII digits that fits in a `usize`.
+fn parse_digits(digits: &str) -> Option<usize> {
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// Parse a complex expression with parentheses and operators
@@ -551,11 +643,28 @@ pub fn calculate_proposer_region(proposer_idx: usize, distribution: &Distributio
     panic!("Proposer index {proposer_idx} out of bounds");
 }
 
+/// Returns the maximum number of faults `f` tolerated by `peers` when the protocol requires
+/// `peers >= resilience*f + 1`, i.e. `floor((peers-1)/resilience)`.
+const fn faults(peers: usize, resilience: NonZeroUsize) -> usize {
+    peers.saturating_sub(1) / resilience.get()
+}
+
 /// Calculate required count based on threshold
 pub fn calculate_threshold(thresh: &Threshold, peers: usize) -> usize {
     match thresh {
         Threshold::Percent(p) => ((peers as f64) * *p).ceil() as usize,
         Threshold::Count(c) => *c,
+        Threshold::Faults { resilience, bound } => {
+            let faults = faults(peers, *resilience);
+            match *bound {
+                FaultBound::AtLeast { multiplier, offset } => {
+                    faults.saturating_mul(multiplier).saturating_add(offset)
+                }
+                FaultBound::AllBut { multiplier } => {
+                    peers.saturating_sub(faults.saturating_mul(multiplier))
+                }
+            }
+        }
     }
 }
 
@@ -725,6 +834,7 @@ pub fn validate(commands: &[(usize, Command)], peers: usize, proposer: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_utils::NZUsize;
 
     #[test]
     fn test_crate_version() {
@@ -764,6 +874,216 @@ mod tests {
     fn test_calculate_threshold() {
         assert_eq!(calculate_threshold(&Threshold::Count(5), 10), 5);
         assert_eq!(calculate_threshold(&Threshold::Percent(0.5), 10), 5);
+
+        // n=50 and resilience=5 give f=9.
+        let thresholds = [
+            ("f+1", 10),
+            ("2f+1", 19),
+            ("3f+1", 28),
+            ("5f+2", 47),
+            ("n-f", 41),
+            ("n-2f", 32),
+            ("n-3f", 23),
+        ];
+        for (threshold, expected) in thresholds {
+            let command = parse_task(&format!("wait{{0, threshold={threshold}, resilience=5}}"));
+            let Command::Wait(_, parsed, _) = &command[0].1 else {
+                panic!("expected wait command");
+            };
+            assert_eq!(calculate_threshold(parsed, 50), expected, "{threshold}");
+        }
+    }
+
+    #[test]
+    fn test_calculate_fault_threshold_saturates() {
+        let threshold = Threshold::Faults {
+            resilience: NZUsize!(1),
+            bound: FaultBound::AtLeast {
+                multiplier: usize::MAX,
+                offset: usize::MAX,
+            },
+        };
+        assert_eq!(calculate_threshold(&threshold, 3), usize::MAX);
+
+        let threshold = Threshold::Faults {
+            resilience: NZUsize!(1),
+            bound: FaultBound::AllBut {
+                multiplier: usize::MAX,
+            },
+        };
+        assert_eq!(calculate_threshold(&threshold, 3), 0);
+    }
+
+    #[test]
+    fn test_faults() {
+        assert_eq!(faults(0, NZUsize!(3)), 0);
+        assert_eq!(faults(1, NZUsize!(3)), 0);
+        assert_eq!(faults(3, NZUsize!(3)), 0);
+        assert_eq!(faults(4, NZUsize!(3)), 1);
+        assert_eq!(faults(6, NZUsize!(5)), 1);
+        assert_eq!(faults(50, NZUsize!(5)), 9);
+        assert_eq!(faults(51, NZUsize!(5)), 10);
+        assert_eq!(faults(10, NZUsize!(1)), 9);
+    }
+
+    #[test]
+    fn test_parse_fault_threshold_general_forms() {
+        let cases = [
+            (
+                "f+1",
+                FaultBound::AtLeast {
+                    multiplier: 1,
+                    offset: 1,
+                },
+            ),
+            (
+                "1f+1",
+                FaultBound::AtLeast {
+                    multiplier: 1,
+                    offset: 1,
+                },
+            ),
+            (
+                "2f+1",
+                FaultBound::AtLeast {
+                    multiplier: 2,
+                    offset: 1,
+                },
+            ),
+            (
+                "5f+2",
+                FaultBound::AtLeast {
+                    multiplier: 5,
+                    offset: 2,
+                },
+            ),
+            (
+                "f+0",
+                FaultBound::AtLeast {
+                    multiplier: 1,
+                    offset: 0,
+                },
+            ),
+            ("n-f", FaultBound::AllBut { multiplier: 1 }),
+            ("n-1f", FaultBound::AllBut { multiplier: 1 }),
+            ("n-2f", FaultBound::AllBut { multiplier: 2 }),
+            ("n-3f", FaultBound::AllBut { multiplier: 3 }),
+        ];
+        for (threshold, bound) in cases {
+            assert_eq!(
+                parse_threshold(threshold, Some("5")),
+                Threshold::Faults {
+                    resilience: NZUsize!(5),
+                    bound,
+                },
+                "{threshold}"
+            );
+        }
+        assert_eq!(
+            parse_threshold("f+1", Some("3")),
+            parse_threshold("1f+1", Some("3"))
+        );
+        assert_eq!(
+            parse_threshold("n-f", Some("3")),
+            parse_threshold("n-1f", Some("3"))
+        );
+    }
+
+    #[test]
+    fn test_parse_fault_bound_rejects_malformed() {
+        let malformed = [
+            "",
+            "f",
+            "2f",
+            "f+",
+            "2f+",
+            "nf",
+            "n",
+            "n-",
+            "n-ff",
+            "n-2",
+            "n-f+1",
+            "n--f",
+            "n-+2f",
+            "xf+1",
+            "-f+1",
+            "+2f+1",
+            "2f+-1",
+            "2f++1",
+            "2f+1 ",
+            " 2f+1",
+            "2 f+1",
+            "f+1f+1",
+            "2.5f+1",
+            "2F+1",
+            "N-F",
+            "99999999999999999999999f+1",
+            "f+99999999999999999999999",
+            "n-99999999999999999999999f",
+        ];
+        for threshold in malformed {
+            assert_eq!(parse_fault_bound(threshold), None, "{threshold:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid threshold: 2f+")]
+    fn test_parse_fault_threshold_rejects_missing_offset() {
+        parse_task("wait{0, threshold=2f+, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid threshold: nf")]
+    fn test_parse_fault_threshold_rejects_missing_separator() {
+        parse_task("wait{0, threshold=nf, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid threshold: n-")]
+    fn test_parse_fault_threshold_rejects_missing_fault_term() {
+        parse_task("collect{0, threshold=n-, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid threshold: xf+1")]
+    fn test_parse_fault_threshold_rejects_invalid_multiplier() {
+        parse_task("wait{0, threshold=xf+1, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid threshold: 99999999999999999999999f+1")]
+    fn test_parse_fault_threshold_rejects_overflow() {
+        parse_task("wait{0, threshold=99999999999999999999999f+1, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Missing resilience for threshold n-f")]
+    fn test_parse_fault_threshold_requires_resilience() {
+        parse_task("wait{0, threshold=n-f}");
+    }
+
+    #[test]
+    #[should_panic(expected = "resilience must be greater than zero")]
+    fn test_parse_fault_threshold_rejects_zero_resilience() {
+        parse_task("wait{0, threshold=n-f, resilience=0}");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid resilience")]
+    fn test_parse_fault_threshold_rejects_invalid_resilience() {
+        parse_task("wait{0, threshold=n-f, resilience=five}");
+    }
+
+    #[test]
+    #[should_panic(expected = "resilience applies only to fault thresholds")]
+    fn test_parse_count_threshold_rejects_resilience() {
+        parse_task("wait{0, threshold=5, resilience=5}");
+    }
+
+    #[test]
+    #[should_panic(expected = "resilience applies only to fault thresholds")]
+    fn test_parse_percent_threshold_rejects_resilience() {
+        parse_task("collect{0, threshold=80%, resilience=5}");
     }
 
     #[test]
@@ -1093,6 +1413,16 @@ broadcast{1}
             (
                 "kudzu_large_block_coding_50.lazy",
                 include_str!("../kudzu_large_block_coding_50.lazy"),
+                true,
+            ),
+            (
+                "multimmit_small_block_50.lazy",
+                include_str!("../multimmit_small_block_50.lazy"),
+                true,
+            ),
+            (
+                "multimmit_large_block_50.lazy",
+                include_str!("../multimmit_large_block_50.lazy"),
                 true,
             ),
             ("hotstuff.lazy", include_str!("../hotstuff.lazy"), true),
