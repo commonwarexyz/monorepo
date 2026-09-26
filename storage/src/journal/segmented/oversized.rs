@@ -74,6 +74,7 @@ use commonware_utils::sequence::U64 as SectionKey;
 use futures::{FutureExt as _, future::try_join};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
+    iter,
     num::NonZeroUsize,
 };
 use tracing::{debug, warn};
@@ -944,19 +945,61 @@ impl<E: Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         // buffer and return quickly (only blocks when the buffer is full).
         let (offset, size);
         (self.values, offset, size) = self.values.append(section, value).await?;
-
-        // Update entry with actual location and write to index
-        let entry_with_location = entry.with_location(offset, size);
         let position;
-        (self.index, position) = self.index.append(section, &entry_with_location).await?;
+        (self, position) = self
+            .append_index(section, iter::once(entry.with_location(offset, size)))
+            .await?;
+        Ok((self, position, offset, size))
+    }
+
+    /// Append multiple entry/value pairs to one section.
+    ///
+    /// Values are written before their located index entries. Returns the last index position and
+    /// each value's `(offset, size)` in input order. All encoded value frames are held in one
+    /// temporary buffer, so callers should bound the total encoded input size. Returns
+    /// [Error::EmptyAppend] for no entries.
+    #[commonware_macros::stability(ALPHA)]
+    pub async fn append_many<'a>(
+        mut self,
+        section: u64,
+        entries: impl IntoIterator<Item = (I, &'a V)>,
+    ) -> Result<(Self, u64, Vec<(u64, u32)>), Error>
+    where
+        V: 'a,
+    {
+        // Awaited calls take owned collections: an iterator adapter borrowing a local, held
+        // across an await, makes callers' futures fail rustc's `Send` check.
+        let (entries, values): (Vec<I>, Vec<&V>) = entries.into_iter().unzip();
+        let locations;
+        (self.values, locations) = self.values.append_many(section, values).await?;
+        let located: Vec<I> = entries
+            .into_iter()
+            .zip(&locations)
+            .map(|(entry, &(offset, size))| entry.with_location(offset, size))
+            .collect();
+        let position;
+        (self, position) = self.append_index(section, located).await?;
+        Ok((self, position, locations))
+    }
+
+    /// Append index entries whose values are already written to `section`, returning the last
+    /// entry's position.
+    async fn append_index(
+        mut self,
+        section: u64,
+        entries: impl IntoIterator<Item = I>,
+    ) -> Result<(Self, u64), Error> {
+        let mut position = 0;
+        for entry in entries {
+            (self.index, position) = self.index.append(section, &entry).await?;
+        }
 
         // Track this section so a later sync can prove and publish its new length. A fresh
         // barrier claims only the staged floor, never the unproven pre-append prefix.
         if let Some(tracking) = &mut self.tracking {
             tracking.barrier(section);
         }
-
-        Ok((self, position, offset, size))
+        Ok((self, position))
     }
 
     /// Get entry at position (index entry only, not value).
@@ -1399,7 +1442,7 @@ mod tests {
         },
     };
     use commonware_utils::{NZU16, NZUsize, probability};
-    use std::time::Duration;
+    use std::{future::Future, time::Duration};
 
     impl<E: crate::Context, I: Record + Send + Sync, V: CodecShared> Oversized<E, I, V> {
         async fn test_reopen_at_most(self, section: u64, end: u64) -> Result<Self, Error> {
@@ -2038,6 +2081,149 @@ mod tests {
             assert_eq!(retrieved_value, value);
 
             oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_recovery() {
+        for compression in [None, Some(3)] {
+            deterministic::Runner::default().start(|context| async move {
+                let mut cfg = test_cfg(&context);
+                cfg.compression = compression;
+                let entries = [
+                    (TestEntry::new(1, 0, 0), [1; 16]),
+                    (TestEntry::new(2, 0, 0), [2; 16]),
+                    (TestEntry::new(3, 0, 0), [3; 16]),
+                ];
+                let oversized = Oversized::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+                let (oversized, first, first_location) = oversized
+                    .append_many(5, [(TestEntry::new(0, 0, 0), &[0; 16])])
+                    .await
+                    .unwrap();
+                assert_eq!(first, 0);
+                assert_eq!(first_location.len(), 1);
+                assert_eq!(
+                    oversized
+                        .get_value(5, first_location[0].0, first_location[0].1)
+                        .await
+                        .unwrap(),
+                    [0; 16]
+                );
+                let (oversized, last, locations) = oversized
+                    .append_many(
+                        5,
+                        entries.iter().map(|(entry, value)| (entry.clone(), value)),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(last, 3);
+                assert_eq!(locations.len(), entries.len());
+                for pair in locations.windows(2) {
+                    assert_eq!(pair[0].0 + u64::from(pair[0].1), pair[1].0);
+                }
+                for (position, ((expected, value), &(offset, size))) in
+                    entries.iter().zip(&locations).enumerate()
+                {
+                    let actual = oversized.get(5, position as u64 + 1).await.unwrap();
+                    assert_eq!(actual.id, expected.id);
+                    assert_eq!(actual.value_location(), (offset, size));
+                    assert_eq!(oversized.get_value(5, offset, size).await.unwrap(), *value);
+                }
+                drop(oversized.sync(5).await.unwrap());
+
+                let oversized =
+                    Oversized::<_, TestEntry, TestValue>::init(context.child("second"), cfg)
+                        .await
+                        .unwrap();
+                for (position, ((expected, value), &(offset, size))) in
+                    entries.iter().zip(&locations).enumerate()
+                {
+                    let actual = oversized.get(5, position as u64 + 1).await.unwrap();
+                    assert_eq!(actual.id, expected.id);
+                    assert_eq!(actual.value_location(), (offset, size));
+                    assert_eq!(oversized.get_value(5, offset, size).await.unwrap(), *value);
+                }
+                oversized.destroy().await.unwrap();
+            });
+        }
+    }
+
+    /// Holds a borrowed batch across `append_many` the way callers do. The `Send` bound on the
+    /// returned future must hold for any context, so compiling proves the future stays `Send`.
+    #[allow(clippy::manual_async_fn)]
+    fn append_borrowed<E: Context>(
+        journal: Oversized<E, TestEntry, TestValue>,
+        batch: Vec<(TestEntry, TestValue)>,
+    ) -> impl Future<Output = Oversized<E, TestEntry, TestValue>> + Send {
+        async move {
+            let (journal, _, locations) = journal
+                .append_many(0, batch.iter().map(|(entry, value)| (entry.clone(), value)))
+                .await
+                .unwrap();
+            assert_eq!(locations.len(), batch.len());
+            journal
+        }
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_future_is_send() {
+        deterministic::Runner::default().start(|context| async move {
+            let oversized = Oversized::<_, TestEntry, TestValue>::init(
+                context.child("send"),
+                test_cfg(&context),
+            )
+            .await
+            .unwrap();
+            let batch = vec![
+                (TestEntry::new(0, 0, 0), [0; 16]),
+                (TestEntry::new(1, 0, 0), [1; 16]),
+            ];
+            let oversized = append_borrowed(oversized, batch).await;
+            oversized.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_rejects_empty() {
+        deterministic::Runner::default().start(|context| async move {
+            let oversized = Oversized::<_, TestEntry, TestValue>::init(
+                context.child("empty"),
+                test_cfg(&context),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                oversized.append_many(0, iter::empty()).await,
+                Err(Error::EmptyAppend)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_append_many_index_failure_is_fatal() {
+        deterministic::Runner::default().start(|context| async move {
+            let faults = WriteFaults::default();
+            let faulty = WriteFaultContext {
+                inner: context,
+                faults: faults.clone(),
+            };
+            let mut cfg = test_cfg(&faulty);
+            cfg.index_write_buffer = NZUsize!(1);
+            cfg.value_write_buffer = NZUsize!(4096);
+            let oversized = Oversized::init(faulty, cfg).await.unwrap();
+            let values = (0..10).map(|id| [id as u8; 16]).collect::<Vec<_>>();
+            let entries = values
+                .iter()
+                .zip(0..)
+                .map(|(value, id)| (TestEntry::new(id, 0, 0), value));
+
+            faults.arm();
+            assert!(matches!(
+                oversized.append_many(0, entries).await,
+                Err(Error::Runtime(_))
+            ));
         });
     }
 
