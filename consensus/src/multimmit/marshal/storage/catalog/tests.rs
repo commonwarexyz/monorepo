@@ -73,7 +73,8 @@ async fn open(
     label: &'static str,
     config: &TestConfig,
 ) -> TestStore {
-    let mut store = Box::pin(TestStore::open(&context.child(label), config))
+    let child_context = context.child(label);
+    let mut store = Box::pin(TestStore::open(&child_context, config))
         .await
         .unwrap();
     Box::pin(store.recover_install()).await.unwrap();
