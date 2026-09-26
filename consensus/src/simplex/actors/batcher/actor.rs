@@ -1,4 +1,7 @@
-use super::{Config, Mailbox, Message, Round, verifier::Batch};
+use super::{
+    Config, Mailbox, Message, Round,
+    verifier::{Batch, Constructed},
+};
 use crate::{
     Epochable, Relay, Reporter, Viewable,
     simplex::{
@@ -26,14 +29,15 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{N3f1, ordered::Quorum};
+use commonware_utils::{N3f1, futures::Pool, ordered::Quorum};
 use rand_core::CryptoRng;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
+    mem,
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tracing::{Instrument as _, Span, debug, info_span, trace};
+use tracing::{Span, debug, info_span, trace};
 
 /// Tracks the current view, its leader, and whether the voter has already been
 /// sent the leader-nullify hint for it.
@@ -45,6 +49,13 @@ struct Current {
     view: View,
     leader: Option<Participant>,
     leader_nullify_hinted: bool,
+}
+
+/// One completed construction attempt, including its submission-to-completion timer.
+pub(super) struct Done<S: Scheme<D>, D: Digest> {
+    pub view: View,
+    pub timer: histogram::Timer,
+    pub constructed: Constructed<S, D>,
 }
 
 pub struct Actor<E, S, B, D, Re, Rl, T>
@@ -315,56 +326,121 @@ where
         }
     }
 
-    /// Attempts to construct certificates from ready votes for `view` and forwards
-    /// them to the voter.
-    async fn process_view(
+    /// Starts ready jobs without exceeding the strategy's execution capacity.
+    /// Returns true when capacity is full and the view needs another dispatch pass.
+    fn dispatch_view(
         &mut self,
-        voter: &mut voter::Mailbox<S, D>,
+        pool: &mut Pool<'static, Done<S, D>>,
         view: View,
         round: &mut Round<S, B, D, Re>,
-    ) {
-        loop {
+    ) -> bool {
+        let capacity = self.strategy.manual().parallelism();
+        while pool.len() < capacity {
+            // Submission may execute inline, so timing must start before begin_construct.
             let timer = self.construct_latency.timer(self.context.as_ref());
-            let Some(Batch {
-                processed,
-                invalid,
-                certificate,
-                fallback,
-            }) = round
-                .try_construct(self.context.as_mut(), &self.strategy)
-                .await
-            else {
-                trace!(%view, "no verifier ready");
+            let Some(job) = round.begin_construct(self.context.as_mut(), &self.strategy) else {
                 break;
             };
-
-            // Record completed work even when no certificate was produced.
-            timer.observe(self.context.as_ref());
-            if fallback {
-                self.construct_fallback.inc();
-            }
-
-            // Block invalid signers even when the remaining votes produced a certificate.
-            for participant in invalid {
-                if let Some(signer) = self.scheme.participants().key(participant) {
-                    commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+            pool.push(async move {
+                Done {
+                    view,
+                    timer,
+                    constructed: job.await,
                 }
-            }
+            });
+        }
+        pool.len() == capacity
+    }
 
-            // Forward the certificate already recorded by the round.
-            if let Some(certificate) = certificate {
-                let kind = certificate.kind();
-                debug!(%view, %kind, "recovered certificate, forwarding to voter");
-                voter.recovered(certificate);
+    /// Revisits each dirty view once, prioritizing the current view. Views skipped
+    /// at capacity remain dirty until a completion frees a slot.
+    pub(super) fn dispatch_ready(
+        &mut self,
+        pool: &mut Pool<'static, Done<S, D>>,
+        work: &mut BTreeMap<View, Round<S, B, D, Re>>,
+        dirty: &mut BTreeSet<View>,
+        voter: &mut voter::Mailbox<S, D>,
+        viewport: Viewport,
+    ) {
+        let Viewport {
+            current, finalized, ..
+        } = viewport;
+        let mut ready = mem::take(dirty);
+        let first = ready.take(&current);
+        for view in first.into_iter().chain(ready) {
+            if view <= finalized {
+                continue;
             }
+            let Some(round) = work.get_mut(&view) else {
+                continue;
+            };
 
-            // Count processed pending votes, including rejected inputs.
-            if processed != 0 {
-                trace!(%view, batch = processed, "processed votes");
-                self.processed.inc_by(processed as u64);
-                self.batch_size.observe(processed as f64);
+            // Leader stamping and certified proposals already bound forwarding.
+            if let Some(me) = self.scheme.me()
+                && let Some(proposal) = round.try_forward_proposal(me)
+            {
+                round.span().in_scope(|| voter.proposal(proposal));
+            }
+            if !self.lookahead.admits(current, view) {
+                continue;
+            }
+            let span = round.span();
+            if span.in_scope(|| self.dispatch_view(pool, view, round)) {
+                dirty.insert(view);
             }
         }
+    }
+
+    /// Records completed work even if its round was pruned. Certificates remain
+    /// useful to the voter, whose retention policy is independent of the batcher's.
+    pub(super) fn handle_done(
+        &mut self,
+        voter: &mut voter::Mailbox<S, D>,
+        work: &mut BTreeMap<View, Round<S, B, D, Re>>,
+        done: Done<S, D>,
+    ) -> Option<View> {
+        let Done {
+            view,
+            timer,
+            constructed,
+        } = done;
+        let round = work.get_mut(&view);
+        let _guard = round
+            .as_ref()
+            .map_or_else(Span::none, |round| round.span())
+            .entered();
+        timer.observe(self.context.as_ref());
+        let (batch, revisit) = if let Some(round) = round {
+            (round.finish_construct(constructed), Some(view))
+        } else {
+            // The monotonic retention floor prevents this round from being recreated.
+            (constructed.batch, None)
+        };
+        let Batch {
+            processed,
+            invalid,
+            certificate,
+            fallback,
+        } = batch;
+        if fallback {
+            self.construct_fallback.inc();
+        }
+        for participant in invalid {
+            if let Some(signer) = self.scheme.participants().key(participant) {
+                commonware_p2p::block!(self.blocker, signer.clone(), "invalid signature");
+            }
+        }
+        if let Some(certificate) = certificate {
+            let kind = certificate.kind();
+            debug!(%view, %kind, "recovered certificate, forwarding to voter");
+            voter.recovered(certificate);
+        }
+        if processed != 0 {
+            trace!(%view, batch = processed, "processed votes");
+            self.processed.inc_by(processed as u64);
+            self.batch_size.observe(processed as f64);
+        }
+        revisit
     }
 
     pub fn start(
@@ -400,14 +476,10 @@ where
         let mut finalized = self.floor;
         let mut work: BTreeMap<View, Round<S, B, D, Re>> = BTreeMap::new();
 
-        // Views whose rounds may have become actionable. Capacity is reused
-        // across select-loop iterations.
-        let mut dirty_views: Vec<View> = Vec::new();
+        let mut dirty_views = BTreeSet::new();
+        let mut crypto_pool = Pool::default();
         select_loop! {
             self.context,
-            on_start => {
-                dirty_views.clear();
-            },
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
             },
@@ -452,7 +524,7 @@ where
                         // span so all of its work shares one trace
                         let round = self.round_for_view(&current, &mut work, current.view);
                         round.set_span(span);
-                        dirty_views.push(current.view);
+                        dirty_views.insert(current.view);
 
                         // Revisit rounds in the admission window now that the
                         // current view advanced: rounds already visited are
@@ -461,7 +533,7 @@ where
                         if current.view < limit {
                             for (&view, round) in work.range_mut(current.view.next()..=limit) {
                                 self.stamp_leader(&current, view, round);
-                                dirty_views.push(view);
+                                dirty_views.insert(view);
                             }
                         }
 
@@ -529,8 +601,13 @@ where
                         let _guard = process.entered();
                         round.accept_vote(message, true);
                         self.added.inc();
-                        dirty_views.push(view);
+                        dirty_views.insert(view);
                     }
+                }
+            },
+            done = crypto_pool.next_completed() => {
+                if let Some(view) = self.handle_done(&mut voter, &mut work, done) {
+                    dirty_views.insert(view);
                 }
             },
             // Handle certificates from the network
@@ -594,7 +671,7 @@ where
                 // certificate may have unlocked already-buffered votes.
                 let round = self.round_for_view(&current, &mut work, view);
                 if round.record_certificate(&message) {
-                    dirty_views.push(view);
+                    dirty_views.insert(view);
                 }
                 voter.recovered(message);
             },
@@ -656,7 +733,7 @@ where
                             .entered();
                         voter.timeout(round, TimeoutReason::LeaderNullify);
                     }
-                    dirty_views.push(view);
+                    dirty_views.insert(view);
                 }
             },
             on_end => {
@@ -664,43 +741,13 @@ where
                     continue;
                 }
 
-                let me = self.scheme.me();
-
-                for view in dirty_views.drain(..) {
-                    // Skip verification and construction for views at or below
-                    // finalized. We still admit votes there (see
-                    // [Viewport::retains]) to notify the reporter of all votes
-                    // within the retained window (even if we don't need them
-                    // in the voter).
-                    if view <= finalized {
-                        continue;
-                    }
-                    let Some(round) = work.get_mut(&view) else {
-                        continue;
-                    };
-
-                    // Forward the round's proposal once known, keeping
-                    // optimistic followers fed. No window check needed: the
-                    // proposal comes from a stamped leader's vote (stamping is
-                    // window-gated) or from a verified certificate.
-                    if let Some(me) = me
-                        && let Some(proposal) = round.try_forward_proposal(me)
-                    {
-                        round.span().in_scope(|| voter.proposal(proposal));
-                    }
-
-                    // We only process bounded future work. This keeps memory and
-                    // verification bounded while still enabling optimistic lookahead.
-                    if !self.lookahead.admits(current.view, view) {
-                        trace!(current = %current.view, %view, "skipping out-of-window round processing");
-                        continue;
-                    }
-
-                    let span = round.span();
-                    self.process_view(&mut voter, view, round)
-                        .instrument(span)
-                        .await;
-                }
+                self.dispatch_ready(
+                    &mut crypto_pool,
+                    &mut work,
+                    &mut dirty_views,
+                    &mut voter,
+                    self.viewport(finalized, current.view),
+                );
 
                 // Drop any rounds that are no longer retained
                 let viewport = self.viewport(finalized, current.view);

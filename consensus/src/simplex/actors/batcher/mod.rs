@@ -47,6 +47,8 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
 #[cfg(test)]
 mod tests {
+    mod dispatch;
+    mod timing;
     use super::{verifier::Batch, *};
     use crate::{
         Viewable,
