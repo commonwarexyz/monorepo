@@ -22,6 +22,15 @@ commonware_macros::stability_scope!(ALPHA {
     mod zoda;
     pub use zoda::{Error as ZodaError, Zoda};
 
+    mod ocelot;
+    pub use ocelot::{Error as OcelotError, Ocelot8, Ocelot16, OcelotHinted8, OcelotHinted16};
+
+    #[cfg(feature = "fuzz")]
+    pub mod fuzz;
+
+    #[cfg(any(test, feature = "fuzz"))]
+    mod test_suites;
+
     /// Configuration common to all encoding schemes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Config {
@@ -113,7 +122,7 @@ commonware_macros::stability_scope!(ALPHA {
     ///         .iter()
     ///         .enumerate()
     ///         .map(|(i, shard)| {
-    ///             RS::check(&config, &commitment, i as u16, shard).unwrap()
+    ///             RS::check(&config, &commitment, i as u16, shard, &STRATEGY).unwrap()
     ///         })
     ///         .collect();
     ///
@@ -185,11 +194,13 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// This takes in an index, to make sure that the shard you're checking
         /// is associated with the participant you expect it to be.
+        /// `strategy` controls how any parallel work is executed.
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Check the integrity of multiple shards.
@@ -203,7 +214,7 @@ commonware_macros::stability_scope!(ALPHA {
             strategy: &impl Strategy,
         ) -> Vec<Result<Self::CheckedShard, Self::Error>> {
             strategy.map_collect_vec(shards, |&(index, shard)| {
-                Self::check(config, commitment, index, shard)
+                Self::check(config, commitment, index, shard, strategy)
             })
         }
 
@@ -265,9 +276,11 @@ commonware_macros::stability_scope!(ALPHA {
     /// let (commitment, mut shards) = Z::encode(namespace, &config, data.as_slice(), &STRATEGY).unwrap();
     ///
     /// let (checking_data, checked_0, _) =
-    ///     Z::weaken(namespace, &config, &commitment, 0, shards.remove(0)).unwrap();
-    /// let (_, _, weak_1) = Z::weaken(namespace, &config, &commitment, 1, shards.remove(0)).unwrap();
-    /// let checked_1 = Z::check(&config, &commitment, &checking_data, 1, weak_1).unwrap();
+    ///     Z::weaken(namespace, &config, &commitment, 0, shards.remove(0), &STRATEGY).unwrap();
+    /// let (_, _, weak_1) =
+    ///     Z::weaken(namespace, &config, &commitment, 1, shards.remove(0), &STRATEGY).unwrap();
+    /// let checked_1 =
+    ///     Z::check(&config, &commitment, &checking_data, 1, weak_1, &STRATEGY).unwrap();
     ///
     /// let data2 = Z::decode(
     ///     &config,
@@ -350,6 +363,7 @@ commonware_macros::stability_scope!(ALPHA {
         /// the shards you receive from others.
         ///
         /// `namespace` must match the one used in the corresponding `encode` call.
+        /// `strategy` controls how any parallel work is executed.
         #[allow(clippy::type_complexity)]
         fn weaken(
             namespace: &[u8],
@@ -357,6 +371,7 @@ commonware_macros::stability_scope!(ALPHA {
             commitment: &Self::Commitment,
             index: u16,
             shard: Self::StrongShard,
+            strategy: &impl Strategy,
         ) -> Result<(Self::CheckingData, Self::CheckedShard, Self::WeakShard), Self::Error>;
 
         /// Check the integrity of a weak shard, producing a checked shard.
@@ -365,12 +380,14 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// This takes in an index, to make sure that the weak shard you're checking
         /// is associated with the participant you expect it to be.
+        /// `strategy` controls how any parallel work is executed.
         fn check(
             config: &Config,
             commitment: &Self::Commitment,
             checking_data: &Self::CheckingData,
             index: u16,
             weak_shard: Self::WeakShard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error>;
 
         /// Decode the data from shards received from other participants.
@@ -451,9 +468,10 @@ commonware_macros::stability_scope!(ALPHA {
             commitment: &Self::Commitment,
             index: u16,
             shard: &Self::Shard,
+            strategy: &impl Strategy,
         ) -> Result<Self::CheckedShard, Self::Error> {
             let (checking_data, checked_shard, _) =
-                P::weaken(b"", config, commitment, index, shard.clone())
+                P::weaken(b"", config, commitment, index, shard.clone(), strategy)
                     .map_err(PhasedAsSchemeError::Scheme)?;
             Ok(PhasedCheckedShard {
                 checking_data,
@@ -505,76 +523,19 @@ commonware_macros::stability_scope!(ALPHA {
 #[cfg(test)]
 mod test {
     use super::*;
-    use arbitrary::Unstructured;
+    use crate::test_suites::generate_case;
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_utils::NZU16;
 
-    const MAX_SHARD_SIZE: usize = 1 << 31;
-    const MAX_SHARDS: u16 = 32;
-    const MAX_DATA: usize = 1024;
-    const MIN_EXTRA_SHARDS: u16 = 1;
-
-    fn generate_case(u: &mut Unstructured<'_>) -> arbitrary::Result<(Config, Vec<u8>, Vec<u16>)> {
-        let minimum_shards = (u.arbitrary::<u16>()? % MAX_SHARDS) + 1;
-        let extra_shards =
-            MIN_EXTRA_SHARDS + (u.arbitrary::<u16>()? % (MAX_SHARDS - MIN_EXTRA_SHARDS + 1));
-        let total_shards = minimum_shards + extra_shards;
-
-        let data_len = usize::from(u.arbitrary::<u16>()?) % (MAX_DATA + 1);
-        let data = u.bytes(data_len)?.to_vec();
-
-        let selected_len = usize::from(minimum_shards)
-            + (usize::from(u.arbitrary::<u16>()?) % (usize::from(extra_shards) + 1));
-        let mut selected: Vec<u16> = (0..total_shards).collect();
-        for i in 0..selected_len {
-            let remaining = usize::from(total_shards) - i;
-            let j = i + (usize::from(u.arbitrary::<u16>()?) % remaining);
-            selected.swap(i, j);
-        }
-        selected.truncate(selected_len);
-
-        Ok((
-            Config {
-                minimum_shards: NZU16!(minimum_shards),
-                extra_shards: NZU16!(extra_shards),
-            },
-            data,
-            selected,
-        ))
-    }
-
     mod scheme {
         use super::*;
-        use crate::{PhasedAsScheme, Scheme, Zoda, reed_solomon::ReedSolomon};
-        use commonware_codec::Encode;
+        use crate::{
+            Ocelot8, Ocelot16, OcelotHinted8, OcelotHinted16, PhasedAsScheme, Scheme, Zoda,
+            reed_solomon::ReedSolomon, test_suites::roundtrip,
+        };
         use commonware_parallel::Sequential;
-
-        fn roundtrip<S: Scheme>(config: &Config, data: &[u8], selected: &[u16]) {
-            let (commitment, shards) = S::encode(config, data, &Sequential).unwrap();
-            let read_cfg = CodecConfig {
-                maximum_shard_size: MAX_SHARD_SIZE,
-            };
-            for shard in &shards {
-                let decoded_shard = S::Shard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
-                assert_eq!(decoded_shard, *shard);
-            }
-
-            let mut checked_shards = Vec::new();
-            for (i, shard) in shards.into_iter().enumerate() {
-                if !selected.contains(&(i as u16)) {
-                    continue;
-                }
-                let checked = S::check(config, &commitment, i as u16, &shard).unwrap();
-                checked_shards.push(checked);
-            }
-
-            checked_shards.reverse();
-            let decoded =
-                S::decode(config, &commitment, checked_shards.iter(), &Sequential).unwrap();
-            assert_eq!(decoded, data);
-        }
 
         fn decode_rejects_mixed_commitments<S: Scheme>(
             config: &Config,
@@ -584,8 +545,8 @@ mod test {
             let (commitment_a, shards_a) = S::encode(config, data_a, &Sequential).unwrap();
             let (commitment_b, shards_b) = S::encode(config, data_b, &Sequential).unwrap();
 
-            let checked_a = S::check(config, &commitment_a, 0, &shards_a[0]).unwrap();
-            let checked_b = S::check(config, &commitment_b, 1, &shards_b[1]).unwrap();
+            let checked_a = S::check(config, &commitment_a, 0, &shards_a[0], &Sequential).unwrap();
+            let checked_b = S::check(config, &commitment_b, 1, &shards_b[1], &Sequential).unwrap();
 
             let result = S::decode(
                 config,
@@ -625,11 +586,41 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
+            decode_rejects_mixed_commitments::<PhasedAsScheme<OcelotHinted8<Sha256>>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+            decode_rejects_mixed_commitments::<Ocelot8<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+            decode_rejects_mixed_commitments::<PhasedAsScheme<OcelotHinted16<Sha256>>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+            decode_rejects_mixed_commitments::<Ocelot16<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
             decode_rejects_empty_checked_shards::<ReedSolomon<Sha256>>(&config, b"alpha payload");
             decode_rejects_empty_checked_shards::<PhasedAsScheme<Zoda<Sha256>>>(
                 &config,
                 b"alpha payload",
             );
+            decode_rejects_empty_checked_shards::<PhasedAsScheme<OcelotHinted8<Sha256>>>(
+                &config,
+                b"alpha payload",
+            );
+            decode_rejects_empty_checked_shards::<Ocelot8<Sha256>>(&config, b"alpha payload");
+            decode_rejects_empty_checked_shards::<PhasedAsScheme<OcelotHinted16<Sha256>>>(
+                &config,
+                b"alpha payload",
+            );
+            decode_rejects_empty_checked_shards::<Ocelot16<Sha256>>(&config, b"alpha payload");
         }
 
         #[test]
@@ -642,6 +633,10 @@ mod test {
 
             roundtrip::<ReedSolomon<Sha256>>(&config, b"", &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, b"", &selected);
+            roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, b"", &selected);
+            roundtrip::<Ocelot8<Sha256>>(&config, b"", &selected);
+            roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, b"", &selected);
+            roundtrip::<Ocelot16<Sha256>>(&config, b"", &selected);
         }
 
         #[test]
@@ -655,6 +650,26 @@ mod test {
 
             roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
             roundtrip::<PhasedAsScheme<Zoda<Sha256>>>(&config, &data, &selected);
+            roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, &data, &selected);
+            roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+            roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, &data, &selected);
+            roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
+        }
+
+        #[test]
+        fn roundtrip_ocelot_recursive_shard_hashes() {
+            let config = Config {
+                minimum_shards: NZU16!(3),
+                extra_shards: NZU16!(4),
+            };
+            // Every shard crosses the second reduction boundary, with a short tail.
+            let data: Vec<_> = (0..3 * 32770 - 4).map(|i| (i % 251) as u8).collect();
+            for selected in [[0, 1, 2], [3, 4, 5]] {
+                roundtrip::<Ocelot8<Sha256>>(&config, &data, &selected);
+                roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
+                roundtrip::<PhasedAsScheme<OcelotHinted8<Sha256>>>(&config, &data, &selected);
+                roundtrip::<PhasedAsScheme<OcelotHinted16<Sha256>>>(&config, &data, &selected);
+            }
         }
 
         #[test]
@@ -664,6 +679,32 @@ mod test {
                 roundtrip::<ReedSolomon<Sha256>>(&config, &data, &selected);
                 Ok(())
             });
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_ocelot() {
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .test(|u| crate::ocelot::fuzz::Plan::Roundtrip8.run(u));
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_ocelot16() {
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .test(|u| crate::ocelot::fuzz::Plan::Roundtrip16.run(u));
+        }
+
+        #[test]
+        fn roundtrip_ocelot16_above_gf8_order() {
+            let config = Config {
+                minimum_shards: NZU16!(257),
+                extra_shards: NZU16!(8),
+            };
+            let data: Vec<_> = (0..1027).map(|i| i as u8).collect();
+            for selected in [(0..257).collect::<Vec<_>>(), (1..258).collect()] {
+                roundtrip::<Ocelot16<Sha256>>(&config, &data, &selected);
+            }
         }
 
         #[test_group("slow")]
@@ -681,62 +722,11 @@ mod test {
 
     mod phased_scheme {
         use super::*;
-        use crate::{PhasedScheme, Zoda};
-        use commonware_codec::Encode;
+        use crate::{
+            OcelotHinted8, OcelotHinted16, PhasedScheme, Zoda,
+            test_suites::phased_roundtrip as roundtrip,
+        };
         use commonware_parallel::Sequential;
-
-        fn roundtrip<S: PhasedScheme>(config: &Config, data: &[u8], selected: &[u16]) {
-            let owner = *selected.first().expect("selected must not be empty");
-            let (commitment, shards) = S::encode(b"", config, data, &Sequential).unwrap();
-            let read_cfg = CodecConfig {
-                maximum_shard_size: MAX_SHARD_SIZE,
-            };
-            for shard in &shards {
-                let decoded_shard =
-                    S::StrongShard::read_cfg(&mut shard.encode(), &read_cfg).unwrap();
-                assert_eq!(decoded_shard, *shard);
-            }
-
-            let (checking_data, own_checked, _) = S::weaken(
-                b"",
-                config,
-                &commitment,
-                owner,
-                shards[owner as usize].clone(),
-            )
-            .unwrap();
-            let mut checked_shards = vec![own_checked];
-            for &index in selected {
-                if index == owner {
-                    continue;
-                }
-                let (_, _, weak_shard) = S::weaken(
-                    b"",
-                    config,
-                    &commitment,
-                    index,
-                    shards[index as usize].clone(),
-                )
-                .unwrap();
-                let decoded_weak =
-                    S::WeakShard::read_cfg(&mut weak_shard.encode(), &read_cfg).unwrap();
-                assert_eq!(decoded_weak, weak_shard);
-                let checked =
-                    S::check(config, &commitment, &checking_data, index, decoded_weak).unwrap();
-                checked_shards.push(checked);
-            }
-
-            checked_shards.reverse();
-            let decoded = S::decode(
-                config,
-                &commitment,
-                checking_data,
-                checked_shards.iter(),
-                &Sequential,
-            )
-            .unwrap();
-            assert_eq!(decoded, data);
-        }
 
         fn check_rejects_mixed_commitments<S: PhasedScheme>(
             config: &Config,
@@ -746,12 +736,33 @@ mod test {
             let (commitment_a, shards_a) = S::encode(b"", config, data_a, &Sequential).unwrap();
             let (commitment_b, shards_b) = S::encode(b"", config, data_b, &Sequential).unwrap();
 
-            let (checking_data_a, checked_a, _) =
-                S::weaken(b"", config, &commitment_a, 0, shards_a[0].clone()).unwrap();
-            let (checking_data_b, checked_b, weak_b) =
-                S::weaken(b"", config, &commitment_b, 1, shards_b[1].clone()).unwrap();
+            let (checking_data_a, checked_a, _) = S::weaken(
+                b"",
+                config,
+                &commitment_a,
+                0,
+                shards_a[0].clone(),
+                &Sequential,
+            )
+            .unwrap();
+            let (checking_data_b, checked_b, weak_b) = S::weaken(
+                b"",
+                config,
+                &commitment_b,
+                1,
+                shards_b[1].clone(),
+                &Sequential,
+            )
+            .unwrap();
 
-            let check_result = S::check(config, &commitment_a, &checking_data_a, 1, weak_b);
+            let check_result = S::check(
+                config,
+                &commitment_a,
+                &checking_data_a,
+                1,
+                weak_b,
+                &Sequential,
+            );
             assert!(
                 check_result.is_err(),
                 "check must reject weak shards derived from a different commitment"
@@ -794,6 +805,16 @@ mod test {
                 b"alpha payload",
                 b"bravo payload",
             );
+            check_rejects_mixed_commitments::<OcelotHinted8<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
+            check_rejects_mixed_commitments::<OcelotHinted16<Sha256>>(
+                &config,
+                b"alpha payload",
+                b"bravo payload",
+            );
         }
 
         #[test]
@@ -805,6 +826,8 @@ mod test {
             let selected: Vec<u16> = (0..30).collect();
 
             roundtrip::<Zoda<Sha256>>(&config, b"", &selected);
+            roundtrip::<OcelotHinted8<Sha256>>(&config, b"", &selected);
+            roundtrip::<OcelotHinted16<Sha256>>(&config, b"", &selected);
         }
 
         #[test]
@@ -817,6 +840,8 @@ mod test {
             let selected: Vec<u16> = (0..8).collect();
 
             roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
+            roundtrip::<OcelotHinted8<Sha256>>(&config, &data, &selected);
+            roundtrip::<OcelotHinted16<Sha256>>(&config, &data, &selected);
         }
 
         #[test_group("slow")]
@@ -829,6 +854,20 @@ mod test {
                     roundtrip::<Zoda<Sha256>>(&config, &data, &selected);
                     Ok(())
                 });
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_ocelot() {
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .test(|u| crate::ocelot::fuzz::Plan::HintedRoundtrip8.run(u));
+        }
+
+        #[test]
+        fn minifuzz_roundtrip_ocelot16() {
+            minifuzz::Builder::default()
+                .with_seed(0)
+                .test(|u| crate::ocelot::fuzz::Plan::HintedRoundtrip16.run(u));
         }
     }
 
