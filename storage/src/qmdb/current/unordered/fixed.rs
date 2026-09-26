@@ -586,6 +586,7 @@ pub mod test {
                     replay_buffer: NZUsize!(4096),
                     strategy: Sequential,
                     page_cache: CacheRef::from_pooler(ctx, NZU16!(1024), NZUsize!(64)),
+                    node_cache_size: None,
                 },
                 journal_config: JournalConfig {
                     partition: "rebranch-ops-journal".into(),

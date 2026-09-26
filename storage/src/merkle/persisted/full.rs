@@ -125,6 +125,12 @@ pub struct Config<S: Strategy> {
 
     /// The page cache to use for caching data.
     pub page_cache: CacheRef,
+
+    /// Capacity (in entries) of the position-keyed node cache serving historical node reads.
+    /// `None` disables it. The cache pays off for access patterns that repeatedly read the same
+    /// positions, such as grafted reads over hot regions or repeated proof generation. Size it
+    /// to minimize the `node_cache_faults` metric.
+    pub node_cache_size: Option<NonZeroUsize>,
 }
 
 /// Configuration for initializing a full Merkle structure for synchronization.
@@ -177,6 +183,11 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
 
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
+
+    /// A position-keyed cache of node digests read from the journal; `None` when disabled. Journal
+    /// node positions are written exactly once (append-only), and the journal is only truncated
+    /// before the cache is published, so entries need no coherence protocol.
+    pub(crate) node_cache: Option<node_cache::NodeCache<D>>,
 }
 
 /// A validated Merkle prefix whose storage has not yet been deliberately truncated.
@@ -196,6 +207,8 @@ pub(crate) struct Recovery<F: Family, E: Context, D: Digest, S: Strategy> {
     effective_prune_pos: Position<F>,
     /// Parallelization strategy for the recovered Merkle structure.
     strategy: S,
+    /// Node cache for the published handle. Recovery reads bypass it.
+    node_cache: Option<node_cache::NodeCache<D>>,
 }
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
@@ -222,6 +235,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Recovery<F, E, D, S> {
             metadata: self.metadata,
             journal_dirty: false,
             strategy: self.strategy,
+            node_cache: self.node_cache,
         }
         .sync()
         .await
@@ -387,6 +401,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             metadata_prune_pos,
             effective_prune_pos,
             strategy: cfg.strategy,
+            node_cache: cfg
+                .node_cache_size
+                .map(|size| node_cache::NodeCache::new(size, &context)),
         })
     }
 
@@ -576,6 +593,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             metadata,
             journal_dirty: false,
             strategy: cfg.config.strategy,
+            node_cache: cfg
+                .config
+                .node_cache_size
+                .map(|size| node_cache::NodeCache::new(size, &context)),
         })
     }
 
@@ -619,8 +640,23 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Ok(Some(node));
         }
 
+        // Per contract, nodes outside the journal bounds must return `None`, so probe the
+        // cache only for retained positions.
+        if *position >= self.journal.bounds().start
+            && let Some(node) = self
+                .node_cache
+                .as_ref()
+                .and_then(|cache| cache.get(*position))
+        {
+            return Ok(Some(node));
+        }
         match self.journal.read(*position).await {
-            Ok(item) => Ok(Some(item)),
+            Ok(item) => {
+                if let Some(cache) = &self.node_cache {
+                    cache.insert(*position, item);
+                }
+                Ok(Some(item))
+            }
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::Journal(e)),
         }
@@ -641,25 +677,39 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         );
         let bounds = self.journal.bounds();
         let mut nodes = vec![None; positions.len()];
-        let mut journal_positions = Vec::with_capacity(positions.len());
+        let mut journal_misses = Vec::with_capacity(positions.len());
         for (slot, &position) in nodes.iter_mut().zip(positions) {
             if let Some(node) = self.mem.get_node(position) {
                 *slot = Some(node);
-            } else if *position >= bounds.start {
-                // In-subsequence order is preserved, so this stays strictly increasing.
-                journal_positions.push(*position);
-            } else {
+            } else if *position < bounds.start {
                 return Err(Error::ElementPruned(position));
+            } else if let Some(node) = self.node_cache.as_ref().and_then(|c| c.get(*position)) {
+                *slot = Some(node);
+            } else {
+                // In-subsequence order is preserved, so this stays strictly increasing.
+                journal_misses.push(*position);
             }
         }
 
         // Within-bounds reads are guaranteed not to return `ItemPruned` (see
         // [`crate::journal::contiguous::Contiguous::read`]).
-        let items = if journal_positions.is_empty() {
+        let items = if journal_misses.is_empty() {
             Vec::new()
+        } else if let Some(cache) = &self.node_cache {
+            // The node cache retains these digests, so their backing pages are read only
+            // once. Skipping page-cache admission avoids churning that cache and its lock.
+            let items = self
+                .journal
+                .read_many_uncached(&journal_misses)
+                .await
+                .map_err(Error::Journal)?;
+            for (&position, &node) in journal_misses.iter().zip(&items) {
+                cache.insert(position, node);
+            }
+            items
         } else {
             self.journal
-                .read_many(&journal_positions)
+                .read_many(&journal_misses)
                 .await
                 .map_err(Error::Journal)?
         };
@@ -1084,7 +1134,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        Blob as _, BufferPooler, Runner, Storage as _, Supervisor as _,
+        Blob as _, BufferPooler, Metrics as _, Runner, Storage as _, Supervisor as _,
         buffer::paged::CacheRef,
         deterministic,
         mocks::{
@@ -1116,6 +1166,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
+            node_cache_size: None,
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
@@ -1996,6 +2047,7 @@ mod tests {
             write_buffer: NZUsize!(1024),
             replay_buffer: NZUsize!(1024),
             strategy: Sequential,
+            node_cache_size: None,
             page_cache: cfg_pruned.page_cache.clone(),
         };
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -2356,6 +2408,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -2421,6 +2474,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -2451,6 +2505,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
                 replay_buffer: NZUsize!(1024),
                 strategy: Sequential,
+                node_cache_size: None,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
@@ -4962,6 +5017,7 @@ mod tests {
             write_buffer: NZUsize!(64),
             replay_buffer: NZUsize!(64),
             strategy: Sequential,
+            node_cache_size: None,
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
@@ -5878,5 +5934,147 @@ mod tests {
     fn test_init_sync_lower_range_drops_future_pins_mmb() {
         deterministic::Runner::default()
             .start(init_sync_lower_range_drops_future_pins_inner::<mmb::Family>);
+    }
+
+    /// Parse a counter value out of an encoded metrics buffer.
+    fn counter(buffer: &str, name: &str) -> u64 {
+        buffer
+            .lines()
+            .find(|l| l.contains(name) && !l.starts_with('#'))
+            .and_then(|l| l.split_whitespace().last())
+            .and_then(|v| v.parse().ok())
+            .expect("counter missing")
+    }
+
+    #[test]
+    fn test_node_cache_faults_metric() {
+        deterministic::Runner::default().start(node_cache_faults_metric_inner::<mmr::Family>);
+    }
+
+    /// Warming reads fault once per journal-served position and cached re-reads add none.
+    async fn node_cache_faults_metric_inner<F2: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let mut cfg = test_config(&context);
+        cfg.node_cache_size = Some(NZUsize!(1024));
+        let mut merkle =
+            Merkle::<F2, _, Digest, Sequential>::init(context.child("cached"), &hasher, cfg)
+                .await
+                .unwrap();
+
+        let mut batch = merkle.new_batch();
+        for i in 0..20u8 {
+            batch = batch.add(&hasher, &Sha256::hash(&[&[i][..]]));
+        }
+        let batch = merkle.with_mem(|mem| batch.merkleize(mem, &hasher));
+        merkle = merkle.apply_batch(&batch).unwrap();
+        let merkle = merkle.sync().await.unwrap();
+
+        // Warming reads fault on every position that escapes the in-memory structure.
+        let positions: Vec<_> = (0..*merkle.size()).map(Position::new).collect();
+        let warm: Vec<_> = merkle.get_nodes(&positions).await.unwrap();
+        let after_warm = counter(&context.encode(), "node_cache_faults_total");
+        assert!(after_warm > 0, "warming reads must fault");
+
+        // Cached re-reads serve the same digests without new faults.
+        assert_eq!(merkle.get_nodes(&positions).await.unwrap(), warm);
+        assert_eq!(
+            counter(&context.encode(), "node_cache_faults_total"),
+            after_warm
+        );
+    }
+}
+/// A sharded, position-keyed cache of node digests read from the merkle journal.
+///
+/// Journal node positions are append-only and written exactly once, and the owner only truncates
+/// the journal before creating its cache, so entries need no coherence protocol. Reads gate cache
+/// probes on the journal's retained bounds (entries below the pruning boundary linger until
+/// eviction but are unreachable).
+pub(crate) mod node_cache {
+    use ahash::RandomState;
+    use commonware_cryptography::Digest;
+    use commonware_runtime::{
+        Metrics,
+        telemetry::metrics::{Counter, MetricsExt as _},
+    };
+    use commonware_utils::{cache::Cache, sync::RwLock};
+    use core::num::NonZeroUsize;
+
+    /// Shard count, bounding writer-lock contention across concurrent readers.
+    const SHARDS: usize = 16;
+
+    /// Mix `position` before selecting a shard. Hot positions (grafted subtree roots) are
+    /// regularly strided with constant low bits, which unmixed modulo selection would
+    /// collapse into a single shard, wasting the other shards' capacity.
+    fn shard_index(position: u64) -> usize {
+        const STATE: RandomState = RandomState::with_seeds(0, 0, 0, 0);
+        (STATE.hash_one(position) % SHARDS as u64) as usize
+    }
+
+    /// See the module docs.
+    pub(crate) struct NodeCache<D> {
+        shards: Box<[RwLock<Cache<u64, D>>]>,
+        /// Probes that fell through to a journal read. Hits are deliberately untracked to
+        /// keep the hit path free of shared-counter traffic.
+        faults: Counter,
+    }
+
+    impl<D: Digest> NodeCache<D> {
+        /// Creates a cache holding at most `capacity` entries, rounded up to a multiple
+        /// of the shard count and preallocated eagerly. Registers the fault counter under
+        /// `context`.
+        pub(crate) fn new(capacity: NonZeroUsize, context: &impl Metrics) -> Self {
+            let per_shard = NonZeroUsize::new(capacity.get().div_ceil(SHARDS).max(1)).unwrap();
+            Self {
+                shards: (0..SHARDS)
+                    .map(|_| RwLock::new(Cache::new(per_shard)))
+                    .collect(),
+                faults: context.counter(
+                    "node_cache_faults",
+                    "Number of node cache probes that fell through to a journal read",
+                ),
+            }
+        }
+
+        /// The digest cached at `position`, if any. A miss counts as a fault.
+        pub(crate) fn get(&self, position: u64) -> Option<D> {
+            let node = self.shards[shard_index(position)]
+                .read()
+                .get(&position)
+                .copied();
+            if node.is_none() {
+                self.faults.inc();
+            }
+            node
+        }
+
+        /// Caches the digest at `position` unless already present.
+        pub(crate) fn insert(&self, position: u64, node: D) {
+            self.shards[shard_index(position)]
+                .write()
+                .get_or_insert_with(position, || node);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{SHARDS, shard_index};
+
+        /// Grafted subtree roots at height `h` sit at positions `k * 2^(h+1) + c`, so entire
+        /// hot working sets share their low bits. Shard selection must still use every shard.
+        #[test]
+        fn test_shard_index_spreads_strided_positions() {
+            for shift in 4..=16u32 {
+                let stride = 1u64 << shift;
+                let offset = stride - 2;
+                let mut hit = [false; SHARDS];
+                for k in 0..1024u64 {
+                    hit[shard_index(k * stride + offset)] = true;
+                }
+                assert!(
+                    hit.iter().all(|&used| used),
+                    "stride {stride} leaves shards unused"
+                );
+            }
+        }
     }
 }
