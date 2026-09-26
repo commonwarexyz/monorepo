@@ -1018,6 +1018,14 @@ latency_bucket{node=\"b\",le=\"+Inf\"} 10
             Some((f64::INFINITY, 20))
         );
         assert_eq!(histogram_percentile(metrics, "missing", 50), None);
+
+        // A bucket sample without a bound is skipped, and an empty histogram has no percentile.
+        let empty = "\
+empty_bucket{node=\"a\",le=\"0.001\"} 0
+empty_bucket{node=\"a\",le=\"+Inf\"} 0
+empty_bucket{node=\"a\"} 5
+";
+        assert_eq!(histogram_percentile(empty, "empty", 50), None);
     }
 
     #[test]
