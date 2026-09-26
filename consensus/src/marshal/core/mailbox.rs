@@ -1,4 +1,4 @@
-use super::{Variant, durability::Durable as _};
+use super::{Processed, Variant, durability::Durable as _};
 use crate::{
     Reporter,
     marshal::{
@@ -63,12 +63,19 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the retrieved finalization.
         response: oneshot::Sender<Option<Finalization<S, V::Commitment>>>,
     },
-    /// A request to retrieve the latest processed height.
-    GetProcessedHeight {
+    /// A request to retrieve the latest processed position.
+    GetProcessed {
         /// The span carried with this request.
         span: Span,
-        /// A channel to send the latest processed height.
-        response: oneshot::Sender<Option<Height>>,
+        /// A channel to send the latest processed position.
+        response: oneshot::Sender<Option<Processed>>,
+    },
+    /// A request to retrieve the latest processed position and the stored block that backs it.
+    GetAnchor {
+        /// The span carried with this request.
+        span: Span,
+        /// A channel to send the processed position and its backing block.
+        response: oneshot::Sender<Option<(Processed, V::Block)>>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -186,9 +193,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
-    /// If the verified finalization advances marshal's current floor, marshal
-    /// anchors on its block, prunes below it, then syncs and delivers blocks
-    /// starting at the floor height. Stale or superseded floors may be ignored.
+    /// If the floor is above the processed height, marshal records the preceding height as
+    /// processed, prunes below it as [Message::Prune] would, and delivers blocks starting at
+    /// the floor. Stale or superseded floors may be ignored.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Message::Prune] instead.
@@ -200,8 +207,9 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
     },
     /// Requests pruning finalized blocks and certificates below the given height.
     ///
-    /// Unlike [Message::SetFloor], this does not affect the sync starting
-    /// point. Requests above marshal's current floor are ignored.
+    /// The block at the given height is kept, and storage may keep some older blocks.
+    /// Requests above the processed height are ignored, so the processed block is never
+    /// pruned. Unlike [Message::SetFloor], this does not affect the sync starting point.
     Prune {
         /// The span carried with this request.
         span: Span,
@@ -303,7 +311,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Notarization { span, .. }
             | Self::Finalization { span, .. }
             | Self::Certification { span, .. }
-            | Self::GetProcessedHeight { span, .. }
+            | Self::GetProcessed { span, .. }
+            | Self::GetAnchor { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -317,7 +326,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetInfo { .. } => "get_info",
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
-            Self::GetProcessedHeight { .. } => "get_processed_height",
+            Self::GetProcessed { .. } => "get_processed",
+            Self::GetAnchor { .. } => "get_anchor",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -360,7 +370,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             }
-            | Self::GetProcessedHeight { .. } => false,
+            | Self::GetProcessed { .. }
+            | Self::GetAnchor { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -381,7 +392,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 response.is_closed()
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
-            Self::GetProcessedHeight { response, .. } => response.is_closed(),
+            Self::GetProcessed { response, .. } => response.is_closed(),
+            Self::GetAnchor { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -712,11 +724,27 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Retrieve the latest processed height.
-    pub async fn get_processed_height(&self) -> Option<Height> {
+    /// Retrieve the latest processed position, if any.
+    ///
+    /// Use [Self::get_anchor] to also read the stored block that backs it.
+    pub async fn get_processed(&self) -> Option<Processed> {
         let (response, receiver) = oneshot::channel();
-        let _ = self.sender.enqueue(Message::GetProcessedHeight {
-            span: info_span!("marshal.mailbox.get_processed_height"),
+        let _ = self.sender.enqueue(Message::GetProcessed {
+            span: info_span!("marshal.mailbox.get_processed"),
+            response,
+        });
+        receiver.await.ok().flatten()
+    }
+
+    /// Retrieve the latest processed position and the stored block that backs it, if any.
+    ///
+    /// The block is at [Processed::anchor]: the processed block, or the floor block at the next
+    /// height when the processed block is [Processed::Absent]. Both come from one request, so
+    /// they always describe the same position.
+    pub async fn get_anchor(&self) -> Option<(Processed, V::Block)> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetAnchor {
+            span: info_span!("marshal.mailbox.get_anchor"),
             response,
         });
         receiver.await.ok().flatten()
@@ -960,9 +988,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
-    /// If the verified finalization advances marshal's current floor, marshal
-    /// anchors on its block, prunes below it, then syncs and delivers blocks
-    /// starting at the floor height. Stale or superseded floors may be ignored.
+    /// If the floor is above the processed height, marshal records the preceding height as
+    /// processed, prunes below it as [Self::prune] would, and delivers blocks starting at the
+    /// floor. Stale or superseded floors may be ignored.
+    ///
+    /// Callers must have recoverable application state through the height preceding the floor.
+    /// Installing a floor may retire outstanding acknowledgements and redeliver already reported
+    /// blocks with fresh ones, even when the starting height does not change.
     ///
     /// To prune data without changing the sync starting point, use
     /// [Self::prune] instead.
@@ -976,8 +1008,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Requests pruning finalized blocks and certificates below the given height.
     ///
-    /// Unlike [Self::set_floor], this does not affect the sync starting point.
-    /// Requests above marshal's current floor are ignored.
+    /// The block at the given height is kept, and storage may keep some older blocks.
+    /// Requests above the processed height are ignored, so the processed block is never
+    /// pruned. Unlike [Self::set_floor], this does not affect the sync starting point.
     pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune {
             span: info_span!("marshal.mailbox.prune", height = height.traced()),
@@ -1492,7 +1525,7 @@ mod tests {
             response,
         };
         let (response, _processed_rx) = oneshot::channel();
-        let processed = TestMessage::GetProcessedHeight {
+        let processed = TestMessage::GetProcessed {
             span: Span::none(),
             response,
         };
@@ -1527,10 +1560,7 @@ mod tests {
             &drained[2],
             TestMessage::HintNotarized { round: hinted, .. } if *hinted == round(1)
         ));
-        assert!(matches!(
-            &drained[3],
-            TestMessage::GetProcessedHeight { .. }
-        ));
+        assert!(matches!(&drained[3], TestMessage::GetProcessed { .. }));
     }
 
     #[test]

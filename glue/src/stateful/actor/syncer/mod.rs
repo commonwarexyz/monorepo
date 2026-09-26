@@ -7,7 +7,7 @@ use commonware_consensus::{
     CertifiableBlock, Heightable, Roundable,
     marshal::{
         Identifier,
-        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Variant},
+        core::{CommitmentFallback, Floor, Mailbox as MarshalMailbox, Processed, Variant},
     },
     simplex::types::Finalization,
     types::Height,
@@ -285,26 +285,6 @@ where
     }
 }
 
-/// Returns the archived block that covers marshal's durable processed position.
-///
-/// Glue cannot reopen below this position because marshal will not redeliver acknowledged blocks.
-/// An acknowledgement-derived position retains its own block. Installing a floor instead records
-/// and prunes the anchor's predecessor so marshal redispatches the anchor, leaving `height.next()`
-/// as the block that covers the processed position.
-async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, height: Height) -> V::Block
-where
-    S: Scheme,
-    V: Variant,
-{
-    if let Some(block) = marshal.get_block(Identifier::Height(height)).await {
-        return block;
-    }
-    marshal
-        .get_block(Identifier::Height(height.next()))
-        .await
-        .expect("marshal must return floor anchor after processed height")
-}
-
 /// Resolves a state sync floor that covers both the selected finalization and marshal's
 /// durable processed height.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
@@ -320,10 +300,28 @@ where
 {
     // Marshal skips installing a startup floor whose round is already processed. Its block may
     // have been pruned, so apply the same rule before registering a local-only waiter.
-    let block = if let Some(height) = floor.height()
-        && floor.round() >= finalization.round()
-    {
-        V::into_shared(processed_anchor(marshal, height).await)
+    let block = if floor.processed().is_some() && floor.round() >= finalization.round() {
+        // A live floor can advance the processed position after marshal's startup snapshot and
+        // prune the snapshot's anchor, so resolve from the current position.
+        let (processed, anchor) = marshal
+            .get_anchor()
+            .await
+            .expect("marshal must report the processed position it started with");
+
+        // A retained successor can be the selected floor block. Prefer it to its processed
+        // predecessor so the resolved target covers the selected finalization. An absent
+        // block is already backed by the floor block at the next height.
+        if let Processed::Block(height) = processed
+            && let Some(next) = height.get().checked_add(1)
+            && let Some(block) = marshal
+                .get_block(Identifier::Height(Height::new(next)))
+                .await
+            && V::commitment(&block) == finalization.proposal.payload
+        {
+            V::into_shared(block)
+        } else {
+            V::into_shared(anchor)
+        }
     } else {
         // Marshal's configured startup floor fetches its anchor when needed. This local-only
         // subscription observes that result without starting a separate fetch.
@@ -335,12 +333,11 @@ where
             V::into_shared(block)
         };
 
-        // Marshal does not redeliver acknowledged blocks. A newly installed floor is the
-        // exception: its processed position is the predecessor so the retained anchor is
-        // dispatched once.
-        match marshal.get_processed_height().await {
-            Some(height) if height > selected.height() => {
-                V::into_shared(processed_anchor(marshal, height).await)
+        // Marshal does not redeliver blocks at or below its durable processed position.
+        // A newly installed floor records its predecessor, leaving the anchor for delivery.
+        match marshal.get_anchor().await {
+            Some((processed, block)) if processed.height() > selected.height() => {
+                V::into_shared(block)
             }
             _ => selected,
         }
@@ -350,21 +347,6 @@ where
         anchor: Anchor::from(block.as_ref()),
         targets: A::sync_targets(block.as_ref()),
     }
-}
-
-/// The result of initializing state from marshal on startup.
-pub(crate) struct StartupResult<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
-    /// The initialized database set and anchor.
-    pub sync: SyncResult<E, A>,
-
-    /// Finalized marshal blocks at or below this height are already reflected
-    /// in the initialized database set and should be acknowledged without
-    /// applying them again.
-    pub skip_finalized_until: Option<Height>,
 }
 
 /// Initializes databases at marshal's current startup anchor.
@@ -381,7 +363,7 @@ pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
-) -> StartupResult<E, A>
+) -> SyncResult<E, A>
 where
     E: Rng + Spawner + Context,
     A: Application<E>,
@@ -389,23 +371,18 @@ where
     V: Variant<ApplicationBlock = A::Block>,
 {
     // A completed state sync may be ahead of marshal's processed height. Recover from the
-    // later anchor and skip already-applied blocks while marshal catches up.
+    // later anchor while marshal catches up.
     let sync_height = sync_metadata.sync_height();
-    let processed_height = marshal.get_processed_height().await;
-    let skip_finalized_until = match (sync_height, processed_height) {
-        (Some(sync_height), Some(processed_height)) if processed_height < sync_height => {
-            Some(sync_height)
-        }
-        (Some(sync_height), None) => Some(sync_height),
-        _ => None,
-    };
+    let anchor = marshal.get_anchor().await;
     let marshal_floor = sync_height
         .into_iter()
-        .chain(processed_height)
+        .chain(anchor.as_ref().map(|(processed, _)| processed.height()))
         .max()
         .unwrap_or_else(Height::zero);
-    let floor_block = if processed_height == Some(marshal_floor) {
-        V::into_shared(processed_anchor(marshal, marshal_floor).await)
+    let floor_block = if let Some((processed, block)) = anchor
+        && processed.height() == marshal_floor
+    {
+        V::into_shared(block)
     } else {
         V::into_shared(
             marshal
@@ -414,10 +391,6 @@ where
                 .expect("marshal must return completed state sync block"),
         )
     };
-    let skip_finalized_until = skip_finalized_until
-        .into_iter()
-        .chain((floor_block.height() > marshal_floor).then_some(floor_block.height()))
-        .max();
 
     // A crash can leave databases ahead of marshal or at different checkpoints. Opening each
     // at this target discards its extra suffix before the set is exposed. A missing target,
@@ -435,10 +408,7 @@ where
         round: floor_block.context().round(),
         digest: floor_block.digest(),
     };
-    StartupResult {
-        sync: SyncResult { databases, anchor },
-        skip_finalized_until,
-    }
+    SyncResult { databases, anchor }
 }
 
 #[cfg(all(test, feature = "arbitrary"))]

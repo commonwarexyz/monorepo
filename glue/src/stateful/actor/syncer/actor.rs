@@ -229,7 +229,7 @@ mod tests {
     use super::{Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
         Application, Input, Proposed,
-        actor::syncer::{StateSyncMetadata, init_databases_from_marshal},
+        actor::syncer::{StateSyncMetadata, SyncPlan, init_databases_from_marshal},
         db::{Anchor, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
         tests::{
             fixtures::{self, MarshalFixture},
@@ -238,7 +238,7 @@ mod tests {
     };
     use commonware_consensus::{
         Heightable as _, Reporter as _,
-        marshal::ancestry::Ancestry,
+        marshal::{ancestry::Ancestry, core::Processed},
         simplex::{
             mocks::scheme as scheme_mocks,
             types::{Activity, Context as SimplexContext},
@@ -246,7 +246,7 @@ mod tests {
         types::{Epoch, Height, Round, View},
     };
     use commonware_cryptography::{
-        ed25519,
+        Digestible as _, ed25519,
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_runtime::{
@@ -430,7 +430,7 @@ mod tests {
             )
             .await;
 
-            while marshal.get_processed_height().await != Some(Height::new(1)) {
+            while marshal.get_processed().await.map(Processed::height) != Some(Height::new(1)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert!(marshal.get_finalization(Height::new(1)).await.is_none());
@@ -447,8 +447,246 @@ mod tests {
         });
     }
 
+    /// Resuming state sync after a floor install resolves to the retained floor block only when
+    /// it is the selected finalization.
+    #[rstest::rstest]
+    #[case::selected_successor_within_section(3, 3, 3)]
+    #[case::selected_successor_at_section_boundary(4, 4, 4)]
+    #[case::selected_predecessor(4, 3, 3)]
+    #[case::selected_older(4, 2, 3)]
+    fn resolved_floor_selects_only_matching_retained_successor(
+        #[case] height: u64,
+        #[case] selected_height: u64,
+        #[case] expected_height: u64,
+    ) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_RETAINED_FLOOR_ANCHOR", 1);
+            let mut blocks = vec![TestBlock::new(0, 0)];
+            for height in 1..=height {
+                blocks.push(TestBlock::child(
+                    blocks.last().unwrap(),
+                    height.try_into().unwrap(),
+                ));
+            }
+
+            // Acknowledge blocks 1 through F-1 in prunable archives.
+            let first = fixtures::prunable_marshal_fixture(
+                context.child("first"),
+                "retained-floor-anchor",
+                fixture.schemes[0].clone(),
+                None,
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let mut marshal = first.mailbox.clone();
+            for block in &blocks[1..blocks.len() - 1] {
+                let finalization =
+                    fixtures::finalization(&fixture, block.height().get(), block.digest());
+                assert!(marshal.verified(finalization.round(), block.clone()).await);
+                marshal.report(Activity::Finalization(finalization));
+                assert_eq!(
+                    marshal.get_processed().await,
+                    Some(Processed::Block(block.height()))
+                );
+            }
+            first.abort().await;
+            drop(marshal);
+
+            // Restart with F as the floor. Marshal records F-1 as processed and prunes below it.
+            let block = blocks.last().unwrap();
+            let installed = fixtures::finalization(&fixture, height, block.digest());
+            let predecessor = Height::new(height - 1);
+            let second = fixtures::prunable_marshal_fixture(
+                context.child("second"),
+                "retained-floor-anchor",
+                fixture.schemes[0].clone(),
+                Some(block),
+                Some(installed.clone()),
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            assert_eq!(
+                second.mailbox.get_processed().await,
+                Some(Processed::Block(predecessor))
+            );
+            second.abort().await;
+
+            // Restart again and confirm F-1, its finalization, and F are all retained.
+            let third = fixtures::prunable_marshal_fixture(
+                context.child("third"),
+                "retained-floor-anchor",
+                fixture.schemes[0].clone(),
+                None,
+                Some(installed.clone()),
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            assert_eq!(third.floor.processed(), Some(Processed::Block(predecessor)));
+            assert_eq!(third.floor.round(), installed.round());
+            assert!(third.mailbox.get_block(predecessor).await.is_some());
+            assert!(third.mailbox.get_finalization(predecessor).await.is_some());
+            assert!(third.mailbox.get_block(block.height()).await.is_some());
+
+            // A selection at F is read back from persisted metadata, as a resumed sync reads it.
+            let selected_block = &blocks[selected_height as usize];
+            let selected =
+                fixtures::finalization(&fixture, selected_height, selected_block.digest());
+            let selected = if selected_height == height {
+                let partition = format!("retained-floor-plan-{height}");
+                let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                    context.child("metadata"),
+                    &partition,
+                )
+                .await
+                .begin_sync(selected)
+                .await;
+                drop(metadata);
+
+                let plan =
+                    SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), &partition)
+                        .await;
+                assert!(plan.requires_state_sync_floor());
+                plan.floor().expect("persisted selected floor").clone()
+            } else {
+                selected
+            };
+
+            // Only a selection of F resolves to F. Older selections resolve to F-1.
+            let resolved = resolve_state_sync_floor::<
+                deterministic::Context,
+                WedgeApp,
+                TestScheme,
+                TestVariant,
+            >(&third.mailbox, third.floor, &selected)
+            .await;
+            assert_eq!(resolved.anchor.height, Height::new(expected_height));
+            assert_eq!(resolved.targets, expected_height);
+            third.abort().await;
+        });
+    }
+
+    /// A live floor installed after marshal's startup snapshot can prune the snapshot's anchor or
+    /// move the processed height past the selected block. Resolution follows the live position.
+    #[rstest::rstest]
+    #[case::pruned_snapshot_anchor(2, 4, 5, 2, 4)]
+    #[case::selected_below_live_floor(4, 6, 7, 5, 6)]
+    fn resolved_floor_follows_live_floor_after_startup(
+        #[case] acknowledged: u64,
+        #[case] stored: u64,
+        #[case] live_floor: u64,
+        #[case] selected_height: u64,
+        #[case] expected_height: u64,
+    ) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_LIVE_FLOOR_RESOLVE", 1);
+            let mut blocks = vec![TestBlock::new(0, 0)];
+            for height in 1..=live_floor {
+                blocks.push(TestBlock::child(
+                    blocks.last().unwrap(),
+                    height.try_into().unwrap(),
+                ));
+            }
+            let finalized = |height: u64| {
+                fixtures::finalization(&fixture, height, blocks[height as usize].digest())
+            };
+
+            // Acknowledge blocks through the snapshot height.
+            let first = fixtures::prunable_marshal_fixture(
+                context.child("first"),
+                "live-floor-resolve",
+                fixture.schemes[0].clone(),
+                None,
+                None,
+                NZUsize!(1),
+                true,
+            )
+            .await;
+            let mut marshal = first.mailbox.clone();
+            for height in 1..=acknowledged {
+                let finalization = finalized(height);
+                let block = blocks[height as usize].clone();
+                assert!(marshal.verified(finalization.round(), block).await);
+                marshal.report(Activity::Finalization(finalization));
+                assert_eq!(
+                    marshal.get_processed().await,
+                    Some(Processed::Block(Height::new(height)))
+                );
+            }
+            first.abort().await;
+            drop(marshal);
+
+            // Store later blocks without acknowledging them.
+            let second = fixtures::prunable_marshal_fixture(
+                context.child("second"),
+                "live-floor-resolve",
+                fixture.schemes[0].clone(),
+                None,
+                None,
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let mut marshal = second.mailbox.clone();
+            for height in acknowledged + 1..=stored {
+                let finalization = finalized(height);
+                let block = blocks[height as usize].clone();
+                assert!(marshal.verified(finalization.round(), block).await);
+                marshal.report(Activity::Finalization(finalization));
+                while marshal.get_block(Height::new(height)).await.is_none() {
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+            }
+            second.abort().await;
+            drop(marshal);
+
+            // Restart, then install a live floor before resolving from the startup snapshot.
+            let third = fixtures::prunable_marshal_fixture(
+                context.child("third"),
+                "live-floor-resolve",
+                fixture.schemes[0].clone(),
+                None,
+                None,
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            assert_eq!(
+                third.floor.processed(),
+                Some(Processed::Block(Height::new(acknowledged)))
+            );
+            let marshal = third.mailbox.clone();
+            let floor = finalized(live_floor);
+            let block = blocks[live_floor as usize].clone();
+            assert!(marshal.verified(floor.round(), block).await);
+            marshal.set_floor(floor);
+            let live = Some(Processed::Block(Height::new(live_floor - 1)));
+            while marshal.get_processed().await != live {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+
+            let resolved = resolve_state_sync_floor::<
+                deterministic::Context,
+                WedgeApp,
+                TestScheme,
+                TestVariant,
+            >(&marshal, third.floor, &finalized(selected_height))
+            .await;
+            assert_eq!(resolved.anchor.height, Height::new(expected_height));
+            assert_eq!(resolved.targets, expected_height);
+            third.abort().await;
+        });
+    }
+
     #[test]
-    fn startup_uses_floor_anchor_when_processed_predecessor_is_pruned() {
+    fn startup_uses_floor_anchor_when_processed_predecessor_is_missing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-install", 1);
             let floor = TestBlock::new(2, 2);
@@ -467,9 +705,13 @@ mod tests {
             )
             .await;
 
-            while marshal.get_processed_height().await != Some(Height::new(1)) {
+            while marshal.get_processed().await.map(Processed::height) != Some(Height::new(1)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
+            assert_eq!(
+                marshal.get_processed().await,
+                Some(Processed::Absent(Height::new(1)))
+            );
             assert!(marshal.get_block(Height::new(1)).await.is_none());
             assert!(marshal.get_block(Height::new(2)).await.is_some());
 
@@ -486,14 +728,13 @@ mod tests {
             >(context.child("databases"), &marshal, 2, metadata)
             .await;
 
-            assert_eq!(startup.sync.anchor.height, Height::new(2));
-            assert_eq!(startup.sync.databases.committed_targets().await, 2);
-            assert_eq!(startup.skip_finalized_until, Some(Height::new(2)));
+            assert_eq!(startup.anchor.height, Height::new(2));
+            assert_eq!(startup.databases.committed_targets().await, 2);
         });
     }
 
     #[test]
-    fn resolved_floor_uses_anchor_when_processed_predecessor_is_pruned() {
+    fn resolved_floor_uses_anchor_when_processed_predecessor_is_missing() {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme_mocks::fixture(&mut context, b"syncer-floor-resolve", 1);
             let selected = TestBlock::new(1, 1);
@@ -514,9 +755,13 @@ mod tests {
             )
             .await;
 
-            while marshal.get_processed_height().await != Some(Height::new(2)) {
+            while marshal.get_processed().await.map(Processed::height) != Some(Height::new(2)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
+            assert_eq!(
+                marshal.get_processed().await,
+                Some(Processed::Absent(Height::new(2)))
+            );
             assert!(marshal.get_block(Height::new(2)).await.is_none());
             assert!(marshal.get_block(Height::new(3)).await.is_some());
 
@@ -570,12 +815,15 @@ mod tests {
                 assert!(marshal.verified(finalization.proposal.round, block).await);
                 let _ = marshal.report(Activity::Finalization(finalization));
                 for _ in 0..100 {
-                    if marshal.get_processed_height().await == Some(height) {
+                    if marshal.get_processed().await.map(Processed::height) == Some(height) {
                         break;
                     }
                     context.sleep(Duration::from_millis(1)).await;
                 }
-                assert_eq!(marshal.get_processed_height().await, Some(height));
+                assert_eq!(
+                    marshal.get_processed().await,
+                    Some(Processed::Block(height))
+                );
             }
 
             let newer_floor = TestBlock::new(10, 10);
@@ -594,12 +842,15 @@ mod tests {
             }
             assert!(marshal.get_block(Height::new(1)).await.is_none());
             for _ in 0..100 {
-                if marshal.get_processed_height().await == Some(Height::new(10)) {
+                if marshal.get_processed().await.map(Processed::height) == Some(Height::new(10)) {
                     break;
                 }
                 context.sleep(Duration::from_millis(1)).await;
             }
-            assert_eq!(marshal.get_processed_height().await, Some(Height::new(10)));
+            assert_eq!(
+                marshal.get_processed().await,
+                Some(Processed::Block(Height::new(10)))
+            );
 
             first.abort().await;
             drop(marshal);
@@ -619,7 +870,7 @@ mod tests {
                 true,
             )
             .await;
-            assert_eq!(floor.height(), Some(Height::new(10)));
+            assert_eq!(floor.processed(), Some(Processed::Block(Height::new(10))));
             assert!(floor.round() > selected_finalization.proposal.round);
             assert!(
                 marshal
@@ -676,7 +927,7 @@ mod tests {
                 let height = block.height();
                 assert!(marshal.verified(finalization.proposal.round, block).await);
                 let _ = marshal.report(Activity::Finalization(finalization));
-                while marshal.get_processed_height().await != Some(height) {
+                while marshal.get_processed().await.map(Processed::height) != Some(height) {
                     context.sleep(Duration::from_millis(1)).await;
                 }
             }
@@ -697,7 +948,7 @@ mod tests {
             )
             .await;
             let marshal = second.mailbox.clone();
-            while marshal.get_processed_height().await != Some(Height::new(7)) {
+            while marshal.get_processed().await.map(Processed::height) != Some(Height::new(7)) {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert!(
@@ -726,7 +977,7 @@ mod tests {
                 true,
             )
             .await;
-            assert_eq!(floor.height(), Some(Height::new(7)));
+            assert_eq!(floor.processed(), Some(Processed::Absent(Height::new(7))));
             assert_eq!(floor.round(), newer_finalization.proposal.round);
             assert!(
                 marshal
