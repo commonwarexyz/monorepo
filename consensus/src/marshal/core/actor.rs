@@ -571,7 +571,7 @@ where
                 Ok(()) => {
                     // Apply in-memory progress updates for this acknowledged
                     // block. The metadata sync below makes drained updates durable.
-                    // Dispatch reads from the finalized archive, so the block is stored.
+                    // Only archived blocks are dispatched, so the block is stored.
                     self.update_processed(Processed::Block(height), resolver);
                     self = self
                         .update_processed_round(height, buffer, application, resolver)
@@ -2413,12 +2413,12 @@ where
 
     /// Classifies a processed height by whether its block is stored.
     ///
-    /// A floor installed without local history records its predecessor as processed without
-    /// storing that block. The floor block is stored before the processed height is recorded.
+    /// A floor installed above a missing predecessor records that predecessor as processed. The
+    /// floor block is stored before the processed height is recorded.
     async fn processed(finalized_blocks: &FB, height: Height) -> Processed {
         match finalized_blocks.get(ArchiveID::Index(height.get())).await {
             Ok(Some(_)) => Processed::Block(height),
-            Ok(None) => Processed::Floor(height),
+            Ok(None) => Processed::Floor(height.next()),
             Err(err) => panic!("failed to get processed block: {err}"),
         }
     }

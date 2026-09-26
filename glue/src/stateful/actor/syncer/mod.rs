@@ -318,7 +318,8 @@ where
         && floor.round() >= finalization.round()
     {
         // A retained successor can be the selected floor block. Prefer it to its processed
-        // predecessor so the resolved target covers the selected finalization.
+        // predecessor so the resolved target covers the selected finalization. A floor
+        // position is already backed by its floor block.
         if let Processed::Block(height) = processed
             && let Some(next) = height.get().checked_add(1)
             && let Some(block) = marshal

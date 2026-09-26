@@ -596,7 +596,7 @@ mod tests {
             }
             assert_eq!(
                 marshal.get_processed().await,
-                Some(Processed::Floor(Height::new(1)))
+                Some(Processed::Floor(Height::new(2)))
             );
             assert!(marshal.get_block(Height::new(1)).await.is_none());
             assert!(marshal.get_block(Height::new(2)).await.is_some());
@@ -646,7 +646,7 @@ mod tests {
             }
             assert_eq!(
                 marshal.get_processed().await,
-                Some(Processed::Floor(Height::new(2)))
+                Some(Processed::Floor(Height::new(3)))
             );
             assert!(marshal.get_block(Height::new(2)).await.is_none());
             assert!(marshal.get_block(Height::new(3)).await.is_some());
@@ -734,8 +734,8 @@ mod tests {
                 context.sleep(Duration::from_millis(1)).await;
             }
             assert_eq!(
-                marshal.get_processed().await.map(Processed::height),
-                Some(Height::new(10))
+                marshal.get_processed().await,
+                Some(Processed::Block(Height::new(10)))
             );
 
             first.abort().await;
@@ -756,10 +756,7 @@ mod tests {
                 true,
             )
             .await;
-            assert_eq!(
-                floor.processed().map(Processed::height),
-                Some(Height::new(10))
-            );
+            assert_eq!(floor.processed(), Some(Processed::Block(Height::new(10))));
             assert!(floor.round() > selected_finalization.proposal.round);
             assert!(
                 marshal
@@ -866,10 +863,7 @@ mod tests {
                 true,
             )
             .await;
-            assert_eq!(
-                floor.processed().map(Processed::height),
-                Some(Height::new(7))
-            );
+            assert_eq!(floor.processed(), Some(Processed::Floor(Height::new(8))));
             assert_eq!(floor.round(), newer_finalization.proposal.round);
             assert!(
                 marshal

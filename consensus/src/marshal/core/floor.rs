@@ -10,26 +10,29 @@ use commonware_utils::vec::NonEmptyVec;
 /// Marshal's durable processed height and the stored block that backs it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Processed {
-    /// The block at this height is stored.
+    /// The block at this height is processed and stored.
     Block(Height),
-    /// A floor was installed at the next height on a node that never stored the block at this
-    /// height. The floor block at the next height is stored instead.
+    /// A floor at this height is installed but not yet processed. The block below it is not
+    /// stored, so the floor block backs the processed height.
     Floor(Height),
 }
 
 impl Processed {
-    /// Returns the processed height.
+    /// Returns the processed height, which is one below the floor for [Self::Floor].
     pub const fn height(self) -> Height {
         match self {
-            Self::Block(height) | Self::Floor(height) => height,
+            Self::Block(height) => height,
+            Self::Floor(floor) => match floor.get().checked_sub(1) {
+                Some(height) => Height::new(height),
+                None => panic!("floor must be above genesis"),
+            },
         }
     }
 
     /// Returns the height of the stored block that backs the processed height.
     pub const fn anchor(self) -> Height {
         match self {
-            Self::Block(height) => height,
-            Self::Floor(height) => height.next(),
+            Self::Block(height) | Self::Floor(height) => height,
         }
     }
 }

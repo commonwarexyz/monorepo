@@ -4721,13 +4721,13 @@ mod tests {
             buffer.insert(floor_block.clone());
 
             let (application, started_rx) = HoldingBlockReporter::new();
-            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+            let (mailbox, _buffer, resolver, actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "start-floor-local-anchor",
                 ConstantProvider::new(schemes[0].clone()),
                 application,
                 Some(buffer),
-                Start::Floor(floor_finalization),
+                Start::Floor(floor_finalization.clone()),
             )
             .await;
             let mut mailbox = mailbox;
@@ -4749,10 +4749,10 @@ mod tests {
             );
 
             // Without local history, the processed height has no stored block and the floor
-            // block at the next height backs it instead.
+            // block backs it instead.
             assert_eq!(
                 mailbox.get_processed().await,
-                Some(Processed::Floor(Height::new(4)))
+                Some(Processed::Floor(Height::new(5)))
             );
             assert!(mailbox.get_block(Height::new(4)).await.is_none());
 
@@ -4766,6 +4766,25 @@ mod tests {
             );
             StandardHarness::report_finalization(&mut mailbox, next_finalization).await;
             assert_eq!(started_rx.await.unwrap(), Height::new(5));
+
+            // Restarting before block 5 is acknowledged classifies the processed height from
+            // storage and finds the same floor.
+            actor_handle.abort();
+            let _ = actor_handle.await;
+            let (application, _started_rx) = HoldingBlockReporter::new();
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("restart"),
+                "start-floor-local-anchor",
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                Some(RecordingBuffer::default()),
+                Start::Floor(floor_finalization),
+            )
+            .await;
+            assert_eq!(
+                mailbox.get_processed().await,
+                Some(Processed::Floor(Height::new(5)))
+            );
         });
     }
 
