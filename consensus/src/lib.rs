@@ -140,12 +140,19 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         /// rather than rebuilding them from current local state. If consensus
         /// later abandons a dependency, it also abandons the proposal.
         ///
+        /// `ancestry` contains commitments on the selected parent branch in
+        /// forward order, ending at the parent and excluding the new payload.
+        /// For parent-linked consensus it begins at a finalized or genesis
+        /// anchor; applications may resolve older canonical history as needed.
+        /// Consecutive re-proposals of one payload contribute one commitment.
+        ///
         /// Closing the response declines this request, which consensus may
         /// treat as final for the context. Keep the response pending when
         /// temporary unavailability should not abandon the context.
         fn propose(
             &mut self,
             context: Self::Context,
+            ancestry: Arc<[Self::Digest]>,
         ) -> impl Future<Output = oneshot::Receiver<Self::Digest>> + Send;
 
         /// Verify the payload is valid.
@@ -167,10 +174,13 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
         ///
         /// The future-context requirement on [`Self::propose`] applies here
         /// too: the context's dependencies may not be resolvable locally yet.
+        /// `ancestry` has the same ordering and availability contract as
+        /// [`Self::propose`] and excludes `payload`.
         fn verify(
             &mut self,
             context: Self::Context,
             payload: Self::Digest,
+            ancestry: Arc<[Self::Digest]>,
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send;
     }
 
@@ -180,12 +190,17 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// phase between notarization and finalization. Applications that do not need custom certification
     /// logic can use the default implementation which always certifies.
     pub trait CertifiableAutomaton: Automaton {
-        /// Determine whether a verified payload is safe to commit.
+        /// Determine whether a payload is safe to commit.
         ///
         /// The round parameter identifies which consensus round is being certified, allowing
         /// applications to associate certification with the correct verification context. The
         /// same payload may appear in multiple rounds, so implementations must key any state
         /// on `(round, payload)` rather than `payload` alone.
+        ///
+        /// Certification may be requested without prior local verification.
+        /// `ancestry` supplies the selected parent branch independently of
+        /// verification, with the same ordering and availability contract as
+        /// [`Automaton::propose`], and excludes `payload`.
         ///
         /// Like [`Automaton::verify`], payloads produced by [`Automaton::propose`] are certifiable-by-construction.
         /// Also like [`Automaton::verify`], certification is single-shot for the given
@@ -211,6 +226,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
             &mut self,
             _round: Round,
             _payload: Self::Digest,
+            _ancestry: Arc<[Self::Digest]>,
         ) -> impl Future<Output = oneshot::Receiver<bool>> + Send {
             #[allow(clippy::async_yields_async)]
             async move {

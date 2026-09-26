@@ -527,7 +527,11 @@ impl Automaton for MockApplication {
     type Context = TestContext;
     type Digest = TestDigest;
 
-    async fn propose(&mut self, _context: Self::Context) -> oneshot::Receiver<Self::Digest> {
+    async fn propose(
+        &mut self,
+        _context: Self::Context,
+        _ancestry: Arc<[Self::Digest]>,
+    ) -> oneshot::Receiver<Self::Digest> {
         let (sender, receiver) = oneshot::channel();
         self.proposals.lock().push(_context);
         sender.send_lossy(Sha256::hash(&[b"proposal"]));
@@ -538,6 +542,7 @@ impl Automaton for MockApplication {
         &mut self,
         _context: Self::Context,
         _payload: Self::Digest,
+        _ancestry: Arc<[Self::Digest]>,
     ) -> oneshot::Receiver<bool> {
         let (sender, receiver) = oneshot::channel();
         sender.send_lossy(true);
