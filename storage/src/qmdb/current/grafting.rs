@@ -254,6 +254,13 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
         self.inner.node_digest(ops_pos, left, right)
     }
 
+    fn leaf_digests(&self, leaves: &[(Position<F>, &[u8])]) -> Vec<Self::Digest> {
+        leaves
+            .iter()
+            .map(|(pos, element)| self.leaf_digest(*pos, element))
+            .collect()
+    }
+
     fn node_digests(
         &self,
         nodes: &[(Position<F>, Self::Digest, Self::Digest)],
@@ -393,6 +400,13 @@ impl<F: Graftable, H: Hasher> HasherTrait<F> for Verifier<'_, F, H> {
                 }
             }
         }
+    }
+
+    fn leaf_digests(&self, leaves: &[(merkle::Position<F>, &[u8])]) -> Vec<H::Digest> {
+        leaves
+            .iter()
+            .map(|(pos, element)| self.leaf_digest(*pos, element))
+            .collect()
     }
 
     fn node_digests(

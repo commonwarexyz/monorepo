@@ -47,6 +47,12 @@ pub trait Hasher<F: Family>: Clone + Send + Sync {
         self.hash(&[&(*pos).to_be_bytes(), element])
     }
 
+    /// Computes the digests of many leaves, each given as its position and the element it
+    /// represents, so the hasher can hash them together.
+    ///
+    /// Must be equivalent to one [`leaf_digest`](Self::leaf_digest) call per leaf, in order.
+    fn leaf_digests(&self, leaves: &[(Position<F>, &[u8])]) -> Vec<Self::Digest>;
+
     /// Compute the digest of a byte slice.
     fn digest(&self, data: &[u8]) -> Self::Digest {
         self.hash(&[data])
@@ -214,6 +220,19 @@ impl<F: Family, H: CHasher> Hasher<F> for Standard<H> {
             .collect();
         H::hash_many_parts(&messages)
     }
+
+    fn leaf_digests(&self, leaves: &[(Position<F>, &[u8])]) -> Vec<Self::Digest> {
+        let positions: Vec<[u8; 8]> = leaves
+            .iter()
+            .map(|(pos, _)| (**pos).to_be_bytes())
+            .collect();
+        let messages: Vec<[&[u8]; 2]> = positions
+            .iter()
+            .zip(leaves)
+            .map(|(pos, (_, element))| [pos.as_slice(), *element])
+            .collect();
+        H::hash_many_parts(&messages)
+    }
 }
 
 impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
@@ -238,6 +257,10 @@ impl<F: Family, T: Hasher<F>> Hasher<F> for &T {
 
     fn leaf_digest(&self, pos: Position<F>, element: &[u8]) -> Self::Digest {
         (**self).leaf_digest(pos, element)
+    }
+
+    fn leaf_digests(&self, leaves: &[(Position<F>, &[u8])]) -> Vec<Self::Digest> {
+        (**self).leaf_digests(leaves)
     }
 
     fn digest(&self, data: &[u8]) -> Self::Digest {
@@ -320,6 +343,43 @@ mod tests {
     #[test]
     fn test_node_digests_blake3() {
         test_node_digests::<Blake3>();
+    }
+
+    #[test]
+    fn test_leaf_digests_sha256() {
+        test_leaf_digests::<Sha256>();
+    }
+
+    #[test]
+    fn test_leaf_digests_blake3() {
+        test_leaf_digests::<Blake3>();
+    }
+
+    fn test_leaf_digests<H: CHasher>() {
+        let hasher: Standard<H> = Standard::new(ForwardFold);
+        let data: Vec<u8> = (0..4096u32)
+            .map(|i| (i.wrapping_mul(0x9E37_79B1) >> 24) as u8)
+            .collect();
+        for count in [0, 1, 2, 3, 16, 17, 33] {
+            // Equal lengths (fixed operations) and varying lengths (variable operations).
+            for varying in [false, true] {
+                let leaves: Vec<(Position, &[u8])> = (0..count)
+                    .map(|i| {
+                        let len = if varying { 33 + 7 * i } else { 105 };
+                        (Position::new(3 * i as u64), &data[i..i + len])
+                    })
+                    .collect();
+                let expected: Vec<_> = leaves
+                    .iter()
+                    .map(|(pos, element)| hasher.leaf_digest(*pos, element))
+                    .collect();
+                assert_eq!(
+                    hasher.leaf_digests(&leaves),
+                    expected,
+                    "count {count} varying {varying}"
+                );
+            }
+        }
     }
 
     fn test_node_digests<H: CHasher>() {

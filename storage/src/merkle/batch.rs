@@ -102,7 +102,8 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::iter::zip_eq;
 use core::ops::Range;
 
-/// Nodes per [`Hasher::node_digests`] call when merkleizing, bounding the working set.
+/// Nodes per [`Hasher::node_digests`] call when merkleizing, and leaves per task when hashing
+/// leaves, bounding the working set.
 const WINDOW: usize = 256;
 
 /// Overwritten node digests keyed by position.
@@ -301,17 +302,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         items: &[Item],
     ) -> Self {
-        let first = self.leaves();
-        let digests = self.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
-                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            },
-        );
+        let digests = hash_leaves(self.strategy(), hasher, self.leaves(), items);
         self.add_leaf_digests(digests)
     }
 
@@ -482,6 +473,68 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             }
         }
     }
+}
+
+/// Encoded bytes per [`Hasher::leaf_digests`] call when hashing leaves, bounding the working set
+/// for large items.
+#[cfg(feature = "std")]
+const WINDOW_BYTES: usize = 64 * 1024;
+
+/// Encode `items` and hash them as the leaves at consecutive locations starting at `first`.
+///
+/// Items are split across the strategy in tasks of at most [`WINDOW`] items. Each task hashes
+/// its items together with [`Hasher::leaf_digests`], starting a new call once the encoded items
+/// reach [`WINDOW_BYTES`].
+#[cfg(feature = "std")]
+#[track_caller]
+pub(crate) fn hash_leaves<F: Family, D: Digest, Item: Write + Sync>(
+    strategy: &impl Strategy,
+    hasher: &impl Hasher<F, Digest = D>,
+    first: Location<F>,
+    items: &[Item],
+) -> Vec<D> {
+    let chunk = items
+        .len()
+        .div_ceil(strategy.manual().parallelism())
+        .clamp(1, WINDOW);
+    let digests: Vec<Vec<D>> = strategy.map_init_collect_vec_with_multiplier(
+        items.chunks(chunk).enumerate(),
+        chunk,
+        || (Vec::new(), Vec::new()),
+        |(buffer, ends): &mut (Vec<u8>, Vec<usize>), (index, items)| {
+            let mut digests = Vec::with_capacity(items.len());
+            let mut start = first + (index * chunk) as u64;
+            let mut rest = items;
+            while !rest.is_empty() {
+                buffer.clear();
+                ends.clear();
+                for item in rest {
+                    item.write(buffer);
+                    ends.push(buffer.len());
+                    if buffer.len() >= WINDOW_BYTES {
+                        break;
+                    }
+                }
+                let mut offset = 0;
+                let leaves: Vec<_> = ends
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &end)| {
+                        let pos =
+                            Position::try_from(start + i as u64).expect("valid leaf location");
+                        let element = &buffer[offset..end];
+                        offset = end;
+                        (pos, element)
+                    })
+                    .collect();
+                digests.extend(hasher.leaf_digests(&leaves));
+                start += ends.len() as u64;
+                rest = &rest[ends.len()..];
+            }
+            digests
+        },
+    );
+    digests.concat()
 }
 
 /// Collect ancestor batch data by walking the parent + its Weak chain.
@@ -728,6 +781,7 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
 mod tests {
     use super::*;
     use crate::merkle::{Bagging::ForwardFold, hasher::Standard, mem::Mem};
+    use commonware_codec::Encode;
     use commonware_cryptography::{Sha256, sha256};
     use commonware_runtime::{Runner as _, deterministic};
 
@@ -758,6 +812,43 @@ mod tests {
         };
         mem.apply_batch(&batch).unwrap();
         mem
+    }
+
+    fn hash_leaves_matches_leaf_digest<F: Family, C: commonware_cryptography::Hasher>() {
+        let hasher = Standard::<C>::new(ForwardFold);
+        let rayon = commonware_parallel::Rayon::new(commonware_utils::NZUsize!(3)).unwrap();
+        let first = Location::<F>::new(37);
+        // Each case is (count, base length, length step): small items cross the WINDOW item
+        // limit, and 20 KiB items cross the WINDOW_BYTES limit.
+        for (count, base, step) in [(600, 32, 40), (600, 105, 0), (10, 20 * 1024, 0)] {
+            for count in [0, 1, 2, WINDOW - 1, WINDOW, WINDOW + 1, count] {
+                let items: Vec<Vec<u8>> = (0..count)
+                    .map(|i| vec![i as u8; base + (i % 7) * step])
+                    .collect();
+                let expected: Vec<_> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let pos = Position::try_from(first + i as u64).unwrap();
+                        hasher.leaf_digest(pos, &item.encode())
+                    })
+                    .collect();
+                assert_eq!(hash_leaves(&Sequential, &hasher, first, &items), expected);
+                assert_eq!(hash_leaves(&rayon, &hasher, first, &items), expected);
+                assert_eq!(
+                    hash_leaves(&rayon.manual(), &hasher, first, &items),
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_hash_leaves_matches_leaf_digest() {
+        hash_leaves_matches_leaf_digest::<crate::mmr::Family, Sha256>();
+        hash_leaves_matches_leaf_digest::<crate::mmb::Family, Sha256>();
+        hash_leaves_matches_leaf_digest::<crate::mmr::Family, commonware_cryptography::Blake3>();
+        hash_leaves_matches_leaf_digest::<crate::mmb::Family, commonware_cryptography::Blake3>();
     }
 
     fn consistency_with_reference<F: Family>() {

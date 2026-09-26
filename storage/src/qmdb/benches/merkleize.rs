@@ -13,7 +13,7 @@ use crate::common::{
     CHUNK_SIZE, Digest, REPLAY_BUFFER_SIZE, WRITE_BUFFER_SIZE, seed_db, write_random_updates,
 };
 use commonware_bench::{Benchmark, Metric, Workload};
-use commonware_cryptography::Sha256;
+use commonware_cryptography::{Blake3, Sha256};
 use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -45,6 +45,15 @@ pub(crate) type AnyUFix = commonware_storage::qmdb::any::unordered::fixed::Db<
     Digest,
     Digest,
     Sha256,
+    EightCap,
+    Rayon,
+>;
+pub(crate) type AnyUFixBlake3 = commonware_storage::qmdb::any::unordered::fixed::Db<
+    commonware_storage::merkle::mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Blake3,
     EightCap,
     Rayon,
 >;
@@ -486,9 +495,8 @@ impl<F, C> Workload for MerkleizeWorkload<F, C>
 where
     F: merkle::Family,
     C: DbAny<F, Key = Digest, Value = Digest>,
-    C::Merkleized: MerkleizedBatch<Digest = Digest>,
 {
-    type Output = Digest;
+    type Output = <C::Merkleized as MerkleizedBatch>::Digest;
 
     async fn setup(&mut self) {
         let Some(db) = self.db.take() else {
@@ -654,6 +662,14 @@ variants! {
     AnyFixed {
         name: "any::unordered::fixed::mmr",
         init: |ctx, page_cache| AnyUFix::init(
+            ctx.child("storage"),
+            any_fix_cfg_with_cache(ctx, page_cache),
+            None,
+        ),
+    }
+    AnyFixedBlake3 {
+        name: "any::unordered::fixed::mmr hasher=blake3",
+        init: |ctx, page_cache| AnyUFixBlake3::init(
             ctx.child("storage"),
             any_fix_cfg_with_cache(ctx, page_cache),
             None,
