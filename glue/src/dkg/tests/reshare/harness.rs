@@ -1004,6 +1004,7 @@ impl EngineDefinition for ReshareEngine {
                     NAMESPACE,
                     *self.initial.info.output.public().public(),
                 )),
+                max_participants: NZUsize!(Widen::widen(MAX_PARTICIPANTS.get())),
                 epocher: FixedEpocher::new(EPOCH_LENGTH),
                 start: plan.marshal_start(genesis.clone().into()),
                 partition_prefix: partition_prefix.clone(),

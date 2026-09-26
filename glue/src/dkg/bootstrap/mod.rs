@@ -14,7 +14,7 @@
 //! Fold [`Limits`] into the P2P `max_message_size` with
 //! [`commonware_p2p::max_message_size`]. Simplex and the DKG assert at start
 //! that their bounds fit their senders. Marshal derives the largest block it
-//! admits from its backfill sender (see
+//! admits from its backfill sender and the participant count (see
 //! [message sizes](commonware_consensus::marshal#message-sizes)), and
 //! [`marshal::Limits`] targets the largest one-shot [`Block`], so every
 //! participant that folds the same participants and directory admits every
@@ -523,6 +523,7 @@ where
             blocks,
             marshal::Config {
                 provider: provider.clone(),
+                max_participants: NZUsize!(Widen::widen(participants)),
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
                 start: Start::Genesis(genesis.clone().into()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),

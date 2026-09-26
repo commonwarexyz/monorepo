@@ -500,6 +500,7 @@ impl EngineDefinition for SingleDbEngine {
         let max_pending_acks = NZUsize!(1);
         let marshal_config = marshal::Config {
             provider: provider.clone(),
+            max_participants: NZUsize!(self.schemes.len()),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
             start: plan.marshal_start(genesis_block.clone().into()),
             partition_prefix: partition_prefix.clone(),

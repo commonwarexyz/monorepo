@@ -662,6 +662,7 @@ mod test {
                 // Marshal actor (unbuffered: blocks arrive via `proposed`/resolver, not a buffer).
                 let marshal_config = marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
+                    max_participants: NZUsize!(participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: Start::Genesis(genesis.clone().into()),
                     partition_prefix: partition_prefix.clone(),

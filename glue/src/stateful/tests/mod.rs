@@ -1196,6 +1196,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 finalized_blocks,
                 marshal::Config {
                     provider,
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "certify-qmdb-marshal".to_string(),
@@ -1328,6 +1329,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 finalized_blocks,
                 marshal::Config {
                     provider,
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "stable-leader-qmdb-marshal".to_string(),
@@ -1519,6 +1521,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 finalized_blocks,
                 marshal::Config {
                     provider,
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "certify-multi-qmdb-marshal".to_string(),
@@ -1777,6 +1780,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 finalized_blocks,
                 marshal::Config {
                     provider,
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "prune-overlap-multi-qmdb-marshal".to_string(),

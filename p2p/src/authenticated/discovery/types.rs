@@ -6,7 +6,7 @@ use commonware_codec::{
 };
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{BufMut, Clock};
-use commonware_utils::SystemTimeExt;
+use commonware_utils::{SystemTimeExt, hostname::MAX_HOSTNAME_LEN};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -72,13 +72,17 @@ pub enum Payload<C: PublicKey> {
     Peers(Vec<Info<C>>),
 }
 
+/// Largest encoded [Ingress]: a DNS address whose [MAX_HOSTNAME_LEN]-byte hostname takes a two-byte
+/// length prefix, which is longer than any socket address.
+const MAX_INGRESS_SIZE: usize = u8::SIZE + 2 + MAX_HOSTNAME_LEN + u16::SIZE;
+
 impl<C: PublicKey> Payload<C> {
     /// Returns the largest encoded [Payload] other than [Payload::Data] that decodes under a
     /// [PayloadConfig] with `max_bit_vec` and `max_peers`.
     ///
     /// Returns `None` if the bound overflows `usize` or `max_peers` exceeds `u32::MAX`.
     pub fn max_control_size(max_bit_vec: u64, max_peers: usize) -> Option<usize> {
-        let info = Ingress::max_size() + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE;
+        let info = MAX_INGRESS_SIZE + MAX_U64_VARINT_SIZE + C::SIZE + C::Signature::SIZE;
 
         // A bit vector packs eight bits per byte behind a fixed-width bit count.
         let bits = usize::try_from(max_bit_vec.div_ceil(8)).ok()?;
@@ -409,9 +413,27 @@ mod tests {
     use commonware_math::algebra::Random;
     use commonware_runtime::{Clock, IoBuf, Runner, deterministic};
     use commonware_utils::{Hostname, Widen, hostname, test_rng};
-    use std::{net::SocketAddr, time::Duration};
+    use std::{
+        net::{Ipv6Addr, SocketAddr},
+        time::Duration,
+    };
 
     const NAMESPACE: &[u8] = b"test";
+
+    #[test]
+    fn test_max_ingress_size() {
+        // Four labels of at most 63 characters reach the hostname limit
+        let host = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
+        assert_eq!(host.len(), MAX_HOSTNAME_LEN);
+        let dns = Ingress::Dns {
+            host: Hostname::new(host).unwrap(),
+            port: u16::MAX,
+        };
+        assert_eq!(dns.encode_size(), MAX_INGRESS_SIZE);
+
+        let socket = Ingress::Socket(SocketAddr::new(Ipv6Addr::LOCALHOST.into(), u16::MAX));
+        assert!(socket.encode_size() < MAX_INGRESS_SIZE);
+    }
 
     fn signed_peer_info(rng: &mut impl rand_core::CryptoRng) -> Info<PublicKey> {
         let signer = PrivateKey::random(rng);

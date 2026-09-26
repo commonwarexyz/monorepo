@@ -46,15 +46,18 @@
 //! resolver response. Marshal derives the largest block it admits from that response. The
 //! receiver returned by [`resolver::p2p::init`] carries values up to the backfill sender's
 //! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus
-//! [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD). In each epoch, the
-//! actor admits a [`core::Variant::Block`] that fits such a value with the widest notarization
-//! for that epoch's committee. When certificate size depends on the committee, a larger committee
-//! lowers the bound. [`core::Mailbox::max_block_size`] returns the bound for an epoch. Every
-//! validator must configure the same `max_message_size`, and changing it requires a coordinated
-//! restart.
+//! [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD). When it starts, the
+//! actor fixes its bound: the largest [`core::Variant::Block`] that fits such a value with the
+//! widest notarization for [`Config::max_participants`]. The bound is the same in every epoch.
+//! [`core::Mailbox::max_block_size`] returns it. Every validator must configure the same
+//! `max_message_size` and `max_participants`, and changing either requires a coordinated restart.
 //!
-//! [`Limits`] is the [`Footprint`](commonware_p2p::Footprint) of a target block. Fold it into the
-//! P2P `max_message_size` with [`commonware_p2p::max_message_size`], wrapped in
+//! Every committee must have at most `max_participants` participants. A response carrying a
+//! larger committee's certificate may exceed the backfill sender's limit and panic in p2p.
+//!
+//! [`Limits`] built with `max_participants` is the [`Footprint`](commonware_p2p::Footprint) of a
+//! target block. Fold it into the P2P `max_message_size` with
+//! [`commonware_p2p::max_message_size`], wrapped in
 //! [`Prefixed`](commonware_p2p::utils::mux::Prefixed) when backfill uses a subchannel, so marshal
 //! admits that block.
 //!
@@ -63,8 +66,8 @@
 //! - [`standard::Inline`], [`standard::Deferred`], and [`coding::Marshaled`] skip a proposal whose
 //!   block exceeds the bound.
 //! - The actor ignores a block from the buffer, a buffer subscription, or the resolver that
-//!   exceeds the bound or whose epoch has no bound it can derive. A peer that delivers one is not
-//!   blocked when the delivery is otherwise valid.
+//!   exceeds the bound. A peer that delivers one is not blocked when the delivery is otherwise
+//!   valid.
 //! - The actor panics on a block above the bound passed to [`core::Mailbox`] or as the genesis
 //!   anchor.
 //!

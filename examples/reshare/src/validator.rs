@@ -44,7 +44,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_stream::encrypted::Handshake;
-use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
+use commonware_utils::{NZDuration, NZU64, NZUsize, Widen, sequence::Unit};
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
 
@@ -216,6 +216,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         finalized_blocks,
         marshal::Config {
             provider: provider.clone(),
+            max_participants: NZUsize!(Widen::widen(MAX_PARTICIPANTS.get())),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: plan.marshal_start(genesis.clone().into()),
             partition_prefix: partition_prefix.to_string(),

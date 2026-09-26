@@ -75,8 +75,8 @@ mod tests {
                 Scheme as SimplexScheme, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
             },
             types::{
-                Certificate, Finalization, Notarization, Notarize, Nullification, Nullify,
-                Proposal, Vote,
+                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
+                Nullify, Proposal, Vote,
             },
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
@@ -84,10 +84,7 @@ mod tests {
     use bytes::{BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
-    use commonware_codec::{
-        Buf, DecodeExt as _, Encode, EncodeSize, FixedSize, Read, Write,
-        varint::MAX_U64_VARINT_SIZE,
-    };
+    use commonware_codec::{Buf, DecodeExt as _, Encode, EncodeSize, FixedSize, Read, Write};
     use commonware_cryptography::{
         Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
@@ -132,19 +129,6 @@ mod tests {
     fn mailbox_provides_application_blocks() {
         fn assert_provider<P: BlockProvider<Block = B>>() {}
         assert_provider::<Mailbox<S, Standard<B>>>();
-    }
-
-    /// A provider that returns one fixed scope for every epoch.
-    #[derive(Clone)]
-    struct FixedProvider<T: commonware_cryptography::certificate::Scheme>(Scoped<T>);
-
-    impl<T: commonware_cryptography::certificate::Scheme> Provider for FixedProvider<T> {
-        type Scope = Epoch;
-        type Scheme = T;
-
-        fn scoped(&self, _: Epoch) -> Option<Scoped<T>> {
-            Some(self.0.clone())
-        }
     }
 
     #[derive(Clone)]
@@ -4379,6 +4363,7 @@ mod tests {
     {
         let config = Config {
             provider,
+            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start,
             mailbox_size: NZUsize!(100),
@@ -4732,7 +4717,7 @@ mod tests {
                         harness::max_value_size::<Standard<B>>(bound),
                     )
                     .await;
-                    assert_eq!(marshal.max_block_size(Epoch::zero()).await, Some(bound));
+                    assert_eq!(marshal.max_block_size().await, Some(bound));
 
                     let app: MockVerifyingApp<B, S> =
                         MockVerifyingApp::new().with_propose_result(block.clone());
@@ -4756,69 +4741,51 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_bound_follows_committee() {
+    fn test_standard_max_block_size() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            // Committees share one resolver, and larger ed25519 committees need wider
-            // certificates
-            let value = 64 * 1024;
-            let mut bounds = Vec::new();
-            for participants in [4u32, 16] {
-                let Fixture { schemes, .. } =
-                    ed25519::fixture(&mut context, NAMESPACE, participants);
-                let certificate =
-                    ed25519::Scheme::certificate_max_size(Widen::widen(participants)).unwrap();
-                let expected = value - (3 * MAX_U64_VARINT_SIZE + D::SIZE + certificate);
-
-                // A follower with a verify-only scope derives the same bound as a validator
-                let scheme = Arc::new(schemes[0].clone());
-                let providers = [
-                    FixedProvider(Scoped::scheme(scheme.clone())),
-                    FixedProvider(Scoped::verifier(scheme)),
-                ];
-                for (index, provider) in providers.into_iter().enumerate() {
-                    let (mailbox, ..) = start_standard_actor_bounded(
-                        context
-                            .child("validator")
-                            .with_attribute("participants", participants)
-                            .with_attribute("index", index),
-                        &format!("bound-follows-committee-{participants}-{index}"),
-                        provider,
-                        Application::<B>::default(),
-                        None::<RecordingBuffer>,
-                        Start::Genesis(StandardHarness::genesis_block(participants as u16).into()),
-                        value,
-                    )
-                    .await;
-                    let bound = mailbox.max_block_size(Epoch::zero()).await.unwrap();
-                    assert_eq!(bound, expected);
-                }
-                bounds.push(expected);
-            }
-            assert!(bounds[1] < bounds[0]);
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_standard_constant_bound_needs_no_scheme() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|context| async move {
-            // Threshold certificates have one size, so the bound needs no scheme for the epoch
+            // ed25519 certificates grow with the signer count, and the committee is smaller than
+            // max_participants
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: committee, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS - 1);
             let value = 64 * 1024;
             let (mailbox, ..) = start_standard_actor_bounded(
                 context.child("validator"),
-                "constant-bound",
-                EmptyProvider,
+                "max-block-size",
+                ConstantProvider::new(committee[0].clone()),
                 Application::<B>::default(),
                 None::<RecordingBuffer>,
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
                 value,
             )
             .await;
-            let bound = value - harness::max_value_size::<Standard<B>>(0);
-            for epoch in [Epoch::zero(), Epoch::new(u64::MAX)] {
-                assert_eq!(mailbox.max_block_size(epoch).await, Some(bound));
-            }
+
+            // The widest notarization or finalization has every one of max_participants sign
+            // at the widest round
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+                View::new(u64::MAX - 1),
+                Sha256::hash(&[b"widest"]),
+            );
+            let notarizes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential)
+                    .unwrap();
+            let finalizes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential)
+                    .unwrap();
+            let widest = notarization.encode_size();
+            assert_eq!(finalization.encode_size(), widest);
+            assert_eq!(mailbox.max_block_size().await, Some(value - widest));
         });
     }
 
@@ -7884,6 +7851,7 @@ mod tests {
             let partition_prefix = "stale-finalized-test".to_string();
             let config = Config {
                 provider: EmptyProvider,
+                max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
                 mailbox_size: NZUsize!(100),
@@ -8310,6 +8278,7 @@ mod tests {
     ) -> Config<harness::P, FixedEpocher, Sequential, B, Arc<B>, D> {
         Config {
             provider,
+            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
@@ -8376,6 +8345,7 @@ mod tests {
                 blocks,
                 Config {
                     provider: ConstantProvider::new(schemes[0].clone()),
+                    max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
                     epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                     start: Start::Genesis(genesis.into()),
                     mailbox_size: NZUsize!(100),

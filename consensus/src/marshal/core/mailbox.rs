@@ -6,7 +6,7 @@ use crate::{
         ancestry::{AncestorStream, Ancestry, BlockProvider},
     },
     simplex::types::{Activity, Finalization, Notarization},
-    types::{Epoch, Height, Round},
+    types::{Height, Round},
 };
 use commonware_actor::{
     Feedback,
@@ -71,14 +71,12 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the latest processed height.
         response: oneshot::Sender<Option<Height>>,
     },
-    /// A request to retrieve the largest encoded block admitted in an epoch.
+    /// A request to retrieve the largest encoded block admitted.
     GetMaxBlockSize {
         /// The span carried with this request.
         span: Span,
-        /// The epoch to query.
-        epoch: Epoch,
-        /// A channel to send the bound, if marshal can derive it.
-        response: oneshot::Sender<Option<usize>>,
+        /// A channel to send the bound.
+        response: oneshot::Sender<usize>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -736,28 +734,26 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Returns the largest encoded [`Variant::Block`] marshal admits in `epoch`.
+    /// Returns the largest encoded [`Variant::Block`] marshal admits.
     ///
     /// Convert an application block's encoded size with [`Variant::block_size`] before
-    /// comparing. Returns `None` if marshal has stopped, or if the bound depends on the committee
-    /// and the provider cannot supply the scheme for `epoch`. See
+    /// comparing. Returns `None` if marshal has stopped. See
     /// [message sizes](crate::marshal#message-sizes).
-    pub async fn max_block_size(&self, epoch: Epoch) -> Option<usize> {
+    pub async fn max_block_size(&self) -> Option<usize> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetMaxBlockSize {
-            span: info_span!("marshal.mailbox.get_max_block_size", epoch = epoch.traced()),
-            epoch,
+            span: info_span!("marshal.mailbox.get_max_block_size"),
             response,
         });
-        receiver.await.ok().flatten()
+        receiver.await.ok()
     }
 
-    /// Returns whether marshal admits the application block `block` in `epoch`.
+    /// Returns whether marshal admits the application block `block`.
     ///
     /// Returns `false` if [`Self::max_block_size`] returns `None`.
-    pub async fn admits(&self, epoch: Epoch, block: &V::ApplicationBlock) -> bool {
+    pub async fn admits(&self, block: &V::ApplicationBlock) -> bool {
         let size = V::block_size(block.encode_size());
-        self.max_block_size(epoch)
+        self.max_block_size()
             .await
             .is_some_and(|bound| size.is_some_and(|size| size <= bound))
     }

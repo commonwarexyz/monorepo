@@ -6,7 +6,6 @@ use commonware_cryptography::{Digest, certificate::Verifier};
 use commonware_p2p::Footprint;
 use commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD;
 use commonware_utils::Widen;
-use std::marker::PhantomData;
 
 /// Returns the largest encoded notarization or finalization with commitment `C` and a
 /// certificate of at most `certificate` bytes: a proposal (round, parent view, and commitment)
@@ -26,6 +25,9 @@ pub struct Limits {
 impl Limits {
     /// Returns limits for committees of at most `participants` under `S`, where `block` is the
     /// largest encoded application block.
+    ///
+    /// Marshal admits `block` when its backfill sender carries these limits and `participants` is
+    /// its [`max_participants`](crate::marshal::Config::max_participants).
     ///
     /// # Panics
     ///
@@ -59,43 +61,19 @@ impl Footprint for Limits {
     }
 }
 
-/// Largest blocks marshal admits, derived from the largest value its resolver carries.
-pub(crate) struct Bounds<C, S> {
-    value: usize,
-    constant: Option<usize>,
-    _marker: PhantomData<fn() -> (C, S)>,
-}
-
-impl<C: Digest, S: Verifier> Bounds<C, S> {
-    /// Returns bounds for a resolver that carries values of at most `value` bytes.
-    pub(crate) fn new(value: usize) -> Self {
-        // A certificate bound that is equal at both extremes does not depend on the committee
-        let min = S::certificate_max_size(0);
-        let constant = if min == S::certificate_max_size(Widen::widen(u32::MAX)) {
-            min.and_then(notarization::<C>)
-        } else {
-            None
-        };
-        Self {
-            value,
-            constant,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Returns the largest encoded [`Variant::Block`] a notarized response carries for a
-    /// committee of the size `participants` returns.
-    ///
-    /// Calls `participants` only when the certificate bound depends on the committee size.
-    /// Returns `None` if `participants` returns `None` or the certificate bound overflows, and
-    /// zero if the value cannot carry the notarization.
-    pub(crate) fn block(&self, participants: impl FnOnce() -> Option<usize>) -> Option<usize> {
-        let notarization = match self.constant {
-            Some(notarization) => notarization,
-            None => notarization::<C>(S::certificate_max_size(participants()?)?)?,
-        };
-        Some(self.value.saturating_sub(notarization))
-    }
+/// Returns the largest encoded [`Variant::Block`] whose notarized response fits a resolver value
+/// of at most `value` bytes, for committees of at most `participants` under `S`.
+///
+/// # Panics
+///
+/// Panics if `S` cannot bound certificates for `participants` participants or if `value` cannot
+/// carry the widest notarization.
+pub(crate) fn bound<C: Digest, S: Verifier>(value: usize, participants: usize) -> usize {
+    let certificate = S::certificate_max_size(participants)
+        .expect("scheme cannot bound certificates for max_participants");
+    notarization::<C>(certificate)
+        .and_then(|notarization| value.checked_sub(notarization))
+        .expect("backfill value cannot carry a notarization for max_participants")
 }
 
 #[cfg(test)]
@@ -135,7 +113,6 @@ mod tests {
     type RS = ReedSolomon<Sha256Hasher>;
     type StandardVariant = Standard<EmptyBlock<Sha256Hasher>>;
     type CodingVariant = Coding<CodingB, RS, Sha256Hasher, PublicKey>;
-    type ThresholdScheme = bls12381_threshold::vrf::Scheme<PublicKey, MinSig>;
 
     /// Asserts that a backfill sender sized by [`Limits`] admits exactly the target block, and
     /// that the block with the widest notarization or finalization fills the sender.
@@ -150,14 +127,12 @@ mod tests {
         // The derived bound round trips to the target block
         let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
         let value = limits.response - overhead;
-        let bound = Bounds::<V::Commitment, S>::new(value)
-            .block(|| Some(participants))
-            .unwrap();
-        assert_eq!(Some(bound), V::block_size(block));
         assert_eq!(
-            Bounds::<V::Commitment, Scoped<S>>::new(value).block(|| Some(participants)),
-            Some(bound)
+            bound::<V::Commitment, Scoped<S>>(value, participants),
+            bound::<V::Commitment, S>(value, participants)
         );
+        let bound = bound::<V::Commitment, S>(value, participants);
+        assert_eq!(Some(bound), V::block_size(block));
 
         // A response adds a block and resolver framing to a notarization or finalization
         let extra = bound + overhead;
@@ -254,41 +229,19 @@ mod tests {
     }
 
     #[test]
-    fn constant_bound_ignores_committee() {
-        let value = 64 * 1024;
-        let bounds = Bounds::<Sha256, ThresholdScheme>::new(value);
-        let notarization =
-            notarization::<Sha256>(ThresholdScheme::certificate_max_size(0).unwrap()).unwrap();
-        assert_eq!(
-            bounds.block(|| panic!("constant bound must not consult the committee")),
-            Some(value - notarization)
-        );
+    #[should_panic(expected = "scheme cannot bound certificates for max_participants")]
+    fn bound_unbounded_certificate() {
+        let participants = Widen::<usize>::widen(u32::MAX) + 1;
+        bound::<Sha256, ed25519::Scheme>(usize::MAX, participants);
     }
 
     #[test]
-    fn bound_follows_committee() {
-        let value = 64 * 1024;
-        let bounds = Bounds::<Sha256, ed25519::Scheme>::new(value);
-        let small = bounds.block(|| Some(4)).unwrap();
-        let large = bounds.block(|| Some(128)).unwrap();
-        assert!(large < small);
-        for (participants, bound) in [(4, small), (128, large)] {
-            let certificate = ed25519::Scheme::certificate_max_size(participants).unwrap();
-            assert_eq!(bound, value - notarization::<Sha256>(certificate).unwrap());
-        }
-
-        // An unknown committee or one certificates cannot carry has no bound
-        assert_eq!(bounds.block(|| None), None);
-        let unbounded = Widen::<usize>::widen(u32::MAX) + 1;
-        assert_eq!(bounds.block(|| Some(unbounded)), None);
-    }
-
-    #[test]
-    fn bound_saturates() {
-        let bounds = Bounds::<Sha256, ed25519::Scheme>::new(1);
-        assert_eq!(bounds.block(|| Some(4)), Some(0));
-        let bounds = Bounds::<Sha256, ThresholdScheme>::new(1);
-        assert_eq!(bounds.block(|| None), Some(0));
+    #[should_panic(expected = "backfill value cannot carry a notarization for max_participants")]
+    fn bound_below_notarization() {
+        let certificate = ed25519::Scheme::certificate_max_size(4).unwrap();
+        let notarization = notarization::<Sha256>(certificate).unwrap();
+        assert_eq!(bound::<Sha256, ed25519::Scheme>(notarization, 4), 0);
+        bound::<Sha256, ed25519::Scheme>(notarization - 1, 4);
     }
 
     #[test]

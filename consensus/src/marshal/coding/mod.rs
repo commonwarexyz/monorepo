@@ -117,7 +117,7 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
+        NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
     use futures::StreamExt;
     use std::{sync::Arc, time::Duration};
@@ -416,6 +416,7 @@ mod tests {
     > {
         Config {
             provider,
+            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
@@ -4790,7 +4791,7 @@ mod tests {
                     RecordingCodingBuffer::default(),
                     (resolver_rx, resolver),
                 );
-                assert_eq!(marshal.max_block_size(Epoch::zero()).await, Some(bound));
+                assert_eq!(marshal.max_block_size().await, Some(bound));
                 let shards =
                     start_shard_mailbox(context.child("shards"), participants, provider.clone())
                         .await;

@@ -363,7 +363,8 @@ where
                     continue;
                 }
 
-                // The resolver answers with an error if the response still exceeds the sender
+                // A single operation or boundary response fits when `boundary_size` is folded
+                // into the network's `max_message_size`
                 response_tx.send_lossy(encoded);
                 serve_requests.inc(status::Status::Success);
                 return;
@@ -973,7 +974,7 @@ mod tests {
                 TestActor::new(context.child("actor"), test_config(Some(db)));
 
             // A response that fits is served whole, one byte over serves half the range, and a
-            // single operation is served even when it does not fit
+            // single operation is served whatever the limit
             for (max, expected) in [
                 (full.len(), full.clone()),
                 (full.len() - 1, half),

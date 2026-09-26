@@ -370,6 +370,7 @@ mod tests {
                 finalized_blocks,
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(NZU64!(2)),
                     start: MarshalStart::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.clone(),
@@ -743,6 +744,7 @@ mod tests {
                     finalized_blocks,
                     marshal::Config {
                         provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
+                        max_participants: NZUsize!(fixture.participants.len()),
                         epocher: FixedEpocher::new(NZU64!(2)),
                         start: MarshalStart::Genesis(genesis.into()),
                         partition_prefix: partition_prefix.clone(),
@@ -998,6 +1000,7 @@ mod tests {
                 finalized_blocks,
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(NZU64!(2)),
                     start: MarshalStart::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.clone(),

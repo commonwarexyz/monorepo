@@ -14,7 +14,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{
     Digestible as _,
-    certificate::{ConstantProvider, mocks::Fixture},
+    certificate::{ConstantProvider, Scheme as _, mocks::Fixture},
     ed25519,
     sha256::Digest as Sha256Digest,
 };
@@ -426,6 +426,7 @@ where
         >,
     FB: marshal::store::Blocks<Block = Arc<TestBlock>>,
 {
+    let max_participants = NZUsize!(scheme.participants().len());
     let provider = ConstantProvider::new(scheme);
     let (actor, mailbox, floor) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
         context.child("marshal_actor"),
@@ -433,6 +434,7 @@ where
         finalized_blocks,
         marshal::Config {
             provider,
+            max_participants,
             epocher: FixedEpocher::new(NZU64!(u64::MAX)),
             start: options.floor.map_or_else(
                 || marshal::Start::Genesis(TestBlock::new(0, 0).into()),
