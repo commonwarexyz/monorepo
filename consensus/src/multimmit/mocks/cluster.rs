@@ -44,9 +44,10 @@ use commonware_runtime::{
 use commonware_utils::{NZUsize, probability, sync::Mutex};
 use rand_core::CryptoRng;
 use std::{
+    collections::HashMap,
     future::{self, Future},
     num::{NonZeroU32, NonZeroUsize},
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 #[cfg(test)]
@@ -770,10 +771,7 @@ impl<V: Variant> Cluster<V> {
         let node = &mut self.nodes[slot];
         let generation = node.generation;
         node.generation += 1;
-        // Labels must be static; each launch leaks one short label so every engine's tasks and
-        // metrics stay distinguishable across slots and restarts.
-        let label =
-            label.unwrap_or_else(|| Box::leak(format!("n{slot}g{generation}").into_boxed_str()));
+        let label = label.unwrap_or_else(|| engine_label(slot, generation));
 
         let application = node.app.clone();
         let engine_context = self.context.child(label);
@@ -1317,6 +1315,20 @@ impl<V: Variant> Cluster<V> {
     }
 }
 
+/// Returns the static label for the engine launched in `slot` at `generation`.
+///
+/// Labels must be static and distinct so every engine's tasks and metrics stay distinguishable
+/// across slots and restarts. Each label is allocated once per process and kept reachable, so
+/// repeated clusters (such as fuzz iterations) reuse it rather than leaking a new one.
+fn engine_label(slot: usize, generation: usize) -> &'static str {
+    static LABELS: LazyLock<Mutex<HashMap<(usize, usize), &'static str>>> =
+        LazyLock::new(Default::default);
+    LABELS
+        .lock()
+        .entry((slot, generation))
+        .or_insert_with(|| Box::leak(format!("n{slot}g{generation}").into_boxed_str()))
+}
+
 /// Returns how many polls of `poll` fit in `budget`, counting a partial poll.
 const fn polls(budget: Duration, poll: Duration) -> u128 {
     budget.as_nanos().div_ceil(poll.as_nanos())
@@ -1383,10 +1395,18 @@ pub async fn link_all_with(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cluster, ClusterOptions, Plane};
+    use super::{Cluster, ClusterOptions, Plane, engine_label};
     use commonware_cryptography::bls12381::primitives::variant::MinPk;
     use commonware_runtime::{Runner as _, deterministic};
     use std::time::Duration;
+
+    #[test]
+    fn engine_labels_are_interned_per_slot_and_generation() {
+        let label = engine_label(3, 1);
+        assert_eq!(label, "n3g1");
+        assert!(std::ptr::eq(label, engine_label(3, 1)));
+        assert_ne!(label, engine_label(1, 3));
+    }
 
     #[test]
     fn reserved_slots_own_every_per_node_control() {
