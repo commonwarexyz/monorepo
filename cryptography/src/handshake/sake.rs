@@ -18,8 +18,8 @@
 //!
 //! Both public identities are inputs to the core exchange and are incorporated into the transcript
 //! with the timestamps, ephemeral keys, and shared secret in a fixed order. Identities are visible,
-//! not hidden by the construction. SAKE has no 0-RTT mode or resumption mechanism; application data
-//! can be sent only after the three messages complete.
+//! not hidden by the construction. SAKE has no 0-RTT mode or resumption mechanism. Application
+//! data can be sent only after the three messages complete.
 //!
 //! The BLAKE3 transcript first commits the caller-provided application namespace as one packet,
 //! then forks it with the fixed `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` protocol namespace. Distinct
@@ -28,16 +28,16 @@
 //!
 //! # Versions
 //!
-//! [Version] selects the transcript schema. Both peers must use the same version; a mismatch fails
+//! [Version] selects the transcript schema. Both peers must use the same version. A mismatch fails
 //! signature verification. The message encodings are identical across versions.
 //!
 //! - [Version::V0] signs [Syn] over the timestamp, listener identity, and ephemeral key, and
-//!   commits the dialer identity only afterwards. The exchange still cannot complete under a
-//!   mismatched identity, because both identities are in the transcript before the [SynAck]
-//!   signature and the key derivation. However, with a signature scheme that allows selecting a
-//!   public key for an existing signature, a listener accepts a [Syn] under an identity the sender
-//!   does not own. It uses [transcript::Version::V0], which is sound here because SAKE commits a
-//!   fixed sequence of canonical encodings at fixed positions.
+//!   commits the dialer identity only afterwards. With a signature scheme that lets anyone derive a
+//!   second public key under which an existing signature verifies, a dialer can complete a
+//!   handshake while claiming an identity derived from its signature instead of its own. Whether a
+//!   derived identity can match one a listener admits depends on the signature scheme. V0 uses
+//!   [transcript::Version::V0], which is sound here because SAKE commits a fixed sequence of
+//!   canonical encodings at fixed positions.
 //! - [Version::V1] commits both identities before every signature, so each signature covers the
 //!   signer's own identity, and uses [transcript::Version::V1].
 //!
@@ -84,11 +84,10 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 /// The version is part of the protocol definition: both peers must agree on it out of band.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Version {
-    /// Commits the dialer identity after signing [Syn] and the listener identity after verifying
-    /// it.
+    /// Commits the dialer identity after the [Syn] signature.
     ///
-    /// A signature scheme that allows selecting a public key for an existing signature lets a
-    /// listener accept a [Syn] under an identity the sender does not own.
+    /// A signature scheme that lets anyone derive a second public key for an existing signature
+    /// lets a dialer complete a handshake under an identity derived from its [Syn] signature.
     V0,
     /// Commits both identities before every signature and uses injective transcript framing.
     V1,
@@ -632,11 +631,11 @@ mod test {
 
     /// Reconstructs the transcript a listener verifies a [Syn] against, with the dialer identity
     /// included or omitted before the ephemeral key.
-    fn syn_transcript(
+    fn syn_transcript<P: PublicKey>(
         version: Version,
-        syn: &Syn<crate::ed25519::Signature>,
-        listener: &crate::ed25519::PublicKey,
-        dialer: Option<&crate::ed25519::PublicKey>,
+        syn: &Syn<P::Signature>,
+        listener: &P,
+        dialer: Option<&P>,
     ) -> Transcript {
         let mut transcript =
             Transcript::new(b"test_namespace", version.transcript()).fork(NAMESPACE);
@@ -701,6 +700,109 @@ mod test {
         assert!(
             !syn_transcript(Version::V0, &syn, &listener, Some(&dialer)).verify(&dialer, &syn.sig)
         );
+    }
+
+    /// Derives the second public key under which an ECDSA signature over `summary` verifies.
+    ///
+    /// Replacing the signature's nonce point `R` with `-R` yields `Q' = -Q - 2 e r^-1 G`.
+    fn substitute(
+        key: &crate::secp256r1::standard::PublicKey,
+        summary: &Summary,
+        sig: &crate::secp256r1::standard::Signature,
+    ) -> crate::secp256r1::standard::PublicKey {
+        use p256::{
+            AffinePoint, FieldBytes, ProjectivePoint, Scalar,
+            elliptic_curve::{ops::Reduce, sec1::ToSec1Point as _},
+        };
+        use sha2::{Digest, Sha256};
+
+        // Transcript signatures use an empty namespace, so the signed payload is the summary
+        // behind a zero-length namespace prefix.
+        let payload = commonware_utils::union_unique(b"", summary.as_ref());
+        let hash: [u8; 32] = Sha256::digest(&payload).into();
+        let e = <Scalar as Reduce<FieldBytes>>::reduce(&FieldBytes::from(hash));
+        let sig = p256::ecdsa::Signature::from_slice(&sig.encode()).unwrap();
+        let r: Scalar = *sig.r();
+        let r_inv = r.invert().unwrap();
+        let q = p256::PublicKey::from_sec1_bytes(&key.encode())
+            .unwrap()
+            .to_projective();
+        let derived: AffinePoint = (-q - ProjectivePoint::GENERATOR * (e * r_inv).double()).into();
+        crate::secp256r1::standard::PublicKey::decode(commonware_codec::Copying(
+            derived.to_sec1_point(true).as_bytes(),
+        ))
+        .unwrap()
+    }
+
+    /// V1 rejects a [Syn] whose signature verifies under a derived identity.
+    ///
+    /// Some signature schemes let anyone derive a second public key under which an existing
+    /// signature verifies. Under V0 the [Syn] signature does not cover the dialer identity, so a
+    /// dialer that signs with its own key can complete the handshake while claiming the derived
+    /// key. V1 commits the dialer identity before signing, so the claim fails verification.
+    #[test]
+    fn test_v1_rejects_derived_identity() {
+        use crate::secp256r1::standard::PrivateKey;
+
+        for version in VERSIONS {
+            let mut rng = test_rng();
+            let dialer = PrivateKey::random(&mut rng);
+            let listener = PrivateKey::random(&mut rng);
+
+            // The dialer signs a Syn with its own key.
+            let (state, syn) = dial_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    version,
+                    0,
+                    0..1,
+                    dialer.clone(),
+                    listener.public_key(),
+                ),
+            );
+
+            // It derives a second identity under which that signature verifies and claims it.
+            let (dialer_key, listener_key) = (dialer.public_key(), listener.public_key());
+            let signed = syn_transcript(
+                version,
+                &syn,
+                &listener_key,
+                version.binds_identity_before_syn().then_some(&dialer_key),
+            )
+            .summarize();
+            let derived = substitute(&dialer_key, &signed, &syn.sig);
+            assert_ne!(derived, dialer_key);
+            assert!(signed.verify(&derived, &syn.sig));
+            let mut claimed = syn_transcript(version, &syn, &listener_key, None);
+            claimed.commit(derived.encode());
+            let result = listen_start(
+                &mut rng,
+                Context::new(
+                    b"test_namespace",
+                    version,
+                    0,
+                    0..1,
+                    listener.clone(),
+                    derived.clone(),
+                ),
+                syn,
+            );
+            if version == Version::V1 {
+                assert!(matches!(result, Err(Error::HandshakeFailed)));
+                continue;
+            }
+
+            // Under V0 the dialer finishes the exchange under the derived identity.
+            let (listen_state, syn_ack) = result.unwrap();
+            let state = DialState {
+                transcript: claimed,
+                ..state
+            };
+            let (ack, mut send, _) = dial_end(state, syn_ack).unwrap();
+            let (_, mut recv) = listen_end(listen_state, ack).unwrap();
+            assert_eq!(recv.recv(&send.send(b"hello").unwrap()).unwrap(), b"hello");
+        }
     }
 
     #[cfg(feature = "arbitrary")]

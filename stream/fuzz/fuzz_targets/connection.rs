@@ -13,6 +13,9 @@ use std::time::Duration;
 
 #[derive(Debug)]
 pub struct FuzzInput {
+    // Protocol version shared by both peers
+    version: Version,
+
     // Seeds for cryptographic identities
     dialer_seed: u64,
     listener_seed: u64,
@@ -31,6 +34,13 @@ pub struct FuzzInput {
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        // Pick the protocol version
+        let version = if bool::arbitrary(u)? {
+            Version::V1
+        } else {
+            Version::V0
+        };
+
         // Generate basic seeds
         let dialer_seed = u64::arbitrary(u)?;
         let listener_seed = dialer_seed.wrapping_add(1);
@@ -70,6 +80,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         }
 
         Ok(FuzzInput {
+            version,
             dialer_seed,
             listener_seed,
             namespace,
@@ -100,7 +111,7 @@ fn fuzz(input: FuzzInput) {
         let dialer_handshake = Timeout::new(
             Handshake {
                 signer: dialer_signer.clone(),
-                version: Version::V1,
+                version: input.version,
                 synchrony_bound,
                 max_handshake_age,
             },
@@ -110,7 +121,7 @@ fn fuzz(input: FuzzInput) {
         let listener_handshake = Timeout::new(
             Handshake {
                 signer: listener_signer.clone(),
-                version: Version::V1,
+                version: input.version,
                 synchrony_bound,
                 max_handshake_age,
             },

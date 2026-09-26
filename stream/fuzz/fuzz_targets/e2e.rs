@@ -1,7 +1,10 @@
 #![no_main]
 
+use commonware_codec::{EncodeSize as _, varint::UInt};
 use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::sake::TAG_SIZE};
-use commonware_runtime::{Handle, Runner as _, Spawner, Supervisor as _, deterministic, mocks};
+use commonware_runtime::{
+    Handle, Runner as _, Sink as _, Spawner, Stream as _, Supervisor as _, deterministic, mocks,
+};
 use commonware_stream::{
     Handshake as _,
     cups::{Error, Handshake, Receiver, Sender, Version},
@@ -17,6 +20,20 @@ use std::time::Duration;
 const NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 2048;
 const MAX_CIPHERTEXT_SIZE: u32 = MAX_MESSAGE_SIZE + TAG_SIZE as u32;
+const V1_HEADER_SIZE: usize = 4 + TAG_SIZE;
+
+/// Returns the size of the header that precedes an encrypted payload of `len` bytes.
+fn header_len(version: Version, len: usize) -> usize {
+    match version {
+        Version::V0 => UInt((len + TAG_SIZE) as u32).encode_size(),
+        Version::V1 => V1_HEADER_SIZE,
+    }
+}
+
+/// Returns the encoded size of a record carrying `len` payload bytes.
+fn record_len(version: Version, len: usize) -> usize {
+    header_len(version, len) + len + TAG_SIZE
+}
 
 #[derive(Debug)]
 enum Direction {
@@ -39,23 +56,25 @@ impl<'a> arbitrary::Arbitrary<'a> for Direction {
 enum Message {
     Authenticated(Direction, Vec<u8>),
     Unauthenticated(Direction, Vec<u8>),
+    /// A legitimate record with one byte flipped in transit.
+    Tampered(Direction, Vec<u8>, usize, u8),
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for Message {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
         let direction = Direction::arbitrary(u)?;
-        let authenticated = bool::arbitrary(u)?;
-        let max_len = if authenticated {
-            MAX_MESSAGE_SIZE as usize
-        } else {
+        let kind = u.int_in_range(0..=2)?;
+        let max_len = if kind == 1 {
             MAX_CIPHERTEXT_SIZE as usize
+        } else {
+            MAX_MESSAGE_SIZE as usize
         };
         let len = u.int_in_range(0..=max_len.min(u.len()))?;
         let msg = u.bytes(len)?.to_vec();
-        let out = if authenticated {
-            Self::Authenticated(direction, msg)
-        } else {
-            Self::Unauthenticated(direction, msg)
+        let out = match kind {
+            0 => Self::Authenticated(direction, msg),
+            1 => Self::Unauthenticated(direction, msg),
+            _ => Self::Tampered(direction, msg, u.arbitrary()?, u.arbitrary::<u8>()?.max(1)),
         };
         Ok(out)
     }
@@ -63,6 +82,7 @@ impl<'a> arbitrary::Arbitrary<'a> for Message {
 
 #[derive(Debug)]
 pub struct FuzzInput {
+    version: Version,
     setup_corruption: Vec<u8>,
     messages: Vec<Message>,
 }
@@ -75,6 +95,11 @@ impl FuzzInput {
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let version = if bool::arbitrary(u)? {
+            Version::V1
+        } else {
+            Version::V0
+        };
         let setup_corruption = if bool::arbitrary(u)? {
             Vec::arbitrary(u)?
         } else {
@@ -82,6 +107,7 @@ impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
         };
         let messages = u.arbitrary_iter()?.collect::<Result<Vec<Message>, _>>()?;
         Ok(Self {
+            version,
             setup_corruption,
             messages,
         })
@@ -93,6 +119,7 @@ fn fuzz(input: FuzzInput) {
     executor.start(|context| async move {
         let has_setup_corruption = input.has_setup_corruption();
         let FuzzInput {
+            version,
             setup_corruption,
             messages,
         } = input;
@@ -107,7 +134,7 @@ fn fuzz(input: FuzzInput) {
         let dialer_handshake = Timeout::new(
             Handshake {
                 signer: dialer_signer.clone(),
-                version: Version::V1,
+                version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -117,7 +144,7 @@ fn fuzz(input: FuzzInput) {
         let listener_handshake = Timeout::new(
             Handshake {
                 signer: listener_signer.clone(),
-                version: Version::V1,
+                version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -270,10 +297,10 @@ fn fuzz(input: FuzzInput) {
 
                     // Send a legitimate plaintext message through the encrypted channel.
                     sender.send(data.clone()).await.unwrap();
-                    // Intercept the resulting ciphertext frame from the wire.
-                    let frame = recv_frame(a_in, MAX_CIPHERTEXT_SIZE).await.unwrap();
-                    // Forward the exact ciphertext frame unchanged.
-                    send_frame(a_out, frame, MAX_CIPHERTEXT_SIZE).await.unwrap();
+                    // Intercept the resulting record from the wire.
+                    let record = a_in.recv(record_len(version, data.len())).await.unwrap();
+                    // Forward the exact record unchanged.
+                    a_out.send(record).await.unwrap();
                     // Receiver should decrypt and deliver the original plaintext.
                     let data2 = receiver.recv().await.unwrap();
                     assert_eq!(data2.coalesce(), data.as_slice(), "expected data to match");
@@ -305,17 +332,83 @@ fn fuzz(input: FuzzInput) {
                         ),
                     };
 
-                    // Trigger one legitimate encrypted frame so nonce/state advance as normal.
+                    // Trigger one legitimate record so nonce/state advance as normal.
                     sender.send(vec![0u8]).await.unwrap();
-                    // Adversary intercepts and drops that frame.
-                    let _ = recv_frame(a_in, MAX_CIPHERTEXT_SIZE).await.unwrap();
-                    // Adversary injects forged unauthenticated bytes instead.
-                    send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap();
-                    // Receiver must reject the forged frame.
+                    // Adversary intercepts and drops that record.
+                    let _ = a_in.recv(record_len(version, 1)).await.unwrap();
+                    // Adversary injects forged unauthenticated bytes instead. A forged version 1
+                    // header is padded to full size so the receiver has a header to reject.
+                    match version {
+                        Version::V0 => send_frame(a_out, data, MAX_CIPHERTEXT_SIZE).await.unwrap(),
+                        Version::V1 => {
+                            let mut forged = data;
+                            forged.resize(forged.len().max(V1_HEADER_SIZE), 0);
+                            a_out.send(forged).await.unwrap();
+                        }
+                    }
+                    // Receiver must reject the forged record.
                     let res = receiver.recv().await;
                     assert!(res.is_err());
 
                     // After unauthenticated injection, this direction's stream state is corrupted.
+                    if matches!(&direction, Direction::D2L) {
+                        d2l_corrupted = true;
+                    } else {
+                        l2d_corrupted = true;
+                    }
+                }
+                Message::Tampered(direction, data, index, mask) => {
+                    if matches!(&direction, Direction::D2L) && d2l_corrupted {
+                        continue;
+                    }
+                    if matches!(&direction, Direction::L2D) && l2d_corrupted {
+                        continue;
+                    }
+                    let (sender, a_in, a_out, receiver): (
+                        &mut Sender<mocks::Sink>,
+                        &mut mocks::Stream,
+                        &mut mocks::Sink,
+                        &mut Receiver<mocks::Stream>,
+                    ) = match direction {
+                        Direction::D2L => (
+                            &mut d_sender,
+                            &mut adversary_d_stream,
+                            &mut adversary_d_sink,
+                            &mut l_receiver,
+                        ),
+                        Direction::L2D => (
+                            &mut l_sender,
+                            &mut adversary_l_stream,
+                            &mut adversary_l_sink,
+                            &mut d_receiver,
+                        ),
+                    };
+
+                    // Send a legitimate record and intercept it.
+                    sender.send(data.clone()).await.unwrap();
+                    let mut record: Vec<u8> = a_in
+                        .recv(record_len(version, data.len()))
+                        .await
+                        .unwrap()
+                        .coalesce()
+                        .into();
+
+                    // Flip one byte. A version 0 prefix is left intact so the receiver reads the
+                    // same span, and any version 1 byte may change because its header is
+                    // authenticated before the payload is requested.
+                    let start = match version {
+                        Version::V0 => header_len(version, data.len()),
+                        Version::V1 => 0,
+                    };
+                    let target = start + index % (record.len() - start);
+                    record[target] ^= mask;
+                    a_out.send(record).await.unwrap();
+
+                    // Receiver must reject the tampered record.
+                    let res = receiver.recv().await;
+                    assert!(res.is_err());
+
+                    // After tampering, this direction's stream state is corrupted.
                     if matches!(&direction, Direction::D2L) {
                         d2l_corrupted = true;
                     } else {

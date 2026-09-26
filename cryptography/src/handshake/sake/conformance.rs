@@ -11,12 +11,18 @@ use commonware_math::algebra::Random;
 use rand::{RngExt as _, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE_CONFORMANCE_TESTS";
-
 /// Runs a full handshake and message exchange for `version`, logging every encoded artifact.
 fn exchange(seed: u64, version: Version) -> Vec<u8> {
     let mut log = Vec::new();
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
+
+    // Namespaces of 128 bytes or more reach the multi-byte packet lengths where transcript
+    // framings differ, and a nonzero high byte pins the timestamp byte order. The listener's clock
+    // runs ahead of the dialer's, so each message carries its sender's own timestamp.
+    let mut namespace = vec![0u8; rng.random_range(0..=300)];
+    rng.fill(&mut namespace[..]);
+    let dialer_time = rng.random_range(1u64 << 56..1 << 63);
+    let listener_time = dialer_time + rng.random_range(1..1000);
 
     let dialer_key = PrivateKey::random(&mut rng);
     let listener_key = PrivateKey::random(&mut rng);
@@ -24,10 +30,10 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
     let (dialer_state, dialer_greeting) = dial_start(
         &mut rng,
         Context::new(
-            NAMESPACE,
+            &namespace,
             version,
-            0,
-            0..1,
+            dialer_time,
+            listener_time..listener_time + 1,
             dialer_key.clone(),
             listener_key.public_key(),
         ),
@@ -37,10 +43,10 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
     let (listener_state, listener_greeting_ack) = listen_start(
         &mut rng,
         Context::new(
-            NAMESPACE,
+            &namespace,
             version,
-            0,
-            0..1,
+            listener_time,
+            dialer_time..dialer_time + 1,
             listener_key,
             dialer_key.public_key(),
         ),
@@ -55,31 +61,34 @@ fn exchange(seed: u64, version: Version) -> Vec<u8> {
 
     let (mut listener_tx, mut listener_rx) = listen_end(listener_state, dialer_ack).unwrap();
 
-    // Generate a random message to send to the listener from the dialer.
-    let mut random_msg = vec![0u8; rng.random_range(0..256)];
-    rng.fill(&mut random_msg[..]);
-    log.extend(random_msg.encode());
+    // Exchange several messages in each direction so successive nonces are covered.
+    for _ in 0..3 {
+        // Send a random message from the dialer to the listener.
+        let mut random_msg = vec![0u8; rng.random_range(0..256)];
+        rng.fill(&mut random_msg[..]);
+        log.extend(random_msg.encode());
 
-    let dialer_ciphertext = dialer_tx.send(random_msg.as_slice()).unwrap();
-    assert_ne!(dialer_ciphertext, random_msg);
-    log.extend(dialer_ciphertext.encode());
+        let dialer_ciphertext = dialer_tx.send(random_msg.as_slice()).unwrap();
+        assert_ne!(dialer_ciphertext, random_msg);
+        log.extend(dialer_ciphertext.encode());
 
-    let received_msg = listener_rx.recv(&dialer_ciphertext).unwrap();
-    assert_eq!(received_msg, random_msg);
-    log.extend(received_msg.encode());
+        let received_msg = listener_rx.recv(&dialer_ciphertext).unwrap();
+        assert_eq!(received_msg, random_msg);
+        log.extend(received_msg.encode());
 
-    // Generate a random message to send to the dialer from the listener.
-    let mut random_msg = vec![0u8; rng.random_range(0..256)];
-    rng.fill(&mut random_msg[..]);
-    log.extend(random_msg.encode());
+        // Send a random message from the listener to the dialer.
+        let mut random_msg = vec![0u8; rng.random_range(0..256)];
+        rng.fill(&mut random_msg[..]);
+        log.extend(random_msg.encode());
 
-    let listener_ciphertext = listener_tx.send(random_msg.as_slice()).unwrap();
-    assert_ne!(listener_ciphertext, random_msg);
-    log.extend(listener_ciphertext.encode());
+        let listener_ciphertext = listener_tx.send(random_msg.as_slice()).unwrap();
+        assert_ne!(listener_ciphertext, random_msg);
+        log.extend(listener_ciphertext.encode());
 
-    let received_msg = dialer_rx.recv(&listener_ciphertext).unwrap();
-    assert_eq!(received_msg, random_msg);
-    log.extend(received_msg.encode());
+        let received_msg = dialer_rx.recv(&listener_ciphertext).unwrap();
+        assert_eq!(received_msg, random_msg);
+        log.extend(received_msg.encode());
+    }
 
     log
 }

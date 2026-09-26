@@ -32,8 +32,17 @@ default-features = false
 features = ["getrandom"]
 
 [dev-dependencies]
+commonware-conformance.workspace = true
 criterion.workspace = true
 rand.workspace = true
+
+[features]
+arbitrary = [
+	"commonware-codec/arbitrary",
+	"commonware-cryptography/arbitrary",
+	"commonware-runtime/arbitrary",
+	"commonware-utils/arbitrary",
+]
 
 [lib]
 bench = false

@@ -16,9 +16,6 @@ To retain a path back to v2026.7.1:
   before the upgraded binary first opens storage. The previous binary cannot
   read V1 blobs, and this release has no V1-to-V0 downgrade tool. Narrowing the
   range after V1 blobs exist rejects them instead of converting them ([#4595]).
-- **V1 handshakes:** Pass `cups::Version::V0` to `cups::Handshake::new` on
-  every peer. A V1 peer cannot complete a handshake with a V0 peer, and the
-  version is not negotiated.
 - **Page-size changes:** Keep each existing store's logical page size.
   Replacing a logical size of 4096 with `buffer::paged::page_size(4096)` changes
   it to 4084 and can truncate existing data. Switching the setting back cannot
@@ -383,19 +380,6 @@ exceeds that limit ([#4397], [#4412]). Discovery and lookup share one router, so
 are the same types and separate trait impls for both now conflict ([#4318]). The
 `Blocker` trait gained a required `blocked()` method returning a latest-wins
 subscription to the set of peers the network currently blocks ([#4645]).
-
-SAKE handshakes are versioned. `handshake::sake::Context::new` and
-`cups::Handshake::new` take a mandatory version, and `cups::Handshake` gains a
-public `version` field. V1 commits both static identities before every signature, so the
-first handshake message's signature covers the dialer identity, and uses the
-injective `transcript::Version::V1` framing. Under V0 that signature covers only
-the timestamp, listener identity, and ephemeral key, which lets a signature
-scheme that allows selecting a public key for an existing signature pass the
-listener's first check under an identity the sender does not own; the exchange
-still cannot complete under a mismatched identity. Message encodings are
-unchanged, but peers must agree on a version: a mismatch fails with
-`HandshakeFailed`. Upgrade a running network in two steps: first deploy with
-`V0` everywhere, then switch every peer to `V1` together.
 
 ### Resolver
 

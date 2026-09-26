@@ -14,6 +14,12 @@ static NAMESPACE: &[u8] = b"fuzz_transport";
 const MAX_MESSAGE_SIZE: u32 = 64 * 1024; // 64KB buffer
 
 fn fuzz(data: &[u8]) {
+    // Pick the protocol version from the first byte.
+    let version = if data.first().is_some_and(|byte| byte & 1 == 1) {
+        Version::V1
+    } else {
+        Version::V0
+    };
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let dialer_signer = PrivateKey::from_seed(42);
@@ -25,7 +31,7 @@ fn fuzz(data: &[u8]) {
         let dialer_handshake = Timeout::new(
             Handshake {
                 signer: dialer_signer.clone(),
-                version: Version::V1,
+                version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
@@ -35,7 +41,7 @@ fn fuzz(data: &[u8]) {
         let listener_handshake = Timeout::new(
             Handshake {
                 signer: listener_signer.clone(),
-                version: Version::V1,
+                version,
                 synchrony_bound: Duration::from_secs(1),
                 max_handshake_age: Duration::from_secs(1),
             },
