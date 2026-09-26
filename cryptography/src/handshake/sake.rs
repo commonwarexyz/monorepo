@@ -84,10 +84,9 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 /// The version is part of the protocol definition: both peers must agree on it out of band.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Version {
-    /// Commits the dialer identity after the [Syn] signature.
-    ///
-    /// A signature scheme that lets anyone derive a second public key for an existing signature
-    /// lets a dialer complete a handshake under an identity derived from its [Syn] signature.
+    /// Commits the dialer identity after the [Syn] signature. If the signature scheme lacks
+    /// conservative exclusive ownership (it admits key substitution), a dialer can claim a public
+    /// key other than its own under which its [Syn] signature also verifies.
     V0,
     /// Commits both identities before every signature and uses injective transcript framing.
     V1,
