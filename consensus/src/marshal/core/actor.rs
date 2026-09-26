@@ -2418,7 +2418,7 @@ where
     async fn processed(finalized_blocks: &FB, height: Height) -> Processed {
         match finalized_blocks.get(ArchiveID::Index(height.get())).await {
             Ok(Some(_)) => Processed::Block(height),
-            Ok(None) => Processed::Floor(height.next()),
+            Ok(None) => Processed::Absent(height),
             Err(err) => panic!("failed to get processed block: {err}"),
         }
     }

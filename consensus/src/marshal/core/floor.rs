@@ -12,27 +12,24 @@ use commonware_utils::vec::NonEmptyVec;
 pub enum Processed {
     /// The block at this height is processed and stored.
     Block(Height),
-    /// A floor at this height is installed but not yet processed. The block below it is not
-    /// stored, so the floor block backs the processed height.
-    Floor(Height),
+    /// This height is processed but its block is not stored. A floor was installed at the next
+    /// height, and the floor block backs this position.
+    Absent(Height),
 }
 
 impl Processed {
-    /// Returns the processed height, which is one below the floor for [Self::Floor].
+    /// Returns the processed height.
     pub const fn height(self) -> Height {
         match self {
-            Self::Block(height) => height,
-            Self::Floor(floor) => match floor.get().checked_sub(1) {
-                Some(height) => Height::new(height),
-                None => panic!("floor must be above genesis"),
-            },
+            Self::Block(height) | Self::Absent(height) => height,
         }
     }
 
     /// Returns the height of the stored block that backs the processed height.
     pub const fn anchor(self) -> Height {
         match self {
-            Self::Block(height) | Self::Floor(height) => height,
+            Self::Block(height) => height,
+            Self::Absent(height) => height.next(),
         }
     }
 }

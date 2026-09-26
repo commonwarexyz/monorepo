@@ -596,7 +596,7 @@ mod tests {
             }
             assert_eq!(
                 marshal.get_processed().await,
-                Some(Processed::Floor(Height::new(2)))
+                Some(Processed::Absent(Height::new(1)))
             );
             assert!(marshal.get_block(Height::new(1)).await.is_none());
             assert!(marshal.get_block(Height::new(2)).await.is_some());
@@ -646,7 +646,7 @@ mod tests {
             }
             assert_eq!(
                 marshal.get_processed().await,
-                Some(Processed::Floor(Height::new(3)))
+                Some(Processed::Absent(Height::new(2)))
             );
             assert!(marshal.get_block(Height::new(2)).await.is_none());
             assert!(marshal.get_block(Height::new(3)).await.is_some());
@@ -863,7 +863,7 @@ mod tests {
                 true,
             )
             .await;
-            assert_eq!(floor.processed(), Some(Processed::Floor(Height::new(8))));
+            assert_eq!(floor.processed(), Some(Processed::Absent(Height::new(7))));
             assert_eq!(floor.round(), newer_finalization.proposal.round);
             assert!(
                 marshal

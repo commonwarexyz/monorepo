@@ -701,7 +701,7 @@ where
                 .get_info(height)
                 .await
                 .map(|(_, digest)| FinalizedTip { height, digest }),
-            Some(Processed::Floor(_)) | None => None,
+            Some(Processed::Absent(_)) | None => None,
         };
         let mut work = ArtifactWork::default();
         let mut scan = ArtifactScan::default();

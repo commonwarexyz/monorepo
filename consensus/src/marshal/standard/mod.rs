@@ -4752,7 +4752,7 @@ mod tests {
             // block backs it instead.
             assert_eq!(
                 mailbox.get_processed().await,
-                Some(Processed::Floor(Height::new(5)))
+                Some(Processed::Absent(Height::new(4)))
             );
             assert!(mailbox.get_block(Height::new(4)).await.is_none());
 
@@ -4783,7 +4783,7 @@ mod tests {
             .await;
             assert_eq!(
                 mailbox.get_processed().await,
-                Some(Processed::Floor(Height::new(5)))
+                Some(Processed::Absent(Height::new(4)))
             );
         });
     }
