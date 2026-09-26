@@ -537,7 +537,8 @@ fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
             mailbox::new(context.child("resolver"), NonZeroUsize::new(64).unwrap());
         let (queries, _queries_rx) =
             mailbox::new_unreliable(context.child("queries"), NonZeroUsize::new(64).unwrap());
-        let (voter, inbox) = Mailbox::new(&context.child("inbox"), &context, NonZeroUsize::new(4).unwrap());
+        let inbox_context = context.child("inbox");
+        let (voter, inbox) = Mailbox::new(&inbox_context, &context, NonZeroUsize::new(4).unwrap());
         // Every endpoint stays alive so no queue closes during the test.
         let Endpoints {
             observations,
@@ -547,7 +548,8 @@ fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
         } = voter.into_endpoints();
         let (sender, _receiver) = inert_channel(&committee.identities);
         let hooks = TestHooks::default();
-        let metrics = Metrics::new(&context.child("metrics"), committee.identities.len());
+        let metrics_context = context.child("metrics");
+        let metrics = Metrics::new(&metrics_context, committee.identities.len());
         let epoch = committee.config.epoch();
         let tasks = TaskReservations::new(
             machine.machine().generation(),
@@ -956,15 +958,17 @@ fn ready_runtime_source_between_actions(scenario: RuntimeSourceScenario) {
 fn chain_tasks_follow_the_role() {
     deterministic::Runner::default().start(|context| async move {
         let committee = Committee::<MinPk>::builder(87, 6).build();
-        let metrics = Metrics::new(&context.child("metrics"), committee.identities.len());
+        let metrics_context = context.child("metrics");
+        let metrics = Metrics::new(&metrics_context, committee.identities.len());
         let scheme = Arc::new(committee.signers[0].clone());
         let mailbox_size = NonZeroUsize::new(4).unwrap();
         let profile = |role: Role| {
             Profile::new::<MinPk>(committee.config.clone(), role, Tuning::default()).unwrap()
         };
         let tasks = |label: &'static str, profile: &Profile<Sha256Digest>| {
+            let child_context = context.child(label);
             ChainTasks::<TestTypes>::new(
-                &context.child(label),
+                &child_context,
                 profile,
                 &scheme,
                 Sequential,

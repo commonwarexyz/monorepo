@@ -896,7 +896,7 @@ where
         SegmentOpener {
             context: self
                 .context
-                .child("segment")
+                .child("segments")
                 .with_attribute("segment", segment),
             config: self.segment_config(segment),
             partitions: self.segment_partitions(segment),

@@ -93,8 +93,9 @@ impl Harness {
                 observation_capacity: NonZeroUsize::new(8).unwrap(),
             },
         );
+        let voter_context = context.child("voter");
         let (voter, Inbox { completions, .. }) = voter::Mailbox::<Ed25519PublicKey, _, _>::new(
-            &context.child("voter"),
+            &voter_context,
             context,
             NonZeroUsize::new(8).unwrap(),
         );
