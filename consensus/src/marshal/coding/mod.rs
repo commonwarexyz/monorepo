@@ -44,6 +44,9 @@
 //! caches; once a block is finalized it is evicted from the reconstruction map, reducing memory
 //! pressure.
 //!
+//! Recovery fetches complete blocks, not shards. See marshal's
+//! [message sizes](crate::marshal#message-sizes).
+//!
 //! # When to Use
 //!
 //! Choose this module when the consensus deployment wants erasure-coded dissemination with the
@@ -97,8 +100,8 @@ mod tests {
     };
     use bytes::Bytes;
     use commonware_actor::{Feedback, mailbox};
-    use commonware_codec::{Encode, FixedSize};
-    use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon, Scheme as _};
+    use commonware_codec::{Encode, EncodeSize, FixedSize};
+    use commonware_coding::{Config as CodingConfig, ReedSolomon, Scheme as _};
     use commonware_cryptography::{
         Committable, Digestible, Hasher,
         certificate::{ConstantProvider, Verifier as _, mocks::Fixture},
@@ -114,7 +117,7 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        NZU16, NZU64, NZUsize, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
+        NZU16, NZU64, NZUsize, Widen, channel::oneshot, sync::Mutex, vec::NonEmptyVec,
     };
     use futures::StreamExt;
     use std::{sync::Arc, time::Duration};
@@ -244,9 +247,17 @@ mod tests {
 
     impl RecordingResolver {
         fn holding(metrics: impl Metrics) -> (handler::Receiver<TestCommitment>, Self) {
+            Self::bounded(metrics, usize::MAX)
+        }
+
+        /// Returns a resolver whose receiver carries values of at most `max_value_size` bytes.
+        fn bounded(
+            metrics: impl Metrics,
+            max_value_size: usize,
+        ) -> (handler::Receiver<TestCommitment>, Self) {
             let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
             (
-                handler::Receiver::new(receiver),
+                handler::Receiver::new(receiver, max_value_size),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     targeted: Arc::new(Mutex::new(Vec::new())),
@@ -405,6 +416,7 @@ mod tests {
     > {
         Config {
             provider,
+            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(CodingHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
@@ -540,12 +552,9 @@ mod tests {
             setup_network_with_participants(context.child("network"), NZUsize!(1), participants)
                 .await;
         let control = oracle.control(me.clone());
-        let shard_config: shards::Config<_, _, _, _, _, Sha256, _, _> = shards::Config {
+        let shard_config = shards::Config {
             scheme_provider: provider,
             blocker: control.clone(),
-            shard_codec_cfg: CodecConfig {
-                maximum_shard_size: 1024 * 1024,
-            },
             block_codec_cfg: (),
             strategy: Sequential,
             mailbox_size: NZUsize!(10),
@@ -553,8 +562,10 @@ mod tests {
             background_channel_capacity: NZUsize!(1024),
             peer_provider: oracle.manager(),
         };
-        let (shard_engine, shard_mailbox) =
-            shards::Engine::new(context.child("shards"), shard_config);
+        let (shard_engine, shard_mailbox) = shards::Engine::<_, _, _, _, _, Sha256, _, _, _>::new(
+            context.child("shards"),
+            shard_config,
+        );
         let network = control.register(0, TEST_QUOTA).await.unwrap();
         shard_engine.start(network);
         shard_mailbox
@@ -4731,6 +4742,79 @@ mod tests {
                 "certify resolved true, so block must be durably persisted"
             );
         });
+    }
+
+    #[test_traced("WARN")]
+    fn test_marshaled_propose_skips_oversized_block() {
+        for oversized in [false, true] {
+            let runner = deterministic::Runner::timed(Duration::from_secs(30));
+            runner.start(|mut context| async move {
+                let Fixture {
+                    participants,
+                    schemes,
+                    ..
+                } = bls12381_threshold_vrf::fixture::<V, _>(
+                    &mut context,
+                    NAMESPACE,
+                    NUM_VALIDATORS,
+                );
+                let provider = ConstantProvider::new(schemes[0].clone());
+                let genesis = genesis_block();
+                let ctx = CodingCtx {
+                    round: Round::new(Epoch::zero(), View::new(1)),
+                    leader: participants[0].clone(),
+                    parent: (View::zero(), genesis_coding_commitment(&genesis)),
+                };
+
+                // The widest timestamp keeps genesis within the bound
+                let block =
+                    make_coding_block(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
+                let bound = <TestCodingVariant as core::Variant>::block_size(block.encode_size())
+                    .unwrap()
+                    - usize::from(oversized);
+                let config = test_config(&context, "propose-oversized", provider.clone());
+                let (finalizations_by_height, finalized_blocks) =
+                    immutable_finalized_stores(&context, "propose-oversized", &config).await;
+                let (actor, marshal, _) = core::Actor::init(
+                    context.child("actor"),
+                    finalizations_by_height,
+                    finalized_blocks,
+                    config,
+                )
+                .await;
+                let (resolver_rx, resolver) = RecordingResolver::bounded(
+                    context.child("resolver"),
+                    harness::max_value_size::<TestCodingVariant>(bound),
+                );
+                let _actor_handle = actor.start(
+                    Application::<CodingB>::default(),
+                    RecordingCodingBuffer::default(),
+                    (resolver_rx, resolver),
+                );
+                assert_eq!(marshal.max_block_size().await, Some(bound));
+                let shards =
+                    start_shard_mailbox(context.child("shards"), participants, provider.clone())
+                        .await;
+
+                let cfg = MarshaledConfig {
+                    application: MockVerifyingApp::<CodingB, S>::new()
+                        .with_propose_result(block.clone()),
+                    marshal,
+                    shards,
+                    scheme_provider: provider,
+                    epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
+                    strategy: Sequential,
+                };
+                let mut marshaled = Marshaled::new(context.child("marshaled"), cfg);
+                let proposal = marshaled.propose(ctx).await.await;
+                if oversized {
+                    assert!(proposal.is_err(), "an oversized block must not be proposed");
+                } else {
+                    let commitment = proposal.expect("proposal missing");
+                    assert_eq!(commitment.block(), block.digest());
+                }
+            });
+        }
     }
 
     /// Regression: a leader must be able to recover its own block across an unclean restart.

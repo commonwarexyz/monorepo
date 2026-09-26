@@ -54,6 +54,15 @@ where
     /// Must cover every epoch that contains heights the marshal will sync.
     pub provider: P,
 
+    /// Maximum number of participants in any epoch's committee.
+    ///
+    /// Marshal admits blocks that fit a backfill response with the widest notarization for this
+    /// many participants. Every committee must have at most this many participants. A larger
+    /// committee is a misconfiguration: a response carrying its certificate may exceed the
+    /// backfill sender's limit and panic in p2p. See
+    /// [message sizes](crate::marshal#message-sizes).
+    pub max_participants: NonZeroUsize,
+
     /// Configuration for epoch lengths across block height ranges.
     ///
     /// Must cover every height the marshal will sync.
@@ -89,6 +98,9 @@ where
     pub value_write_buffer: NonZeroUsize,
 
     /// Codec configuration for block type.
+    ///
+    /// Must decode every block marshal admits. See
+    /// [message sizes](crate::marshal#message-sizes).
     pub block_codec_config: AB::Cfg,
 
     /// Maximum number of blocks to repair at once.

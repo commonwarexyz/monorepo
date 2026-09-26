@@ -15,7 +15,9 @@ use crate::{
     },
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+};
 use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
@@ -39,6 +41,7 @@ use commonware_cryptography::{
     certificate::{ConstantProvider, mocks::Fixture},
     ed25519, sha256,
 };
+use commonware_p2p::max_message_size;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     BufMut, Handle, Quota, Spawner, Supervisor as _, buffer::paged::CacheRef, deterministic,
@@ -375,6 +378,18 @@ impl EngineDefinition for SingleDbEngine {
         ]
     }
 
+    fn max_message_size(&self) -> u32 {
+        let participants = self.schemes.len();
+        let qmdb = qmdb_resolver::boundary_size::<mmr::Family, sha256::Digest>(
+            fixed::Operation::<mmr::Family, sha256::Digest, sha256::Digest>::SIZE,
+        );
+        max_message_size(&[
+            &simplex_limits(participants),
+            &marshal_limits::<Standard<Block>>(participants),
+            &qmdb,
+        ])
+    }
+
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {
         let InitContext {
             context,
@@ -485,6 +500,7 @@ impl EngineDefinition for SingleDbEngine {
         let max_pending_acks = NZUsize!(1);
         let marshal_config = marshal::Config {
             provider: provider.clone(),
+            max_participants: NZUsize!(self.schemes.len()),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
             start: plan.marshal_start(genesis_block.clone().into()),
             partition_prefix: partition_prefix.clone(),

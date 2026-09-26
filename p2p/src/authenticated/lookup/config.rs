@@ -47,8 +47,10 @@ pub struct Config<H: Handshake> {
     ///
     /// The largest supported value is [`crate::authenticated::max_size::<H>()`].
     ///
-    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
-    /// part of the payload and counts toward this limit.
+    /// Sending a larger payload panics, and a peer that sends one is disconnected. Output from
+    /// wrappers such as codecs and multiplexers is part of the payload and counts toward this
+    /// limit. [`crate::max_message_size`] derives this value from the components that send on
+    /// the network.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.

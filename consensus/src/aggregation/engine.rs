@@ -1,7 +1,7 @@
 //! Engine for the module.
 
 use super::{
-    Config, metrics,
+    Config, Limits, metrics,
     safe_tip::SafeTip,
     types::{Ack, Activity, Error, Item, TipAck},
 };
@@ -16,7 +16,7 @@ use commonware_cryptography::{
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
-    Blocker, Receiver, Recipients, Sender,
+    Blocker, Footprint, Receiver, Recipients, Sender,
     utils::codec::{WrappedSender, wrap},
 };
 use commonware_parallel::Strategy;
@@ -28,7 +28,7 @@ use commonware_runtime::{
 };
 use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
 use commonware_utils::{
-    N3f1, PrioritySet,
+    N3f1, PrioritySet, Widen,
     futures::{Pool as FuturesPool, rebind},
     non_empty,
     ordered::Quorum,
@@ -213,6 +213,11 @@ impl<
     ///   - Rebroadcasting Acks
     /// - Messages from the network:
     ///   - Acks from other validators
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size)
+    /// cannot fit [`Limits`].
     pub fn start(
         mut self,
         network: (
@@ -220,6 +225,9 @@ impl<
             impl Receiver<PublicKey = <P::Scheme as Verifier>::PublicKey>,
         ),
     ) -> Handle<()> {
+        let ack = Limits::new::<P::Scheme, D>().footprint();
+        let limit: usize = Widen::widen(network.0.max_message_size());
+        assert!(ack <= limit, "ack size {ack} exceeds sender limit {limit}");
         spawn_cell!(self.context, self.run(network))
     }
 

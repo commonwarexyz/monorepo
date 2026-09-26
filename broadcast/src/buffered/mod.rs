@@ -7,6 +7,12 @@
 //! - Broadcasting messages to all peers
 //! - Serving cached messages on-demand
 //!
+//! # Message Sizes
+//!
+//! The engine sends only messages broadcast through its [Mailbox], each unfragmented, so the
+//! network sender's [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) must
+//! admit every message the application broadcasts. The sender panics on a larger message.
+//!
 //! # Message Caching
 //!
 //! The engine receives messages from other peers and caches them. The cache is a bounded queue of

@@ -12,6 +12,7 @@ use commonware_actor::{
     Feedback,
     mailbox::{Overflow, Policy, Sender},
 };
+use commonware_codec::EncodeSize;
 use commonware_cryptography::{Digestible, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
@@ -69,6 +70,13 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         span: Span,
         /// A channel to send the latest processed height.
         response: oneshot::Sender<Option<Height>>,
+    },
+    /// A request to retrieve the largest encoded block admitted.
+    GetMaxBlockSize {
+        /// The span carried with this request.
+        span: Span,
+        /// A channel to send the bound.
+        response: oneshot::Sender<usize>,
     },
     /// A hint that a finalized block may be available at a given height.
     ///
@@ -304,6 +312,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Finalization { span, .. }
             | Self::Certification { span, .. }
             | Self::GetProcessedHeight { span, .. }
+            | Self::GetMaxBlockSize { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -318,6 +327,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessedHeight { .. } => "get_processed_height",
+            Self::GetMaxBlockSize { .. } => "get_max_block_size",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -360,7 +370,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             }
-            | Self::GetProcessedHeight { .. } => false,
+            | Self::GetProcessedHeight { .. }
+            | Self::GetMaxBlockSize { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -382,6 +393,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessedHeight { response, .. } => response.is_closed(),
+            Self::GetMaxBlockSize { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -720,6 +732,30 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             response,
         });
         receiver.await.ok().flatten()
+    }
+
+    /// Returns the largest encoded [`Variant::Block`] marshal admits.
+    ///
+    /// Convert an application block's encoded size with [`Variant::block_size`] before
+    /// comparing. Returns `None` if marshal has stopped. See
+    /// [message sizes](crate::marshal#message-sizes).
+    pub async fn max_block_size(&self) -> Option<usize> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetMaxBlockSize {
+            span: info_span!("marshal.mailbox.get_max_block_size"),
+            response,
+        });
+        receiver.await.ok()
+    }
+
+    /// Returns whether marshal admits the application block `block`.
+    ///
+    /// Returns `false` if [`Self::max_block_size`] returns `None`.
+    pub async fn admits(&self, block: &V::ApplicationBlock) -> bool {
+        let size = V::block_size(block.encode_size());
+        self.max_block_size()
+            .await
+            .is_some_and(|bound| size.is_some_and(|size| size <= bound))
     }
 
     /// Hints that a finalized block may be available at the given height.

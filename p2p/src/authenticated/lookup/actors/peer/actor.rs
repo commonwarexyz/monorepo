@@ -15,7 +15,7 @@ use commonware_runtime::{
     telemetry::metrics::CounterFamily,
 };
 use commonware_stream::{Receiver, Sender};
-use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
+use commonware_utils::{Widen, channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRng;
 use std::{future::Future, time::Duration};
@@ -81,6 +81,9 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
         (mut conn_sender, mut conn_receiver): (S, R),
         channels: Channels<C>,
     ) -> Result<(), Error<S::Error, R::Error>> {
+        // Received payloads are bounded by the same limit as sent payloads
+        let max_data_length: usize = Widen::widen(channels.max_size());
+
         // Create per-connection counters and rate limiters
         let sent_messages = &self.sent_messages;
         let (received, rate_limited) = (&self.received_messages, &self.rate_limited);
@@ -156,7 +159,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
                 let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
                 // Parse the message
-                let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
                 let msg = match types::Message::decode_cfg(msg, &max_data_length) {
                     Ok(msg) => msg,
                     Err(err) => {
@@ -188,8 +190,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + Metrics, C: PublicKey> Acto
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::router;
-    use commonware_codec::Encode;
+    use crate::{
+        Receiver as _,
+        authenticated::{MAX_PAYLOAD_OVERHEAD, data::Data, router},
+    };
+    use commonware_codec::{Encode, Error as CodecError};
     use commonware_cryptography::{
         Signer,
         ed25519::{PrivateKey, PublicKey},
@@ -213,6 +218,7 @@ mod tests {
 
     const STREAM_NAMESPACE: &[u8] = b"test_lookup_peer_actor";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
+    const MAX_DATA_SIZE: u32 = MAX_MESSAGE_SIZE - MAX_PAYLOAD_OVERHEAD;
 
     struct CountingSink<S> {
         inner: S,
@@ -262,7 +268,7 @@ mod tests {
         );
         let messenger = router::Messenger::unbound(context.network_buffer_pool().clone());
         messenger.bind(router::Mailbox::new(router_sender));
-        Channels::new(messenger, MAX_MESSAGE_SIZE, NZUsize!(1))
+        Channels::new(messenger, MAX_DATA_SIZE, NZUsize!(1))
     }
 
     #[test]
@@ -392,6 +398,91 @@ mod tests {
                 Some(1),
                 "invalid channel metric should be incremented"
             );
+        });
+    }
+
+    #[test]
+    fn test_data_bounded_by_max_message_size() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signer = PrivateKey::from_seed(1);
+            let remote_signer = PrivateKey::from_seed(2);
+            let local_pk = signer.public_key();
+            let remote_pk = remote_signer.public_key();
+
+            let (local_sink, remote_stream) = mocks::Channel::init();
+            let (remote_sink, local_stream) = mocks::Channel::init();
+
+            let local_handshake = handshake(signer.clone());
+            let remote_handshake = handshake(remote_signer.clone());
+
+            let local_pk_clone = local_pk.clone();
+            let listener_handle = context.child("listener").spawn({
+                move |ctx| async move {
+                    remote_handshake
+                        .listen(
+                            ctx,
+                            STREAM_NAMESPACE,
+                            MAX_MESSAGE_SIZE,
+                            |_| async { true },
+                            remote_stream,
+                            remote_sink,
+                        )
+                        .await
+                        .map(|(pk, sender, receiver)| {
+                            assert_eq!(pk, local_pk_clone);
+                            (sender, receiver)
+                        })
+                }
+            });
+
+            let (mut local_sender, _local_receiver) = local_handshake
+                .dial(
+                    context.child("dialer"),
+                    STREAM_NAMESPACE,
+                    MAX_MESSAGE_SIZE,
+                    remote_pk.clone(),
+                    local_stream,
+                    local_sink,
+                )
+                .await
+                .expect("dial failed");
+
+            let (remote_sender, remote_receiver) = listener_handle
+                .await
+                .expect("listen failed")
+                .expect("listen result failed");
+
+            let (peer_actor, _mailbox, _relay) = Actor::<deterministic::Context, PublicKey>::new(
+                context.child("actor"),
+                default_peer_config(context.child("config")),
+            );
+            let mut channels = create_channels(context.child("channels"));
+            let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
+            let (_sender, mut receiver) = channels.register(0, quota, context.child("channel"));
+
+            // Both frames fit the stream, but only the first payload fits the data limit.
+            context.child("task").spawn(move |_| async move {
+                for len in [MAX_DATA_SIZE, MAX_DATA_SIZE + 1] {
+                    let msg = types::Message::Data(Data {
+                        channel: 0,
+                        message: IoBuf::from(vec![0; Widen::widen(len)]),
+                    });
+                    local_sender.send(msg.encode()).await.expect("send failed");
+                }
+            });
+
+            let result = peer_actor
+                .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
+                .await;
+            let over: usize = Widen::widen(MAX_DATA_SIZE + 1);
+            assert!(
+                matches!(result, Err(Error::DecodeFailed(CodecError::InvalidLength(len))) if len == over),
+                "unexpected result: {result:?}"
+            );
+            let (peer, message) = receiver.recv().await.expect("payload at limit not delivered");
+            assert_eq!(peer, local_pk);
+            assert_eq!(message.len(), over - 1);
         });
     }
 

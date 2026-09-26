@@ -10,7 +10,7 @@ use crate::{
     authenticated::{
         MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
-        discovery::types::{Info, InfoVerifier},
+        discovery::types::{Info, InfoVerifier, Payload},
         max_size, router,
     },
     sizing::max_retained_peers,
@@ -67,7 +67,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
+    /// Panics if the configured frame size or the largest discovery control message exceeds the
+    /// stream limit, or if capacity arithmetic overflows.
     pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
         // `max_size` subtracts framing overhead from `H::MAX_SIZE`, so this bound guarantees
         // that adding the overhead back cannot overflow.
@@ -75,12 +76,21 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             cfg.max_message_size <= max_size::<H>(),
             "maximum message size exceeds stream limit"
         );
+        let max_peer_set_size =
+            u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
+
+        // Control messages do not count toward `max_message_size`, so frames must also fit the
+        // largest one the peer actor decodes.
+        let max_control_size =
+            Payload::<H::PublicKey>::max_control_size(max_peer_set_size, cfg.peer_gossip_max_count)
+                .and_then(|size| u32::try_from(size).ok())
+                .filter(|size| *size <= H::MAX_SIZE)
+                .expect("discovery control message exceeds stream limit");
         let max_frame_size = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
-            .expect("maximum frame size overflow");
-        let max_peer_set_size =
-            u64::try_from(cfg.max_peers_per_set.get()).expect("maximum peers per set exceeds u64");
+            .expect("maximum frame size overflow")
+            .max(max_control_size);
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
@@ -315,11 +325,58 @@ mod tests {
     use super::*;
     use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
     use commonware_codec::Encode;
-    use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_cryptography::{
+        Signer,
+        ed25519::{PrivateKey, PublicKey},
+    };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_stream::encrypted::Handshake as StreamHandshake;
-    use commonware_utils::NZUsize;
+    use commonware_utils::{NZUsize, Widen};
     use std::{net::SocketAddr, time::Duration};
+
+    fn config(max_message_size: u32) -> Config<StreamHandshake<PrivateKey>> {
+        let address = SocketAddr::from(([127, 0, 0, 1], 7000));
+        Config::local(
+            StreamHandshake::new(PrivateKey::from_seed(0)),
+            b"discovery-test",
+            address,
+            address,
+            Vec::new(),
+            NZUsize!(64),
+            max_message_size,
+        )
+    }
+
+    #[test]
+    fn frame_fits_data_and_control_messages() {
+        let cfg = config(0);
+        let max_bit_vec = u64::try_from(cfg.max_peers_per_set.get()).unwrap();
+        let control =
+            Payload::<PublicKey>::max_control_size(max_bit_vec, cfg.peer_gossip_max_count).unwrap();
+        let control = u32::try_from(control).unwrap();
+
+        // Small application limits leave the frame at the control bound.
+        for (max_message_size, max_frame_size) in [
+            (0, control),
+            (control - MAX_PAYLOAD_OVERHEAD, control),
+            (control, control + MAX_PAYLOAD_OVERHEAD),
+        ] {
+            deterministic::Runner::default().start(|context| async move {
+                let (network, _) = Network::new(context.child("network"), config(max_message_size));
+                assert_eq!(network.max_frame_size, max_frame_size);
+            });
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "discovery control message exceeds stream limit")]
+    fn control_message_exceeds_stream_limit() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut cfg = config(0);
+            cfg.peer_gossip_max_count = Widen::widen(u32::MAX);
+            let _ = Network::new(context.child("network"), cfg);
+        });
+    }
 
     #[test]
     fn greeting_and_verifier_use_the_authenticated_identity_and_gossip_namespace() {

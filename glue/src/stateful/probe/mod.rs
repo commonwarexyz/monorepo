@@ -117,6 +117,11 @@
 //! delivery lags across request rounds without wasting certificate work or allowing one peer to
 //! inflate a sample. The p2p channel supplies rate limiting and maximum encoded message size
 //! enforcement.
+//!
+//! # Message Sizes
+//!
+//! A reply carries one finalization that marshal holds. Serving skips any reply the sender cannot
+//! carry.
 
 mod actor;
 pub use actor::{Config, Probe};
@@ -161,8 +166,9 @@ mod test {
     };
     use commonware_macros::test_collect_traces;
     use commonware_p2p::{
-        Recipients, Sender as _,
+        LimitedSender as _, Recipients, Sender as _,
         simulated::{Config as SimConfig, Link, Network, Oracle, Sender},
+        utils::mocks::Capped,
     };
     use commonware_parallel::{Sequential, Strategy as ParallelStrategy};
     use commonware_runtime::{
@@ -379,6 +385,10 @@ mod test {
             Scheme::is_batchable()
         }
 
+        fn certificate_max_size(participants: usize) -> Option<usize> {
+            Scheme::certificate_max_size(participants)
+        }
+
         fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
             self.inner.certificate_codec_config()
         }
@@ -524,8 +534,8 @@ mod test {
         probe: Mailbox<Scheme, Variant>,
         marshal: MarshalMailbox<Scheme, Variant>,
         // A clone of the node's probe channel sender, used by tests to inject raw
-        // bytes that appear to originate from this node.
-        probe_sender: Sender<ed25519::PublicKey, deterministic::Context>,
+        // bytes that appear to originate from this node and to lower its limit.
+        probe_sender: Capped<Sender<ed25519::PublicKey, deterministic::Context>>,
         // The probe actor, started on demand via `start_probes` once peers have
         // been seeded with finalizations. `None` once started.
         start: Option<Box<dyn FnOnce() -> Handle<()>>>,
@@ -652,6 +662,7 @@ mod test {
                 // Marshal actor (unbuffered: blocks arrive via `proposed`/resolver, not a buffer).
                 let marshal_config = marshal::Config {
                     provider: ConstantProvider::new(scheme.clone()),
+                    max_participants: NZUsize!(participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: Start::Genesis(genesis.clone().into()),
                     partition_prefix: partition_prefix.clone(),
@@ -678,11 +689,13 @@ mod test {
                 let marshal_handle = marshal_actor.start_unbuffered(NoopReporter, resolver);
 
                 // Probe.
-                let probe_network = control
+                let (sender, receiver) = control
                     .register(PROBE_CHANNEL, TEST_QUOTA)
                     .await
                     .expect("failed to register probe channel");
-                let probe_sender = probe_network.0.clone();
+                let max = sender.max_message_size();
+                let probe_sender = Capped::new(sender, max);
+                let probe_network = (probe_sender.clone(), receiver);
                 let (probe, probe_mailbox) = Probe::new(Config {
                     context: node_ctx.child("probe"),
                     provider: make_provider(&scheme),
@@ -997,6 +1010,43 @@ mod test {
                 ),
                 "matching replies below the sample size must not resolve the floor"
             );
+        });
+    }
+
+    /// A source skips a reply its sender cannot carry instead of sending it.
+    #[test]
+    fn test_skips_reply_above_sender_limit() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut harness =
+                Harness::setup(&context, 4, NZDuration!(Duration::from_secs(3600))).await;
+
+            // Seed a sample (f + 1 = 2) of peers and drop one source's sender limit one byte
+            // below the reply
+            let (block, finalization) = harness.finalization(1, 1);
+            for index in [1, 2] {
+                harness
+                    .inject(index, block.clone(), finalization.clone())
+                    .await;
+            }
+            let reply = finalization_bytes(finalization).len();
+            harness.nodes[1]
+                .probe_sender
+                .set(u32::try_from(reply - 1).unwrap());
+            harness.start_probes();
+
+            // Only the other source replies, so the sample stays short and no peer is blocked
+            let mut subscription = harness.nodes[0].probe.subscribe();
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "floor resolved from a skipped reply"
+            );
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "skipping a reply must not block peers");
         });
     }
 

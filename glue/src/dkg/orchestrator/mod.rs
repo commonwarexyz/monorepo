@@ -64,6 +64,12 @@
 //! per-epoch Simplex tunables; callers must provide these explicitly rather
 //! than relying on hidden defaults.
 //!
+//! # Message Sizes
+//!
+//! Each epoch's Simplex engine runs on epoch subchannels, so fold the
+//! [`simplex::Limits`](commonware_consensus::simplex::Limits) for the largest
+//! committee wrapped in [`Prefixed`](commonware_p2p::utils::mux::Prefixed).
+//!
 //! [`Epoch`]: commonware_consensus::types::Epoch
 
 mod mailbox;
@@ -364,6 +370,7 @@ mod tests {
                 finalized_blocks,
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[index].clone()),
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(NZU64!(2)),
                     start: MarshalStart::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.clone(),
@@ -737,6 +744,7 @@ mod tests {
                     finalized_blocks,
                     marshal::Config {
                         provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
+                        max_participants: NZUsize!(fixture.participants.len()),
                         epocher: FixedEpocher::new(NZU64!(2)),
                         start: MarshalStart::Genesis(genesis.into()),
                         partition_prefix: partition_prefix.clone(),
@@ -992,6 +1000,7 @@ mod tests {
                 finalized_blocks,
                 marshal::Config {
                     provider: mocks::TestProvider::new(fixture.schemes[0].clone()),
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(NZU64!(2)),
                     start: MarshalStart::Genesis(genesis.into()),
                     partition_prefix: partition_prefix.clone(),

@@ -2,6 +2,7 @@ use super::{
     actors::{batcher, resolver, voter},
     config::{Config, SkipPolicy},
     elector::{self, Elector as _},
+    limits::Limits,
     types::{Activity, Context},
 };
 use crate::{
@@ -10,11 +11,12 @@ use crate::{
 };
 use commonware_cryptography::Digest;
 use commonware_macros::select;
-use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_p2p::{Blocker, Footprint, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
 };
+use commonware_utils::Widen;
 use rand_core::CryptoRng;
 use tracing::debug;
 
@@ -31,6 +33,7 @@ pub struct Engine<
     T: Strategy,
 > {
     context: ContextCell<E>,
+    limits: Limits,
 
     voter: voter::Actor<E, S, L::Elector, B, D, A, R, F>,
     voter_mailbox: voter::Mailbox<S, D>,
@@ -58,6 +61,7 @@ impl<
     pub fn new(mut context: E, cfg: Config<S, L, B, D, A, R, F, T>) -> Self {
         // Ensure configuration is valid
         cfg.assert(&mut context);
+        let limits = Limits::new::<S, D>(cfg.scheme.participants().len());
         let skip_budget = match cfg.skip {
             SkipPolicy::Disabled => 0,
             SkipPolicy::Enabled { budget, .. } => budget.resolve(cfg.scheme.participants().len()),
@@ -134,6 +138,7 @@ impl<
         // Return the engine
         Self {
             context: ContextCell::new(context),
+            limits,
 
             voter,
             voter_mailbox,
@@ -183,6 +188,12 @@ impl<
     /// catch up on a view it missed (e.g., to verify a proposal's parent), it
     /// uses this channel to request certificates from peers. The resolver handles
     /// retries and peer selection for these requests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a sender's
+    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) cannot fit the
+    /// [`Limits`] of this engine's committee.
     pub fn start(
         mut self,
         vote_network: (
@@ -198,6 +209,20 @@ impl<
             impl Receiver<PublicKey = S::PublicKey>,
         ),
     ) -> Handle<()> {
+        // Ensure every sender fits every message
+        let size = self.limits.footprint();
+        for limit in [
+            vote_network.0.max_message_size(),
+            certificate_network.0.max_message_size(),
+            resolver_network.0.max_message_size(),
+        ] {
+            let limit: usize = Widen::widen(limit);
+            assert!(
+                size <= limit,
+                "simplex size {size} exceeds sender limit {limit}"
+            );
+        }
+
         spawn_cell!(
             self.context,
             self.run(vote_network, certificate_network, resolver_network)

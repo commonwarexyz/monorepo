@@ -14,7 +14,9 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::{collections::BTreeSet, vec::Vec};
 use bytes::BufMut;
-use commonware_codec::{Buf, EncodeSize, Error, Read, ReadRangeExt, Write, types::lazy::Lazy};
+use commonware_codec::{
+    Buf, EncodeSize, Error, FixedSize, Read, ReadRangeExt, Write, types::lazy::Lazy,
+};
 use commonware_utils::{
     Participant,
     iter::NonEmpty,
@@ -257,6 +259,11 @@ impl<P: crate::PublicKey, N: Namespace> Generic<P, N> {
         false
     }
 
+    /// Returns the maximum encoded certificate size for at most `participants` participants.
+    pub fn certificate_max_size(participants: usize) -> Option<usize> {
+        crate::certificate::max_individual_certificate_size(participants, Secp256r1Signature::SIZE)
+    }
+
     pub const fn certificate_codec_config(&self) -> <Certificate as commonware_codec::Read>::Cfg {
         self.participants.len()
     }
@@ -468,6 +475,10 @@ macro_rules! impl_certificate_secp256r1 {
 
             fn is_batchable() -> bool {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
+            }
+
+            fn certificate_max_size(participants: usize) -> Option<usize> {
+                $crate::secp256r1::certificate::Generic::<P, $namespace>::certificate_max_size(participants)
             }
 
             fn certificate_codec_config(
@@ -1044,8 +1055,28 @@ mod tests {
             .assemble(non_empty![@attestations], &Sequential)
             .unwrap();
         let encoded = certificate.encode();
+        assert!(encoded.len() <= Scheme::<PublicKey>::certificate_max_size(schemes.len()).unwrap());
         let decoded = Certificate::decode_cfg(encoded, &schemes.len()).expect("decode certificate");
         assert_eq!(decoded, certificate);
+    }
+
+    #[test]
+    fn test_certificate_max_size() {
+        let mut rng = test_rng();
+        let (schemes, _) = setup_signers(&mut rng, 128);
+        let attestations = schemes.iter().map(|s| {
+            s.sign::<Sha256Digest>(TestSubject {
+                message: Bytes::from_static(MESSAGE),
+            })
+            .unwrap()
+        });
+        let certificate = schemes[0]
+            .assemble(non_empty![@attestations], &Sequential)
+            .unwrap();
+        assert_eq!(
+            Some(certificate.encode().len()),
+            Scheme::<PublicKey>::certificate_max_size(schemes.len())
+        );
     }
 
     #[test]

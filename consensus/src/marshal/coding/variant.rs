@@ -11,8 +11,8 @@ use crate::{
     simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{Round, coding::Commitment},
 };
-use commonware_codec::Read;
-use commonware_coding::Scheme as CodingScheme;
+use commonware_codec::{FixedSize, Read};
+use commonware_coding::{Bounded, Config as CodingConfig};
 use commonware_cryptography::{Committable, Digestible, Hasher, PublicKey, certificate::Scheme};
 use commonware_p2p::Recipients;
 use commonware_utils::channel::oneshot;
@@ -26,14 +26,14 @@ use std::{future::Future, sync::Arc};
 pub struct Coding<B, C, H, P>(std::marker::PhantomData<(B, C, H, P)>)
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     P: PublicKey;
 
 impl<B, C, H, P> Clone for Coding<B, C, H, P>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     P: PublicKey,
 {
@@ -45,7 +45,7 @@ where
 impl<B, C, H, P> Copy for Coding<B, C, H, P>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     P: PublicKey,
 {
@@ -54,7 +54,7 @@ where
 impl<B, C, H, P> Variant for Coding<B, C, H, P>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     P: PublicKey,
 {
@@ -111,12 +111,31 @@ where
     ) -> Self::Block {
         Arc::new(CodedBlock::new_trusted(block, payload))
     }
+
+    fn block_size(block: usize) -> Option<usize> {
+        // A coded block appends its coding configuration
+        block.checked_add(CodingConfig::SIZE)
+    }
+
+    fn buffer_size(participants: usize, block: usize) -> Option<usize> {
+        // Shard size does not grow monotonically with the committee, so scan every committee
+        // size that coding supports
+        let participants = u16::try_from(participants).ok()?;
+        let mut widest = None;
+        for n in 4..=participants {
+            let shard = C::shard_size(&coding_config_for_participants(n), block)?;
+            widest = widest.max(Some(shard));
+        }
+
+        // Each shard travels with its commitment and index
+        widest?.checked_add(Self::Commitment::SIZE + u16::SIZE)
+    }
 }
 
 impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
 where
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     P: PublicKey,
 {
@@ -164,7 +183,7 @@ impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>
 where
     S: Scheme,
     B: CertifiableBlock<Context = Context<Commitment<B, C, H>, P>>,
-    C: CodingScheme,
+    C: Bounded,
     H: Hasher,
     P: PublicKey,
 {
@@ -194,7 +213,7 @@ mod tests {
         types::{Epoch, Height, View},
     };
     use bytes::BufMut;
-    use commonware_codec::{Buf, EncodeSize, Error, Read, Write};
+    use commonware_codec::{Buf, Encode, EncodeSize, Error, Read, Write};
     use commonware_coding::{Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
         Digest as _, Digestible, Signer as _,
@@ -290,6 +309,22 @@ mod tests {
             1_234_567,
         );
         NoCloneBlock { inner }
+    }
+
+    #[test]
+    fn block_size_matches_encoding() {
+        const CONFIG: CodingConfig = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(2),
+        };
+
+        type TestScheme = ReedSolomon<Sha256>;
+        type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
+
+        let block = no_clone_block(CONFIG);
+        let size = block.encode_size();
+        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(block, CONFIG, &Sequential);
+        assert_eq!(TestVariant::block_size(size), Some(coded.encode().len()));
     }
 
     #[test]

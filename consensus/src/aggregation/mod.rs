@@ -77,6 +77,11 @@
 //! attestation's signer index), and a signer gains nothing by relabeling its own ack that it could
 //! not achieve by signing the item directly in the target epoch. Integrations that perform
 //! per-epoch accounting from [types::Activity] should not treat the epoch as signed intent.
+//!
+//! ## Message Sizes
+//!
+//! The engine sends only [types::TipAck]s, each unfragmented. Fold [Limits] into
+//! [`max_message_size`](commonware_p2p::max_message_size) when sizing the network.
 
 pub mod scheme;
 pub mod types;
@@ -87,6 +92,8 @@ cfg_if::cfg_if! {
         pub use config::Config;
         mod engine;
         pub use engine::Engine;
+        mod limits;
+        pub use limits::Limits;
         mod metrics;
         mod safe_tip;
 
@@ -97,7 +104,7 @@ cfg_if::cfg_if! {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Engine, mocks};
+    use super::{Config, Engine, Limits, mocks};
     use crate::{
         aggregation::scheme::{Scheme, bls12381_multisig, bls12381_threshold, ed25519, secp256r1},
         types::{Epoch, EpochDelta, Height, HeightDelta},
@@ -109,7 +116,10 @@ mod tests {
         sha256::Digest as Sha256Digest,
     };
     use commonware_macros::{select, test_group, test_traced};
-    use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
+    use commonware_p2p::{
+        max_message_size,
+        simulated::{Link, Network, Oracle, Receiver, Sender},
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Clock, Quota, Runner, Spawner, Supervisor as _,
@@ -213,7 +223,7 @@ mod tests {
         }
     }
 
-    /// Initialize a simulated network environment.
+    /// Initialize a simulated network sized from [Limits].
     async fn initialize_simulation<S: Scheme<Sha256Digest, PublicKey = PublicKey>>(
         context: Context,
         fixture: &Fixture<S>,
@@ -225,7 +235,7 @@ mod tests {
         let (network, mut oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
+                max_size: max_message_size(&[&Limits::new::<S, Sha256Digest>()]),
                 max_peers_per_set: NZUsize!(fixture.participants.len()),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -407,6 +417,36 @@ mod tests {
     }
 
     test_for_all_fixtures!(slow all_online);
+
+    #[test_traced("INFO")]
+    #[should_panic(expected = "ack size 131 exceeds sender limit 130")]
+    fn test_limits_reject_sender() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = ed25519::fixture(&mut context, TEST_NAMESPACE, 4);
+            let (network, mut oracle) = Network::new_with_peers(
+                context.child("network"),
+                commonware_p2p::simulated::Config {
+                    max_size: 130,
+                    max_peers_per_set: NZUsize!(4),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                fixture.participants.clone(),
+            )
+            .await;
+            network.start();
+            let mut registrations = register_participants(&mut oracle, &fixture.participants).await;
+            spawn_validator_engines(
+                context.child("validator"),
+                &fixture,
+                &mut registrations,
+                &mut oracle,
+                Epoch::new(111),
+                Duration::from_secs(5),
+                vec![],
+            );
+        });
+    }
 
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<S, F>(fixture: F)

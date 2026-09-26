@@ -17,7 +17,8 @@
 //!
 //! The standard variant uses the core [`crate::marshal::core::Actor`] and
 //! [`crate::marshal::core::Mailbox`] with [`Standard`] as the variant type parameter.
-//! Blocks are broadcast through [`commonware_broadcast::buffered`].
+//! Blocks are broadcast through [`commonware_broadcast::buffered`] (see
+//! [message sizes](crate::marshal#message-sizes)).
 //!
 //! # When to Use
 //!
@@ -70,10 +71,12 @@ mod tests {
             self, Plan,
             config::{ForwardPolicy, SkipBudget, SkipPolicy},
             elector::{Config as _, Elector as _, RoundRobin, RoundRobinElector},
-            scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
+            scheme::{
+                Scheme as SimplexScheme, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519,
+            },
             types::{
-                Certificate, Finalization, Notarization, Notarize, Nullification, Nullify,
-                Proposal, Vote,
+                Certificate, Finalization, Finalize, Notarization, Notarize, Nullification,
+                Nullify, Proposal, Vote,
             },
         },
         types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
@@ -81,7 +84,7 @@ mod tests {
     use bytes::{BufMut, Bytes};
     use commonware_actor::{Feedback, mailbox};
     use commonware_broadcast::{Broadcaster as _, buffered};
-    use commonware_codec::{Buf, DecodeExt as _, Encode, FixedSize, Read, Write};
+    use commonware_codec::{Buf, DecodeExt as _, Encode, EncodeSize, FixedSize, Read, Write};
     use commonware_cryptography::{
         Digestible, Hasher as _,
         certificate::{ConstantProvider, Provider, Scoped, Verifier as _, mocks::Fixture},
@@ -102,7 +105,7 @@ mod tests {
         translator::{EightCap, TwoCap},
     };
     use commonware_utils::{
-        Acknowledgement as _, NZU16, NZU64, NZUsize,
+        Acknowledgement as _, NZU16, NZU64, NZUsize, Widen,
         acknowledgement::Exact,
         channel::{fallible::OneshotExt, mpsc, oneshot, oneshot::error::TryRecvError},
         non_empty,
@@ -4009,9 +4012,14 @@ mod tests {
 
     impl RecordingResolver {
         fn holding(metrics: impl Metrics) -> (handler::Receiver<D>, Self) {
+            Self::bounded(metrics, usize::MAX)
+        }
+
+        /// Returns a resolver whose receiver carries values of at most `max_value_size` bytes.
+        fn bounded(metrics: impl Metrics, max_value_size: usize) -> (handler::Receiver<D>, Self) {
             let (sender, receiver) = mailbox::new(metrics, NZUsize!(100));
             (
-                handler::Receiver::new(receiver),
+                handler::Receiver::new(receiver, max_value_size),
                 Self {
                     fetches: Arc::new(Mutex::new(Vec::new())),
                     active_fetches: Arc::new(Mutex::new(Vec::new())),
@@ -4087,6 +4095,28 @@ mod tests {
                 .as_ref()
                 .expect("recording resolver sender missing")
                 .enqueue(message)
+        }
+
+        /// Delivers `value` for `key` to one `subscriber` and returns whether marshal accepted it.
+        async fn deliver(
+            &self,
+            key: handler::Key<D>,
+            subscriber: handler::Annotation,
+            value: Bytes,
+        ) -> bool {
+            let (response, receiver) = oneshot::channel();
+            assert!(
+                self.enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key,
+                        subscribers: NonEmptyVec::new((subscriber, tracing::Span::none())),
+                    },
+                    value,
+                    response,
+                })
+                .accepted()
+            );
+            receiver.await.expect("delivery response missing")
         }
     }
 
@@ -4298,8 +4328,42 @@ mod tests {
         P: Provider<Scope = Epoch, Scheme = S>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
+        start_standard_actor_bounded(
+            context,
+            partition_prefix,
+            provider,
+            application,
+            buffer,
+            start,
+            usize::MAX,
+        )
+        .await
+    }
+
+    /// Starts a standard actor like [`start_standard_actor`] under any scheme, with a resolver
+    /// that carries values of at most `max_value_size` bytes.
+    async fn start_standard_actor_bounded<R, Buf, P>(
+        context: deterministic::Context,
+        partition_prefix: &str,
+        provider: P,
+        application: R,
+        buffer: Option<Buf>,
+        start: Start<P::Scheme, D, Arc<B>>,
+        max_value_size: usize,
+    ) -> (
+        Mailbox<P::Scheme, Standard<B>>,
+        Option<Buf>,
+        RecordingResolver,
+        commonware_runtime::Handle<()>,
+    )
+    where
+        R: Reporter<Activity = Update<B>>,
+        P: Provider<Scope = Epoch, Scheme: SimplexScheme<D, PublicKey = PublicKey>>,
+        Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
+    {
         let config = Config {
             provider,
+            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start,
             mailbox_size: NZUsize!(100),
@@ -4336,7 +4400,7 @@ mod tests {
                 freezer_value_compression: None,
                 ordinal_partition: format!("{partition_prefix}-finalizations-by-height-ordinal"),
                 items_per_section: NZU64!(10),
-                codec_config: S::certificate_codec_config_unbounded(),
+                codec_config: P::Scheme::certificate_codec_config_unbounded(),
                 replay_buffer: config.replay_buffer,
                 freezer_key_write_buffer: config.key_write_buffer,
                 freezer_value_write_buffer: config.value_write_buffer,
@@ -4380,7 +4444,8 @@ mod tests {
             config,
         )
         .await;
-        let (resolver_rx, resolver) = RecordingResolver::holding(context.child("mailbox"));
+        let (resolver_rx, resolver) =
+            RecordingResolver::bounded(context.child("mailbox"), max_value_size);
         let actor_handle = if let Some(buffer) = buffer.clone() {
             actor.start(application, buffer, (resolver_rx, resolver.clone()))
         } else {
@@ -4613,6 +4678,334 @@ mod tests {
             .await;
             mailbox.set_floor(floor_finalization);
             context.sleep(Duration::from_secs(1)).await;
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_propose_skips_oversized_block() {
+        for kind in wrapper_kinds() {
+            for oversized in [false, true] {
+                let runner = deterministic::Runner::timed(Duration::from_secs(30));
+                runner.start(|mut context| async move {
+                    let Fixture {
+                        participants,
+                        schemes,
+                        ..
+                    } = bls12381_threshold_vrf::fixture::<V, _>(
+                        &mut context,
+                        NAMESPACE,
+                        NUM_VALIDATORS,
+                    );
+                    let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+                    let ctx = Ctx {
+                        round: Round::new(Epoch::zero(), View::new(1)),
+                        leader: participants[0].clone(),
+                        parent: (View::zero(), genesis.digest()),
+                    };
+
+                    // The widest timestamp keeps genesis within the bound
+                    let block =
+                        B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), u64::MAX);
+                    let bound = block.encode_size() - usize::from(oversized);
+                    let (marshal, ..) = start_standard_actor_bounded(
+                        context.child("validator"),
+                        "propose-oversized",
+                        ConstantProvider::new(schemes[0].clone()),
+                        Application::<B>::default(),
+                        None::<RecordingBuffer>,
+                        Start::Genesis(genesis.into()),
+                        harness::max_value_size::<Standard<B>>(bound),
+                    )
+                    .await;
+                    assert_eq!(marshal.max_block_size().await, Some(bound));
+
+                    let app: MockVerifyingApp<B, S> =
+                        MockVerifyingApp::new().with_propose_result(block.clone());
+                    let mut wrapper = Wrapper::new(kind, context.child("wrapper"), app, marshal);
+                    let proposal = wrapper.propose(ctx).await.await;
+                    if oversized {
+                        assert!(
+                            proposal.is_err(),
+                            "{kind:?}: an oversized block must not be proposed"
+                        );
+                    } else {
+                        assert_eq!(
+                            proposal.expect("proposal missing"),
+                            block.digest(),
+                            "{kind:?}: a block at the bound must be proposed"
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_max_block_size() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // ed25519 certificates grow with the signer count, and the committee is smaller than
+            // max_participants
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let Fixture {
+                schemes: committee, ..
+            } = ed25519::fixture(&mut context, NAMESPACE, NUM_VALIDATORS - 1);
+            let value = 64 * 1024;
+            let (mailbox, ..) = start_standard_actor_bounded(
+                context.child("validator"),
+                "max-block-size",
+                ConstantProvider::new(committee[0].clone()),
+                Application::<B>::default(),
+                None::<RecordingBuffer>,
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                value,
+            )
+            .await;
+
+            // The widest notarization or finalization has every one of max_participants sign
+            // at the widest round
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+                View::new(u64::MAX - 1),
+                Sha256::hash(&[b"widest"]),
+            );
+            let notarizes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&schemes[0], non_empty![@&notarizes], &Sequential)
+                    .unwrap();
+            let finalizes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&schemes[0], non_empty![@&finalizes], &Sequential)
+                    .unwrap();
+            let widest = notarization.encode_size();
+            assert_eq!(finalization.encode_size(), widest);
+            assert_eq!(mailbox.max_block_size().await, Some(value - widest));
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_oversized_buffered_block_is_absent() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let parent = Sha256::hash(&[b""]);
+            let fitting = make_raw_block(parent, Height::new(1), 1);
+            let oversized = make_raw_block(parent, Height::new(1), u64::MAX);
+            let buffer = RecordingBuffer::default();
+            buffer.insert(fitting.clone());
+            buffer.insert(oversized.clone());
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor_bounded(
+                context.child("validator"),
+                "oversized-buffered-block",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(buffer.clone()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
+            )
+            .await;
+
+            // Lookups return the fitting block and treat the oversized block as absent
+            let found = mailbox
+                .get_block(&fitting.digest())
+                .await
+                .expect("fitting block missing");
+            assert_eq!(found.digest(), fitting.digest());
+            assert!(mailbox.get_block(&oversized.digest()).await.is_none());
+            let mut by_commitment =
+                mailbox.subscribe_by_commitment(oversized.digest(), CommitmentFallback::Wait);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "buffer subscription",
+                || buffer.commitment_subscription_count() == 1,
+            )
+            .await;
+            assert!(matches!(by_commitment.try_recv(), Err(TryRecvError::Empty)));
+
+            // A buffer subscription completed by the oversized block leaves its subscriber waiting
+            let mut waiting = mailbox.subscribe_by_digest(oversized.digest(), DigestFallback::Wait);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "buffer subscription",
+                || buffer.digest_subscriptions.lock().len() == 1,
+            )
+            .await;
+            let sender = buffer.digest_subscriptions.lock().pop().unwrap();
+            sender.send_lossy(Arc::new(oversized));
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(matches!(waiting.try_recv(), Err(TryRecvError::Empty)));
+
+            // A buffer subscription completed by a fitting block notifies its subscriber
+            let late = make_raw_block(parent, Height::new(1), 2);
+            let delivered = mailbox.subscribe_by_digest(late.digest(), DigestFallback::Wait);
+            wait_until(
+                &context,
+                Duration::from_secs(5),
+                "buffer subscription",
+                || buffer.digest_subscriptions.lock().len() == 1,
+            )
+            .await;
+            let sender = buffer.digest_subscriptions.lock().pop().unwrap();
+            sender.send_lossy(Arc::new(late.clone()));
+            let delivered = delivered.await.expect("fitting block subscription dropped");
+            assert_eq!(delivered.digest(), late.digest());
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_oversized_delivery_does_not_block_peer() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let parent = Sha256::hash(&[b""]);
+            let fitting = make_raw_block(parent, Height::new(1), 1);
+            let oversized = make_raw_block(parent, Height::new(1), u64::MAX);
+            let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor_bounded(
+                context.child("validator"),
+                "oversized-delivery",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
+            )
+            .await;
+
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let commitment = StandardHarness::commitment(&oversized);
+            let proposal = Proposal::new(round, View::zero(), commitment);
+            let notarization =
+                StandardHarness::make_notarization(proposal.clone(), &schemes, QUORUM);
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+
+            // An oversized block that fails validation still blocks the peer
+            assert!(
+                !resolver
+                    .deliver(
+                        handler::Key::Block(fitting.digest()),
+                        handler::Annotation::Certified { height },
+                        oversized.encode(),
+                    )
+                    .await
+            );
+
+            // Valid deliveries of the oversized block are acknowledged but not stored
+            for (key, subscriber, value) in [
+                (
+                    handler::Key::Block(commitment),
+                    handler::Annotation::Certified { height },
+                    oversized.encode(),
+                ),
+                (
+                    handler::Key::Notarized { round },
+                    handler::Annotation::Notarization { round },
+                    (notarization, oversized.clone()).encode(),
+                ),
+                (
+                    handler::Key::Finalized { height },
+                    handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
+                    (finalization, oversized.clone()).encode(),
+                ),
+            ] {
+                assert!(resolver.deliver(key, subscriber, value).await);
+            }
+            assert!(mailbox.get_block(&oversized.digest()).await.is_none());
+            assert!(mailbox.get_finalization(height).await.is_none());
+        });
+    }
+
+    /// A local path that hands marshal a block.
+    #[derive(Clone, Copy)]
+    enum Ingest {
+        Proposed,
+        Verified,
+        Certified,
+    }
+
+    /// Hands a standard actor a block above its bound through `ingest`.
+    fn ingest_oversized(ingest: Ingest) {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let parent = Sha256::hash(&[b""]);
+            let fitting = make_raw_block(parent, Height::new(1), 1);
+            let oversized = make_raw_block(parent, Height::new(1), u64::MAX);
+            let (mailbox, ..) = start_standard_actor_bounded(
+                context.child("validator"),
+                "oversized-ingest",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+                harness::max_value_size::<Standard<B>>(fitting.encode_size()),
+            )
+            .await;
+            let round = Round::new(Epoch::zero(), View::new(1));
+            match ingest {
+                Ingest::Proposed => {
+                    let (ack, _durable) = oneshot::channel();
+                    let _ = mailbox.proposed(round, oversized, Recipients::All, ack);
+                    context.sleep(Duration::from_secs(1)).await;
+                }
+                Ingest::Verified => {
+                    let _ = mailbox.verified(round, oversized).await;
+                }
+                Ingest::Certified => {
+                    let _ = mailbox.certified(round, oversized).await;
+                }
+            }
+        });
+    }
+
+    #[test_traced("WARN")]
+    #[should_panic(expected = "proposed block exceeds size limit")]
+    fn test_standard_proposed_oversized_block_panics() {
+        ingest_oversized(Ingest::Proposed);
+    }
+
+    #[test_traced("WARN")]
+    #[should_panic(expected = "verified block exceeds size limit")]
+    fn test_standard_verified_oversized_block_panics() {
+        ingest_oversized(Ingest::Verified);
+    }
+
+    #[test_traced("WARN")]
+    #[should_panic(expected = "certified block exceeds size limit")]
+    fn test_standard_certified_oversized_block_panics() {
+        ingest_oversized(Ingest::Certified);
+    }
+
+    #[test_traced("WARN")]
+    #[should_panic(expected = "genesis anchor exceeds size limit")]
+    fn test_standard_oversized_genesis_panics() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let genesis = StandardHarness::genesis_block(NUM_VALIDATORS as u16);
+            let bound = genesis.encode_size() - 1;
+            start_standard_actor_bounded(
+                context.child("validator"),
+                "oversized-genesis",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                None::<RecordingBuffer>,
+                Start::Genesis(genesis.into()),
+                harness::max_value_size::<Standard<B>>(bound),
+            )
+            .await;
         });
     }
 
@@ -7458,6 +7851,7 @@ mod tests {
             let partition_prefix = "stale-finalized-test".to_string();
             let config = Config {
                 provider: EmptyProvider,
+                max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
                 epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                 start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
                 mailbox_size: NZUsize!(100),
@@ -7535,7 +7929,7 @@ mod tests {
                 Application::<B>::default(),
                 buffer,
                 (
-                    handler::Receiver::new(resolver_rx),
+                    handler::Receiver::new(resolver_rx, usize::MAX),
                     RecordingResolver::default(),
                 ),
             );
@@ -7884,6 +8278,7 @@ mod tests {
     ) -> Config<harness::P, FixedEpocher, Sequential, B, Arc<B>, D> {
         Config {
             provider,
+            max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
             mailbox_size: NZUsize!(100),
@@ -7950,6 +8345,7 @@ mod tests {
                 blocks,
                 Config {
                     provider: ConstantProvider::new(schemes[0].clone()),
+                    max_participants: NZUsize!(Widen::widen(NUM_VALIDATORS)),
                     epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
                     start: Start::Genesis(genesis.into()),
                     mailbox_size: NZUsize!(100),

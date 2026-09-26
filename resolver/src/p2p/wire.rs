@@ -1,6 +1,14 @@
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, BufsMut, EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, BufsMut, EncodeSize, Error, FixedSize, Read, ReadExt, Write, varint::MAX_U32_VARINT_SIZE,
+};
 use commonware_utils::Span;
+
+/// Maximum number of bytes a P2P resolver message adds to its payload.
+///
+/// A response adds an 8-byte request ID, a 1-byte tag, and a value-length varint of at most
+/// 5 bytes. Requests and errors add only the ID and tag.
+pub const MAX_MESSAGE_OVERHEAD: u32 = (u64::SIZE + u8::SIZE + MAX_U32_VARINT_SIZE) as u32;
 
 /// Represents a message sent between peers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,6 +187,7 @@ mod tests {
     use bytes::Buf as _;
     use commonware_codec::{DecodeExt, Encode};
     use commonware_runtime::{BufferPooler, Runner, deterministic, iobuf::EncodeExt};
+    use commonware_utils::Widen;
 
     #[test]
     fn test_codec_request() {
@@ -197,6 +206,32 @@ mod tests {
         let encoded = original.encode();
         let decoded = Message::decode(encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_max_message_overhead() {
+        let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
+        let size = |payload: Payload<u8>| {
+            Message {
+                id: u64::MAX,
+                payload,
+            }
+            .encode()
+            .len()
+        };
+        assert!(size(Payload::Request(u8::MAX)) - u8::SIZE <= overhead);
+        assert!(size(Payload::Error) <= overhead);
+        for len in [0, 127, 128, 16_383, 16_384] {
+            assert!(size(Payload::Response(Bytes::from(vec![0; len]))) - len <= overhead);
+        }
+
+        // Combine the encoded envelope with the largest supported length prefix without
+        // allocating a maximum-size response value.
+        let envelope = size(Payload::Response(Bytes::new())) - Bytes::new().encode_size();
+        assert_eq!(
+            envelope + Widen::<usize>::widen(u32::MAX).encode_size(),
+            overhead
+        );
     }
 
     #[test]

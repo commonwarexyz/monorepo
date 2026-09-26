@@ -28,6 +28,7 @@ stability_scope!(BETA {
     pub mod types;
     pub mod utils;
 
+    pub use sizing::{Footprint, max_message_size};
     pub use types::{Address, Ingress};
 
     /// Tuple representing a message received from a given public key.
@@ -74,6 +75,9 @@ stability_scope!(BETA {
             message: impl Into<IoBufs> + Send,
             priority: bool,
         ) -> Unreliable<Feedback>;
+
+        /// Returns the largest payload, in bytes, that this sender accepts.
+        fn max_message_size(&self) -> u32;
     }
 
     /// Interface for constructing a [`CheckedSender`] from a set of [`Recipients`],
@@ -104,6 +108,9 @@ stability_scope!(BETA {
             &mut self,
             recipients: Recipients<Self::PublicKey>,
         ) -> Result<Self::Checked<'_>, SystemTime>;
+
+        /// Returns the largest payload, in bytes, that this sender accepts.
+        fn max_message_size(&self) -> u32;
     }
 
     /// Interface for sending messages to [`Recipients`] that are not currently rate-limited.

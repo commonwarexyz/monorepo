@@ -288,6 +288,7 @@ mod tests {
         },
     };
     use commonware_actor::{Feedback, Unreliable};
+    use commonware_codec::FixedSize;
     use commonware_cryptography::ed25519;
     use commonware_macros::{select, select_loop, test_group, test_traced};
     use commonware_runtime::{
@@ -620,6 +621,16 @@ mod tests {
             let base_port = 3000;
             let n = 10;
             run_network(context, MAX_MESSAGE_SIZE, base_port, n, Mode::One).await;
+        });
+    }
+
+    #[test_traced]
+    fn test_tiny_max_message_size_gossips() {
+        // Payloads are public keys, which are smaller than one gossiped peer record.
+        let max_message_size = u32::try_from(ed25519::PublicKey::SIZE).unwrap();
+        let executor = deterministic::Runner::timed(Duration::from_secs(60));
+        executor.start(|context| async move {
+            run_network(context, max_message_size, 3000, 5, Mode::All).await;
         });
     }
 

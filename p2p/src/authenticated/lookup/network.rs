@@ -69,6 +69,8 @@ where
             cfg.max_message_size <= max_size::<H>(),
             "maximum message size exceeds stream limit"
         );
+
+        // Pings, the only control messages, fit within the framing overhead.
         let max_frame_size = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)

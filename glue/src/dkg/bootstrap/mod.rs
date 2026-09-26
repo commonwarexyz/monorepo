@@ -8,9 +8,30 @@
 //!
 //! See [`reshare`] for the protocol flow that this engine reuses and for the
 //! application contract of a continuously reshared chain.
+//!
+//! # Message Sizes
+//!
+//! Fold [`Limits`] into the P2P `max_message_size` with
+//! [`commonware_p2p::max_message_size`]. Simplex and the DKG assert at start
+//! that their bounds fit their senders. Marshal derives the largest block it
+//! admits from its backfill sender and the participant count (see
+//! [message sizes](commonware_consensus::marshal#message-sizes)), and
+//! [`marshal::Limits`] targets the largest one-shot [`Block`], so every
+//! participant that folds the same participants and directory admits every
+//! block of the ceremony.
+//!
+//! ```
+//! use commonware_cryptography::bls12381::primitives::variant::MinSig;
+//! use commonware_glue::dkg::bootstrap::Limits;
+//! use commonware_p2p::max_message_size;
+//! use commonware_utils::{NZU32, sequence::Unit};
+//!
+//! // Size the network for a ceremony among 4 participants with a key-only directory
+//! let size = max_message_size(&[&Limits::new::<MinSig, _>(NZU32!(4), &Unit)]);
+//! ```
 
 use crate::dkg::{
-    ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    self, ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
     network::{Directory, Manager},
     reshare::{self, DkgConfig},
@@ -18,12 +39,18 @@ use crate::dkg::{
     types::{EpochInfo, Participants, Payload, SchemeInfo},
 };
 use commonware_broadcast::buffered;
-use commonware_codec::{Buf, Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+use commonware_codec::{
+    Buf, Encode, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt as _, Write,
+    varint::MAX_U64_VARINT_SIZE,
+};
 use commonware_consensus::{
     Application, Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
-        self, Start, ancestry::Ancestry, core::Actor as MarshalActor,
-        resolver::p2p as marshal_resolver, standard::Deferred,
+        self, Start,
+        ancestry::Ancestry,
+        core::Actor as MarshalActor,
+        resolver::p2p as marshal_resolver,
+        standard::{Deferred, Standard},
     },
     simplex::{
         self, Floor,
@@ -46,7 +73,7 @@ use commonware_cryptography::{
     ed25519,
     sha256::{self, Digest as Sha256Digest},
 };
-use commonware_p2p::{Blocker, Receiver, Sender};
+use commonware_p2p::{Blocker, Footprint, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufMut, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
@@ -54,7 +81,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    NZU16, NZU32, NZU64, NZUsize,
+    NZU16, NZU32, NZU64, NZUsize, Widen,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
     sequence::Unit,
@@ -232,6 +259,58 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
     }
 }
 
+/// Largest payloads the bootstrap [`Engine`] sends.
+#[derive(Clone, Debug)]
+pub struct Limits {
+    simplex: simplex::Limits,
+    marshal: marshal::Limits,
+    dkg: dkg::Limits,
+}
+
+impl Limits {
+    /// Returns the limits for a ceremony among `participants` participants whose epoch artifact
+    /// carries `directory`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a bound overflows `usize`.
+    pub fn new<V: Variant, D: Directory<ed25519::PublicKey>>(
+        participants: NonZeroU32,
+        directory: &D,
+    ) -> Self {
+        let dkg = dkg::Limits::new::<V, ed25519::PrivateKey>(participants);
+        let participants: usize = Widen::widen(participants.get());
+
+        // A block is a context (round, leader, and parent), a parent digest, a height, and an
+        // optional payload
+        let header = 4 * MAX_U64_VARINT_SIZE
+            + ed25519::PublicKey::SIZE
+            + 2 * sha256::Digest::SIZE
+            + u8::SIZE;
+        let block = dkg
+            .payload(directory.encode_size())
+            .checked_add(header)
+            .expect("block size overflow");
+        let marshal =
+            marshal::Limits::new::<Standard<Block<V, D>>, ConsensusScheme>(participants, block);
+
+        Self {
+            simplex: simplex::Limits::new::<ConsensusScheme, sha256::Digest>(participants),
+            marshal,
+            dkg,
+        }
+    }
+}
+
+impl Footprint for Limits {
+    fn footprint(&self) -> usize {
+        self.simplex
+            .footprint()
+            .max(self.marshal.footprint())
+            .max(self.dkg.footprint())
+    }
+}
+
 /// Self-contained DKG engine.
 pub struct Engine<E, V, M, X, SS, T, D = Unit>
 where
@@ -272,6 +351,8 @@ where
     ed25519::Batch: BatchVerifier<PublicKey = ed25519::PublicKey> + Send + 'static,
 {
     /// Starts consensus, marshal, broadcast, and the private reshare DKG actor.
+    ///
+    /// Each channel must carry the [`Limits`] for the configured participants and directory.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub fn start(
         mut self,
@@ -442,6 +523,7 @@ where
             blocks,
             marshal::Config {
                 provider: provider.clone(),
+                max_participants: NZUsize!(Widen::widen(participants)),
                 epocher: FixedEpocher::new(self.config.blocks_per_epoch),
                 start: Start::Genesis(genesis.clone().into()),
                 partition_prefix: format!("{}-marshal", self.config.partition_prefix),
@@ -658,7 +740,57 @@ fn archive_config<C>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_cryptography::bls12381::primitives::variant::MinPk;
+    use crate::dkg::network::Addresses;
+    use commonware_cryptography::bls12381::primitives::variant::{MinPk, MinSig};
+    use commonware_p2p::Address;
+    use std::net::SocketAddr;
+
+    /// Asserts that the marshal target is the widest block without a payload plus the widest
+    /// payload.
+    fn check<D: Directory<ed25519::PublicKey>>(participants: u32, directory: D) {
+        let limits = Limits::new::<MinSig, D>(NZU32!(participants), &directory);
+        let block = Block::<MinSig, D> {
+            context: Context {
+                round: Round::new(Epoch::new(u64::MAX), View::new(u64::MAX)),
+                leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                parent: (View::new(u64::MAX), Sha256::hash(&[b"parent"])),
+            },
+            parent: Sha256::hash(&[b"parent"]),
+            height: Height::new(u64::MAX),
+            payload: None,
+        };
+        let payload = limits.dkg.payload(directory.encode_size());
+        assert_eq!(
+            limits.marshal,
+            marshal::Limits::new::<Standard<Block<MinSig, D>>, ConsensusScheme>(
+                Widen::widen(participants),
+                block.encode().len() + payload
+            )
+        );
+        assert_eq!(
+            limits.footprint(),
+            limits
+                .simplex
+                .footprint()
+                .max(limits.marshal.footprint())
+                .max(limits.dkg.footprint())
+        );
+    }
+
+    #[test]
+    fn widest_block() {
+        for participants in [1u32, 4, 128] {
+            check(participants, Unit);
+            let directory = (0..participants)
+                .map(|seed| {
+                    let key = ed25519::PrivateKey::from_seed(u64::from(seed));
+                    let address = Address::Symmetric(SocketAddr::from(([127, 0, 0, 1], 3000)));
+                    (key.public_key(), address)
+                })
+                .collect::<Addresses<_>>();
+            check(participants, directory);
+        }
+    }
 
     #[test]
     #[should_panic(expected = "sharing mode must be supported by max supported mode")]

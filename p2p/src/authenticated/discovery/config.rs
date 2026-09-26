@@ -57,11 +57,17 @@ where
     ///
     /// The largest supported value is [`crate::authenticated::max_size::<H>()`].
     ///
-    /// Sending a larger payload panics. Output from wrappers such as codecs and multiplexers is
-    /// part of the payload and counts toward this limit.
+    /// Sending a larger payload panics, and a peer that sends one is disconnected. Output from
+    /// wrappers such as codecs and multiplexers is part of the payload and counts toward this
+    /// limit. [`crate::max_message_size`] derives this value from the components that send on
+    /// the network.
     ///
     /// Framing and transport overhead are added after this size check and do not count toward
     /// the limit, so the resulting network message will be larger.
+    ///
+    /// Frames also carry discovery messages, which do not count toward this limit either. The
+    /// frame limit is the larger of this value plus framing overhead and the largest discovery
+    /// message admitted by [`Config::max_peers_per_set`] and [`Config::peer_gossip_max_count`].
     pub max_message_size: u32,
 
     /// Maximum number of distinct identities at one peer-set index, including the local identity.

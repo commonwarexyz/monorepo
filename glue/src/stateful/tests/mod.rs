@@ -1196,6 +1196,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
                 finalized_blocks,
                 marshal::Config {
                     provider,
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "certify-qmdb-marshal".to_string(),
@@ -1214,7 +1215,7 @@ fn out_of_order_certifications_complete_on_qmdb() {
             )
             .await;
         let (resolver_receiver, _resolver_handler) =
-            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+            handler::init(context.child("marshal_resolver"), NZUsize!(8), usize::MAX);
         let marshal_actor = marshal_actor.start_unbuffered(
             NoopMarshalApplication,
             (resolver_receiver, fixtures::IgnoreResolver),
@@ -1328,6 +1329,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
                 finalized_blocks,
                 marshal::Config {
                     provider,
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "stable-leader-qmdb-marshal".to_string(),
@@ -1346,7 +1348,7 @@ fn stable_leader_finalizations_outpace_slow_qmdb_sync() {
             )
             .await;
         let (resolver_receiver, _resolver_handler) =
-            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+            handler::init(context.child("marshal_resolver"), NZUsize!(8), usize::MAX);
         let marshal_actor = marshal_actor.start_unbuffered(
             NoopMarshalApplication,
             (resolver_receiver, fixtures::IgnoreResolver),
@@ -1519,6 +1521,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
                 finalized_blocks,
                 marshal::Config {
                     provider,
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "certify-multi-qmdb-marshal".to_string(),
@@ -1537,7 +1540,7 @@ fn overlapping_finalizations_complete_on_multi_qmdb() {
             )
             .await;
         let (resolver_receiver, _resolver_handler) =
-            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+            handler::init(context.child("marshal_resolver"), NZUsize!(8), usize::MAX);
         let marshal_actor = marshal_actor.start_unbuffered(
             NoopMultiMarshalApplication,
             (resolver_receiver, fixtures::IgnoreResolver),
@@ -1777,6 +1780,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
                 finalized_blocks,
                 marshal::Config {
                     provider,
+                    max_participants: NZUsize!(fixture.participants.len()),
                     epocher: FixedEpocher::new(EPOCH_LENGTH),
                     start: marshal::Start::Genesis(genesis.clone().into()),
                     partition_prefix: "prune-overlap-multi-qmdb-marshal".to_string(),
@@ -1795,7 +1799,7 @@ fn pruning_quiesces_and_retries_verification_on_real_qmdbs() {
             )
             .await;
         let (resolver_receiver, _resolver_handler) =
-            handler::init(context.child("marshal_resolver"), NZUsize!(8));
+            handler::init(context.child("marshal_resolver"), NZUsize!(8), usize::MAX);
         let marshal_actor = marshal_actor.start_unbuffered(
             NoopMultiMarshalApplication,
             (resolver_receiver, fixtures::IgnoreResolver),

@@ -233,6 +233,16 @@ commonware_macros::stability_scope!(ALPHA {
         ) -> Result<Vec<u8>, Self::Error>;
     }
 
+    /// A [`Scheme`] that bounds the encoded size of the shards it produces.
+    pub trait Bounded: Scheme {
+        /// Returns an upper bound on the encoded size of every shard [`Scheme::encode`] produces
+        /// for `config` from at most `data` bytes, across all shard indices and data contents.
+        ///
+        /// The bound never decreases as `data` grows. Returns `None` if `config` cannot encode
+        /// `data` bytes or the bound overflows.
+        fn shard_size(config: &Config, data: usize) -> Option<usize>;
+    }
+
     /// A phased coding interface with separate local and forwarded shard handling.
     ///
     /// This trait models schemes where the initial distributor attaches extra

@@ -6,9 +6,9 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
-        LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
-        RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
+        LogReporter, MAILBOX_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
+        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL, RESOLVER_CHANNEL, REVEAL,
+        Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -44,7 +44,7 @@ use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_stream::encrypted::Handshake;
-use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
+use commonware_utils::{NZDuration, NZU64, NZUsize, Widen, sequence::Unit};
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
 
@@ -81,7 +81,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         node.dial,
         bootstrappers,
         max_peers_per_set,
-        MAX_MESSAGE_SIZE,
+        types::max_message_size(),
     );
     p2p_config.mailbox_size = MAILBOX_SIZE;
     let (mut p2p, oracle) = discovery::Network::new(context.child("network"), p2p_config);
@@ -216,6 +216,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
         finalized_blocks,
         marshal::Config {
             provider: provider.clone(),
+            max_participants: NZUsize!(Widen::widen(MAX_PARTICIPANTS.get())),
             epocher: FixedEpocher::new(BLOCKS_PER_EPOCH),
             start: plan.marshal_start(genesis.clone().into()),
             partition_prefix: partition_prefix.to_string(),

@@ -1064,6 +1064,10 @@ impl<P: PublicKey, E: Clock> crate::UnlimitedSender for UnlimitedSender<P, E> {
             Unreliable::new(Feedback::Closed)
         }
     }
+
+    fn max_message_size(&self) -> u32 {
+        self.max_size
+    }
 }
 
 /// Implementation of a [crate::Sender] for the simulated network.
@@ -1146,6 +1150,10 @@ impl<P: PublicKey, E: Clock> crate::LimitedSender for Sender<P, E> {
     ) -> Result<Self::Checked<'_>, SystemTime> {
         self.limited_sender.check(recipients)
     }
+
+    fn max_message_size(&self) -> u32 {
+        self.limited_sender.max_message_size()
+    }
 }
 
 /// A sender that routes recipients per message via a user-provided function.
@@ -1192,6 +1200,10 @@ impl<P: PublicKey, E: Clock, F: SplitForwarder<P>> crate::LimitedSender for Spli
 
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    fn max_message_size(&self) -> u32 {
+        self.inner.limited_sender.max_message_size()
     }
 }
 
@@ -1672,6 +1684,14 @@ mod tests {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+
+            // Senders, including split senders, report the configured payload limit.
+            assert_eq!(sender.max_message_size(), MAX_SIZE as u32);
+            let (primary, secondary) = sender
+                .clone()
+                .split_with(|_origin, recipients, _| Some(recipients.clone()));
+            assert_eq!(primary.max_message_size(), MAX_SIZE as u32);
+            assert_eq!(secondary.max_message_size(), MAX_SIZE as u32);
 
             oracle
                 .add_link(

@@ -33,7 +33,7 @@ use commonware_cryptography::{
 use commonware_macros::select;
 use commonware_math::algebra::Random;
 use commonware_p2p::{
-    Manager as _,
+    Manager as _, max_message_size,
     simulated::{self, Link, Network},
 };
 use commonware_parallel::Sequential;
@@ -179,6 +179,12 @@ impl EngineDefinition for DkgEngine {
             (BROADCAST, TEST_QUOTA),
             (DKG, TEST_QUOTA),
         ]
+    }
+
+    fn max_message_size(&self) -> u32 {
+        let participants = u32::try_from(self.signers.len()).unwrap();
+        let limits = bootstrap::Limits::new::<MinPk, _>(NZU32!(participants), &Unit);
+        max_message_size(&[&limits])
     }
 
     async fn init(&self, ctx: InitContext<'_, Self::PublicKey>) -> (Self::Engine, Self::State) {

@@ -3,8 +3,8 @@
 use super::{Mailbox, handler, mailbox, metrics::Metrics as ResolverMetrics};
 use crate::stateful::db::Shared;
 use commonware_actor::mailbox as actor_mailbox;
-use commonware_codec::{Codec, Decode, Encode};
-use commonware_cryptography::PublicKey;
+use commonware_codec::{Codec, Decode, Encode, EncodeSize, FixedSize, varint::MAX_U64_VARINT_SIZE};
+use commonware_cryptography::{Digest, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Provider, Receiver, Sender};
 use commonware_resolver::{Delivery, Fetch, Resolver, p2p};
@@ -13,10 +13,11 @@ use commonware_runtime::{
     telemetry::metrics::{GaugeExt, status},
 };
 use commonware_storage::{
-    merkle::Family,
+    merkle::{Family, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
     qmdb::sync::{Request, Response, Source},
 };
 use commonware_utils::{
+    Widen,
     channel::{fallible::OneshotExt, oneshot},
     futures::Pool as FuturesPool,
 };
@@ -141,6 +142,9 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
+        // Serve only responses that fit the sender after resolver framing
+        let max = Widen::<usize>::widen(sender.max_message_size())
+            .saturating_sub(Widen::widen(p2p::MAX_MESSAGE_OVERHEAD));
         let (handler_tx, mut handler_rx) =
             actor_mailbox::new(self.context.child("handler"), self.config.mailbox_size);
         let handler = handler::Handler::new(handler_tx);
@@ -196,7 +200,7 @@ where
                     self.handle_deliver(delivery, value, response);
                 }
                 handler::EngineMessage::Produce { key, response } => {
-                    self.handle_produce(key, response);
+                    self.handle_produce(key, response, max);
                 }
             },
         }
@@ -320,7 +324,12 @@ where
     }
 
     /// Serve a peer's request by querying the local database.
-    fn handle_produce(&mut self, key: Request<F>, response_tx: oneshot::Sender<bytes::Bytes>) {
+    fn handle_produce(
+        &mut self,
+        mut key: Request<F>,
+        response_tx: oneshot::Sender<bytes::Bytes>,
+        max: usize,
+    ) {
         let Some(database) = &self.config.database else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
@@ -335,17 +344,52 @@ where
         let serve_requests = self.metrics.serve_requests.clone();
 
         self.serves.push(async move {
-            let result = database.serve(key).await;
+            loop {
+                let Ok((response, _feedback)) = database.serve(key).await else {
+                    serve_requests.inc(status::Status::Failure);
+                    return;
+                };
+                let encoded = response.encode();
 
-            let Ok((response, _feedback)) = result else {
-                serve_requests.inc(status::Status::Failure);
+                // Halve the operations served, so the request shrinks on every attempt
+                if encoded.len() > max
+                    && let Request::Operations { max_ops, .. } = &mut key
+                    && let Response::Operations { operations, .. } = &response
+                    && let Some(half) = NonZeroU64::new(
+                        Widen::<u64>::widen(operations.len()).min(max_ops.get()) / 2,
+                    )
+                {
+                    *max_ops = half;
+                    continue;
+                }
+
+                // A single operation or boundary response fits when `boundary_size` is folded
+                // into the network's `max_message_size`
+                response_tx.send_lossy(encoded);
+                serve_requests.inc(status::Status::Success);
                 return;
-            };
-
-            response_tx.send_lossy(response.encode());
-            serve_requests.inc(status::Status::Success);
+            }
         });
     }
+}
+
+/// Returns the largest [`Response::Boundary`], with resolver framing, for operations of at most
+/// `op` encoded bytes. No single-operation response exceeds it.
+///
+/// # Panics
+///
+/// Panics if the size overflows `usize`.
+pub fn boundary_size<F: Family, D: Digest>(op: usize) -> usize {
+    // A proof is a leaf count, an inactive peak count, and its digests
+    let digests = |count: usize| count.encode_size() + count * D::SIZE;
+    let proof =
+        F::MAX_LEAVES.encode_size() + MAX_U64_VARINT_SIZE + digests(MAX_PROOF_DIGESTS_PER_ELEMENT);
+
+    // A boundary response is a tag, a proof, an operation, and pinned nodes
+    let framing: usize = Widen::widen(p2p::MAX_MESSAGE_OVERHEAD);
+    (u8::SIZE + proof + digests(MAX_PINNED_NODES) + framing)
+        .checked_add(op)
+        .expect("boundary size overflow")
 }
 
 #[cfg(test)]
@@ -596,6 +640,20 @@ mod tests {
         Shared::new("test", db)
     }
 
+    /// Apply `count` updates to `db` in one batch.
+    async fn populate(db: &Shared<TestDb>, count: u64) {
+        let (slot, database) = db.write().await;
+        let mut batch = database.new_batch();
+        for index in 0..count {
+            let key = Sha256::hash(&[b"key", &index.to_be_bytes()]);
+            let value = Sha256::hash(&[b"value", &index.to_be_bytes()]);
+            batch = batch.write(key, Some(value));
+        }
+        let batch = batch.merkleize(&database, None).await.unwrap();
+        let (database, _) = database.apply_batch(batch).await.unwrap();
+        slot.put(database);
+    }
+
     /// Create a database with one applied update.
     async fn init_seeded_db(context: deterministic::Context, suffix: &str) -> Shared<TestDb> {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context), None)
@@ -630,12 +688,21 @@ mod tests {
     /// Connect two replicas over reliable links, with wire timeouts beyond the
     /// one-second progress checks.
     async fn spawn_live_pair(context: &deterministic::Context, prefix: &str) -> LivePair {
+        spawn_live_pair_with(context, prefix, 1024 * 1024).await
+    }
+
+    /// Connect two replicas whose senders accept at most `max_size` bytes.
+    async fn spawn_live_pair_with(
+        context: &deterministic::Context,
+        prefix: &str,
+        max_size: u32,
+    ) -> LivePair {
         // Reliable links isolate actor scheduling and database availability from packet loss.
         let peers = [1, 2].map(|seed| ed25519::PrivateKey::from_seed(seed).public_key());
         let (network, oracle) = Network::new_with_peers(
             context.child("network"),
             commonware_p2p::simulated::Config {
-                max_size: 1024 * 1024,
+                max_size,
                 max_peers_per_set: NZUsize!(2),
                 disconnect_on_block: true,
                 tracked_peer_sets: NZUsize!(1),
@@ -813,7 +880,7 @@ mod tests {
 
             // An unattached actor must release the peer request without waiting for a database.
             let (response_tx, response_rx) = oneshot::channel();
-            actor.handle_produce(test_request_at(Location::new(1)), response_tx);
+            actor.handle_produce(test_request_at(Location::new(1)), response_tx, usize::MAX);
             assert!(response_rx.await.is_err());
         });
     }
@@ -830,7 +897,7 @@ mod tests {
 
             // Drive the queued read to completion and check that the peer receives encoded data.
             let (response_tx, response_rx) = oneshot::channel();
-            actor.handle_produce(test_request_at(size), response_tx);
+            actor.handle_produce(test_request_at(size), response_tx, usize::MAX);
             actor.serves.next_completed().await;
 
             let payload = response_rx
@@ -859,7 +926,7 @@ mod tests {
             );
 
             let (response_tx, response_rx) = oneshot::channel();
-            actor.handle_produce(request, response_tx);
+            actor.handle_produce(request, response_tx, usize::MAX);
             actor.serves.next_completed().await;
             assert_eq!(response_rx.await.unwrap(), expected);
             assert!(verdict_rx.await.is_err());
@@ -883,9 +950,138 @@ mod tests {
                 max_ops: NZU64!(1_000),
             };
             let (response_tx, response_rx) = oneshot::channel();
-            actor.handle_produce(request, response_tx);
+            actor.handle_produce(request, response_tx, usize::MAX);
 
             assert!(response_rx.await.is_err());
+        });
+    }
+
+    #[test]
+    fn produce_halves_range_until_response_fits() {
+        deterministic::Runner::default().start(|context| async move {
+            let db = init_db(context.child("resolver_db"), "produce-halves").await;
+            populate(&db, 16).await;
+            let size = db.read().await.bounds().end;
+            let request = |max_ops| Request::Operations {
+                size,
+                start: Location::new(0),
+                max_ops,
+            };
+            let full = expected_payload(&db, request(NZU64!(16))).await;
+            let half = expected_payload(&db, request(NZU64!(8))).await;
+            let single = expected_payload(&db, request(NZU64!(1))).await;
+            let (mut actor, _mailbox) =
+                TestActor::new(context.child("actor"), test_config(Some(db)));
+
+            // A response that fits is served whole, one byte over serves half the range, and a
+            // single operation is served whatever the limit
+            for (max, expected) in [
+                (full.len(), full.clone()),
+                (full.len() - 1, half),
+                (0, single),
+            ] {
+                let (response_tx, response_rx) = oneshot::channel();
+                actor.handle_produce(request(NZU64!(16)), response_tx, max);
+                actor.serves.next_completed().await;
+                assert_eq!(response_rx.await.unwrap(), expected);
+            }
+        });
+    }
+
+    #[test]
+    fn boundary_size_admits_widest_boundary() {
+        // The widest proof and every pinned node, with the widest leaf and inactive peak counts
+        let digest = Sha256::hash(&[b"digest"]);
+        let response = TestResponse::Boundary {
+            proof: Proof {
+                leaves: mmr::Family::MAX_LEAVES,
+                inactive_peaks: usize::MAX,
+                digests: vec![digest; MAX_PROOF_DIGESTS_PER_ELEMENT],
+            },
+            op: fixed::Operation::Delete(digest),
+            pinned_nodes: vec![digest; MAX_PINNED_NODES],
+        };
+        let encoded = response.encode();
+        assert!(TestResponse::decode_cfg(encoded.clone(), &(1, ())).is_ok());
+        let framing: usize = Widen::widen(p2p::MAX_MESSAGE_OVERHEAD);
+        let bound = boundary_size::<mmr::Family, sha256::Digest>(TestOp::SIZE);
+        assert_eq!(encoded.len() + framing, bound);
+
+        // A single operation with the widest proof is smaller
+        let TestResponse::Boundary { proof, op, .. } = response else {
+            unreachable!("built a boundary response");
+        };
+        let single = TestResponse::Operations {
+            proof,
+            operations: vec![op],
+        };
+        assert!(single.encode_size() + framing < bound);
+    }
+
+    #[test]
+    fn sync_completes_when_full_batches_exceed_sender() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            const PREFIX: &str = "full_batches_exceed_sender";
+            let pair_context = context.child(PREFIX);
+
+            // Size the senders so every full batch exceeds them, with its resolver framing (a
+            // request ID, a tag, and a length), while every half batch and the boundary fit
+            let reference = init_db(pair_context.child("reference"), "exceed-reference").await;
+            populate(&reference, 64).await;
+            let bounds = reference.read().await.bounds();
+            let size = async |start: u64, max_ops| {
+                let request = Request::Operations {
+                    size: bounds.end,
+                    start: Location::new(start),
+                    max_ops,
+                };
+                expected_payload(&reference, request).await.len()
+            };
+            let mut full = usize::MAX;
+            let mut half = 0;
+            for start in *bounds.start..=*bounds.end - 16 {
+                full = full.min(size(start, NZU64!(16)).await);
+                half = half.max(size(start, NZU64!(8)).await);
+            }
+            let boundary = Request::Boundary {
+                size: bounds.end,
+                start: bounds.start,
+            };
+            let boundary = expected_payload(&reference, boundary).await.len();
+            let max_size = full + u64::SIZE + u8::SIZE + full.encode_size() - 1;
+            let overhead: usize = Widen::widen(p2p::MAX_MESSAGE_OVERHEAD);
+            assert!(half.max(boundary) + overhead <= max_size);
+            let max_size = u32::try_from(max_size).unwrap();
+
+            let pair = spawn_live_pair_with(&pair_context, PREFIX, max_size).await;
+            populate(&pair.databases[1], 64).await;
+            let root = pair.databases[1].read().await.root();
+            let target = sync::Target::new(root, bounds.clone().try_into().unwrap());
+            assert_eq!(pair.databases[1].read().await.bounds(), bounds);
+
+            // Every full batch is answered with a shorter range
+            let synced: TestDb = select! {
+                result = sync::sync(sync::engine::Config {
+                    context: pair_context.child("destination"),
+                    source: pair.mailboxes[0].clone(),
+                    target: target.clone(),
+                    max_outstanding_requests: 1,
+                    fetch_batch_size: NZU64!(16),
+                    apply_batch_size: NZU64!(16),
+                    db_config: db_config("exceed-destination", &pair_context),
+                    update_rx: None,
+                    finish_rx: None,
+                    reached_target_tx: None,
+                    max_retained_roots: 0,
+                }) => result.unwrap(),
+                _ = context.sleep(Duration::from_secs(1)) => {
+                    panic!("sync stopped making progress");
+                },
+            };
+            assert_eq!(synced.root(), target.root);
+            assert_eq!(synced.bounds(), bounds);
+            wait_for_no_pending(&context, &pair.metrics[0]).await;
+            shutdown_actors(&context, PREFIX, pair.handles).await;
         });
     }
 
@@ -1406,7 +1602,7 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), config);
             let mut responses = requests.map(|request| {
                 let (response, receiver) = oneshot::channel();
-                actor.handle_produce(request, response);
+                actor.handle_produce(request, response, usize::MAX);
                 receiver
             });
             let reads_pending = actor.serves.next_completed().now_or_never().is_none();
@@ -1446,9 +1642,9 @@ mod tests {
 
             // Queue an unavailable history beside a request the database can serve.
             let (failed_tx, failed_rx) = oneshot::channel();
-            actor.handle_produce(test_request_at(size + 1), failed_tx);
+            actor.handle_produce(test_request_at(size + 1), failed_tx, usize::MAX);
             let (response_tx, response_rx) = oneshot::channel();
-            actor.handle_produce(request, response_tx);
+            actor.handle_produce(request, response_tx, usize::MAX);
 
             // Both reads finish independently, with only the unavailable request failing.
             for _ in 0..2 {

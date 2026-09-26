@@ -148,6 +148,12 @@
 //! corresponding boundary finalization and boundary block for every epoch they
 //! intend to serve.
 //!
+//! # Message Sizes
+//!
+//! Fold [`Limits`] into the P2P `max_message_size` with every other
+//! component's limits. See [`orchestrator`] for Simplex on epoch subchannels
+//! and [`bootstrap::Limits`] for the one-shot engine.
+//!
 //! See [`probe`], [`fence`], [`orchestrator`], [`reshare`], [`state_sync`], and
 //! [`types`] for the detailed actors, synchronization points, and wire artifacts.
 
@@ -166,6 +172,8 @@ use std::future::Future;
 
 pub mod bootstrap;
 pub mod fence;
+mod limits;
+pub use limits::Limits;
 pub mod network;
 pub mod orchestrator;
 pub mod probe;

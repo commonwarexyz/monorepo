@@ -137,7 +137,7 @@
 //! commits without a share and registers as a verifier.
 
 use crate::dkg::{
-    ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
+    Limits, ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     fence::Fence,
     network::{Directory, Manager},
     reshare::{Mailbox, Message, metrics::Metrics as ReshareMetrics, store::Store},
@@ -159,12 +159,12 @@ use commonware_cryptography::{
     },
     certificate::Scheme,
 };
-use commonware_p2p::{Blocker, Receiver, Sender, utils::mux::Muxer};
+use commonware_p2p::{Blocker, Footprint, Receiver, Sender, utils::mux::Muxer};
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage, spawn_cell,
 };
-use commonware_utils::{Acknowledgement, acknowledgement::Exact, ordered::Set};
+use commonware_utils::{Acknowledgement, Widen, acknowledgement::Exact, ordered::Set};
 use rand_core::CryptoRng;
 use std::{
     marker::PhantomData,
@@ -395,11 +395,25 @@ where
         (actor, mailbox)
     }
 
+    /// Starts the actor on the DKG channel.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the channel's
+    /// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) cannot fit the
+    /// [`Limits`] for `max_participants`.
     pub fn start<SE, RE>(mut self, chan: (SE, RE)) -> Handle<()>
     where
         SE: Sender<PublicKey = C::PublicKey>,
         RE: Receiver<PublicKey = C::PublicKey>,
     {
+        let size = Limits::new::<V, C>(self.max_participants).footprint();
+        let limit: usize = Widen::widen(chan.0.max_message_size());
+        assert!(
+            size <= limit,
+            "dkg size {size} exceeds sender limit {limit}"
+        );
+
         spawn_cell!(self.context, self.run(chan))
     }
 

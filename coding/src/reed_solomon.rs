@@ -1,13 +1,15 @@
-use crate::{Config, Scheme};
+use crate::{Bounded, Config, Scheme};
 use bytes::{BufMut, Bytes};
-use commonware_codec::{Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
+use commonware_codec::{
+    Buf, BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write, varint::UInt,
+};
 use commonware_cryptography::{
     Digest, Hasher,
     reed_solomon::{Decoder, Encoder, Error as RsError, Plan, SHARD_CHUNK_BYTES},
 };
 use commonware_parallel::{Batches, Strategy};
 use commonware_storage::bmt::{self, Builder};
-use commonware_utils::{Cached, NZUsize};
+use commonware_utils::{Cached, NZUsize, Widen};
 use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
@@ -1390,6 +1392,32 @@ impl<H: Hasher> Scheme for ReedSolomon<H> {
             shards,
             strategy,
         )
+    }
+}
+
+impl<H: Hasher> Bounded for ReedSolomon<H> {
+    fn shard_size(config: &Config, data: usize) -> Option<usize> {
+        let total = total_shards(config).ok()?;
+        let k = usize::from(config.minimum_shards.get());
+        if !Encoder::supports(k, usize::from(config.extra_shards.get())) {
+            return None;
+        }
+
+        // Encoding rejects more than `u32::MAX` bytes and prefixes the data with its length.
+        u32::try_from(data).ok()?;
+        data.checked_add(u32::SIZE)?;
+
+        // Every chunk carries a shard of the canonical width. Chunk 0 has a sibling at every
+        // level of the tree, so its proof is the longest.
+        let len = canonical_shard_len(data, k);
+        let siblings: usize = Widen::widen(u32::from(total).next_power_of_two().trailing_zeros());
+        UInt(u32::try_from(len).ok()?)
+            .encode_size()
+            .checked_add(len)?
+            .checked_add(u16::SIZE)?
+            .checked_add(u32::SIZE)?
+            .checked_add(siblings.encode_size())?
+            .checked_add(siblings.checked_mul(H::Digest::SIZE)?)
     }
 }
 
@@ -2914,6 +2942,49 @@ mod tests {
             )
             .is_err()
         )
+    }
+
+    #[test]
+    fn test_shard_size() {
+        let config = |min, extra| Config {
+            minimum_shards: NZU16!(min),
+            extra_shards: NZU16!(extra),
+        };
+
+        // Totals that are not powers of two give later chunks shorter proofs than chunk 0.
+        for (min, extra) in [(1, 1), (2, 1), (3, 4), (171, 342), (342, 682)] {
+            let config = config(min, extra);
+            let mut previous = 0;
+            for len in [0, 1, 2, 3, 333, 612, 4096, 1 << 20] {
+                let data = vec![0x67; len];
+                let (_, chunks) = RS::encode(&config, data.as_slice(), &STRATEGY).unwrap();
+                let sizes: Vec<_> = chunks.iter().map(|chunk| chunk.encode().len()).collect();
+                let bound = RS::shard_size(&config, len).unwrap();
+                assert_eq!(sizes[0], bound);
+                assert_eq!(sizes.iter().max(), Some(&bound));
+                assert!(bound >= previous);
+                previous = bound;
+            }
+        }
+
+        // 16385 of 49153 shards is the largest supported rate for this minimum.
+        let (_, chunks) = RS::encode(&config(16385, 32768), [].as_slice(), &STRATEGY).unwrap();
+        assert_eq!(
+            RS::shard_size(&config(16385, 32768), 0),
+            Some(chunks[0].encode().len())
+        );
+        assert!(RS::encode(&config(16385, 32769), [].as_slice(), &STRATEGY).is_err());
+        assert_eq!(RS::shard_size(&config(16385, 32769), 0), None);
+
+        // Too many total shards.
+        assert!(RS::encode(&config(u16::MAX, 1), [].as_slice(), &STRATEGY).is_err());
+        assert_eq!(RS::shard_size(&config(u16::MAX, 1), 0), None);
+
+        // Data longer than `u32::MAX` bytes, or a shard too long for its length prefix.
+        let max: usize = Widen::widen(u32::MAX);
+        assert!(RS::shard_size(&config(2, 1), max).is_some());
+        assert_eq!(RS::shard_size(&config(2, 1), max + 1), None);
+        assert_eq!(RS::shard_size(&config(1, 1), max), None);
     }
 
     #[test]

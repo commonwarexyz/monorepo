@@ -52,7 +52,7 @@ mod tests {
     };
     use crate::{Handler, Monitor, Originator};
     use commonware_actor::Feedback;
-    use commonware_codec::Encode;
+    use commonware_codec::{Encode, FixedSize};
     use commonware_cryptography::{
         Committable, Signer,
         ed25519::{PrivateKey, PublicKey},
@@ -61,6 +61,7 @@ mod tests {
     use commonware_p2p::{
         Blocker, Manager as _, Recipients, Sender as _,
         simulated::{Link, Network, Oracle, Receiver, Sender},
+        utils::mocks::Capped,
     };
     use commonware_runtime::{
         Clock, Quota, Runner, Supervisor as _, deterministic,
@@ -161,7 +162,7 @@ mod tests {
                 Receiver<PublicKey>,
             ),
             (
-                Sender<PublicKey, deterministic::Context>,
+                impl commonware_p2p::Sender<PublicKey = PublicKey>,
                 Receiver<PublicKey>,
             ),
         ),
@@ -251,6 +252,75 @@ mod tests {
             assert_eq!(collected.response.result, 2);
             assert_eq!(collected.count, 1);
         });
+    }
+
+    #[test_traced]
+    fn test_reply_size() {
+        for (max, delivered) in [(Response::SIZE, true), (Response::SIZE - 1, false)] {
+            let executor = deterministic::Runner::timed(Duration::from_secs(10));
+            executor.start(|context| async move {
+                let (mut oracle, schemes, peers, connections) =
+                    setup_network_and_peers(&context, &[0, 1]).await;
+                let mut schemes = schemes.into_iter();
+                let mut connections = connections.into_iter();
+
+                // Link the two peers
+                add_link(&mut oracle, LINK.clone(), &peers, 0, 1).await;
+
+                // Setup peer 1
+                let scheme = schemes.next().unwrap();
+                let (mon, mut mon_out) = MockMonitor::new();
+                let mut mailbox = setup_and_spawn_engine(
+                    &context,
+                    oracle.control(scheme.public_key()),
+                    scheme,
+                    connections.next().unwrap(),
+                    mon,
+                    MockHandler::dummy(),
+                );
+
+                // Setup peer 2 with a response sender that accepts at most `max` bytes
+                let scheme = schemes.next().unwrap();
+                let (requests, (sender, receiver)) = connections.next().unwrap();
+                let sender = Capped::new(sender, u32::try_from(max).unwrap());
+                let (handler, mut handler_out) = MockHandler::new(true);
+                let _mailbox = setup_and_spawn_engine(
+                    &context,
+                    oracle.control(scheme.public_key()),
+                    scheme,
+                    (requests, (sender, receiver)),
+                    MockMonitor::dummy(),
+                    handler,
+                );
+
+                // Peer 2 processes every request, whether or not it skips the reply
+                for id in [1, 2] {
+                    let request = Request { id, data: 1 };
+                    assert_eq!(
+                        mailbox.send(Recipients::One(peers[1].clone()), request.clone()),
+                        Feedback::Ok
+                    );
+                    let processed = handler_out.recv().await.unwrap();
+                    assert_eq!(processed.request, request);
+                    assert!(processed.responded);
+                }
+
+                // Replies reach peer 1 only if they fit
+                if delivered {
+                    for id in [1, 2] {
+                        let collected = mon_out.recv().await.unwrap();
+                        assert_eq!(collected.handler, peers[1]);
+                        assert_eq!(collected.response.id, id);
+                    }
+                }
+                select! {
+                    _ = mon_out.recv() => {
+                        panic!("unexpected reply");
+                    },
+                    _ = context.sleep(Duration::from_secs(1)) => {},
+                }
+            });
+        }
     }
 
     #[test_traced]

@@ -1,7 +1,7 @@
 use crate::simulate::processed::ProcessedHeight;
 use commonware_consensus::{
     marshal::{self, Identifier as MarshalIdentifier, core::Variant},
-    simplex::mocks::scheme::Scheme as MockScheme,
+    simplex::{self, mocks::scheme::Scheme as MockScheme},
     types::Height,
 };
 use commonware_cryptography::{Digestible, ed25519, sha256};
@@ -30,6 +30,20 @@ pub(super) const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 pub(super) const IO_BUFFER_SIZE: NonZeroUsize = NZUsize!(2048);
 pub(super) const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 pub(super) const SLOW_SYNC_MARSHAL_RETENTION: usize = 128;
+
+/// Largest encoded block the tests build.
+pub(super) const MAX_BLOCK_SIZE: usize = 1024;
+
+/// Returns marshal limits for committees of at most `participants` and blocks of at most
+/// [`MAX_BLOCK_SIZE`].
+pub(super) fn marshal_limits<V: Variant>(participants: usize) -> marshal::Limits {
+    marshal::Limits::new::<V, MockScheme<ed25519::PublicKey>>(participants, MAX_BLOCK_SIZE)
+}
+
+/// Returns simplex limits for committees of at most `participants`.
+pub(super) fn simplex_limits(participants: usize) -> simplex::Limits {
+    simplex::Limits::new::<MockScheme<ed25519::PublicKey>, sha256::Digest>(participants)
+}
 
 pub(super) fn u64_to_digest(v: u64) -> sha256::Digest {
     let mut bytes = [0u8; 32];

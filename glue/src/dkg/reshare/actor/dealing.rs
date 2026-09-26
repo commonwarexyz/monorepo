@@ -312,6 +312,7 @@ where
 mod tests {
     use super::*;
     use crate::dkg::{
+        Limits,
         fence::Fence,
         reshare::actor::{Config, utils},
         state_sync::Plan as StateSyncPlan,
@@ -327,9 +328,9 @@ mod tests {
         ed25519,
     };
     use commonware_p2p::{
-        Receiver,
+        Footprint, Receiver,
         simulated::{Config as NetworkConfig, Network},
-        utils::mocks::inert_channel,
+        utils::mocks::{Capped, inert_channel},
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{IoBuf, Runner, Supervisor as _, deterministic};
@@ -367,6 +368,51 @@ mod tests {
             self.received.fetch_add(1, Ordering::SeqCst);
             Ok((self.peer.clone(), message))
         }
+    }
+
+    /// Starts an actor for at most 16 participants on a sender that accepts `max` bytes.
+    fn start_with_limit(max: impl FnOnce(usize) -> usize) {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let signer = ed25519::PrivateKey::from_seed(0);
+            let participants = Set::from_iter_dedup([signer.public_key()]);
+            let (_network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                NetworkConfig {
+                    max_size: 1024,
+                    max_peers_per_set: NZUsize!(participants.len()),
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.iter().cloned(),
+            )
+            .await;
+            let (actor, _mailbox) = utils::new_actor(
+                context.child("reshare"),
+                signer.clone(),
+                participants,
+                &oracle,
+                TEST_NAMESPACE,
+                "start-limit",
+                NZU64!(2),
+            )
+            .await;
+            let size = Limits::new::<mocks::TestBlsVariant, mocks::TestSigner>(NZU32!(16));
+            let max = u32::try_from(max(size.footprint())).unwrap();
+            let (sender, receiver) = inert_channel([signer.public_key()]);
+            actor.start((Capped::new(sender, max), receiver)).abort();
+        });
+    }
+
+    #[test]
+    fn start_accepts_sender_at_limits() {
+        start_with_limit(|size| size);
+    }
+
+    #[test]
+    #[should_panic(expected = "dkg size 812 exceeds sender limit 811")]
+    fn start_rejects_sender_below_limits() {
+        start_with_limit(|size| size - 1);
     }
 
     #[test]
