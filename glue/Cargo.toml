@@ -43,7 +43,7 @@ commonware-conformance.workspace = true
 commonware-consensus = { workspace = true, features = ["mocks"] }
 commonware-cryptography = { workspace = true, features = ["mocks"] }
 commonware-formatting.workspace = true
-commonware-p2p.workspace = true
+commonware-p2p = { workspace = true, features = ["mocks"] }
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-storage.workspace = true
