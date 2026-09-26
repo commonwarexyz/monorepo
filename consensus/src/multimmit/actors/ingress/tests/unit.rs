@@ -145,12 +145,13 @@ fn ready_ingress_batches_before_flush_without_waiting() {
             );
             assert_eq!(context.current(), now);
 
+            let voter_context = context.child("voter");
             let (
                 voter,
                 Inbox {
                     mut observations, ..
                 },
-            ) = voter::Mailbox::new(&context.child("voter"), &context, NonZeroUsize::MIN);
+            ) = voter::Mailbox::new(&voter_context, &context, NonZeroUsize::MIN);
             let voter = voter.into_endpoints().observations;
             let mut forwarded = 0;
             let mut bytes = 0;
