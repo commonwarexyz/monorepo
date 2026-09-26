@@ -112,9 +112,17 @@ pub fn parse_task(content: &str) -> Vec<(usize, Command)> {
             continue;
         }
 
-        // Check if line contains operators or parentheses
-        let command = if line.contains(" || ")
-            || line.contains(" && ")
+        // Check if line contains operators or parentheses. `||`/`&&` are
+        // detected without requiring surrounding whitespace (matching
+        // `leading_operator`, used by `ExpressionParser`) so that, e.g.,
+        // `wait{1,threshold=1}||wait{2,threshold=1}` is treated as an
+        // expression instead of being handed whole to `parse_single_command`,
+        // which would silently misparse it: it would match the line's first
+        // `{` against its *last* `}`, splicing both commands' arguments
+        // together into one bogus command instead of erroring or producing
+        // two commands.
+        let command = if line.contains("||")
+            || line.contains("&&")
             || line.contains('(')
             || line.contains(')')
         {
@@ -271,6 +279,24 @@ fn parse_expression(line: &str) -> Command {
     result
 }
 
+/// Returns the boolean operator (`||` or `&&`) starting at the front of `s`,
+/// ignoring any leading whitespace, or `None` if neither is there.
+///
+/// Shared by `ExpressionParser::peek_operator` and
+/// `ExpressionParser::extract_atomic_command` so the two can never again
+/// disagree about where an operator starts (see the `parse_task` doc comment
+/// for the bug that inconsistency caused).
+fn leading_operator(s: &str) -> Option<&'static str> {
+    let trimmed = s.trim_start();
+    if trimmed.starts_with("||") {
+        Some("||")
+    } else if trimmed.starts_with("&&") {
+        Some("&&")
+    } else {
+        None
+    }
+}
+
 /// Expression parser that handles parentheses and operator precedence
 struct ExpressionParser<'a> {
     input: &'a str,
@@ -340,13 +366,10 @@ impl<'a> ExpressionParser<'a> {
                     break; // Hit closing paren for parent expression
                 }
                 paren_depth -= 1;
-            } else if paren_depth == 0 {
-                // Check for operators at top level
-                if self.input[self.position..].starts_with(" || ")
-                    || self.input[self.position..].starts_with(" && ")
-                {
-                    break;
-                }
+            } else if paren_depth == 0 && leading_operator(&self.input[self.position..]).is_some() {
+                // Stop at a top-level operator, using the same check as
+                // `peek_operator` (see `leading_operator`'s doc comment).
+                break;
             }
 
             self.position += ch.len_utf8();
@@ -357,16 +380,7 @@ impl<'a> ExpressionParser<'a> {
 
     /// Peek at the next operator without consuming it
     fn peek_operator(&self) -> Option<&'static str> {
-        let remaining = &self.input[self.position..];
-        let trimmed = remaining.trim_start();
-
-        if trimmed.starts_with("||") {
-            Some("||")
-        } else if trimmed.starts_with("&&") {
-            Some("&&")
-        } else {
-            None
-        }
+        leading_operator(&self.input[self.position..])
     }
 
     /// Consume a specific operator
@@ -1390,6 +1404,88 @@ reply{4}
                 assert_eq!(*size, None);
             }
             _ => panic!("Expected Reply command without size"),
+        }
+    }
+
+    #[test]
+    fn test_leading_operator() {
+        // No whitespace.
+        assert_eq!(leading_operator("||rest"), Some("||"));
+        assert_eq!(leading_operator("&&rest"), Some("&&"));
+        // Arbitrary leading whitespace (space, tab, multiple).
+        assert_eq!(leading_operator(" || rest"), Some("||"));
+        assert_eq!(leading_operator("\t&&rest"), Some("&&"));
+        assert_eq!(leading_operator("   ||rest"), Some("||"));
+        // Not an operator, or not at the front.
+        assert_eq!(leading_operator("rest || more"), None);
+        assert_eq!(leading_operator(""), None);
+        assert_eq!(leading_operator("|rest"), None);
+    }
+
+    #[test]
+    fn test_parse_task_operators_without_surrounding_spaces() {
+        // `||`/`&&` must be recognized as operators even without spaces
+        // around them, matching the spaced form. Previously, an unspaced
+        // operator (with no other `(`/`)` in the line) caused the whole
+        // line to be treated as a single atomic command: `parse_single_command`
+        // then matched the first `{` against the *last* `}` in the line,
+        // silently merging both commands' arguments into one bogus command
+        // instead of erroring or parsing two commands.
+        let spaced = "wait{1,threshold=1} || wait{2,threshold=7}";
+        let unspaced = "wait{1,threshold=1}||wait{2,threshold=7}";
+
+        let spaced_cmds = parse_task(spaced);
+        let unspaced_cmds = parse_task(unspaced);
+        assert_eq!(spaced_cmds.len(), 1);
+        assert_eq!(unspaced_cmds.len(), 1);
+
+        for cmds in [&spaced_cmds, &unspaced_cmds] {
+            match &cmds[0].1 {
+                Command::Or(cmd1, cmd2) => {
+                    match cmd1.as_ref() {
+                        Command::Wait(id, Threshold::Count(c), _) => {
+                            assert_eq!(*id, 1);
+                            assert_eq!(*c, 1);
+                        }
+                        _ => panic!("Expected Wait(1, Count(1))"),
+                    }
+                    match cmd2.as_ref() {
+                        Command::Wait(id, Threshold::Count(c), _) => {
+                            assert_eq!(*id, 2);
+                            assert_eq!(*c, 7);
+                        }
+                        _ => panic!("Expected Wait(2, Count(7))"),
+                    }
+                }
+                _ => panic!("Expected Or command"),
+            }
+        }
+
+        // Same check for `&&`.
+        let spaced_and = "wait{3,threshold=1} && wait{4,threshold=2}";
+        let unspaced_and = "wait{3,threshold=1}&&wait{4,threshold=2}";
+        for content in [spaced_and, unspaced_and] {
+            let cmds = parse_task(content);
+            assert_eq!(cmds.len(), 1);
+            match &cmds[0].1 {
+                Command::And(cmd1, cmd2) => {
+                    match cmd1.as_ref() {
+                        Command::Wait(id, Threshold::Count(c), _) => {
+                            assert_eq!(*id, 3);
+                            assert_eq!(*c, 1);
+                        }
+                        _ => panic!("Expected Wait(3, Count(1))"),
+                    }
+                    match cmd2.as_ref() {
+                        Command::Wait(id, Threshold::Count(c), _) => {
+                            assert_eq!(*id, 4);
+                            assert_eq!(*c, 2);
+                        }
+                        _ => panic!("Expected Wait(4, Count(2))"),
+                    }
+                }
+                _ => panic!("Expected And command for input: {content}"),
+            }
         }
     }
 }
