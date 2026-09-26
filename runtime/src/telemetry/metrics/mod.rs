@@ -248,10 +248,54 @@ pub fn metric_samples<'a>(
     })
 }
 
+/// Iterates over complete label pairs, decoding Prometheus label escapes.
+#[cfg(any(test, feature = "test-utils"))]
+fn metric_labels(mut labels: &str) -> impl Iterator<Item = (&str, Cow<'_, str>)> {
+    std::iter::from_fn(move || {
+        let (key, rest) = labels.trim_start().split_once('=')?;
+        let rest = rest.trim_start().strip_prefix('"')?;
+        let mut escaped = false;
+        let end = rest.bytes().position(|byte| {
+            if escaped {
+                escaped = false;
+                false
+            } else if byte == b'\\' {
+                escaped = true;
+                false
+            } else {
+                byte == b'"'
+            }
+        })?;
+        let value = &rest[..end];
+        labels = rest[end + 1..].trim_start().strip_prefix(',').unwrap_or("");
+        let value = if value.contains('\\') {
+            let mut decoded = String::with_capacity(value.len());
+            let mut chars = value.chars();
+            while let Some(c) = chars.next() {
+                decoded.push(if c == '\\' {
+                    match chars.next()? {
+                        'n' => '\n',
+                        '"' => '"',
+                        '\\' => '\\',
+                        _ => return None,
+                    }
+                } else {
+                    c
+                });
+            }
+            Cow::Owned(decoded)
+        } else {
+            Cow::Borrowed(value)
+        };
+        Some((key.trim_end(), value))
+    })
+}
+
 /// Returns the sum of every sample of `name` in encoded Prometheus `metrics` whose labels include
 /// each `(key, value)` pair of `labels`.
 ///
-/// `name` may be either the full encoded metric name or its unprefixed suffix.
+/// `name` may be either the full encoded metric name or its unprefixed suffix. Label values are
+/// compared after decoding their Prometheus escapes.
 ///
 /// # Panics
 ///
@@ -261,9 +305,10 @@ pub fn metric_samples<'a>(
 pub fn metric_sum(metrics: &str, name: &str, labels: &[(&str, &str)]) -> f64 {
     metric_samples(metrics, name)
         .filter(|(sample_labels, _)| {
-            labels
-                .iter()
-                .all(|(key, value)| sample_labels.contains(&format!("{key}=\"{value}\"")))
+            labels.iter().all(|(key, value)| {
+                metric_labels(sample_labels)
+                    .any(|(sample_key, sample_value)| sample_key == *key && sample_value == *value)
+            })
         })
         .map(|(_, value)| {
             value
@@ -290,14 +335,12 @@ pub fn histogram_percentile(metrics: &str, name: &str, percentile: u64) -> Optio
     let bucket = format!("{name}_bucket");
     let mut buckets = Vec::<(f64, u64)>::new();
     for (labels, value) in metric_samples(metrics, &bucket) {
-        let Some(bound) = labels
-            .split_once("le=\"")
-            .and_then(|(_, rest)| rest.split_once('"'))
-            .map(|(bound, _)| bound)
+        let Some(bound) =
+            metric_labels(labels).find_map(|(key, value)| (key == "le").then_some(value))
         else {
             continue;
         };
-        let bound = match bound {
+        let bound = match bound.as_ref() {
             "+Inf" => f64::INFINITY,
             bound => bound.parse().expect("histogram bucket bound is a number"),
         };
@@ -976,6 +1019,45 @@ mod tests {
     use std::sync::mpsc::{self, TryRecvError};
 
     #[test]
+    fn metric_sum_matches_complete_labels() {
+        let metrics = r#"
+syncs_total{other_kind="journal"} 2
+syncs_total{kind="journal",detail="kind=\"snapshot\""} 3
+syncs_total{kind="snapshot",detail="kind=\"journal\""} 5
+"#;
+        assert_eq!(
+            metric_sum(metrics, "syncs_total", &[("kind", "journal")]),
+            3.0
+        );
+    }
+
+    #[test]
+    fn metric_sum_matches_escaped_label_values() {
+        let metrics = r#"items_total{path="a\\b\"c\n雪,}",node="a"} 7"#;
+        assert_eq!(
+            metric_sum(
+                metrics,
+                "items_total",
+                &[("path", "a\\b\"c\n雪,}"), ("node", "a")]
+            ),
+            7.0
+        );
+    }
+
+    #[test]
+    fn histogram_percentile_matches_complete_bucket_label() {
+        let metrics = r#"
+latency_bucket{note="a,b}c\"d\\e\nf",role="worker",le="0.01"} 1
+latency_bucket{role="worker",le="+Inf"} 1
+latency_bucket{role="0.001"} 10
+"#;
+        assert_eq!(
+            histogram_percentile(metrics, "latency", 50),
+            Some((0.01, 1))
+        );
+    }
+
+    #[test]
     fn metric_sum_adds_matching_samples_with_every_label() {
         let metrics = "\
 # HELP node_syncs_total Syncs.
@@ -1023,6 +1105,14 @@ latency_bucket{node=\"b\",le=\"+Inf\"} 10
             Some((f64::INFINITY, 20))
         );
         assert_eq!(histogram_percentile(metrics, "missing", 50), None);
+
+        // A bucket sample without a bound is skipped, and an empty histogram has no percentile.
+        let empty = "\
+empty_bucket{node=\"a\",le=\"0.001\"} 0
+empty_bucket{node=\"a\",le=\"+Inf\"} 0
+empty_bucket{node=\"a\"} 5
+";
+        assert_eq!(histogram_percentile(empty, "empty", 50), None);
     }
 
     #[test]
