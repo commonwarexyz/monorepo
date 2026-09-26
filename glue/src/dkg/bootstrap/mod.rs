@@ -390,10 +390,13 @@ where
             buffered::Config {
                 public_key: public_key.clone(),
                 mailbox_size: MAILBOX_SIZE,
+                ingress_size: MAILBOX_SIZE,
                 deque_size: 16,
                 priority: false,
                 codec_config: block_codec_config,
                 peer_provider: self.config.manager.clone(),
+                blocker: self.config.blocker.clone(),
+                strategy: self.config.strategy.clone(),
             },
         );
         let buffer_handle = buffer.start(broadcast);

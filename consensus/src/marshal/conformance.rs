@@ -15,7 +15,7 @@ use crate::{
 use commonware_conformance::{Conformance, conformance_tests};
 use commonware_cryptography::certificate::{ConstantProvider, mocks::Fixture};
 use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-use commonware_utils::NZUsize;
+use commonware_utils::{NZUsize, TestRng};
 use rand::RngExt as _;
 use std::time::Duration;
 
@@ -37,6 +37,8 @@ impl Conformance for CodingStorageConformance {
 }
 
 fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
+    // Fixture inputs must be independent of the executor's scheduling RNG.
+    let mut rng = TestRng::new(seed);
     let runner = deterministic::Runner::new(
         deterministic::Config::default()
             .with_seed(seed)
@@ -47,7 +49,7 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
             participants,
             schemes,
             ..
-        } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+        } = bls12381_threshold_vrf::fixture::<V, _>(&mut rng, NAMESPACE, NUM_VALIDATORS);
         let mut oracle = harness::setup_network_with_participants(
             context.child("network"),
             NZUsize!(1),
@@ -77,7 +79,7 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
         };
         let mut peers = Vec::<ValidatorHandle<H>>::new();
         let mut parent = H::genesis_block(NUM_VALIDATORS as u16);
-        let count = context.random_range(1..=BLOCKS_PER_EPOCH.get().min(4));
+        let count = rng.random_range(1..=BLOCKS_PER_EPOCH.get().min(4));
         for height in 1..=count {
             let height = Height::new(height);
             let round = Round::new(Epoch::zero(), View::new(height.get()));
@@ -88,7 +90,7 @@ fn marshal_commit<H: TestHarness>(seed: u64) -> Vec<u8> {
                 H::digest(&parent),
                 H::commitment(&parent),
                 height,
-                context.random(),
+                rng.random(),
                 NUM_VALIDATORS as u16,
             );
             H::verify(&mut handle, round, &block, &mut peers).await;
