@@ -2,7 +2,7 @@
 
 use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
-use commonware_stream::{Handshake as _, encrypted::Handshake, utils::Timeout};
+use commonware_stream::{Handshake as _, cups::Handshake, utils::Timeout};
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
 

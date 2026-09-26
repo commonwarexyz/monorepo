@@ -198,9 +198,7 @@ mod tests {
         BufferPooler, Error as RuntimeError, IoBuf, IoBufs, Runner, Spawner, Supervisor as _,
         deterministic, mocks, telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::{
-        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
-    };
+    use commonware_stream::{Handshake as _, cups::Handshake as StreamHandshake, utils::Timeout};
     use commonware_utils::NZUsize;
     use std::{
         num::NonZeroU32,

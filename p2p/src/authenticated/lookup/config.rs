@@ -3,7 +3,7 @@ use commonware_cryptography::Signer;
 use commonware_runtime::Quota;
 use commonware_stream::Handshake;
 #[cfg(test)]
-use commonware_stream::encrypted::Handshake as StreamHandshake;
+use commonware_stream::cups::Handshake as StreamHandshake;
 use commonware_utils::{NZU32, NZUsize};
 use std::{
     net::SocketAddr,

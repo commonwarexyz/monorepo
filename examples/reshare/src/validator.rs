@@ -43,7 +43,7 @@ use commonware_p2p::authenticated::{self, discovery};
 use commonware_parallel::Sequential;
 use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::cups::Handshake;
 use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;

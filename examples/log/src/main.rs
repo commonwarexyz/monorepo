@@ -59,7 +59,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{Quota, Runner, Supervisor as _, buffer::paged::CacheRef, tokio};
-use commonware_stream::encrypted::Handshake;
+use commonware_stream::cups::Handshake;
 use commonware_utils::{NZU16, NZU32, NZUsize, TryCollect, ordered::Set, union};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},

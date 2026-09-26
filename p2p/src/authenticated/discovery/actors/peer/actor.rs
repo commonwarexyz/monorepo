@@ -295,9 +295,7 @@ mod tests {
         BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::{
-        Handshake as _, encrypted::Handshake as StreamHandshake, utils::Timeout,
-    };
+    use commonware_stream::{Handshake as _, cups::Handshake as StreamHandshake, utils::Timeout};
     use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},

@@ -1,10 +1,10 @@
 #![no_main]
 
-use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::TAG_SIZE};
+use commonware_cryptography::{Signer, ed25519::PrivateKey, handshake::sake::TAG_SIZE};
 use commonware_runtime::{Handle, Runner as _, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,
-    encrypted::{Error, Handshake, Receiver, Sender},
+    cups::{Error, Handshake, Receiver, Sender},
     utils::{
         Timeout,
         codec::{recv_frame, send_frame},

@@ -20,7 +20,7 @@ use commonware_runtime::{
     StreamOf, spawn_cell,
     telemetry::metrics::{CounterFamily, MetricsExt as _},
 };
-use commonware_stream::{Config as StreamConfig, Handshake};
+use commonware_stream::{Handshake, cups::Config as StreamConfig};
 use rand::seq::{IndexedRandom, SliceRandom};
 use rand_core::CryptoRng;
 use std::{sync::Arc, time::Duration};
@@ -234,7 +234,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{Clock, Runner, Supervisor as _, deterministic};
-    use commonware_stream::{encrypted::Handshake as StreamHandshake, utils::Timeout};
+    use commonware_stream::{cups::Handshake as StreamHandshake, utils::Timeout};
     use commonware_utils::NZUsize;
     use std::{
         net::{Ipv4Addr, SocketAddr},

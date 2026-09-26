@@ -1,4 +1,4 @@
-use crate::encrypted::Error;
+use crate::cups::Error;
 use commonware_codec::{
     Encode, EncodeSize, Write,
     varint::{Decoder, MAX_U32_VARINT_SIZE, UInt},
@@ -205,7 +205,7 @@ mod tests {
     fn test_build_frame_closure_error() {
         let result: Result<IoBufs, _> = build_frame(10, MAX_MESSAGE_SIZE, |_prefix| {
             Err(Error::HandshakeError(
-                commonware_cryptography::handshake::Error::EncryptionFailed,
+                commonware_cryptography::handshake::sake::Error::EncryptionFailed,
             ))
         });
         assert!(matches!(&result, Err(Error::HandshakeError(_))));

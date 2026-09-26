@@ -4,7 +4,7 @@ use commonware_cryptography::{Signer, ed25519::PrivateKey};
 use commonware_runtime::{Runner, Spawner, Supervisor as _, deterministic, mocks};
 use commonware_stream::{
     Handshake as _,
-    encrypted::{Handshake, Receiver, Sender},
+    cups::{Handshake, Receiver, Sender},
     utils::Timeout,
 };
 use futures::executor::block_on;

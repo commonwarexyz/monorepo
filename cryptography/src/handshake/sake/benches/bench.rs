@@ -1,7 +1,7 @@
 use commonware_cryptography::{
     Signer,
     ed25519::PrivateKey,
-    handshake::{
+    handshake::sake::{
         Context, Error, RecvCipher, SendCipher, dial_end, dial_start, listen_end, listen_start,
     },
 };
@@ -10,7 +10,7 @@ use criterion::criterion_main;
 use rand::SeedableRng as _;
 use rand_chacha::ChaCha8Rng;
 
-mod handshake;
+mod sake;
 mod transport;
 
 fn connect() -> Result<(SendCipher, RecvCipher), Error> {
@@ -44,4 +44,4 @@ fn connect() -> Result<(SendCipher, RecvCipher), Error> {
     Ok((d_send, l_recv))
 }
 
-criterion_main!(handshake::benches, transport::benches);
+criterion_main!(sake::benches, transport::benches);

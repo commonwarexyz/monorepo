@@ -20,7 +20,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::{Config as StreamConfig, utils::Timeout};
+use commonware_stream::{cups::Config as StreamConfig, utils::Timeout};
 use commonware_utils::{SystemTimeExt, ordered::Set, union};
 use rand_core::CryptoRng;
 use std::sync::Arc;
@@ -317,7 +317,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{Signer, ed25519::PrivateKey};
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
-    use commonware_stream::encrypted::Handshake as StreamHandshake;
+    use commonware_stream::cups::Handshake as StreamHandshake;
     use commonware_utils::NZUsize;
     use std::{net::SocketAddr, time::Duration};
 

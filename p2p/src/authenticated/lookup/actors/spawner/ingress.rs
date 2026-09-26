@@ -58,9 +58,7 @@ mod tests {
     use commonware_runtime::{Runner as _, Spawner as _, Supervisor as _, deterministic, mocks};
     use commonware_stream::{
         Handshake as _,
-        encrypted::{
-            Handshake as StreamHandshake, Receiver as EncryptedReceiver, Sender as EncryptedSender,
-        },
+        cups::{Handshake as StreamHandshake, Receiver as CupsReceiver, Sender as CupsSender},
         utils::Timeout,
     };
     use commonware_utils::NZUsize;
@@ -70,10 +68,7 @@ mod tests {
     const STREAM_NAMESPACE: &[u8] = b"test_lookup_spawner_ingress";
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
-    type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
-    );
+    type Connection = (CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>);
 
     fn handshake(signer: PrivateKey) -> Timeout<StreamHandshake<PrivateKey>> {
         Timeout::new(
@@ -145,7 +140,7 @@ mod tests {
             let peer_2 = PrivateKey::from_seed(2).public_key();
 
             let (mut spawner, mut receiver) =
-                Mailbox::<Message<EncryptedSender<mocks::Sink>, EncryptedReceiver<mocks::Stream>, PublicKey>>::new(
+                Mailbox::<Message<CupsSender<mocks::Sink>, CupsReceiver<mocks::Stream>, PublicKey>>::new(
                     context.child("spawner_mailbox"),
                     NZUsize!(1),
                 );

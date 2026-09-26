@@ -25,7 +25,10 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{Listener, Network, Runner, Spawner, Supervisor as _, tokio};
-use commonware_stream::{Config as StreamConfig, encrypted::Handshake, utils::Timeout};
+use commonware_stream::{
+    cups::{Config as StreamConfig, Handshake},
+    utils::Timeout,
+};
 use commonware_utils::{
     TryCollect,
     channel::{mpsc, oneshot},
