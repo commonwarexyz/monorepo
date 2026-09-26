@@ -62,6 +62,59 @@ fn all_zero(bytes: &[u8]) -> Choice {
         .fold(Choice::TRUE, |acc, b| acc & b.ct_eq(&0u8))
 }
 
+/// Partial product of pairings that can be built in parallel and merged before one final
+/// exponentiation.
+struct PairingProduct {
+    pairing: Pairing,
+    /// Whether pending Miller loops were folded into the accumulator. Merging and the final
+    /// check both require a commit, and a merged product may be merged again, so a second
+    /// commit is a no-op. No pairs may be aggregated after a commit.
+    committed: bool,
+}
+
+impl PairingProduct {
+    /// Creates an empty product over raw group elements (no hashing or domain separation tag).
+    fn new() -> Self {
+        Self {
+            pairing: Pairing::new(false, &[]),
+            committed: false,
+        }
+    }
+
+    /// Multiplies `e(p1, p2)` into the product.
+    fn aggregate(&mut self, p1: &blst_p1_affine, p2: &blst_p2_affine) {
+        debug_assert!(!self.committed);
+        self.pairing.raw_aggregate(p2, p1);
+    }
+
+    /// Folds pending Miller loops into the accumulator, once.
+    fn commit(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.pairing.commit();
+        self.committed = true;
+    }
+
+    /// Returns the product of `self` and `other`.
+    fn merge(mut self, mut other: Self) -> Self {
+        self.commit();
+        other.commit();
+        assert_eq!(
+            self.pairing.merge(&other.pairing),
+            BLST_ERROR::BLST_SUCCESS,
+            "products created by PairingProduct::new share one configuration"
+        );
+        self
+    }
+
+    /// Returns whether the product equals the identity.
+    fn verify(mut self) -> bool {
+        self.commit();
+        self.pairing.finalverify(None)
+    }
+}
+
 /// Calculate the optimal window size for Pippenger's algorithm.
 ///
 /// Reference: <https://github.com/supranational/blst/blob/v0.3.13/bindings/rust/src/pippenger.rs#L540-L550>
@@ -1105,23 +1158,28 @@ impl G1 {
     ///
     /// `p1` and `p2` MUST have the same length.
     #[must_use]
-    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G2], t1: &Self, t2: &G2) -> bool {
+    pub(crate) fn multi_pairing_check(
+        p1: &[Self],
+        p2: &[G2],
+        t1: &Self,
+        t2: &G2,
+        strategy: &impl Strategy,
+    ) -> bool {
         assert_eq!(p1.len(), p2.len());
-        // We deal with group elements directly, so there's no need for hashing,
-        // or a domain separation tag, hence `false`, `&[]`.
-        let mut pairing = Pairing::new(false, &[]);
-        let p1_affine = Self::batch_to_affine(p1);
-        let p2_affine = G2::batch_to_affine(p2);
-        for (p1, p2) in iter::once((&t1.as_blst_p1_affine(), &t2.as_blst_p2_affine()))
-            .chain(p1_affine.iter().zip(p2_affine.iter()))
-        {
-            pairing.raw_aggregate(p2, p1);
-        }
-
-        // These final two steps check that the sum of the pairings is equal to 0.
-        pairing.commit();
-        // Passing `None` here indicates that our target is 0.
-        pairing.finalverify(None)
+        let (p1_affine, p2_affine) =
+            strategy.join(|| Self::batch_to_affine(p1), || G2::batch_to_affine(p2));
+        let terminal = (t1.as_blst_p1_affine(), t2.as_blst_p2_affine());
+        strategy
+            .fold(
+                iter::once(terminal).chain(p1_affine.into_iter().zip(p2_affine)),
+                PairingProduct::new,
+                |mut product, (p1, p2)| {
+                    product.aggregate(&p1, &p2);
+                    product
+                },
+                PairingProduct::merge,
+            )
+            .verify()
     }
 
     fn msm_inner<'a>(
@@ -1543,8 +1601,14 @@ impl G2 {
     ///
     /// `p1` and `p2` MUST have the same length.
     #[must_use]
-    pub(crate) fn multi_pairing_check(p1: &[Self], p2: &[G1], t1: &Self, t2: &G1) -> bool {
-        G1::multi_pairing_check(p2, p1, t2, t1)
+    pub(crate) fn multi_pairing_check(
+        p1: &[Self],
+        p2: &[G1],
+        t1: &Self,
+        t2: &G1,
+        strategy: &impl Strategy,
+    ) -> bool {
+        G1::multi_pairing_check(p2, p1, t2, t1, strategy)
     }
 
     fn msm_inner<'a>(
