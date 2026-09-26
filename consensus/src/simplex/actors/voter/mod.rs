@@ -53,7 +53,7 @@ pub struct Config<
 mod tests {
     use super::*;
     use crate::{
-        Viewable,
+        HandoffProposal, HandoffPublication, Viewable,
         simplex::{
             actors::{
                 batcher,
@@ -73,6 +73,7 @@ mod tests {
         },
         types::{Participant, Round, TermLength, View},
     };
+    use bytes::Bytes;
     use commonware_actor::mailbox;
     use commonware_codec::{Decode, DecodeExt, Encode};
     use commonware_cryptography::{
@@ -96,10 +97,16 @@ mod tests {
         telemetry::traces::collector::{RecordedEvents, TraceStorage},
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{NZU16, NZU32, NZUsize, non_empty, probability, sync::Mutex};
+    use commonware_utils::{
+        NZU16, NZU32, NZUsize,
+        channel::{mpsc, oneshot},
+        non_empty, probability,
+        sync::Mutex,
+    };
     use futures::FutureExt;
     use rand_core::CryptoRng;
     use std::{
+        collections::BTreeMap,
         num::{NonZeroU16, NonZeroU32},
         sync::Arc,
         time::Duration,
@@ -109,6 +116,74 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
+    type ProposeRequests = Arc<Mutex<Vec<crate::simplex::types::Context<Sha256Digest, PublicKey>>>>;
+    type HandoffProposeResponses = Arc<
+        Mutex<
+            Vec<(
+                HandoffProposal<Sha256Digest>,
+                oneshot::Sender<HandoffProposal<Sha256Digest>>,
+            )>,
+        >,
+    >;
+    type CertificationRequests = Arc<Mutex<Vec<(View, oneshot::Sender<bool>)>>>;
+
+    fn labeled_metric_snapshot(
+        metrics: &str,
+        actor_prefix: &str,
+        family: &str,
+        label: &str,
+    ) -> BTreeMap<String, u64> {
+        let series = format!("{actor_prefix}_{family}_total");
+        let labeled_series = format!("{series}{{");
+        let value_prefix = format!("{{{label}=\"");
+        metrics
+            .lines()
+            .filter_map(|line| {
+                let (sample, count) = line.split_once(' ')?;
+                if sample != series && !sample.starts_with(&labeled_series) {
+                    return None;
+                }
+                let labels = sample.strip_prefix(&series).unwrap();
+                let value = labels
+                    .strip_prefix(&value_prefix)
+                    .and_then(|value| value.strip_suffix("\"}"))
+                    .unwrap_or_else(|| {
+                        panic!("unexpected labels on scoped metric series: {sample}")
+                    });
+                Some((value.to_string(), count.parse().unwrap()))
+            })
+            .fold(BTreeMap::new(), |mut snapshot, (value, count)| {
+                assert!(
+                    snapshot.insert(value.clone(), count).is_none(),
+                    "duplicate scoped metric series for {label}={value}"
+                );
+                snapshot
+            })
+    }
+
+    fn assert_handoff_metrics(
+        metrics: &str,
+        actor_prefix: &str,
+        events: &[(&str, u64)],
+        abandoned: &[(&str, u64)],
+    ) {
+        let expected_events = events
+            .iter()
+            .map(|(label, count)| ((*label).to_string(), *count))
+            .collect();
+        let expected_abandoned = abandoned
+            .iter()
+            .map(|(label, count)| ((*label).to_string(), *count))
+            .collect();
+        assert_eq!(
+            labeled_metric_snapshot(metrics, actor_prefix, "handoff_events", "event"),
+            expected_events
+        );
+        assert_eq!(
+            labeled_metric_snapshot(metrics, actor_prefix, "handoff_abandoned", "reason"),
+            expected_abandoned
+        );
+    }
 
     async fn start_test_network_with_peers<I>(
         context: deterministic::Context,
@@ -198,14 +273,22 @@ mod tests {
         local_index: usize,
         /// Mock application propose latency, in milliseconds.
         propose_latency_ms: f64,
-        /// Views whose proposal requests reached the mock application.
-        propose_requests: Option<Arc<Mutex<Vec<View>>>>,
-        /// Whether proposal responses should remain pending indefinitely.
-        stall_proposals: bool,
         /// Mock application verify latency, in milliseconds.
         verify_latency_ms: f64,
         /// Mock application certify latency, in milliseconds.
         certify_latency_ms: f64,
+        /// Contexts supplied to mock application proposal requests.
+        propose_requests: Option<ProposeRequests>,
+        /// Handoff proposal responses controlled by the test.
+        handoff_propose_responses: Option<HandoffProposeResponses>,
+        /// Whether mock application proposal requests should remain pending.
+        stall_proposals: bool,
+        /// Whether the mock application drops proposal responses.
+        drop_proposals: bool,
+        /// Publication permission the mock application returns with handoff
+        /// proposals, or `None` to defer them until the parent certifies.
+        handoff: Option<HandoffPublication>,
+        actor_handle: Option<Arc<Mutex<Option<commonware_runtime::Handle<()>>>>>,
         /// Views whose verification requests reached the mock application.
         verify_requests: Option<Arc<Mutex<Vec<View>>>>,
         /// Whether every mock application verification should fail.
@@ -223,10 +306,14 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 local_index: 0,
                 propose_latency_ms: 1.0,
-                propose_requests: None,
-                stall_proposals: false,
                 verify_latency_ms: 1.0,
                 certify_latency_ms: 1.0,
+                propose_requests: None,
+                handoff_propose_responses: None,
+                stall_proposals: false,
+                drop_proposals: false,
+                handoff: None,
+                actor_handle: None,
                 verify_requests: None,
                 fail_verification: false,
                 certifier: mocks::application::Certifier::Always,
@@ -265,6 +352,7 @@ mod tests {
         let relay = Arc::new(mocks::relay::Relay::<Sha256Digest, _>::new());
         let elector = elector.build(signing.participants());
         let propose_requests = options.propose_requests;
+        let handoff_propose_responses = options.handoff_propose_responses;
         let verify_requests = options.verify_requests;
 
         let application_cfg = mocks::application::Config::<Sha256, _> {
@@ -278,10 +366,17 @@ mod tests {
         let (mut actor, application) =
             mocks::application::Application::new(context.child("app"), application_cfg);
         actor.set_stall_proposals(options.stall_proposals);
+        actor.set_drop_proposals(options.drop_proposals);
+        actor.set_handoff(options.handoff);
         actor.set_fail_verification(options.fail_verification);
         if let Some(propose_requests) = propose_requests {
             actor.set_propose_observer(Box::new(move |context| {
-                propose_requests.lock().push(context.view());
+                propose_requests.lock().push(context);
+            }));
+        }
+        if let Some(handoff_propose_responses) = handoff_propose_responses {
+            actor.set_handoff_propose_controller(Box::new(move |proposal, response| {
+                handoff_propose_responses.lock().push((proposal, response));
             }));
         }
         if let Some(verify_requests) = verify_requests {
@@ -329,12 +424,16 @@ mod tests {
             .await
             .unwrap();
 
-        voter.start(
+        let handle = voter.start(
             batcher::Mailbox::new(batcher_sender),
             resolver::Mailbox::new(resolver_sender),
             vote_sender,
             certificate_sender,
         );
+
+        if let Some(slot) = options.actor_handle {
+            *slot.lock() = Some(handle);
+        }
 
         (
             mailbox,
@@ -345,16 +444,170 @@ mod tests {
         )
     }
 
-    async fn wait_for_request(
+    /// Certifies view 1 and drives the local validator through its notarize
+    /// vote for view 2, leaving the outgoing tip uncertified for handoff tests.
+    async fn prepare_pipelined_handoff_tip(
+        context: &mut deterministic::Context,
+        schemes: &[ed25519::Scheme],
+        outgoing: &PublicKey,
+        voter_mailbox: &mut Mailbox<ed25519::Scheme, Sha256Digest>,
+        batcher_receiver: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
+        resolver_receiver: &mut mailbox::Receiver<
+            resolver::MailboxMessage<ed25519::Scheme, Sha256Digest>,
+        >,
+        relay: &Arc<mocks::relay::Relay<Sha256Digest, PublicKey>>,
+    ) -> Proposal<Sha256Digest> {
+        let epoch = Epoch::new(333);
+        let quorum = quorum(u32::try_from(schemes.len()).expect("test fixture must fit u32"));
+        assert!(matches!(
+            batcher_receiver.recv().await.unwrap(),
+            batcher::Message::Update { .. }
+        ));
+
+        let genesis = mocks::application::genesis::<Sha256>(epoch);
+        let proposal_1 = Proposal::new(
+            Round::new(epoch, View::new(1)),
+            View::zero(),
+            Sha256::hash(&[b"pipelined_test_view_1"]),
+        );
+        relay.broadcast(
+            outgoing,
+            Recipients::All,
+            (
+                proposal_1.payload,
+                (proposal_1.round, genesis, 0u64).encode(),
+            ),
+        );
+        let (_, notarization_1) = build_notarization(schemes, &proposal_1, quorum);
+        voter_mailbox.recovered(Certificate::Notarization(notarization_1));
+
+        let mut certified_view_1 = false;
+        let mut entered_view_2 = false;
+        while !certified_view_1 || !entered_view_2 {
+            select! {
+                message = batcher_receiver.recv() => {
+                    if matches!(
+                        message.unwrap(),
+                        batcher::Message::Update { current, .. } if current == View::new(2)
+                    ) {
+                        entered_view_2 = true;
+                    }
+                },
+                message = resolver_receiver.recv() => {
+                    if matches!(
+                        message.unwrap(),
+                        MailboxMessage::Certified { view, success: true, .. }
+                            if view == View::new(1)
+                    ) {
+                        certified_view_1 = true;
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("view 1 did not certify before the handoff");
+                }
+            }
+        }
+
+        let proposal_2 = Proposal::new(
+            Round::new(epoch, View::new(2)),
+            View::new(1),
+            Sha256::hash(&[b"pipelined_test_view_2"]),
+        );
+        relay.broadcast(
+            outgoing,
+            Recipients::All,
+            (
+                proposal_2.payload,
+                (proposal_2.round, proposal_1.payload, 1u64).encode(),
+            ),
+        );
+        voter_mailbox.proposal(proposal_2.clone());
+
+        loop {
+            select! {
+                message = batcher_receiver.recv() => {
+                    if matches!(
+                        message.unwrap(),
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == View::new(2)
+                    ) {
+                        return proposal_2;
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(5)) => {
+                    panic!("view 2 was not notarized before the handoff");
+                }
+            }
+        }
+    }
+
+    /// Lets bare view logs share [`wait_for_request`] with context logs.
+    impl Viewable for View {
+        fn view(&self) -> View {
+            *self
+        }
+    }
+
+    async fn wait_for_request<T: Viewable>(
         context: &deterministic::Context,
-        requests: &Arc<Mutex<Vec<View>>>,
+        requests: &Arc<Mutex<Vec<T>>>,
         view: View,
     ) {
         let deadline = context.current() + Duration::from_secs(1);
-        while !requests.lock().contains(&view) {
+        while !requests.lock().iter().any(|request| request.view() == view) {
             if context.current() >= deadline {
                 panic!("application did not receive request for {view}");
             }
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Returns the (view, parent) pairs of the logged proposal requests.
+    fn request_parents(requests: &ProposeRequests) -> Vec<(View, View)> {
+        requests
+            .lock()
+            .iter()
+            .map(|request| (request.view(), request.parent.0))
+            .collect()
+    }
+
+    async fn take_proposal_response<T>(
+        context: &deterministic::Context,
+        responses: &Arc<Mutex<Vec<T>>>,
+    ) -> T {
+        let deadline = context.current() + Duration::from_secs(1);
+        loop {
+            if let Some(response) = responses.lock().pop() {
+                return response;
+            }
+            assert!(
+                context.current() < deadline,
+                "application did not receive proposal request"
+            );
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn take_certification_request(
+        context: &deterministic::Context,
+        requests: &CertificationRequests,
+        view: View,
+    ) -> oneshot::Sender<bool> {
+        let deadline = context.current() + Duration::from_secs(1);
+        loop {
+            if let Some(response) = {
+                let mut requests = requests.lock();
+                requests
+                    .iter()
+                    .position(|(request_view, _)| *request_view == view)
+                    .map(|index| requests.swap_remove(index).1)
+            } {
+                return response;
+            }
+            assert!(
+                context.current() < deadline,
+                "application did not receive certification request for {view}"
+            );
             context.sleep(Duration::from_millis(1)).await;
         }
     }
@@ -3172,7 +3425,7 @@ mod tests {
                 VoterOptions {
                     leader_timeout: Duration::from_secs(2),
                     // The certification timeout fires between the view-2
-                    // optimistic proposal request (issued with view 1's
+                    // handoff proposal request (issued with view 1's
                     // notarize after one propose latency) and its response
                     // (a second propose latency later): handling the view-1
                     // timeout must not drop the in-flight request.
@@ -3549,6 +3802,1352 @@ mod tests {
                 "view 2 verification must dispatch before the view 1 notarize broadcast \
                  (verify at {verify_next}, broadcast at {broadcast})"
             );
+        });
+    }
+
+    /// A pipelined handoff proposes and notarizes across the term boundary
+    /// before any certificate forms. Voting for the outgoing term's final
+    /// view is enough for the incoming leader to issue its proposal.
+    #[test_traced]
+    fn test_pipelined_handoff_proposes_across_term_boundary() {
+        let n = 5;
+        let namespace = b"pipelined_handoff_proposes_across_term_boundary".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let outgoing_idx = built_elector.elect(Round::new(epoch, View::new(1)), None);
+            let outgoing = participants[usize::from(outgoing_idx)].clone();
+            // Views 1 and 2 form term 1; view 3 starts term 2.
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            assert_ne!(usize::from(outgoing_idx), local_index);
+
+            let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    // Timeouts long enough that none fires within the test:
+                    // no certificate is ever delivered, so a view-3 notarize
+                    // can only come from a pipelined handoff.
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    propose_latency_ms: 10.0,
+                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+
+            // Feed the outgoing leader's proposals for both views of term 1.
+            let proposal_1 = Proposal::new(
+                Round::new(epoch, View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"pipelined_handoff_view_1"]),
+            );
+            let contents_1 = (proposal_1.round, genesis, 0u64).encode();
+            relay.broadcast(&outgoing, Recipients::All, (proposal_1.payload, contents_1));
+            mailbox.proposal(proposal_1.clone());
+
+            let proposal_2 = Proposal::new(
+                Round::new(epoch, View::new(2)),
+                View::new(1),
+                Sha256::hash(&[b"pipelined_handoff_view_2"]),
+            );
+            let contents_2 = (proposal_2.round, proposal_1.payload, 1u64).encode();
+            relay.broadcast(&outgoing, Recipients::All, (proposal_2.payload, contents_2));
+            mailbox.proposal(proposal_2.clone());
+
+            let mut saw_view_2_notarize = false;
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = msg.unwrap() {
+                            if notarize.view() == View::new(2) {
+                                saw_view_2_notarize = true;
+                            }
+                            if notarize.view() == View::new(3) {
+                                assert!(
+                                    saw_view_2_notarize,
+                                    "expected the outgoing tip's notarize before the handoff notarize"
+                                );
+                                assert_eq!(
+                                    notarize.proposal.parent,
+                                    View::new(2),
+                                    "handoff proposal must build on the outgoing term's final view"
+                                );
+                                break;
+                            }
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(8)) => {
+                        panic!("expected pipelined handoff notarize for view 3");
+                    }
+                }
+            }
+            assert_handoff_metrics(
+                &context.encode(),
+                "actor",
+                &[
+                    ("PublishedBeforeCertification", 1),
+                    ("CandidateReturned", 1),
+                    ("Requested", 1),
+                ],
+                &[],
+            );
+        });
+    }
+
+    /// A locally pipelined term-start vote may notarize before its parent
+    /// certifies, but application certification requests remain parent-first.
+    #[test_traced]
+    fn test_pipelined_handoff_certifies_parent_before_child() {
+        let n = 1;
+        let namespace = b"pipelined_handoff_certifies_parent_before_child".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let requests: CertificationRequests = Arc::new(Mutex::new(Vec::new()));
+            let requests_for_app = requests.clone();
+            let certifier =
+                mocks::application::Certifier::Controlled(Box::new(move |round, _, response| {
+                    requests_for_app.lock().push((round.view(), response));
+                }));
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, _, _, reporter) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    certifier,
+                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // A singleton's local votes notarize both views while the parent
+            // application request remains under test control.
+            let mut parent = None;
+            let mut child = None;
+            while parent.is_none() || child.is_none() {
+                select! {
+                    message = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Notarize(notarize)) = message.unwrap() {
+                            match notarize.view() {
+                                view if view == View::new(1) => {
+                                    parent = Some(notarize.proposal);
+                                }
+                                view if view == View::new(2) => {
+                                    child = Some(notarize.proposal);
+                                }
+                                _ => {}
+                            }
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected local parent and handoff-child notarize votes");
+                    }
+                }
+            }
+            let parent = parent.expect("parent proposal");
+            let child = child.expect("child proposal");
+            assert_eq!(child.parent, parent.view());
+
+            // Deliver the child certificate first. The mailbox is FIFO, so by
+            // the time the parent's request appears, a child request that did
+            // not wait for the parent would already be queued.
+            let (_, child_notarization) = build_notarization(&schemes, &child, 1);
+            mailbox.recovered(Certificate::Notarization(child_notarization));
+            let (_, parent_notarization) = build_notarization(&schemes, &parent, 1);
+            mailbox.recovered(Certificate::Notarization(parent_notarization));
+            let parent_response =
+                take_certification_request(&context, &requests, View::new(1)).await;
+
+            assert!(
+                !requests
+                    .lock()
+                    .iter()
+                    .any(|(view, _)| *view == View::new(2)),
+                "child certification ran ahead of its parent"
+            );
+
+            parent_response
+                .send(true)
+                .expect("parent certification receiver must remain open");
+            let child_response =
+                take_certification_request(&context, &requests, View::new(2)).await;
+            child_response
+                .send(true)
+                .expect("child certification receiver must remain open");
+
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => {
+                        if matches!(
+                            message.unwrap(),
+                            batcher::Message::Constructed(Vote::Finalize(finalize))
+                                if finalize.view() == View::new(2)
+                        ) {
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(2)) => {
+                        panic!("child did not finalize after parent certification completed");
+                    }
+                }
+            }
+            assert!(reporter.certifications.lock().contains_key(&View::new(1)));
+            assert!(reporter.certifications.lock().contains_key(&View::new(2)));
+        });
+    }
+
+    const HANDOFF_LEADER_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Metrics prefix of the fixture voter: the `delayed` sync context plus
+    /// the `actor` child that `setup_voter` creates.
+    const HANDOFF_ACTOR_METRICS: &str = "delayed_actor";
+
+    struct HandoffFixture {
+        participants: Vec<PublicKey>,
+        schemes: Vec<ed25519::Scheme>,
+        oracle: Oracle<PublicKey, deterministic::Context>,
+        elector: RoundRobin<Sha256>,
+        local_index: usize,
+        parent: Proposal<Sha256Digest>,
+        /// The candidate the mock built, forwarded unchanged by `respond`.
+        proposal: HandoffProposal<Sha256Digest>,
+        /// The candidate's payload, for observing relays and votes.
+        digest: Sha256Digest,
+        response: Option<oneshot::Sender<HandoffProposal<Sha256Digest>>>,
+        certification_requests: CertificationRequests,
+        pending_syncs: PendingSyncs,
+        actor_handle: Arc<Mutex<Option<commonware_runtime::Handle<()>>>>,
+        mailbox: Mailbox<ed25519::Scheme, Sha256Digest>,
+        batcher: mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
+        resolver: mailbox::Receiver<resolver::MailboxMessage<ed25519::Scheme, Sha256Digest>>,
+        relay: Arc<mocks::relay::Relay<Sha256Digest, PublicKey>>,
+        propose_requests: ProposeRequests,
+    }
+
+    impl HandoffFixture {
+        async fn new(
+            context: &mut deterministic::Context,
+            handoff_publication: HandoffPublication,
+        ) -> Self {
+            let n = 5;
+            let epoch = Epoch::new(333);
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(context, b"pipelined_handoff_linear", n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(2)),
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            let outgoing_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let outgoing = participants[outgoing_index].clone();
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+            let handoff_responses = Arc::new(Mutex::new(Vec::new()));
+            let certification_requests = Arc::new(Mutex::new(Vec::new()));
+            let controlled = certification_requests.clone();
+            let actor_handle = Arc::new(Mutex::new(None));
+            let pending_syncs = PendingSyncs::default();
+            let voter_context = DelayedSyncContext {
+                inner: context.child("delayed"),
+                pending: pending_syncs.clone(),
+            };
+            let (mut mailbox, mut batcher, mut resolver, relay, _) = setup_voter(
+                &voter_context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector.clone(),
+                VoterOptions {
+                    leader_timeout: HANDOFF_LEADER_TIMEOUT,
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    actor_handle: Some(actor_handle.clone()),
+                    certifier: mocks::application::Certifier::Controlled(Box::new(
+                        move |round, _, response| {
+                            if round.view() == View::new(2) {
+                                controlled.lock().push((round.view(), response));
+                            } else {
+                                response.send(true).unwrap();
+                            }
+                        },
+                    )),
+                    propose_requests: Some(propose_requests.clone()),
+                    handoff_propose_responses: Some(handoff_responses.clone()),
+                    handoff: Some(handoff_publication),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let parent = prepare_pipelined_handoff_tip(
+                context,
+                &schemes,
+                &outgoing,
+                &mut mailbox,
+                &mut batcher,
+                &mut resolver,
+                &relay,
+            )
+            .await;
+            let (proposal, response) = take_proposal_response(context, &handoff_responses).await;
+            let HandoffProposal::Proposed {
+                payload: digest,
+                publication,
+            } = proposal
+            else {
+                panic!("mock must return a candidate");
+            };
+            assert_eq!(publication, handoff_publication);
+
+            Self {
+                participants,
+                schemes,
+                oracle,
+                elector,
+                local_index,
+                parent,
+                proposal,
+                digest,
+                response: Some(response),
+                certification_requests,
+                pending_syncs,
+                actor_handle,
+                mailbox,
+                batcher,
+                resolver,
+                relay,
+                propose_requests,
+            }
+        }
+
+        fn quorum(&self) -> u32 {
+            quorum(self.schemes.len() as u32)
+        }
+
+        /// Declines the pending handoff until the parent certifies.
+        fn defer(&mut self) {
+            self.response
+                .take()
+                .expect("handoff response must be pending")
+                .send(HandoffProposal::AwaitCertification)
+                .expect("handoff request must remain open");
+        }
+
+        /// Counts proposal requests the application received for `view`,
+        /// including the handoff request.
+        fn requests_for(&self, view: View) -> usize {
+            self.propose_requests
+                .lock()
+                .iter()
+                .filter(|request| request.view() == view)
+                .count()
+        }
+
+        fn respond(&mut self) {
+            self.response
+                .take()
+                .expect("handoff response must be pending")
+                .send(self.proposal)
+                .expect("handoff request must remain open");
+        }
+
+        /// Delivers the captured parent's notarization and returns its
+        /// certification request.
+        async fn certify_parent(
+            &mut self,
+            context: &deterministic::Context,
+        ) -> oneshot::Sender<bool> {
+            let parent = self.parent.clone();
+            self.certification_request(context, &parent).await
+        }
+
+        /// Delivers `parent`'s notarization and returns its certification
+        /// request.
+        async fn certification_request(
+            &mut self,
+            context: &deterministic::Context,
+            parent: &Proposal<Sha256Digest>,
+        ) -> oneshot::Sender<bool> {
+            let (_, notarization) = build_notarization(&self.schemes, parent, self.quorum());
+            self.mailbox
+                .recovered(Certificate::Notarization(notarization));
+            take_certification_request(context, &self.certification_requests, parent.view()).await
+        }
+
+        /// Answers the parent's certification request and returns the handle
+        /// that releases its blocked journal sync.
+        async fn block_certification(
+            &mut self,
+            certified: oneshot::Sender<bool>,
+        ) -> oneshot::Sender<Result<(), commonware_runtime::Error>> {
+            self.pending_syncs.arm();
+            certified.send(true).unwrap();
+            let journal = next_pending_sync(&self.pending_syncs);
+            journal
+                .blocked
+                .await
+                .expect("certification journal sync started");
+            journal.release
+        }
+
+        /// Releases the blocked sync and waits until the voter has processed
+        /// the parent's certification.
+        async fn release_certification(
+            &mut self,
+            release: oneshot::Sender<Result<(), commonware_runtime::Error>>,
+        ) {
+            release.send(Ok(())).unwrap();
+            self.pending_syncs.unblock();
+            loop {
+                if matches!(self.resolver.recv().await.unwrap(), MailboxMessage::Certified {
+                    view,
+                    success: true,
+                    ..
+                } if view == View::new(2))
+                {
+                    return;
+                }
+            }
+        }
+
+        /// Answers the parent's certification request and waits until the
+        /// voter has processed it.
+        async fn finish_certification(&mut self, certified: oneshot::Sender<bool>) {
+            let release = self.block_certification(certified).await;
+            self.release_certification(release).await;
+        }
+
+        /// Registers the next participant as a relay observer.
+        fn observer(&self) -> mpsc::UnboundedReceiver<(Sha256Digest, Bytes)> {
+            self.observer_on(&self.relay)
+        }
+
+        fn observer_on(
+            &self,
+            relay: &mocks::relay::Relay<Sha256Digest, PublicKey>,
+        ) -> mpsc::UnboundedReceiver<(Sha256Digest, Bytes)> {
+            let observer =
+                self.participants[(self.local_index + 1) % self.participants.len()].clone();
+            relay.register(observer)
+        }
+    }
+
+    /// Waits for a `handoff_events` label to count an event.
+    async fn wait_for_handoff_event(context: &deterministic::Context, event: &str) {
+        wait_for_handoff_metric(context, "handoff_events", "event", event).await;
+    }
+
+    /// Waits for a `handoff_abandoned` reason to count an abandonment.
+    async fn wait_for_handoff_abandoned(context: &deterministic::Context, reason: &str) {
+        wait_for_handoff_metric(context, "handoff_abandoned", "reason", reason).await;
+    }
+
+    /// Waits for a handoff metric label to count at least one event.
+    async fn wait_for_handoff_metric(
+        context: &deterministic::Context,
+        family: &str,
+        label: &str,
+        value: &str,
+    ) {
+        let deadline = context.current() + Duration::from_secs(2);
+        loop {
+            if labeled_metric_snapshot(&context.encode(), HANDOFF_ACTOR_METRICS, family, label)
+                .get(value)
+                .is_some_and(|count| *count > 0)
+            {
+                return;
+            }
+            assert!(
+                context.current() < deadline,
+                "missing {family} metric {value}"
+            );
+            context.sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    fn assert_handoff_silent(
+        relayed: &mut mpsc::UnboundedReceiver<(Sha256Digest, Bytes)>,
+        batcher: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
+        digest: Sha256Digest,
+    ) {
+        while let Some((relayed_digest, _)) = relayed.recv().now_or_never().flatten() {
+            assert_ne!(relayed_digest, digest, "stale handoff must not relay");
+        }
+        while let Some(message) = batcher.recv().now_or_never().flatten() {
+            assert!(
+                !matches!(message, batcher::Message::Constructed(Vote::Notarize(ref vote))
+                    if vote.proposal.payload == digest),
+                "stale handoff must not vote"
+            );
+        }
+    }
+
+    async fn observe_handoff_publication(
+        context: &deterministic::Context,
+        relayed: &mut mpsc::UnboundedReceiver<(Sha256Digest, Bytes)>,
+        batcher: &mut mailbox::Receiver<batcher::Message<ed25519::Scheme, Sha256Digest>>,
+        digest: Sha256Digest,
+    ) {
+        let mut observed_relay = false;
+        let mut observed_vote = false;
+        while !observed_relay || !observed_vote {
+            select! {
+                message = relayed.recv() => {
+                    let (relayed_digest, _) = message.expect("relay observer must remain open");
+                    assert_eq!(relayed_digest, digest, "retained handoff must be relayed");
+                    observed_relay = true;
+                },
+                message = batcher.recv() => {
+                    if let batcher::Message::Constructed(Vote::Notarize(vote)) =
+                        message.expect("batcher must remain open")
+                        && vote.view() == View::new(3)
+                    {
+                        assert_eq!(vote.proposal.payload, digest, "retained handoff must be voted");
+                        observed_vote = true;
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("retained handoff was not relayed and voted");
+                }
+            }
+        }
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_build_before_certification() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut relayed = fixture.observer();
+
+            fixture.respond();
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
+
+            let release = fixture.block_certification(certified).await;
+            assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
+
+            fixture.release_certification(release).await;
+            observe_handoff_publication(
+                &context,
+                &mut relayed,
+                &mut fixture.batcher,
+                fixture.digest,
+            )
+            .await;
+            assert_eq!(
+                fixture.requests_for(View::new(3)),
+                1,
+                "held handoff must not rebuild"
+            );
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[
+                    ("Held", 1),
+                    ("PublishedAfterCertification", 1),
+                    ("CandidateReturned", 1),
+                    ("Requested", 1),
+                ],
+                &[],
+            );
+        });
+    }
+
+    /// Certification completes before the application answers. The single
+    /// build is published once, after certification, for either permission.
+    async fn certification_first_reuses_build(
+        context: &mut deterministic::Context,
+        publication: HandoffPublication,
+    ) {
+        let mut fixture = HandoffFixture::new(context, publication).await;
+        let mut relayed = fixture.observer();
+        let certified = fixture.certify_parent(context).await;
+
+        fixture.finish_certification(certified).await;
+        fixture.respond();
+        observe_handoff_publication(context, &mut relayed, &mut fixture.batcher, fixture.digest)
+            .await;
+        assert_eq!(fixture.requests_for(View::new(3)), 1, "must not rebuild");
+        assert_handoff_metrics(
+            &context.encode(),
+            HANDOFF_ACTOR_METRICS,
+            &[
+                ("PublishedAfterCertification", 1),
+                ("CandidateReturned", 1),
+                ("Requested", 1),
+            ],
+            &[],
+        );
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_certification_before_build() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            certification_first_reuses_build(&mut context, HandoffPublication::AfterCertification)
+                .await;
+        });
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_permitted_early_publication_finishes_after_certification() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            certification_first_reuses_build(
+                &mut context,
+                HandoffPublication::AllowBeforeCertification,
+            )
+            .await;
+        });
+    }
+
+    /// Parent finalization releases a held build like certification does.
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_released_by_parent_finalization() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut relayed = fixture.observer();
+            fixture.respond();
+            wait_for_handoff_event(&context, "Held").await;
+
+            let (_, finalization) =
+                build_finalization(&fixture.schemes, &fixture.parent, fixture.quorum());
+            fixture
+                .mailbox
+                .recovered(Certificate::Finalization(finalization));
+            observe_handoff_publication(
+                &context,
+                &mut relayed,
+                &mut fixture.batcher,
+                fixture.digest,
+            )
+            .await;
+            assert_eq!(
+                fixture.requests_for(View::new(3)),
+                1,
+                "held handoff must not rebuild"
+            );
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[
+                    ("Held", 1),
+                    ("PublishedAfterCertification", 1),
+                    ("CandidateReturned", 1),
+                    ("Requested", 1),
+                ],
+                &[],
+            );
+        });
+    }
+
+    /// A deferred handoff waits in the pending slot. The ordinary request for
+    /// the same context follows the durable parent certification.
+    #[test_traced]
+    fn test_pipelined_handoff_deferred_request_waits_for_certification_sync() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            fixture.defer();
+            wait_for_handoff_event(&context, "Deferred").await;
+            let certified = fixture.certify_parent(&context).await;
+
+            let release = fixture.block_certification(certified).await;
+            // Long enough for a re-request to reach the application if the
+            // certification result alone released the deferral.
+            context.sleep(Duration::from_millis(50)).await;
+            assert_eq!(
+                fixture.requests_for(View::new(3)),
+                1,
+                "ordinary request must wait for the certification sync"
+            );
+
+            fixture.release_certification(release).await;
+            let deadline = context.current() + Duration::from_secs(1);
+            while fixture.requests_for(View::new(3)) < 2 {
+                assert!(
+                    context.current() < deadline,
+                    "ordinary request did not follow parent certification"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            let contexts: Vec<_> = fixture
+                .propose_requests
+                .lock()
+                .iter()
+                .filter(|request| request.round.view() == View::new(3))
+                .cloned()
+                .collect();
+            assert_eq!(contexts.len(), 2);
+            assert_eq!(
+                contexts[0], contexts[1],
+                "ordinary request must reuse the deferred context"
+            );
+            assert_eq!(contexts[1].parent, (View::new(2), fixture.parent.payload));
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Deferred", 1), ("Requested", 1)],
+                &[],
+            );
+        });
+    }
+
+    /// A deferred handoff request is abandoned when its view exits.
+    #[test_traced]
+    fn test_pipelined_handoff_deferred_request_exits_view() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            fixture.defer();
+            wait_for_handoff_event(&context, "Deferred").await;
+            let certified = fixture.certify_parent(&context).await;
+
+            let (_, nullification) = build_nullification(
+                &fixture.schemes,
+                Round::new(Epoch::new(333), View::new(3)),
+                fixture.quorum(),
+            );
+            fixture
+                .mailbox
+                .recovered(Certificate::Nullification(nullification));
+            loop {
+                if matches!(fixture.batcher.recv().await.unwrap(), batcher::Message::Update { current, .. }
+                    if current > View::new(3))
+                {
+                    break;
+                }
+            }
+            fixture.finish_certification(certified).await;
+            wait_for_handoff_abandoned(&context, "ViewExit").await;
+            assert_eq!(
+                fixture.requests_for(View::new(3)),
+                1,
+                "no ordinary request follows an exited view"
+            );
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Deferred", 1), ("Requested", 1)],
+                &[("ViewExit", 1)],
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_rejects_conflicting_parent() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut relayed = fixture.observer();
+            fixture.respond();
+            wait_for_handoff_event(&context, "Held").await;
+
+            let mut conflicting_parent = fixture.parent.clone();
+            conflicting_parent.payload = Sha256::hash(&[b"conflicting parent"]);
+            let certified = fixture
+                .certification_request(&context, &conflicting_parent)
+                .await;
+            fixture.finish_certification(certified).await;
+            wait_for_handoff_abandoned(&context, "AncestrySuperseded").await;
+            assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
+            // The conflicting notarization supersedes the held build and issues
+            // a second handoff request on the new tip.
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 2)],
+                &[("AncestrySuperseded", 1)],
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_rejects_parent_nullification() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut relayed = fixture.observer();
+            fixture.respond();
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
+
+            let (_, nullification) = build_nullification(
+                &fixture.schemes,
+                Round::new(Epoch::new(333), View::new(2)),
+                fixture.quorum(),
+            );
+            fixture
+                .mailbox
+                .recovered(Certificate::Nullification(nullification));
+            loop {
+                if matches!(fixture.batcher.recv().await.unwrap(), batcher::Message::Update { current, .. }
+                    if current == View::new(3))
+                {
+                    break;
+                }
+            }
+            fixture.finish_certification(certified).await;
+            wait_for_handoff_abandoned(&context, "AncestrySuperseded").await;
+            assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
+            // The nullified tip leaves certified ancestry, so the replacement
+            // is an ordinary request rather than a second handoff.
+            let deadline = context.current() + Duration::from_secs(1);
+            while fixture.requests_for(View::new(3)) < 2 {
+                assert!(
+                    context.current() < deadline,
+                    "fallback request on certified ancestry missing"
+                );
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
+                &[("AncestrySuperseded", 1)],
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_exits_view() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut relayed = fixture.observer();
+            fixture.respond();
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
+
+            let (_, nullification) = build_nullification(
+                &fixture.schemes,
+                Round::new(Epoch::new(333), View::new(3)),
+                fixture.quorum(),
+            );
+            fixture
+                .mailbox
+                .recovered(Certificate::Nullification(nullification));
+            loop {
+                if matches!(fixture.batcher.recv().await.unwrap(), batcher::Message::Update { current, .. }
+                    if current > View::new(3))
+                {
+                    break;
+                }
+            }
+            fixture.finish_certification(certified).await;
+            wait_for_handoff_abandoned(&context, "ViewExit").await;
+            assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
+                &[("ViewExit", 1)],
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_becomes_ineligible_at_leader_timeout() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            let mut relayed = fixture.observer();
+            fixture.respond();
+            wait_for_handoff_event(&context, "Held").await;
+            let certified = fixture.certify_parent(&context).await;
+
+            let release = fixture.block_certification(certified).await;
+
+            // The configured leader timeout expires while the earlier parent
+            // certification journal sync remains blocked.
+            context
+                .sleep(HANDOFF_LEADER_TIMEOUT + Duration::from_secs(1))
+                .await;
+            fixture.release_certification(release).await;
+            wait_for_handoff_abandoned(&context, "IneligibleAtRecording").await;
+            assert_handoff_silent(&mut relayed, &mut fixture.batcher, fixture.digest);
+            assert_handoff_metrics(
+                &context.encode(),
+                HANDOFF_ACTOR_METRICS,
+                &[("Held", 1), ("CandidateReturned", 1), ("Requested", 1)],
+                &[("IneligibleAtRecording", 1)],
+            );
+        });
+    }
+
+    /// Restart discards a held candidate. Replay re-issues the handoff
+    /// request, and dropping it nullifies the view without relaying the old
+    /// candidate.
+    #[test_traced]
+    fn test_pipelined_handoff_held_build_is_volatile_on_restart() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let mut fixture =
+                HandoffFixture::new(&mut context, HandoffPublication::AfterCertification).await;
+            fixture.respond();
+            wait_for_handoff_event(&context, "Held").await;
+
+            let handle = fixture.actor_handle.lock().take().unwrap();
+            handle.abort();
+            assert!(handle.await.is_err());
+
+            let restarted_responses: HandoffProposeResponses = Arc::new(Mutex::new(Vec::new()));
+            let restarted_context = context.child("restarted");
+            let (mut restarted, mut restarted_batcher, _, restarted_relay, _) = setup_voter(
+                &restarted_context,
+                &fixture.oracle,
+                &fixture.participants,
+                &fixture.schemes,
+                fixture.elector.clone(),
+                VoterOptions {
+                    local_index: fixture.local_index,
+                    leader_timeout: HANDOFF_LEADER_TIMEOUT,
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    handoff: Some(HandoffPublication::AfterCertification),
+                    handoff_propose_responses: Some(restarted_responses.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
+            let (_, fresh) = take_proposal_response(&context, &restarted_responses).await;
+            drop(fresh);
+            let mut restarted_relay = fixture.observer_on(&restarted_relay);
+            let (_, notarization) =
+                build_notarization(&fixture.schemes, &fixture.parent, fixture.quorum());
+            restarted.recovered(Certificate::Notarization(notarization));
+            loop {
+                match restarted_batcher.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Notarize(vote)) => {
+                        assert_ne!(vote.proposal.payload, fixture.digest);
+                    }
+                    batcher::Message::Constructed(Vote::Nullify(vote))
+                        if vote.view() == View::new(3) =>
+                    {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                restarted_relay.recv().now_or_never().is_none(),
+                "held result must remain volatile"
+            );
+        });
+    }
+
+    /// A dropped handoff response is a terminal application failure for the
+    /// optimistic child, even if its parent later certifies.
+    #[test_traced]
+    fn test_pipelined_handoff_dropped_response_nullifies_after_parent_certification() {
+        let n = 5;
+        let namespace = b"pipelined_handoff_dropped_response".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            let outgoing_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let outgoing = participants[outgoing_index].clone();
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    propose_requests: Some(propose_requests.clone()),
+                    drop_proposals: true,
+                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let parent = prepare_pipelined_handoff_tip(
+                &mut context,
+                &schemes,
+                &outgoing,
+                &mut mailbox,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                &relay,
+            )
+            .await;
+
+            wait_for_request(&context, &propose_requests, View::new(3)).await;
+            assert_eq!(
+                request_parents(&propose_requests),
+                [(View::new(3), View::new(2))]
+            );
+
+            let (_, notarization) = build_notarization(&schemes, &parent, quorum(n));
+            mailbox.recovered(Certificate::Notarization(notarization));
+
+            let deadline = context.current() + Duration::from_secs(1);
+            let mut parent_certified = false;
+            let mut entered_child = false;
+            let mut child_nullified = false;
+            while !parent_certified || !child_nullified {
+                select! {
+                    message = resolver_receiver.recv() => {
+                        if matches!(
+                            message.unwrap(),
+                            MailboxMessage::Certified { view, success: true, .. }
+                                if view == View::new(2)
+                        ) {
+                            parent_certified = true;
+                        }
+                    },
+                    message = batcher_receiver.recv() => {
+                        match message.unwrap() {
+                            batcher::Message::Update { current, .. }
+                                if current == View::new(3) =>
+                            {
+                                entered_child = true;
+                            }
+                            batcher::Message::Constructed(Vote::Nullify(nullify))
+                                if nullify.view() == View::new(3) =>
+                            {
+                                assert!(entered_child, "child nullified before becoming current");
+                                child_nullified = true;
+                            }
+                            _ => {}
+                        }
+                    },
+                    _ = context.sleep_until(deadline) => {
+                        panic!(
+                            "expected dropped handoff to nullify view 3 before normal deadlines"
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                request_parents(&propose_requests),
+                [(View::new(3), View::new(2))],
+                "parent certification must not retry a dropped handoff"
+            );
+            assert_handoff_metrics(
+                &context.encode(),
+                "actor",
+                &[("Requested", 1)],
+                &[("ResponseClosed", 1)],
+            );
+        });
+    }
+
+    /// A stalled proposal build on an abandoned outgoing tip must be
+    /// superseded while the incoming term-start view is still live.
+    #[test_traced]
+    fn test_pipelined_handoff_reissues_stalled_proposal_after_parent_nullification() {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"pipelined_handoff_reissues_stalled_proposal".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let local_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            let outgoing_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let outgoing = participants[outgoing_index].clone();
+            let propose_requests = Arc::new(Mutex::new(Vec::new()));
+
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    propose_requests: Some(propose_requests.clone()),
+                    stall_proposals: true,
+                    handoff: Some(HandoffPublication::AllowBeforeCertification),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            // Certify view 1 so it remains a usable fallback after view 2 is
+            // abandoned, then let the outgoing leader issue view 2.
+            prepare_pipelined_handoff_tip(
+                &mut context,
+                &schemes,
+                &outgoing,
+                &mut mailbox,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                &relay,
+            )
+            .await;
+
+            wait_for_request(&context, &propose_requests, View::new(3)).await;
+            assert_eq!(
+                request_parents(&propose_requests),
+                [(View::new(3), View::new(2))]
+            );
+
+            // Nullifying the captured parent enters view 3. The still-pending
+            // build must be replaced immediately with one on certified view 1.
+            let (_, nullification_2) =
+                build_nullification(&schemes, Round::new(epoch, View::new(2)), quorum);
+            mailbox.recovered(Certificate::Nullification(nullification_2));
+
+            let deadline = context.current() + Duration::from_secs(2);
+            while propose_requests.lock().len() < 2 {
+                assert!(
+                    context.current() < deadline,
+                    "proposal was not reissued on the certified fallback"
+                );
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            let expected = [(View::new(3), View::new(2)), (View::new(3), View::new(1))];
+            assert_eq!(request_parents(&propose_requests), expected);
+            assert_handoff_metrics(
+                &context.encode(),
+                "actor",
+                &[("Requested", 1)],
+                &[("AncestrySuperseded", 1)],
+            );
+        });
+    }
+
+    /// A follower requests a missing term-start parent certificate from any
+    /// validator because the pipelined proposer may not hold it yet.
+    #[test_traced]
+    fn test_pipelined_handoff_parent_repair_is_untargeted() {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"pipelined_handoff_parent_repair_is_untargeted".to_vec();
+        let epoch = Epoch::new(333);
+        let term_length = TermLength::new(NZU32!(2));
+        let executor = deterministic::Runner::timed(Duration::from_secs(20));
+        executor.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = ed25519::fixture(&mut context, &namespace, n);
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                term_length,
+                Duration::from_secs(30),
+                ViewDelta::new(1),
+            );
+            let built_elector: elector::RoundRobinElector<ed25519::Scheme> =
+                elector.clone().build(schemes[0].participants());
+            let outgoing_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(1)), None));
+            let incoming_index =
+                usize::from(built_elector.elect(Round::new(epoch, View::new(3)), None));
+            let local_index = (0..participants.len())
+                .find(|index| *index != outgoing_index && *index != incoming_index)
+                .expect("a follower must exist");
+            let outgoing = participants[outgoing_index].clone();
+            let incoming = participants[incoming_index].clone();
+
+            let (mut mailbox, mut batcher_receiver, mut resolver_receiver, relay, _) = setup_voter(
+                &context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                VoterOptions {
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    local_index,
+                    ..Default::default()
+                },
+            )
+            .await;
+
+            let proposal_2 = prepare_pipelined_handoff_tip(
+                &mut context,
+                &schemes,
+                &outgoing,
+                &mut mailbox,
+                &mut batcher_receiver,
+                &mut resolver_receiver,
+                &relay,
+            )
+            .await;
+
+            let proposal_3 = Proposal::new(
+                Round::new(epoch, View::new(3)),
+                View::new(2),
+                Sha256::hash(&[b"parent_repair_view_3"]),
+            );
+            relay.broadcast(
+                &incoming,
+                Recipients::All,
+                (
+                    proposal_3.payload,
+                    (proposal_3.round, proposal_2.payload, 2u64).encode(),
+                ),
+            );
+            mailbox.proposal(proposal_3);
+
+            loop {
+                select! {
+                    message = resolver_receiver.recv() => {
+                        let MailboxMessage::Resolve {
+                            proposal,
+                            view,
+                            kind,
+                            target,
+                            ..
+                        } = message.unwrap() else {
+                            continue;
+                        };
+                        assert_eq!(proposal, View::new(3));
+                        assert_eq!(view, View::new(2));
+                        assert!(matches!(kind, crate::simplex::actors::Kind::Notarization));
+                        assert!(
+                            target.is_none(),
+                            "term-start parent repair must allow any peer to respond"
+                        );
+                        break;
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("voter never requested the outgoing parent certificate");
+                    }
+                }
+            }
+
+            // Deliver the parent as an unrestricted resolver response. The
+            // follower must certify it, verify the buffered child, and vote
+            // before the term-start view times out.
+            let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
+            mailbox.recovered(Certificate::Notarization(notarization_2));
+            loop {
+                select! {
+                    message = batcher_receiver.recv() => match message.unwrap() {
+                        batcher::Message::Constructed(Vote::Notarize(notarize))
+                            if notarize.view() == View::new(3) => break,
+                        batcher::Message::Constructed(Vote::Nullify(nullify))
+                            if nullify.view() == View::new(3) =>
+                        {
+                            panic!("term-start view timed out before parent repair completed");
+                        }
+                        batcher::Message::Update { .. }
+                        | batcher::Message::Constructed(_) => {}
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("follower did not vote after parent repair");
+                    }
+                }
+            }
         });
     }
 

@@ -187,7 +187,7 @@ where
             Self {
                 context: ContextCell::new(context),
                 mailbox,
-                application: config.application,
+                application: config.application.clone(),
                 provider: config.provider,
                 marshal: config.marshal,
                 db_config: config.db_config,
@@ -196,7 +196,7 @@ where
                 sync_config: config.sync_config,
                 pruning,
             },
-            Mailbox::new(sender),
+            Mailbox::new(sender, config.application),
         )
     }
 
@@ -299,7 +299,7 @@ mod tests {
         },
     };
     use commonware_consensus::{
-        Application as _, CertifiableBlock as _, Reporter as _,
+        Application as _, CertifiableBlock as _, HandoffPolicy, HandoffPublication, Reporter as _,
         marshal::{Update, ancestry},
         simplex::mocks::scheme as scheme_mocks,
     };
@@ -377,6 +377,51 @@ mod tests {
         ) -> Result<Self, Self::SyncError> {
             Ok(Self::default())
         }
+    }
+
+    #[test]
+    fn mailbox_forwards_handoff_policy() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            let mut signing_context = context.child("signing");
+            let fixture = scheme_mocks::fixture(&mut signing_context, b"handoff-policy", 1);
+            let marshal = fixtures::marshal_fixture(
+                context.child("marshal"),
+                "stateful-handoff-policy",
+                fixture.schemes[0].clone(),
+                None,
+                NZUsize!(8),
+                true,
+            )
+            .await;
+            let plan = SyncPlan::init(&context, "stateful-handoff-policy-stateful").await;
+            let publication = HandoffPublication::AllowBeforeCertification;
+            let (_stateful, mailbox) = Stateful::init(
+                context.child("stateful"),
+                Config {
+                    application: TestApp::with_handoff_policy(HandoffPolicy::Prepare(publication)),
+                    db_config: (),
+                    provider: (),
+                    marshal: (marshal.mailbox.clone(), marshal.floor),
+                    mailbox_size: NZUsize!(8),
+                    plan,
+                    resolvers: NoopResolver::default(),
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                    prune_config: None,
+                },
+            );
+            let _guards = marshal.guards;
+            let block = TestBlock::new(1, 1);
+            assert_eq!(
+                mailbox.handoff_policy(&block.context()),
+                HandoffPolicy::Prepare(publication),
+            );
+        });
     }
 
     #[test]

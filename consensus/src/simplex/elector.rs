@@ -17,6 +17,8 @@
 //!
 //! Applications can implement [`Config`] and [`Elector`] for custom leader
 //! selection logic such as stake-weighted selection or other application-specific strategies.
+//! An elector can support pipelined handoffs when it can select a leader before the round's
+//! unlocking certificate exists. See [`Elector::elect_without_certificate`].
 //!
 //! # Usage
 //!
@@ -227,6 +229,24 @@ pub trait Elector<S: Scheme>: Clone + Send + 'static {
     ///
     /// Returns the index of the selected leader in the participants list.
     fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant;
+
+    /// Selects the leader for `round` without its unlocking certificate.
+    ///
+    /// Returning `Some` allows the application to consider a pipelined handoff
+    /// (see [Pipelined Handoff]).
+    ///
+    /// Return `Some` only when the elector can derive the leader without a certificate.
+    /// The result must equal [`Self::elect`] for every certificate that can
+    /// unlock the round. The default returns `None`, which disables pipelined
+    /// handoffs. Certificate-derived electors such as [`RandomElector`] keep
+    /// the default.
+    ///
+    /// The voter may call this method several times per view. Keep it inexpensive.
+    ///
+    /// [Pipelined Handoff]: crate::simplex#pipelined-handoff
+    fn elect_without_certificate(&self, _round: Round) -> Option<Participant> {
+        None
+    }
 }
 
 /// Configuration for round-robin leader election.
@@ -337,6 +357,12 @@ impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
             % u64::try_from(n).expect("permutation length fits in u64");
         let idx = usize::try_from(idx).expect("leader index fits in usize");
         self.permutation[idx]
+    }
+
+    fn elect_without_certificate(&self, round: Round) -> Option<Participant> {
+        // Round-robin election never reads the certificate, so electing early
+        // is always consistent with `elect`.
+        Some(self.elect(round, None))
     }
 }
 
@@ -633,6 +659,29 @@ mod tests {
         assert_eq!(leader_v4, leader_v5);
         assert_eq!(leader_v4, leader_v6);
         assert_ne!(leader_v1, leader_v4);
+    }
+
+    #[test]
+    fn round_robin_elect_without_certificate_matches_elect() {
+        let mut rng = test_rng();
+        let Fixture { participants, .. } = ed25519::fixture(&mut rng, NAMESPACE, 4);
+        let participants = Set::try_from_iter(participants).unwrap();
+        let config = RoundRobin::<Sha256>::default().with_term(
+            TermLength::new(NZU32!(3)),
+            Duration::from_secs(10),
+            ViewDelta::new(1),
+        );
+        let elector: RoundRobinElector<ed25519::Scheme> = config.build(&participants);
+
+        for epoch in [0u64, 7] {
+            for view in 1..=9u64 {
+                let round = Round::new(Epoch::new(epoch), View::new(view));
+                assert_eq!(
+                    elector.elect_without_certificate(round),
+                    Some(elector.elect(round, None))
+                );
+            }
+        }
     }
 
     #[test]

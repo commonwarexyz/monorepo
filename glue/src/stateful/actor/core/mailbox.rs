@@ -6,7 +6,8 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
 };
 use commonware_consensus::{
-    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, Reporter, Viewable,
+    Application as ConsensusApplication, Block, CertifiableBlock, Epochable, HandoffPolicy,
+    Reporter, Viewable,
     marshal::{
         Update,
         ancestry::{Ancestry, BoxedAncestry},
@@ -188,8 +189,10 @@ where
 
 /// Channel-based proxy to the [`Stateful`](super::Stateful) actor.
 ///
-/// Implements the consensus application and verifying traits by forwarding
-/// each call to the actor via a message and awaiting the response.
+/// Implements the consensus application and verifying traits. The mailbox forwards
+/// proposal, verification, and reporting calls to the actor. It evaluates handoff
+/// policy on a retained application clone, including after actor shutdown. A
+/// [`HandoffPolicy::Prepare`] decision does not guarantee proposal availability.
 pub struct Mailbox<E, A>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -197,6 +200,7 @@ where
 {
     sender: Sender<Message<E, A>>,
     retry_mailbox: RetryMailbox<E, A>,
+    application: A,
 }
 
 impl<E, A> Clone for Mailbox<E, A>
@@ -208,6 +212,7 @@ where
         Self {
             sender: self.sender.clone(),
             retry_mailbox: self.retry_mailbox.clone(),
+            application: self.application.clone(),
         }
     }
 }
@@ -218,7 +223,7 @@ where
     A: Application<E>,
 {
     /// Create a mailbox from the send half of the actor's message channel.
-    pub(super) fn new(sender: Sender<Message<E, A>>) -> Self {
+    pub(super) fn new(sender: Sender<Message<E, A>>, application: A) -> Self {
         let retry_sender = sender.clone();
         let retry_mailbox = Arc::new(move |message| {
             let _ = retry_sender.enqueue(message);
@@ -226,6 +231,7 @@ where
         Self {
             sender,
             retry_mailbox,
+            application,
         }
     }
 
@@ -284,6 +290,10 @@ where
             response,
         });
         receiver.await.ok().flatten()
+    }
+
+    fn handoff_policy(&self, context: &Self::Context) -> HandoffPolicy {
+        self.application.handoff_policy(context)
     }
 
     async fn verify(

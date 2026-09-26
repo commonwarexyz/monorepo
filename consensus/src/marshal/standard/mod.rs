@@ -41,9 +41,11 @@ pub use variant::Standard;
 
 #[cfg(test)]
 mod tests {
+    mod pipeline;
     use super::{Deferred, Inline, Standard, relay};
     use crate::{
-        Automaton, CertifiableAutomaton, Heightable, Relay, Reporter,
+        Automaton, CertifiableAutomaton, HandoffPolicy, HandoffProposal, HandoffPublication,
+        Heightable, Relay, Reporter,
         marshal::{
             Identifier, Update,
             ancestry::BlockProvider,
@@ -1991,6 +1993,16 @@ mod tests {
     }
 
     impl CertifiableAutomaton for Wrapper {
+        async fn propose_handoff(
+            &mut self,
+            context: Self::Context,
+        ) -> oneshot::Receiver<HandoffProposal<Self::Digest>> {
+            match self {
+                Self::Inline(inline) => inline.propose_handoff(context).await,
+                Self::Deferred(deferred) => deferred.propose_handoff(context).await,
+            }
+        }
+
         async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
             Self::certify(self, round, digest).await
         }
@@ -3219,7 +3231,7 @@ mod tests {
                     leader: me.clone(),
                     parent: (View::zero(), genesis.digest()),
                 };
-                let proposal_rx = wrapper.propose(non_boundary_context).await;
+                let proposal_rx = wrapper.propose(non_boundary_context.clone()).await;
                 assert!(
                     proposal_rx.await.is_err(),
                     "{kind:?}: proposal should be dropped when application returns no block"
@@ -3230,6 +3242,39 @@ mod tests {
                         .contains("wrapper_under_test_build_duration_count 0"),
                     "{kind:?}: failed application builds should not be timed"
                 );
+
+                // A failed build closes the handoff response as it closes the ordinary one.
+                let failing_app = MockVerifyingApp::new().with_handoff_policy(
+                    HandoffPolicy::Prepare(HandoffPublication::AfterCertification),
+                );
+                let mut failing = Wrapper::new(
+                    kind,
+                    context.child("failed_handoff"),
+                    failing_app,
+                    marshal.clone(),
+                );
+                let handoff_rx = failing.propose_handoff(non_boundary_context.clone()).await;
+                assert!(
+                    handoff_rx.await.is_err(),
+                    "{kind:?}: handoff response should close when application returns no block"
+                );
+
+                // Dropping a handoff response must cancel the ordinary build it forwards.
+                let (gated_app, started, dropped) = MockVerifyingApp::new()
+                    .with_handoff_policy(HandoffPolicy::Prepare(
+                        HandoffPublication::AllowBeforeCertification,
+                    ))
+                    .with_proposal_gate();
+                let mut gated = Wrapper::new(
+                    kind,
+                    context.child("cancelled_handoff"),
+                    gated_app,
+                    marshal.clone(),
+                );
+                let response = gated.propose_handoff(non_boundary_context.clone()).await;
+                started.await.expect("handoff build should start");
+                drop(response);
+                assert!(dropped.await.is_err(), "handoff build should be cancelled");
 
                 // Boundary propose should re-propose the parent block even if the app cannot build.
                 let boundary_height = Height::new(BLOCKS_PER_EPOCH.get() - 1);
@@ -3262,6 +3307,13 @@ mod tests {
                     leader: me,
                     parent: (View::new(boundary_height.get()), boundary_digest),
                 };
+                let handoff_rx = wrapper.propose_handoff(reproposal_context.clone()).await;
+                assert_eq!(
+                    handoff_rx.await.expect("handoff decision missing"),
+                    HandoffProposal::AwaitCertification,
+                    "{kind:?}: application deferral must precede automatic boundary reproposal"
+                );
+
                 let reproposal_rx = wrapper.propose(reproposal_context).await;
                 assert_eq!(
                     reproposal_rx.await.expect("reproposal result missing"),
@@ -3279,6 +3331,39 @@ mod tests {
                 assert!(
                     marshal.get_verified(reproposal_round).await.is_some(),
                     "{kind:?}: re-proposed boundary block must be stored at the re-proposal round"
+                );
+
+                // An accepted handoff uses the automatic boundary re-proposal path
+                // without invoking the application builder.
+                let publication = HandoffPublication::AllowBeforeCertification;
+                let pipeline_round =
+                    Round::new(Epoch::zero(), View::new(boundary_height.get() + 2));
+                let pipeline_context = Ctx {
+                    round: pipeline_round,
+                    leader: default_leader(),
+                    parent: (View::new(boundary_height.get()), boundary_digest),
+                };
+                let pipeline_app = MockVerifyingApp::new()
+                    .with_handoff_policy(HandoffPolicy::Prepare(publication));
+                let mut pipeline = Wrapper::new(
+                    kind,
+                    context.child("pipeline_wrapper"),
+                    pipeline_app,
+                    marshal.clone(),
+                );
+                let pipeline_rx = pipeline.propose_handoff(pipeline_context.clone()).await;
+                assert_eq!(
+                    pipeline_rx.await.expect("pipeline result missing"),
+                    HandoffProposal::Proposed {
+                        payload: boundary_digest,
+                        publication,
+                    },
+                    "{kind:?}: accepted handoff should forward its publication permission"
+                );
+                let certify_rx = pipeline.certify(pipeline_round, boundary_digest).await;
+                assert!(
+                    certify_rx.await.expect("pipeline certify result missing"),
+                    "{kind:?}: pipelined boundary re-proposal must certify"
                 );
             });
         }
