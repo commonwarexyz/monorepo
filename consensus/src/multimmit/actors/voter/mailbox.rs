@@ -300,8 +300,9 @@ mod tests {
     fn observation_and_completion_queues_keep_their_engine_metric_names() {
         deterministic::Runner::default().start(|context| async move {
             let engine = context.child("engine");
+            let voter_context = engine.child("voter");
             let (_mailbox, _inbox) = Mailbox::<ed25519::PublicKey, MinPk, Sha256Digest>::new(
-                &engine.child("voter"),
+                &voter_context,
                 &engine,
                 NonZeroUsize::MIN,
             );
