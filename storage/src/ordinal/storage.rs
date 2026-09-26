@@ -297,25 +297,27 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
     async fn put(&mut self, index: u64, value: V) -> Result<(), Error> {
         self.puts.inc();
 
-        // Check if blob exists
+        // Get the blob, creating it if it doesn't exist
         let items_per_blob = self.config.items_per_blob.get();
         let section = index / items_per_blob;
-        if let Entry::Vacant(entry) = self.blobs.entry(section) {
-            let (blob, len) = self
-                .context
-                .open(&self.config.partition, &section.to_be_bytes())
-                .await?;
-            entry.insert(Write::from_pooler(
-                &self.context,
-                blob,
-                len,
-                self.config.write_buffer,
-            ));
-            debug!(section, "created blob");
-        }
+        let blob = match self.blobs.entry(section) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let (blob, len) = self
+                    .context
+                    .open(&self.config.partition, &section.to_be_bytes())
+                    .await?;
+                debug!(section, "created blob");
+                entry.insert(Write::from_pooler(
+                    &self.context,
+                    blob,
+                    len,
+                    self.config.write_buffer,
+                ))
+            }
+        };
 
         // Write the value to the blob
-        let blob = self.blobs.get_mut(&section).unwrap();
         let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
         blob.write_at(offset, Record::encode(&value)).await?;
         self.pending.insert(section);

@@ -53,7 +53,7 @@ use super::mpsc::{
 use crate::sync::Mutex;
 use futures::Stream;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque, hash_map::Entry},
     hash::Hash,
     pin::Pin,
     sync::Arc,
@@ -75,29 +75,23 @@ impl<B: Eq + Hash + Clone> Drop for Guard<B> {
         let mut state = self.tracker.lock();
 
         // Mark the message as delivered
-        *state.pending.get_mut(&self.sequence).unwrap() = true;
+        let index = (self.sequence - state.watermark - 1) as usize;
+        state.pending[index] = true;
 
-        // Update watermark if possible
-        let mut current_watermark = state.watermark;
-        while let Some(delivered) = state.pending.get(&(current_watermark + 1)) {
-            // If the next message is not delivered, we can stop
-            if !*delivered {
-                break;
-            }
-
-            // Remove the next message from the pending list
-            state.pending.remove(&(current_watermark + 1));
-            current_watermark += 1;
-            state.watermark = current_watermark;
+        // Advance past consecutive delivered messages
+        while state.pending.pop_front_if(|delivered| *delivered).is_some() {
+            state.watermark += 1;
         }
 
         // Update batch count (if necessary)
-        if let Some(batch) = &self.batch {
-            let count = state.batches.get_mut(batch).unwrap();
-            if *count > 1 {
-                *count -= 1;
+        if let Some(batch) = self.batch.take() {
+            let Entry::Occupied(mut entry) = state.batches.entry(batch) else {
+                panic!("batch must be tracked");
+            };
+            if *entry.get() > 1 {
+                *entry.get_mut() -= 1;
             } else {
-                state.batches.remove(batch);
+                entry.remove();
             }
         }
     }
@@ -118,7 +112,8 @@ struct State<B> {
     next: u64,
     watermark: u64,
     batches: HashMap<B, usize>,
-    pending: HashMap<u64, bool>,
+    /// `pending[i]` is whether sequence `watermark + 1 + i` has been delivered.
+    pending: VecDeque<bool>,
 }
 
 impl<B> Default for State<B> {
@@ -127,7 +122,7 @@ impl<B> Default for State<B> {
             next: 1,
             watermark: 0,
             batches: HashMap::new(),
-            pending: HashMap::new(),
+            pending: VecDeque::new(),
         }
     }
 }
@@ -159,7 +154,7 @@ impl<B: Eq + Hash + Clone> Tracker<B> {
         state.next += 1;
 
         // Track this sequence as not yet delivered
-        state.pending.insert(sequence, false);
+        state.pending.push_back(false);
 
         // Update batch count if provided
         if let Some(batch) = &batch {
@@ -285,6 +280,33 @@ mod tests {
             // Drop the guard to mark as delivered
             drop(msg.guard);
             assert_eq!(sender.watermark(), 1);
+        });
+    }
+
+    #[test]
+    fn test_out_of_order_delivery() {
+        block_on(async move {
+            let (sender, mut receiver) = bounded::<i32, u64>(4);
+            for value in 1..=4 {
+                sender.send(Some(1), value).await.unwrap();
+            }
+            let first = receiver.recv().await.unwrap();
+            let second = receiver.recv().await.unwrap();
+            let third = receiver.recv().await.unwrap();
+            let fourth = receiver.recv().await.unwrap();
+
+            drop(second);
+            drop(fourth);
+            assert_eq!(sender.watermark(), 0);
+            assert_eq!(sender.pending(1), 2);
+
+            drop(first);
+            assert_eq!(sender.watermark(), 2);
+            assert_eq!(sender.pending(1), 1);
+
+            drop(third);
+            assert_eq!(sender.watermark(), 4);
+            assert_eq!(sender.pending(1), 0);
         });
     }
 
