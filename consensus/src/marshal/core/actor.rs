@@ -872,6 +872,17 @@ where
             Message::GetProcessed { response, .. } => {
                 response.send_lossy(self.floor.processed());
             }
+            Message::GetAnchor { response, .. } => {
+                let anchor = match self.floor.processed() {
+                    Some(processed) => Some(
+                        self.get_finalized_block(processed.anchor())
+                            .await
+                            .expect("processed position must be backed by a stored block"),
+                    ),
+                    None => None,
+                };
+                response.send_lossy(anchor);
+            }
             Message::HintFinalized {
                 height, targets, ..
             } => {

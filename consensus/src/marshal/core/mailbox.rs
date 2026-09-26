@@ -70,6 +70,13 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         /// A channel to send the latest processed position.
         response: oneshot::Sender<Option<Processed>>,
     },
+    /// A request to retrieve the stored block that backs the latest processed position.
+    GetAnchor {
+        /// The span carried with this request.
+        span: Span,
+        /// A channel to send the backing block.
+        response: oneshot::Sender<Option<V::Block>>,
+    },
     /// A hint that a finalized block may be available at a given height.
     ///
     /// This triggers a network fetch if the finalization is not available locally.
@@ -305,6 +312,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             | Self::Finalization { span, .. }
             | Self::Certification { span, .. }
             | Self::GetProcessed { span, .. }
+            | Self::GetAnchor { span, .. }
             | Self::HintFinalized { span, .. }
             | Self::HintNotarized { span, .. }
             | Self::SetFloor { span, .. }
@@ -319,6 +327,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             Self::GetBlock { .. } => "get_block",
             Self::GetFinalization { .. } => "get_finalization",
             Self::GetProcessed { .. } => "get_processed",
+            Self::GetAnchor { .. } => "get_anchor",
             Self::HintFinalized { .. } => "hint_finalized",
             Self::SubscribeByDigest { .. } => "subscribe_by_digest",
             Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
@@ -361,7 +370,8 @@ impl<S: Scheme, V: Variant> Message<S, V> {
                 identifier: Identifier::Digest(_) | Identifier::Latest,
                 ..
             }
-            | Self::GetProcessed { .. } => false,
+            | Self::GetProcessed { .. }
+            | Self::GetAnchor { .. } => false,
             Self::HintNotarized { .. } => false,
             Self::SubscribeByDigest { .. }
             | Self::SubscribeByCommitment { .. }
@@ -383,6 +393,7 @@ impl<S: Scheme, V: Variant> Message<S, V> {
             }
             Self::GetFinalization { response, .. } => response.is_closed(),
             Self::GetProcessed { response, .. } => response.is_closed(),
+            Self::GetAnchor { response, .. } => response.is_closed(),
             Self::SubscribeByDigest { response, .. }
             | Self::SubscribeByCommitment { response, .. } => response.is_closed(),
             Self::HintNotarized { .. } => false,
@@ -715,12 +726,24 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
 
     /// Retrieve the latest processed position, if any.
     ///
-    /// [Processed::anchor] identifies the stored block that backs it, which can be read with
-    /// [Self::get_block].
+    /// Use [Self::get_anchor] to read the stored block that backs it.
     pub async fn get_processed(&self) -> Option<Processed> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetProcessed {
             span: info_span!("marshal.mailbox.get_processed"),
+            response,
+        });
+        receiver.await.ok().flatten()
+    }
+
+    /// Retrieve the stored block that backs the latest processed position, if any.
+    ///
+    /// This is the block at [Processed::anchor]: the processed block, or the floor block at the
+    /// next height when the processed block is [Processed::Absent].
+    pub async fn get_anchor(&self) -> Option<V::Block> {
+        let (response, receiver) = oneshot::channel();
+        let _ = self.sender.enqueue(Message::GetAnchor {
+            span: info_span!("marshal.mailbox.get_anchor"),
             response,
         });
         receiver.await.ok().flatten()

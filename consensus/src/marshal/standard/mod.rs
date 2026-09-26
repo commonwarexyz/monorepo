@@ -4755,6 +4755,10 @@ mod tests {
                 Some(Processed::Absent(Height::new(4)))
             );
             assert!(mailbox.get_block(Height::new(4)).await.is_none());
+            assert_eq!(
+                mailbox.get_anchor().await.map(|block| block.digest()),
+                Some(floor_block.digest())
+            );
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
@@ -4784,6 +4788,10 @@ mod tests {
             assert_eq!(
                 mailbox.get_processed().await,
                 Some(Processed::Absent(Height::new(4)))
+            );
+            assert_eq!(
+                mailbox.get_anchor().await.map(|block| block.digest()),
+                Some(floor_block.digest())
             );
         });
     }

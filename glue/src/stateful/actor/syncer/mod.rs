@@ -285,20 +285,6 @@ where
     }
 }
 
-/// Returns the stored block that backs marshal's durable processed position.
-///
-/// Glue cannot reopen below this position because marshal does not redeliver blocks at or below it.
-async fn processed_anchor<S, V>(marshal: &MarshalMailbox<S, V>, processed: Processed) -> V::Block
-where
-    S: Scheme,
-    V: Variant,
-{
-    marshal
-        .get_block(Identifier::Height(processed.anchor()))
-        .await
-        .expect("marshal must store the block backing its processed position")
-}
-
 /// Resolves a state sync floor that covers both the selected finalization and marshal's
 /// durable processed height.
 pub(crate) async fn resolve_state_sync_floor<E, A, S, V>(
@@ -329,7 +315,12 @@ where
         {
             V::into_shared(block)
         } else {
-            V::into_shared(processed_anchor(marshal, processed).await)
+            V::into_shared(
+                marshal
+                    .get_anchor()
+                    .await
+                    .expect("processed floor must have an anchor"),
+            )
         }
     } else {
         // Marshal's configured startup floor fetches its anchor when needed. This local-only
@@ -345,9 +336,12 @@ where
         // Marshal does not redeliver blocks at or below its durable processed position.
         // A newly installed floor records its predecessor, leaving the anchor for delivery.
         match marshal.get_processed().await {
-            Some(processed) if processed.height() > selected.height() => {
-                V::into_shared(processed_anchor(marshal, processed).await)
-            }
+            Some(processed) if processed.height() > selected.height() => V::into_shared(
+                marshal
+                    .get_anchor()
+                    .await
+                    .expect("processed height must have an anchor"),
+            ),
             _ => selected,
         }
     };
@@ -391,7 +385,12 @@ where
     let floor_block = if let Some(processed) = processed
         && processed.height() == marshal_floor
     {
-        V::into_shared(processed_anchor(marshal, processed).await)
+        V::into_shared(
+            marshal
+                .get_anchor()
+                .await
+                .expect("processed height must have an anchor"),
+        )
     } else {
         V::into_shared(
             marshal

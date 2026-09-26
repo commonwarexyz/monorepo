@@ -3427,6 +3427,7 @@ pub fn genesis_emitted_once<H: TestHarness>() {
         .await;
         assert_eq!(setup.height, None);
         assert_eq!(setup.mailbox.get_processed().await, None);
+        assert!(setup.mailbox.get_anchor().await.is_none());
         assert_eq!(setup.application.acknowledged().await, Height::zero());
         context.sleep(Duration::from_millis(10)).await;
         assert_eq!(
@@ -3891,6 +3892,10 @@ pub fn floor_retains_processed_predecessor<H: TestHarness>() {
         assert_eq!(
             mailbox.get_processed().await,
             Some(Processed::Block(Height::new(19)))
+        );
+        assert_eq!(
+            mailbox.get_anchor().await.map(|block| block.height()),
+            Some(Height::new(19))
         );
 
         // Installing the floor prunes before it dispatches block 20, so processing 20 means
