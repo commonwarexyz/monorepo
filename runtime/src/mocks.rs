@@ -1615,6 +1615,79 @@ mod tests {
     }
 
     #[test]
+    fn delayed_read_blob_forwards_resize_and_sync() {
+        deterministic::Runner::default().start(|context| async move {
+            let context = DelayedReadContext {
+                inner: context,
+                pending: Gates::default(),
+            };
+            let (blob, _) = context.open("delayed_read_sync", b"blob").await.unwrap();
+            blob.write_at(0, b"data", WriteOptions::default())
+                .await
+                .unwrap();
+            blob.resize(2).await.unwrap();
+            blob.sync().await.unwrap();
+            blob.start_sync().await.await.unwrap();
+            let read = blob.read_at(0, 2, ReadOptions::default()).await.unwrap();
+            assert_eq!(read.coalesce(), b"da");
+        });
+    }
+
+    #[test]
+    fn delayed_open_context_gates_the_next_open() {
+        deterministic::Runner::default().start(|context| async move {
+            let gates = Gates::default();
+            let context = DelayedOpenContext {
+                inner: context,
+                pending: gates.clone(),
+            };
+
+            // An open with no armed gate proceeds at once.
+            drop(context.open("delayed_open", b"free").await.unwrap());
+
+            // An armed gate holds the next open until it is released.
+            let Gated { release, blocked } = gates.arm();
+            let handle = context.child("gated_open").spawn(|context| async move {
+                context
+                    .open("delayed_open", b"gated")
+                    .await
+                    .map(|(_, len)| len)
+            });
+            blocked.await.unwrap();
+            release.send(()).unwrap();
+            assert_eq!(handle.await.unwrap().unwrap(), 0);
+
+            // Dropping the release fails the gated open.
+            let Gated {
+                release,
+                blocked: _blocked,
+            } = gates.arm();
+            drop(release);
+            assert!(matches!(
+                context.open("delayed_open", b"closed").await,
+                Err(Error::Closed)
+            ));
+        });
+    }
+
+    #[test]
+    fn delayed_open_context_forwards_spawner_configuration() {
+        deterministic::Runner::default().start(|context| async move {
+            let context = DelayedOpenContext {
+                inner: context,
+                pending: Gates::default(),
+            };
+            let shared = context.child("shared").shared(true).spawn(|_| async { 1 });
+            let dedicated = context
+                .child("dedicated")
+                .dedicated()
+                .spawn(|_| async { 2 });
+            assert_eq!(shared.await.unwrap() + dedicated.await.unwrap(), 3);
+            context.stop(0, None).await.unwrap();
+        });
+    }
+
+    #[test]
     fn delayed_sync_blob_forwards_read_options() {
         deterministic::Runner::default().start(|context| async move {
             let (inner, recordings) = RecordingContext::new(context);
