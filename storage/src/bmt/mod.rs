@@ -53,6 +53,9 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_utils::{non_empty_vec, vec::NonEmptyVec};
 use thiserror::Error;
 
+/// Messages per [`Hasher::hash_many_parts`] call when building a tree, bounding the working set.
+const WINDOW: usize = 256;
+
 /// There should never be more than 32 sibling levels in a proof. Because
 /// [Proof::leaf_count] is a `u32`, a tree can have at most `u32::MAX` leaves,
 /// which requires at most `u32::BITS` sibling hashes per proven item.
@@ -88,7 +91,7 @@ impl<H: Hasher> Builder<H> {
 
     /// Adds a leaf to the Binary Merkle Tree.
     ///
-    /// When added, the leaf is hashed with its position.
+    /// The leaf is hashed with its position when the tree is built.
     ///
     /// # Panics
     ///
@@ -99,8 +102,7 @@ impl<H: Hasher> Builder<H> {
         let position: u32 = self.leaves.len().try_into().expect("too many leaves");
         assert!(position < u32::MAX, "too many leaves");
 
-        let digest = H::hash(&[&position.to_be_bytes(), leaf.as_ref()]);
-        self.leaves.push(digest);
+        self.leaves.push(*leaf);
         position
     }
 
@@ -109,7 +111,23 @@ impl<H: Hasher> Builder<H> {
     /// It is valid to build a tree with no leaves, in which case
     /// just an "empty" node is included (no leaves will be provable).
     pub fn build(self) -> Tree<H::Digest> {
-        Tree::new::<H>(self.leaves)
+        // Hash each leaf with its position, a window at a time so the hasher can
+        // work on many leaves at once (see `Hasher::hash_many_parts`).
+        let mut digests = Vec::with_capacity(self.leaves.len());
+        for (index, window) in self.leaves.chunks(WINDOW).enumerate() {
+            let first = (index * WINDOW) as u32;
+            let mut positions = [[0u8; 4]; WINDOW];
+            for (offset, position) in positions.iter_mut().take(window.len()).enumerate() {
+                *position = (first + offset as u32).to_be_bytes();
+            }
+            let messages: Vec<[&[u8]; 2]> = positions
+                .iter()
+                .zip(window)
+                .map(|(position, leaf)| [position.as_slice(), leaf.as_ref()])
+                .collect();
+            digests.extend(H::hash_many_parts(&messages));
+        }
+        Tree::new::<H>(digests)
     }
 }
 
@@ -150,16 +168,22 @@ impl<D: Digest> Tree<D> {
         // Construct the tree level-by-level
         let mut current_level = levels.last();
         while !current_level.is_singleton() {
-            // Hash every sibling pair of the level together, duplicating an unpaired
-            // trailing node, so the hasher can work on many independent messages at once
-            // (see `Hasher::hash_many_parts`).
-            let (pairs, rest) = current_level.as_chunks::<2>();
-            let messages: Vec<[&[u8]; 2]> = pairs
-                .iter()
-                .map(|[a, b]| [a.as_ref(), b.as_ref()])
-                .chain(rest.iter().map(|a| [a.as_ref(), a.as_ref()]))
-                .collect();
-            let next_level = H::hash_many_parts(&messages);
+            // Hash sibling pairs a window at a time, duplicating an unpaired trailing
+            // node, so the hasher can work on many independent messages at once (see
+            // `Hasher::hash_many_parts`).
+            let mut next_level = Vec::with_capacity(current_level.len().get().div_ceil(2));
+            let mut messages: Vec<[&[u8]; 2]> = Vec::with_capacity(WINDOW);
+            for window in current_level.chunks(2 * WINDOW) {
+                let (pairs, rest) = window.as_chunks::<2>();
+                messages.clear();
+                messages.extend(
+                    pairs
+                        .iter()
+                        .map(|[a, b]| [a.as_ref(), b.as_ref()])
+                        .chain(rest.iter().map(|a| [a.as_ref(), a.as_ref()])),
+                );
+                next_level.extend(H::hash_many_parts(&messages));
+            }
 
             // Add the computed level to the tree
             levels.push(non_empty_vec![@next_level]);

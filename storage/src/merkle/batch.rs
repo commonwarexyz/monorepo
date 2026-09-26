@@ -440,14 +440,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
 
         let mut output = Vec::with_capacity(positions.len());
+        let mut nodes = Vec::with_capacity(WINDOW.min(positions.len()));
         for window in positions.chunks(WINDOW) {
-            let nodes: Vec<_> = window
-                .iter()
-                .map(|&pos| {
-                    let (left, right) = self.child_digests(base, pos, height);
-                    (pos, left, right)
-                })
-                .collect();
+            nodes.clear();
+            nodes.extend(window.iter().map(|&pos| {
+                let (left, right) = self.child_digests(base, pos, height);
+                (pos, left, right)
+            }));
             output.extend(zip_eq(window.iter().copied(), hasher.node_digests(&nodes)));
         }
         output
