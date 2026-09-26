@@ -32,6 +32,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Handle, ReadOptions};
+use commonware_utils::NZU64;
 use core::{
     num::{NonZeroU64, NonZeroUsize},
     ops::Range,
@@ -377,12 +378,10 @@ where
     ///
     /// # Errors
     ///
-    /// - Returns [Error::Merkle] with [merkle::Error::LocationOverflow] if `start_loc` >
-    ///   [Family::MAX_LEAVES].
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >= current
     ///   item count.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
     pub async fn proof(
         &self,
         start_loc: Location<F>,
@@ -446,8 +445,8 @@ where
     ///
     /// - Returns [Error::Merkle] with [merkle::Error::RangeOutOfBounds] if `start_loc` >=
     ///   `historical_leaves` or `historical_leaves` > number of items in the journal.
-    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] if `start_loc` has been
-    ///   pruned.
+    /// - Returns [Error::Journal] with [crate::journal::Error::ItemPruned] or [Error::Merkle] with
+    ///   [merkle::Error::ElementPruned] if a required item or Merkle node has been pruned.
     pub async fn historical_proof(
         &self,
         historical_leaves: Location<F>,
@@ -623,7 +622,7 @@ where
         merkle: Merkle<F, E, H::Digest, S>,
         journal: C,
         hasher: StandardHasher<H>,
-        apply_batch_size: u64,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Self, Error<F>> {
         let merkle = Self::align(merkle, &journal, &hasher, apply_batch_size).await?;
 
@@ -647,7 +646,7 @@ where
         mut merkle: Merkle<F, E, H::Digest, S>,
         journal: &C,
         hasher: &StandardHasher<H>,
-        apply_batch_size: u64,
+        apply_batch_size: NonZeroU64,
     ) -> Result<Merkle<F, E, H::Digest, S>, Error<F>> {
         let journal_size = journal.bounds().end;
         let mut merkle_leaves = merkle.leaves();
@@ -666,7 +665,7 @@ where
             );
 
             while merkle_leaves < journal_size {
-                let count = apply_batch_size.min(journal_size - *merkle_leaves);
+                let count = apply_batch_size.get().min(journal_size - *merkle_leaves);
                 let mut items = Vec::with_capacity(count as usize);
                 for _ in 0..count {
                     items.push(journal.read(*merkle_leaves).await?);
@@ -768,10 +767,12 @@ where
         Ok(self)
     }
 
-    /// Prune both the Merkle structure and journal to the given location.
+    /// Prune journal items before `prune_loc`, then raise the Merkle pruning boundary to the
+    /// journal's retained start if it is lower.
     ///
     /// # Returns
-    /// The new pruning boundary, which may be less than the requested `prune_loc`.
+    /// The journal's retained start, which may be less than `prune_loc`. After state sync, the
+    /// Merkle pruning boundary can remain above the returned start.
     #[boxed]
     pub async fn prune(self, prune_loc: Location<F>) -> Result<(Self, Location<F>), Error<F>> {
         let (journal, boundary, _) = self.prune_inner(prune_loc).await?;
@@ -911,7 +912,7 @@ where
 }
 
 /// The number of items to apply to the Merkle structure in a single batch.
-const APPLY_BATCH_SIZE: u64 = 1 << 16;
+const APPLY_BATCH_SIZE: NonZeroU64 = NZU64!(1 << 16);
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
@@ -1198,7 +1199,7 @@ pub trait BackingRecovery: Send + Sync + Sized {
 /// A [Mutable] journal that can back an authenticated [Journal].
 pub trait Backing<E: Context>: Mutable {
     /// The configuration needed to initialize this journal.
-    type Config: Clone + Send;
+    type Config: Clone + Send + Sync;
 
     /// Initialization-owned storage used to select and validate the retained prefix.
     type Recovery: BackingRecovery<Journal = Self>;
@@ -1211,6 +1212,54 @@ pub trait Backing<E: Context>: Mutable {
         cfg: Self::Config,
         max_size: Option<u64>,
     ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Open recovery storage reset to an empty journal at `size`, discarding stored items
+    /// without reading them. Returns [JournalError::SizeOverflow] for `u64::MAX`.
+    fn clear(
+        context: E,
+        cfg: Self::Config,
+        size: u64,
+    ) -> impl Future<Output = Result<Self::Recovery, JournalError>> + Send;
+
+    /// Positions stored items may occupy, determined without reading them.
+    ///
+    /// The start is the retained start and the end bounds every stored item. A pending reset
+    /// yields an empty span at its target.
+    fn span(
+        context: E,
+        cfg: &Self::Config,
+    ) -> impl Future<Output = Result<Range<u64>, JournalError>> + Send;
+}
+
+/// Whether `span` contains `position` or is empty exactly at it.
+fn covers(span: &Range<u64>, position: u64) -> bool {
+    position == span.start || span.contains(&position)
+}
+
+/// A [Backing] journal's storage, as [Stored::open] leaves it.
+pub(crate) enum Stored<E: Context, J: Backing<E>> {
+    /// Recovery opened bounded at the requested end.
+    Opened(J::Recovery),
+
+    /// Storage whose span cannot hold the requested position, left unopened.
+    Unopened { context: E, cfg: J::Config },
+}
+
+impl<E: Context, J: Backing<E>> Stored<E, J> {
+    /// Open recovery bounded at `max_size` when [Backing::span] contains `position` or is empty
+    /// exactly at it. Otherwise return the storage unopened.
+    pub(crate) async fn open(
+        context: E,
+        cfg: J::Config,
+        position: u64,
+        max_size: u64,
+    ) -> Result<Self, JournalError> {
+        if !covers(&J::span(context.child("span"), &cfg).await?, position) {
+            return Ok(Self::Unopened { context, cfg });
+        }
+        let recovery = J::recover(context, cfg, Some(max_size)).await?;
+        Ok(Self::Opened(recovery))
+    }
 }
 
 /// Recover the portion useful for state sync, or reset an unusable local range.
@@ -1221,20 +1270,14 @@ pub(crate) async fn init_sync<E: Context, J: Backing<E>>(
 ) -> Result<J, JournalError> {
     assert!(!range.is_empty(), "range must not be empty");
 
-    // Sync targets describe the same append-only log. Recover local history before choosing the
-    // prefix to reuse for this target.
-    let pending = J::recover(context, cfg, None).await?;
-    let bounds = pending.bounds();
-
-    // A fresh journal already aligned with the sync start needs no reset.
-    if bounds == (0..0) && range.start == 0 {
-        return pending.finish(0).await;
-    }
-
-    // Fetch the range anew when its start is pruned or local progress does not reach it.
-    if bounds.start > range.start || bounds.end <= range.start {
-        return pending.reset(range.start).await?.finish(range.start).await;
-    }
+    // Storage whose span cannot hold the sync start is cleared without reading stored items.
+    // The span end reflects blob capacity, which can overstate the recovered end when the tail
+    // is short or has a gap, so an opened prefix that does not cover the sync start is reset.
+    let pending = match Stored::<E, J>::open(context, cfg, range.start, range.end).await? {
+        Stored::Opened(pending) if covers(&pending.bounds(), range.start) => pending,
+        Stored::Opened(pending) => pending.reset(range.start).await?,
+        Stored::Unopened { context, cfg } => J::clear(context, cfg, range.start).await?,
+    };
 
     // Publish the retained prefix before pruning complete sections below the sync start.
     let journal = pending.finish(range.end).await?;
@@ -1796,7 +1839,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let serial = TestJournal::<F>::align(serial, &journal, &hasher, 7)
+        let serial = TestJournal::<F>::align(serial, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 
@@ -1811,7 +1854,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, 7)
+        let parallel = ParallelJournal::<F>::align(parallel, &journal, &hasher, NZU64!(7))
             .await
             .unwrap();
 
@@ -2872,11 +2915,13 @@ mod tests {
         assert_eq!(journal.bounds().start, 0);
 
         // Test no pruning
+        drop(journal);
         let journal =
             create_journal_with_ops::<F>(context.child("no_prune"), "boundary", 100).await;
         assert_eq!(journal.bounds().start, 0);
 
         // Test after pruning
+        drop(journal);
         let mut journal =
             create_journal_with_ops::<F>(context.child("pruned"), "boundary", 100).await;
         (journal, _) = journal
@@ -3229,13 +3274,15 @@ mod tests {
     /// Verify replay() with empty journal and multiple operations.
     async fn test_replay_operations_inner<F: Family + PartialEq>(context: Context) {
         // Test empty journal
-        let journal = create_empty_journal::<F>(context.child("empty"), "replay").await;
-        let stream = journal
-            .replay(0, NZUsize!(10), ReadOptions::default())
-            .await
-            .unwrap();
-        futures::pin_mut!(stream);
-        assert!(stream.next().await.is_none());
+        {
+            let journal = create_empty_journal::<F>(context.child("empty"), "replay").await;
+            let stream = journal
+                .replay(0, NZUsize!(10), ReadOptions::default())
+                .await
+                .unwrap();
+            futures::pin_mut!(stream);
+            assert!(stream.next().await.is_none());
+        }
 
         // Test replaying all operations
         let journal = create_journal_with_ops::<F>(context.child("with_ops"), "replay", 50).await;

@@ -306,8 +306,8 @@ async fn run_engine<B, M, A, EC, VS, CS, RS, BS, FS>(
 
     // The startup plan decides between marshal reconciliation and peer state
     // sync. A node that syncs discovers its floor through its probe first.
-    let startup = context.child("stateful_startup");
-    let mut plan = SyncPlan::init(&startup, partition_prefix.clone()).await;
+    let mut plan =
+        SyncPlan::init(context.child("stateful_startup"), partition_prefix.clone()).await;
     let should_state_sync = plan.should_state_sync(state_sync);
     assert!(
         !should_state_sync || channels.probe.is_some(),

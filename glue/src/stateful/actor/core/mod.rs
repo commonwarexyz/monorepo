@@ -261,7 +261,7 @@ where
             sync: SyncResult { databases, anchor },
             skip_finalized_until,
         } = syncer::init_databases_from_marshal::<E, A, S, V>(
-            self.context.as_present(),
+            self.context.child("databases"),
             &marshal,
             self.db_config,
             self.plan.into_sync_metadata(),
@@ -399,7 +399,8 @@ mod tests {
             )
             .await;
 
-            let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
+            let plan =
+                SyncPlan::init(context.child("plan"), "pending-floor-stateful".to_string()).await;
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -458,7 +459,7 @@ mod tests {
             .await;
 
             let (resolver, startup_started, startup_release) = NoopResolver::gated();
-            let plan = SyncPlan::init(&context, format!("{prefix}-stateful")).await;
+            let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {

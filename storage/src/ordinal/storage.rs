@@ -13,6 +13,7 @@ use futures::future::try_join_all;
 use std::{
     collections::{BTreeMap, BTreeSet, btree_map::Entry},
     marker::PhantomData,
+    sync::Arc,
 };
 use tracing::{debug, warn};
 
@@ -150,7 +151,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             }
 
             debug!(blob = index, len, "found index blob");
-            blobs.insert(index, (blob, len));
+            blobs.insert(index, (Arc::new(blob), len));
         }
 
         // Initialize intervals by scanning committed records
@@ -224,7 +225,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 // re-read and damage surfaces at get. Membership of an unmarked section
                 // comes from record validity, so its records must be read.
                 let mut replay_blob = bits.is_none().then(|| {
-                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer)
+                    ReadBuffer::from_pooler(&context, Arc::clone(blob), *size, config.replay_buffer)
                 });
                 while let Some(bit_index) = set_indices
                     .as_mut()
@@ -262,6 +263,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let blobs = blobs
             .into_iter()
             .map(|(index, (blob, len))| {
+                let blob = Arc::into_inner(blob).expect("replay readers must be closed");
                 (
                     index,
                     Write::from_pooler(&context, blob, len, config.write_buffer),

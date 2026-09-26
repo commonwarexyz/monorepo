@@ -207,6 +207,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "reed_solomon_engine"
+path = "fuzz_targets/reed_solomon_engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "ed25519_certificate"
 path = "fuzz_targets/ed25519_certificate.rs"
 test = false
@@ -258,6 +265,13 @@ bench = false
 [[bin]]
 name = "reed_solomon_engine_neon"
 path = "fuzz_targets/reed_solomon_engine_neon.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reed_solomon_rate"
+path = "fuzz_targets/reed_solomon_rate.rs"
 test = false
 doc = false
 bench = false

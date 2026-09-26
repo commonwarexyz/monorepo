@@ -1,6 +1,42 @@
-//! Vendored version of [`reed_solomon_simd`].
+//! Encode and reconstruct shards using Reed-Solomon erasure coding over GF(2^16).
+//!
+//! [`Encoder`] and [`Decoder`] select a rate and CPU engine automatically. Every shard
+//! must have the same nonzero, even byte length. [`Encoder::supports`] checks whether
+//! a pair of original and recovery shard counts is supported.
+//!
+//! Decoding requires at least as many distinct shards as there were original shards.
+//! All supplied shards must belong to the same codeword: this module reconstructs
+//! missing shards and does not authenticate their contents.
+//!
+//! [`Plan`] prepares erasure coefficients once for decoders that share shard
+//! counts and received indices, even when their shard byte lengths differ.
+//!
+//! # Basic Usage
+//!
+//! ```
+//! use commonware_cryptography::reed_solomon::{Decoder, Encoder};
+//!
+//! let originals = [[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]];
+//! let mut encoder = Encoder::new(2, 1, 6)?;
+//! for shard in &originals {
+//!     encoder.add_original_shard(shard)?;
+//! }
+//! let encoded = encoder.encode()?;
+//!
+//! let mut decoder = Decoder::new(2, 1, 6)?;
+//! decoder.add_original_shard(0, originals[0])?;
+//! decoder.add_recovery_shard(0, encoded.recovery(0).unwrap())?;
+//! let decoded = decoder.decode()?.unwrap();
+//! assert_eq!(decoded.original(1), Some(originals[1].as_slice()));
+//! # Ok::<(), commonware_cryptography::reed_solomon::Error>(())
+//! ```
+//!
+//! Result objects borrow the working buffers. Dropping a result resets its encoder
+//! or decoder for another round with the same configuration.
 //!
 //! # Changes vs. Upstream
+//!
+//! This module vendors [`reed_solomon_simd`].
 //!
 //! - Moved the crate into `commonware_cryptography::reed_solomon` and rewrote internal
 //!   `crate::` paths accordingly.
@@ -10,8 +46,22 @@
 //!   and naming rules.
 //! - Uses workspace dependencies and [`commonware_formatting`] in the test harness.
 //! - Uses [`thiserror`] for error display formatting.
-//! - Renamed upstream `ReedSolomonEncoder` and `ReedSolomonDecoder` to [`Encoder`] and [`Decoder`].
+//! - Renamed upstream `ReedSolomonEncoder` and `ReedSolomonDecoder` to [`Encoder`] and [`Decoder`],
+//!   and the `NoSimd` engine to [`Scalar`](engine::Scalar).
 //! - Uses plain code references for cfg-gated SIMD engine docs so rustdoc works on all targets.
+//! - Validates transform domains, shard ranges, and working-space sizes at their public boundaries.
+//! - Supports AVX-512 with GFNI multiplication and runtime CPU feature checks.
+//! - Adds [`Plan`] and plan-based decoding to reuse erasure coefficients across decoders.
+//! - Sizes decoder Walsh transforms to the decoding domain.
+//! - Fuses AVX-512 butterfly layers.
+//! - Fuses formal-derivative leaves in blocks of four shards for every engine. When the `Avx512`
+//!   engine's CPU features are present, blocks of 16 shards use an AVX-512 leaf for suitable shard
+//!   counts and sizes, regardless of the selected engine.
+//! - Builds the 128-bit multiplication tables in native byte order, since the Neon, Avx2, and
+//!   Ssse3 engines read each table as a vector of its in-memory bytes.
+//! - Includes independent field-arithmetic checks, lifecycle regressions, and differential fuzzing.
+//! - Rewrote comments in Commonware style: removed section banners and uppercase step headers,
+//!   and attached floating comments to the code they describe.
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd
 //! [`thiserror`]: https://docs.rs/thiserror
@@ -25,6 +75,7 @@ pub use self::{
     decoder_result::{DecoderResult, Originals, Recoveries, RecoveryDecoderResult},
     encoder_result::{EncoderResult, Recovery},
     engine::SHARD_CHUNK_BYTES,
+    plan::Plan,
     wrappers::{Decoder, Encoder},
 };
 use thiserror::Error;
@@ -33,8 +84,12 @@ use thiserror::Error;
 #[macro_use]
 mod test_util;
 
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz;
+
 mod decoder_result;
 mod encoder_result;
+mod plan;
 mod wrappers;
 
 pub mod algorithm {
@@ -55,21 +110,21 @@ pub enum Error {
         got: usize,
     },
 
-    /// Decoder was given two original shards with same index.
+    /// Decoder or [`Plan`] was given the same original shard index twice.
     #[error("duplicate original shard index: {index}")]
     DuplicateOriginalShardIndex {
         /// Given duplicate index.
         index: usize,
     },
 
-    /// Decoder was given two recovery shards with same index.
+    /// Decoder or [`Plan`] was given the same recovery shard index twice.
     #[error("duplicate recovery shard index: {index}")]
     DuplicateRecoveryShardIndex {
         /// Given duplicate index.
         index: usize,
     },
 
-    /// Decoder was given original shard with invalid index,
+    /// Decoder or [`Plan`] was given an invalid original shard index,
     /// i.e. `index >= original_count`.
     #[error("invalid original shard index: {index} >= original_count {original_count}")]
     InvalidOriginalShardIndex {
@@ -79,7 +134,7 @@ pub enum Error {
         index: usize,
     },
 
-    /// Decoder was given recovery shard with invalid index,
+    /// Decoder or [`Plan`] was given an invalid recovery shard index,
     /// i.e. `index >= recovery_count`.
     #[error("invalid recovery shard index: {index} >= recovery_count {recovery_count}")]
     InvalidRecoveryShardIndex {
@@ -89,14 +144,15 @@ pub enum Error {
         index: usize,
     },
 
-    /// Configured shard size is invalid: size must be non-zero and even.
-    #[error("invalid shard size: {shard_bytes} bytes (must non-zero and multiple of 2)")]
+    /// Configured shard size is zero, odd, or requires more working space than a single
+    /// allocation can hold.
+    #[error("invalid shard size: {shard_bytes} bytes (zero, odd, or working space too large)")]
     InvalidShardSize {
         /// Configured shard size.
         shard_bytes: usize,
     },
 
-    /// Decoder was given too few shards.
+    /// Decoder or [`Plan`] was given too few shards.
     ///
     /// Decoding requires as many shards as there were original shards
     /// in total, in any combination of original shards and recovery shards.
@@ -106,11 +162,16 @@ pub enum Error {
     NotEnoughShards {
         /// Configured number of original shards.
         original_count: usize,
-        /// Number of original shards given to decoder.
+        /// Number of original shards given.
         original_received_count: usize,
-        /// Number of recovery shards given to decoder.
+        /// Number of recovery shards given.
         recovery_received_count: usize,
     },
+
+    /// Decoder was given a [`Plan`] built for different shard counts or received
+    /// shard indices.
+    #[error("plan does not match decoder")]
+    PlanMismatch,
 
     /// Encoder was given less than `original_count` original shards.
     #[error(
@@ -176,6 +237,7 @@ mod tests {
         fn assert_send<T: Send>() {}
         assert_send::<Encoder>();
         assert_send::<Decoder>();
+        assert_send::<Plan>();
         assert_send::<DefaultEngine>();
         assert_send::<DefaultRate<DefaultEngine>>();
         assert_send::<DecoderResult<'_>>();
@@ -189,6 +251,7 @@ mod tests {
         fn assert_sync<T: Sync>() {}
         assert_sync::<Encoder>();
         assert_sync::<Decoder>();
+        assert_sync::<Plan>();
         assert_sync::<DefaultEngine>();
         assert_sync::<DefaultRate<DefaultEngine>>();
         assert_sync::<DecoderResult<'_>>();

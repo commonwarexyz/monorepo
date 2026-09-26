@@ -3382,6 +3382,8 @@ pub fn ack_pipeline_backlog_persists_on_restart<H: TestHarness>() {
         );
 
         // Restart marshal and confirm the processed height restored from metadata.
+        setup.actor_handle.abort();
+        let _ = setup.actor_handle.await;
         let restart = H::setup_validator_with(
             context
                 .child("validator_restart")
@@ -5486,6 +5488,9 @@ pub fn broadcast_caches_block<H: TestHarness>() {
             .expect("block should be cached after broadcast");
 
         // Restart marshal, removing any in-memory cache
+        drop(handle);
+        setup.actor_handle.abort();
+        let _ = setup.actor_handle.await;
         let setup2 = H::setup_validator(
             context
                 .child("validator_restart")

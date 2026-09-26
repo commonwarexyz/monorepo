@@ -181,10 +181,10 @@ where
     C: Digest,
 {
     /// Load the durable state-sync metadata partition, creating it if needed.
-    pub(crate) async fn init(context: &E, partition_prefix: impl AsRef<str>) -> Self {
+    pub(crate) async fn init(context: E, partition_prefix: impl AsRef<str>) -> Self {
         let partition_prefix = partition_prefix.as_ref().to_string();
         let metadata = Metadata::init(
-            context.child("metadata"),
+            context,
             metadata::Config {
                 partition: format!("{partition_prefix}{SYNC_METADATA_SUFFIX}"),
                 codec_config: S::certificate_codec_config_unbounded(),
@@ -377,7 +377,7 @@ where
 /// The marshal target constrains recovery before database publication. Startup panics
 /// if any recovered database does not match its complete target.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
-    context: &E,
+    context: E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
@@ -423,8 +423,7 @@ where
     // at this target discards its extra suffix before the set is exposed. A missing target,
     // including one lost to corruption or excessive pruning, makes startup fail.
     let processed_targets = A::sync_targets(&floor_block);
-    let databases =
-        A::Databases::init(context.child("db_set"), db_config, Some(processed_targets)).await;
+    let databases = A::Databases::init(context, db_config, Some(processed_targets)).await;
 
     // Once startup has aligned databases with marshal, future boots should skip peer
     // state sync and recover from the later of this anchor and marshal's durable

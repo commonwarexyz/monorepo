@@ -8,6 +8,7 @@
 //! and that they can be looked up by their identifiers.
 
 mod channels;
+mod connection;
 mod data;
 pub use crate::sizing::peer_set_limit;
 pub use data::{MAX_PAYLOAD_OVERHEAD, max_size};
@@ -18,3 +19,4 @@ mod mailbox;
 pub use mailbox::Mailbox;
 mod relay;
 mod router;
+mod throttle;

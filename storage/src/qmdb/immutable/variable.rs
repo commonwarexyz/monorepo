@@ -214,6 +214,8 @@ mod tests {
     }
 
     immutable_tests! {
+        test_variable_merkleize_foreign_db => run_merkleize_foreign_db, pair;
+        test_variable_merkleize_stale_sibling => run_merkleize_stale_sibling, open;
         test_variable_empty => run_empty, open;
         test_variable_build_basic => run_build_basic, open;
         test_variable_proof_verify => run_proof_verify, open;
@@ -295,13 +297,15 @@ mod tests {
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&db, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .set(k1, v1)
             .set(k2, v2)
             .merkleize(&compact, Some(metadata), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 

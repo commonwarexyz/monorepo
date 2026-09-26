@@ -136,7 +136,7 @@ mod tests {
                 for value in 0..count {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch.merkleize(&db, None, Location::new(0)).await;
+                let batch = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 commits.push((db.bounds().end, db.root()));
             }
@@ -170,7 +170,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(999))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             (db, _) = db.apply_batch(batch).await.unwrap();
             db = db.sync().await.unwrap();
             let appended = (db.bounds().end, db.root());
@@ -216,7 +217,7 @@ mod tests {
                 for value in 0..count {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch.merkleize(&db, None, Location::new(0)).await;
+                let batch = batch.merkleize(&db, None, Location::new(0)).await.unwrap();
                 (db, _) = db.apply_batch(batch).await.unwrap();
                 commits.push((db.size(), db.root()));
             }
@@ -253,7 +254,8 @@ mod tests {
                 .new_batch()
                 .append(U64::new(999))
                 .merkleize(&db, None, Location::new(0))
-                .await;
+                .await
+                .unwrap();
             (db, _) = db.apply_batch(batch).await.unwrap();
             db = db.sync().await.unwrap();
             let appended = (db.size(), db.root());
@@ -288,9 +290,14 @@ mod tests {
             for value in 0..10 {
                 batch = batch.append(U64::new(value));
             }
-            let batch = batch.merkleize(&source, None, Location::new(0)).await;
+            let batch = batch
+                .merkleize(&source, None, Location::new(0))
+                .await
+                .unwrap();
             let (source, _) = source.apply_batch(batch).await.unwrap();
             let source = Arc::new(source.sync().await.unwrap());
+            let source_root = source.root();
+            let source_end = source.bounds().end;
 
             // Import a suffix whose logical inactivity floor precedes its retained start.
             let client_cfg = db_config("synced-range-client", &context, Sequential);
@@ -298,8 +305,8 @@ mod tests {
                 context: context.child("client"),
                 db_config: client_cfg.clone(),
                 target: sync::Target {
-                    root: source.root(),
-                    range: non_empty_range!(Location::new(5), source.bounds().end),
+                    root: source_root,
+                    range: non_empty_range!(Location::new(5), source_end),
                 },
                 source,
                 apply_batch_size: NZU64!(10),
@@ -315,11 +322,14 @@ mod tests {
             assert_eq!(*client.bounds().start, 5);
             assert_eq!(*client.inactivity_floor_loc(), 0);
 
-            // Persist and reopen the imported prefix without requiring replay from its floor.
+            // Persist and reopen the imported suffix without requiring replay from its floor.
             _ = client.sync().await.unwrap();
-            TestDb::<mmr::Family>::init(context.child("reopened"), client_cfg, None)
+            let client = TestDb::<mmr::Family>::init(context.child("reopened"), client_cfg, None)
                 .await
                 .unwrap();
+            assert_eq!(client.bounds(), Location::new(5)..source_end);
+            assert_eq!(*client.sync_boundary(), 0);
+            assert_eq!(client.root(), source_root);
         });
     }
 
@@ -347,20 +357,19 @@ mod tests {
     /// uses large pages and blobs: an apply that fills the write buffer or rolls the blob over
     /// waits for the in-flight sync, so mid-sync applies must stay clear of both.
     fn open_delayed_db(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         suffix: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let mut cfg = db_config(suffix, context, Sequential);
-        let page_cache = CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(8));
+        let mut cfg = db_config(suffix, &context, Sequential);
+        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
         cfg.log.items_per_blob = NZU64!(1000);
         cfg.log.page_cache = page_cache.clone();
         cfg.merkle.items_per_blob = NZU64!(1000);
         cfg.merkle.page_cache = page_cache;
         DelayedDb::init(
             DelayedSyncContext {
-                inner: context.child(label),
+                inner: context,
                 pending: pending.clone(),
             },
             cfg,
@@ -379,7 +388,8 @@ mod tests {
             .new_batch()
             .append(value)
             .merkleize(&db, None, floor)
-            .await;
+            .await
+            .unwrap();
         let (db, range) = db.apply_batch(batch).await.unwrap();
         (db, range.start)
     }
@@ -389,7 +399,7 @@ mod tests {
     fn test_keyless_fixed_start_sync_overlaps_work() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-overlap", &pending);
+            let open = open_delayed_db(ctx.child("delayed"), "start-sync-overlap", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             let value0 = U64::new(1);
             let loc0;
@@ -434,7 +444,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", "start-sync-overlap", &pending)
+            let db = open_delayed_db(ctx.child("reopen"), "start-sync-overlap", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -451,7 +461,7 @@ mod tests {
             // Pass syncs through so opening the database doesn't park.
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-fail", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-fail", &pending)
                 .await
                 .unwrap();
             let floor = db.inactivity_floor_loc();
@@ -486,7 +496,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "start-sync-recovery", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
             let value = U64::new(1);
@@ -500,7 +510,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", "start-sync-recovery", &pending)
+            let db = open_delayed_db(ctx.child("reopen"), "start-sync-recovery", &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -624,7 +634,7 @@ mod tests {
     fn test_keyless_fixed_start_sync_prune_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "start-sync-prune", &pending);
+            let open = open_delayed_db(ctx.child("delayed"), "start-sync-prune", &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             // Two batches: the second declares floor 2 so the prune below is non-trivial.
             (db, _) = apply_append(db, U64::new(1), Location::new(0)).await;
@@ -661,7 +671,8 @@ mod tests {
                 .new_batch()
                 .append(value.clone())
                 .merkleize(&db, None, floor)
-                .await;
+                .await
+                .unwrap();
             let (db, range) = db.apply_batch(batch).await.unwrap();
             assert_eq!(db.get(range.start).await.unwrap(), Some(value.clone()));
             assert_eq!(
@@ -704,6 +715,9 @@ mod tests {
 
     keyless_tests! {
         test_keyless_fixed_empty => run_empty, reopen_indexed;
+        test_keyless_fixed_merkleize_foreign_db => run_merkleize_foreign_db, pair;
+        test_keyless_fixed_merkleize_stale_sibling => run_merkleize_stale_sibling, db;
+        test_keyless_fixed_merkleize_ancestor_states => run_merkleize_ancestor_states, db;
         test_keyless_fixed_build_basic => run_build_basic, reopen_indexed;
         test_keyless_fixed_recovery => run_recovery, reopen_indexed;
         test_keyless_fixed_non_empty_recovery => run_non_empty_recovery, reopen_indexed;
@@ -713,6 +727,7 @@ mod tests {
         test_keyless_fixed_empty_db_recovery => run_empty_db_recovery, reopen_indexed;
         test_keyless_fixed_replay_with_trailing_appends => run_replay_with_trailing_appends, reopen_indexed;
         test_keyless_fixed_get_out_of_bounds => run_get_out_of_bounds, db;
+        test_keyless_fixed_get_pruned => run_get_pruned, db;
         test_keyless_fixed_metadata => run_metadata, db;
         test_keyless_fixed_pruning => run_pruning, reopen;
         test_keyless_fixed_batch_get => run_batch_get, db;
@@ -777,13 +792,15 @@ mod tests {
             .append(v1.clone())
             .append(v2.clone())
             .merkleize(&db, Some(metadata.clone()), floor)
-            .await;
+            .await
+            .unwrap();
         let compact_batch = compact
             .new_batch()
             .append(v1)
             .append(v2)
             .merkleize(&compact, Some(metadata.clone()), floor)
-            .await;
+            .await
+            .unwrap();
 
         assert_eq!(retained.root(), compact_batch.root());
 
@@ -860,7 +877,7 @@ mod tests {
                 batch = batch.append(U64::new(i * 10 + 1));
             }
             let floor = target_db.inactivity_floor_loc();
-            let merkleized = batch.merkleize(&target_db, None, floor).await;
+            let merkleized = batch.merkleize(&target_db, None, floor).await.unwrap();
             let (target_db, _) = target_db.apply_batch(merkleized).await.unwrap();
 
             let target_root = target_db.root();
@@ -955,7 +972,10 @@ mod tests {
                 for value in 1..=100u64 {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 102);
@@ -966,7 +986,10 @@ mod tests {
                 for value in 1001..=1100u64 {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 assert_eq!(*db.bounds().end, 203);
@@ -991,7 +1014,10 @@ mod tests {
                 for value in 2001..=2050u64 {
                     batch = batch.append(U64::new(value));
                 }
-                let batch = batch.merkleize(&db, None, db.inactivity_floor_loc()).await;
+                let batch = batch
+                    .merkleize(&db, None, db.inactivity_floor_loc())
+                    .await
+                    .unwrap();
                 let root_n = batch.root();
                 let (db, range) = db.apply_batch(batch).await.unwrap();
                 assert_eq!((*range.start, *range.end), (102, 153));
@@ -1036,7 +1062,8 @@ mod tests {
                     .new_batch()
                     .append(U64::new(9999))
                     .merkleize(&db, None, db.inactivity_floor_loc())
-                    .await;
+                    .await
+                    .unwrap();
                 let (db, _) = db.apply_batch(batch).await.unwrap();
                 let db = db.commit().await.unwrap();
                 let size = *db.bounds().end;

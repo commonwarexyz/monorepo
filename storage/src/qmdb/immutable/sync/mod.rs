@@ -57,7 +57,8 @@ where
     /// # Returns
     ///
     /// A [super::Immutable] db populated with the state from the given range.
-    /// The pruning boundary is set to the range start.
+    /// Its inactivity floor comes from the final commit, while the Merkle pruning boundary is
+    /// the range start.
     async fn from_sync_result(
         context: Self::Context,
         db_config: Self::Config,
@@ -83,7 +84,7 @@ where
             merkle,
             log,
             hasher,
-            apply_batch_size.get(),
+            apply_batch_size,
         )
         .await?;
 

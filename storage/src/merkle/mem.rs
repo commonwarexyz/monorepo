@@ -357,7 +357,7 @@ impl<F: Family, D: Digest> Mem<F, D> {
     }
 
     /// Pin extra nodes. It's up to the caller to ensure this set is valid.
-    #[cfg(any(feature = "std", test))]
+    #[cfg(feature = "std")]
     pub(crate) fn add_pinned_nodes(&mut self, pinned_nodes: BTreeMap<Position<F>, D>) {
         for (pos, node) in pinned_nodes {
             self.pinned_nodes.insert(pos, node);

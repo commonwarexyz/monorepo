@@ -1,3 +1,5 @@
+//! Roundtrip helpers, error-test macros, and recovery-hash fixtures for the rate tests.
+
 use crate::reed_solomon::{
     engine::Engine,
     rate::{Rate, RateDecoder, RateEncoder},
@@ -9,16 +11,19 @@ use rand_chacha::ChaCha8Rng;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-// ======================================================================
-// ShardSelection - CRATE
-
+/// Selects which shard indices a roundtrip hands to the decoder.
+///
+/// Indices past the shard count are ignored.
 #[derive(Debug)]
 pub(crate) enum ShardSelection {
+    /// A single shard index.
     Index(usize),
+    /// A half-open range of shard indices. An empty or reversed range selects nothing.
     Range(Range<usize>),
 }
 
 impl ShardSelection {
+    /// Returns the selected indices as a half-open range.
     fn indices(&self) -> Range<usize> {
         match self {
             Self::Index(index) => *index..*index + 1,
@@ -27,27 +32,38 @@ impl ShardSelection {
     }
 }
 
+/// Returns a selection of the single shard `index`.
 pub(crate) const fn index(index: usize) -> ShardSelection {
     ShardSelection::Index(index)
 }
 
+/// Returns a selection of shards `start..end`.
 pub(crate) const fn range(start: usize, end: usize) -> ShardSelection {
     ShardSelection::Range(start..end)
 }
 
+/// Parameters for one encode and decode roundtrip, consumed by [`roundtrip`].
 pub(crate) struct Roundtrip<'a> {
     pub(crate) original_count: usize,
     pub(crate) recovery_count: usize,
     pub(crate) shard_bytes: usize,
+    /// Expected hex SHA256 of the recovery shards, checked with [`assert_hash`].
     pub(crate) recovery_hash: &'a str,
+    /// Original shard indices given to the decoder.
     pub(crate) decoder_original: &'a [ShardSelection],
+    /// Recovery shard indices given to the decoder.
     pub(crate) decoder_recovery: &'a [ShardSelection],
+    /// Seed passed to [`generate_original`].
     pub(crate) seed: u8,
 }
 
-// ======================================================================
-// FUNCTIONS - CRATE
-
+/// Asserts that the SHA256 of `shards`, concatenated in order, equals the hex digest `expected`.
+///
+/// On a digest mismatch with the `std` feature, prints both digests before panicking.
+///
+/// # Panics
+///
+/// Panics if `expected` is not valid hex or the digests differ.
 pub(crate) fn assert_hash<T>(shards: T, expected: &str)
 where
     T: IntoIterator,
@@ -73,6 +89,9 @@ where
     }
 }
 
+/// Returns `original_count` shards of `shard_bytes` random bytes each.
+///
+/// The bytes come from a `ChaCha8Rng` seeded with `[seed; 32]`, so the output is deterministic.
 pub(crate) fn generate_original(
     original_count: usize,
     shard_bytes: usize,
@@ -86,9 +105,17 @@ pub(crate) fn generate_original(
     original
 }
 
-// ======================================================================
-// RATE ENCODER/DECODER - TEST SINGLE-ROUND ROUNDTRIP
-
+/// Encodes shards from [`generate_original`], checks the recovery hash, then decodes from the
+/// selected shards and checks every original the decoder did not receive.
+///
+/// `encoder` and `decoder` must be configured with the counts and shard size in `cfg`. The
+/// decoder runs without computing missing recovery shards. If it reports nothing to reconstruct,
+/// no originals are checked.
+///
+/// # Panics
+///
+/// Panics if encoding or decoding fails, the recovery hash differs, or a missing original is
+/// not restored exactly.
 pub(crate) fn roundtrip<R: Rate<E>, E: Engine>(
     encoder: &mut R::RateEncoder,
     decoder: &mut R::RateDecoder,
@@ -146,6 +173,12 @@ pub(crate) fn roundtrip<R: Rate<E>, E: Engine>(
     }
 }
 
+/// Runs [`roundtrip`] once on a fresh encoder and decoder of rate `R`, each with its own engine
+/// from `new_engine`.
+///
+/// # Panics
+///
+/// Panics if `R` rejects the configuration or [`roundtrip`] panics.
 pub(crate) fn roundtrip_single<R: Rate<E>, E: Engine>(new_engine: fn() -> E, cfg: &Roundtrip<'_>) {
     let mut encoder = R::encoder(
         cfg.original_count,
@@ -168,6 +201,10 @@ pub(crate) fn roundtrip_single<R: Rate<E>, E: Engine>(new_engine: fn() -> E, cfg
     roundtrip::<R, E>(&mut encoder, &mut decoder, cfg);
 }
 
+/// Runs [`roundtrip_single()`] for rate `$Rate` with the `Naive`, `Scalar`, and `DefaultEngine`
+/// engines.
+///
+/// The remaining arguments are the [`Roundtrip`] fields in declaration order.
 macro_rules! roundtrip_single {
     ($Rate: ident,
      $original_count: expr,
@@ -194,90 +231,45 @@ macro_rules! roundtrip_single {
         );
 
         crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
-            crate::reed_solomon::engine::NoSimd::new,
+            crate::reed_solomon::engine::Scalar::new,
+            &cfg,
+        );
+
+        crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
+            crate::reed_solomon::engine::DefaultEngine::new,
             &cfg,
         );
     };
 }
 
-// ======================================================================
-// RATE ENCODER/DECODER - TEST TWO-ROUND ROUNDTRIP
-
+/// Runs [`roundtrip_two_rounds_inner!`] for rate `$Rate` with the `Naive`, `Scalar`, and
+/// `DefaultEngine` engines.
+///
+/// The caller must have the names that [`roundtrip_two_rounds_inner!`] requires in scope.
 macro_rules! roundtrip_two_rounds {
     (
         $Rate: ident,
         $explicit_reset: expr,
-        (
-            $original_count_a: expr,
-            $recovery_count_a: expr,
-            $shard_bytes_a: expr,
-            $recovery_hash_a: expr,
-            $decoder_original_a: expr,
-            $decoder_recovery_a: expr,
-            $seed_a: expr $(,)?
-        ),
-        (
-            $original_count_b: expr,
-            $recovery_count_b: expr,
-            $shard_bytes_b: expr,
-            $recovery_hash_b: expr,
-            $decoder_original_b: expr,
-            $decoder_recovery_b: expr,
-            $seed_b: expr $(,)?
-        ) $(,)?
+        $round_a: tt,
+        $round_b: tt $(,)?
     ) => {
-        use crate::reed_solomon::engine::{Naive, NoSimd};
+        use crate::reed_solomon::engine::{DefaultEngine, Naive, Scalar};
 
-        roundtrip_two_rounds_inner!(
-            $Rate,
-            Naive,
-            $explicit_reset,
-            (
-                $original_count_a,
-                $recovery_count_a,
-                $shard_bytes_a,
-                $recovery_hash_a,
-                $decoder_original_a,
-                $decoder_recovery_a,
-                $seed_a,
-            ),
-            (
-                $original_count_b,
-                $recovery_count_b,
-                $shard_bytes_b,
-                $recovery_hash_b,
-                $decoder_original_b,
-                $decoder_recovery_b,
-                $seed_b,
-            ),
-        );
-
-        roundtrip_two_rounds_inner!(
-            $Rate,
-            NoSimd,
-            $explicit_reset,
-            (
-                $original_count_a,
-                $recovery_count_a,
-                $shard_bytes_a,
-                $recovery_hash_a,
-                $decoder_original_a,
-                $decoder_recovery_a,
-                $seed_a,
-            ),
-            (
-                $original_count_b,
-                $recovery_count_b,
-                $shard_bytes_b,
-                $recovery_hash_b,
-                $decoder_original_b,
-                $decoder_recovery_b,
-                $seed_b,
-            ),
-        );
+        roundtrip_two_rounds_inner!($Rate, Naive, $explicit_reset, $round_a, $round_b);
+        roundtrip_two_rounds_inner!($Rate, Scalar, $explicit_reset, $round_a, $round_b);
+        roundtrip_two_rounds_inner!($Rate, DefaultEngine, $explicit_reset, $round_a, $round_b);
     };
 }
 
+/// Runs two [`roundtrip`] rounds on one encoder and decoder of rate `$Rate` with engine `$Engine`.
+///
+/// Each round is a tuple of [`Roundtrip`] fields in declaration order. The encoder and decoder
+/// are built with round A's counts and shard size. If `$explicit_reset` is true, both are reset
+/// to round B's counts and shard size between rounds. Otherwise round B reuses them as left by
+/// round A and must match round A's counts and shard size.
+///
+/// The caller must have `test_util` and the `Rate`, `RateEncoder`, and `RateDecoder` traits in
+/// scope.
 macro_rules! roundtrip_two_rounds_inner {
     (
         $Rate: ident,
@@ -356,9 +348,10 @@ macro_rules! roundtrip_two_rounds_inner {
     };
 }
 
-// ======================================================================
-// RATE ENCODER - TEST ERRORS
-
+/// Generates `#[test]` fns checking the errors that `$Encoder::new`, `add_original_shard`,
+/// `encode`, and `reset` report.
+///
+/// The caller must have `$Encoder`, `Error`, `Scalar`, and the `RateEncoder` trait in scope.
 macro_rules! test_rate_encoder_errors {
     ($Encoder:ident) => {
         #[test]
@@ -367,7 +360,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -383,7 +376,7 @@ macro_rules! test_rate_encoder_errors {
         #[test]
         fn invalid_shard_size_in_new() {
             assert_eq!(
-                $Encoder::new(1, 1, 123, NoSimd::new(), None).err(),
+                $Encoder::new(1, 1, 123, Scalar::new(), None).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 }),
             );
         }
@@ -394,7 +387,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -410,7 +403,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -429,7 +422,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -449,7 +442,7 @@ macro_rules! test_rate_encoder_errors {
                     0,
                     1,
                     crate::reed_solomon::SHARD_CHUNK_BYTES,
-                    NoSimd::new(),
+                    Scalar::new(),
                     None
                 )
                 .err(),
@@ -466,7 +459,7 @@ macro_rules! test_rate_encoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -481,9 +474,10 @@ macro_rules! test_rate_encoder_errors {
     };
 }
 
-// ======================================================================
-// RATE DECODER - TEST ERRORS
-
+/// Generates `#[test]` fns checking the errors that `$Decoder::new`, `add_original_shard`,
+/// `add_recovery_shard`, `decode`, and `reset` report.
+///
+/// The caller must have `$Decoder`, `Error`, `Scalar`, and the `RateDecoder` trait in scope.
 macro_rules! test_rate_decoder_errors {
     ($Decoder:ident) => {
         #[test]
@@ -492,7 +486,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -511,7 +505,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -530,7 +524,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -549,7 +543,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -568,7 +562,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -587,7 +581,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -603,7 +597,7 @@ macro_rules! test_rate_decoder_errors {
         #[test]
         fn invalid_shard_size_in_new() {
             assert_eq!(
-                $Decoder::new(1, 1, 123, NoSimd::new(), None).err(),
+                $Decoder::new(1, 1, 123, Scalar::new(), None).err(),
                 Some(Error::InvalidShardSize { shard_bytes: 123 }),
             );
         }
@@ -614,7 +608,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -630,7 +624,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -651,7 +645,7 @@ macro_rules! test_rate_decoder_errors {
                     0,
                     1,
                     crate::reed_solomon::SHARD_CHUNK_BYTES,
-                    NoSimd::new(),
+                    Scalar::new(),
                     None
                 )
                 .err(),
@@ -668,7 +662,7 @@ macro_rules! test_rate_decoder_errors {
                 1,
                 1,
                 crate::reed_solomon::SHARD_CHUNK_BYTES,
-                NoSimd::new(),
+                Scalar::new(),
                 None,
             )
             .unwrap();
@@ -683,28 +677,23 @@ macro_rules! test_rate_decoder_errors {
     };
 }
 
-// ============================================================
-// RECOVERY HASHES
-
-// SHA256 hashes of some recovery shards.
-// - shard_bytes = 1024 (or `SHARD_CHUNK_BYTES` if mentioned explicitly)
-// - Original shards are from `generate_original`.
-
-// ==================================================
-// TINY
-
-// (original_count, recovery_count, seed, hash)
-
+/// Recovery hashes for tiny shard counts under `DefaultRate`, as
+/// `(original_count, recovery_count, seed, hash)`.
+///
+/// Every recovery hash in this module is the SHA256 of the recovery shards, with 1024-byte
+/// shards unless stated otherwise and original shards from [`generate_original`]. The trailing
+/// comment on each row names the rate `DefaultRate` selects, with `EITHER` where both rates
+/// produce the same hash.
 #[rustfmt::skip]
 pub(crate) const DEFAULT_TINY: &[(usize, usize, u8, &str)] = &[
-    // single original/recovery
+    // One original or one recovery shard.
     (1, 1, 111, "17e3108283196d04f027f01c23577076a1db3c4caeed6269995733ffef6d3398"), // EITHER
     (1, 2, 112, "cabef22cfe49d9167b4cd40a6a6437b52496af28ff1dcfb6e207c9c337d5affa"), // LOW
     (1, 3, 113, "fda3b35bb91a71b0ba7b6ea437fbf74648ea6e94a4ce2be885b0cd14f0d8005b"), // LOW
     (2, 1, 121, "7fc8ed9211851121e4a80cf995b113f498c20646e18dc312db7d27efd6cd60d2"), // HIGH
     (3, 1, 131, "1f118cce8f4c528a4f68c9215d6996e982bce81ba7c0132193a65961f777943a"), // HIGH
 
-    // 2 .. 8
+    // 2 to 8 original and recovery shards.
     (2, 2, 122, "7d53725125394f5913300b40f09055bb75e6335a936305070da3707c9211dd26"), // EITHER
     (2, 3, 123, LOW_2_3),                                                            // LOW
     (2, 4, 124, "3ce3eab3625dae68e164daee1e2bd3304ac7cdcf1ffdd8f81560c2def733e567"), // LOW
@@ -756,16 +745,19 @@ pub(crate) const DEFAULT_TINY: &[(usize, usize, u8, &str)] = &[
     (8, 8, 188, "b8da62e75f305a59128b2257162605e541fd252aca8f74ceb2a91fb2a3276d6e"), // EITHER
 ];
 
+/// Recovery hashes for tiny shard counts under `HighRate`, laid out like [`DEFAULT_TINY`].
+///
+/// A trailing `EITHER` comment or an `EITHER_*` constant marks a row whose hash matches `LowRate`.
 #[rustfmt::skip]
 pub(crate) const HIGH_TINY: &[(usize, usize, u8, &str)] = &[
-    // single original/recovery
+    // One original or one recovery shard.
     (1, 1, 111, "17e3108283196d04f027f01c23577076a1db3c4caeed6269995733ffef6d3398"), // EITHER
     (1, 2, 112, "a5bdc2eb1cd88327a675d2fa1df587ea3e7fa42e74975fd8577c5c248ab51824"),
     (1, 3, 113, "ea7c19a1de8308599d84334059c6ca6c1e574ea3cfbe680f749754af986a0b18"),
     (2, 1, 121, "7fc8ed9211851121e4a80cf995b113f498c20646e18dc312db7d27efd6cd60d2"),
     (3, 1, 131, "1f118cce8f4c528a4f68c9215d6996e982bce81ba7c0132193a65961f777943a"),
 
-    // 2 .. 8
+    // 2 to 8 original and recovery shards.
     (2, 2, 122, "7d53725125394f5913300b40f09055bb75e6335a936305070da3707c9211dd26"), // EITHER
     (2, 3, 123, "19fb5ce2d7a3db95f819017cf49050eb8cd4b3c626cedf5ca13f6d2ab4eb43c4"),
     (2, 4, 124, "ed0d8db29d770cbafc4fa2ebe5ab991b3a0ee2dd8089f82cbb35de4670ccee50"),
@@ -817,16 +809,19 @@ pub(crate) const HIGH_TINY: &[(usize, usize, u8, &str)] = &[
     (8, 8, 188, "b8da62e75f305a59128b2257162605e541fd252aca8f74ceb2a91fb2a3276d6e"), // EITHER
 ];
 
+/// Recovery hashes for tiny shard counts under `LowRate`, laid out like [`DEFAULT_TINY`].
+///
+/// A trailing `EITHER` comment or an `EITHER_*` constant marks a row whose hash matches `HighRate`.
 #[rustfmt::skip]
 pub(crate) const LOW_TINY: &[(usize, usize, u8, &str)] = &[
-    // single original/recovery
+    // One original or one recovery shard.
     (1, 1, 111, "17e3108283196d04f027f01c23577076a1db3c4caeed6269995733ffef6d3398"), // EITHER
     (1, 2, 112, "cabef22cfe49d9167b4cd40a6a6437b52496af28ff1dcfb6e207c9c337d5affa"),
     (1, 3, 113, "fda3b35bb91a71b0ba7b6ea437fbf74648ea6e94a4ce2be885b0cd14f0d8005b"),
     (2, 1, 121, "446657e70765196f11c9df04fcacc74ef915cdb634633e0d5755c1ca6e46e323"),
     (3, 1, 131, "b93350bf3318af823674c954d274f51ed1bef1a49a5240338d31440aebbf8af5"),
 
-    // 2 .. 8
+    // 2 to 8 original and recovery shards.
     (2, 2, 122, "7d53725125394f5913300b40f09055bb75e6335a936305070da3707c9211dd26"), // EITHER
     (2, 3, 123, LOW_2_3),
     (2, 4, 124, "3ce3eab3625dae68e164daee1e2bd3304ac7cdcf1ffdd8f81560c2def733e567"),
@@ -878,84 +873,79 @@ pub(crate) const LOW_TINY: &[(usize, usize, u8, &str)] = &[
     (8, 8, 188, "b8da62e75f305a59128b2257162605e541fd252aca8f74ceb2a91fb2a3276d6e"), // EITHER
 ];
 
-// ==================================================
-// EITHER RATE
-
-// 3 original ; 3 recovery ; 133 seed
+/// 3 original, 3 recovery, seed 133.
 pub(crate) const EITHER_3_3: &str =
     "9502b325f6f50a25e6816144603f1b0cda09e00b4949965babbaf8266ff81e84";
 
-// 3 original ; 4 recovery ; 134 seed
+/// 3 original, 4 recovery, seed 134.
 pub(crate) const EITHER_3_4: &str =
     "e534a7260f1e8aca3c2983503138f158d8977b82f1d3c09b2cedb66d01c01e0b";
 
-// 4 original ; 3 recovery ; 143 seed
+/// 4 original, 3 recovery, seed 143.
 pub(crate) const EITHER_4_3: &str =
     "e43d0903b619f4b17c5389ce869317ce549e3f6d2fe3aa2805ef4d4fb7adce74";
 
-// 32768 original ; 32768 recovery ; 11 seed ; shard_bytes = SHARD_CHUNK_BYTES
+/// 32768 original, 32768 recovery, seed 11, `SHARD_CHUNK_BYTES`-byte shards.
 pub(crate) const EITHER_32768_32768_11: &str =
     "432025ead0e3f432f74e30500076a8c2b5554f5dfb7767b62fc3a8126eef7389";
 
-// ==================================================
-// HIGH RATE
-
-// 3 original ; 2 recovery ; 132 seed
+/// 3 original, 2 recovery, seed 132.
 pub(crate) const HIGH_3_2: &str =
     "afd47751b63fb0a62671e0e4a124a8ba51eb6d4b55f79c3dd54a60c28583634f";
 
-// 3 original ; 2 recovery ; 232 seed
+/// 3 original, 2 recovery, seed 232.
 pub(crate) const HIGH_3_2_232: &str =
     "2ee88d495ae1fff216f2865dbbdda2e1a051c5d98c7117a2a0b2ebcdfb57cd33";
 
-// 5 original ; 2 recovery ; 152 seed
+/// 5 original, 2 recovery, seed 152.
 pub(crate) const HIGH_5_2: &str =
     "5387208d6756e3e79558a9b9ddebe0439eb3b08eec2393d4acafce6fc5332683";
 
-// 5 original ; 3 recovery ; 153 seed
+/// 5 original, 3 recovery, seed 153.
 pub(crate) const HIGH_5_3: &str =
     "6f53d5175900d70b4821d1d0c947d0c47a802add0d620bfa72d57dd983dfc156";
 
-// 3000 original ; 30000 recovery ; 14 seed ; shard_bytes = SHARD_CHUNK_BYTES
-// NOTE: Chunk size is 4096, with partial chunk at end.
+/// 3000 original, 30000 recovery, seed 14, `SHARD_CHUNK_BYTES`-byte shards.
+///
+/// Chunk size is 32768 shards, so the original shards fit in one partial chunk.
 pub(crate) const HIGH_3000_30000_14: &str =
     "2d7d97fd92be0721b4fcfac8814fe0dd9ad07959eb40558c6ed9af09943fed4e";
 
-// 60000 original ; 3000 recovery ; 12 seed ; shard_bytes = SHARD_CHUNK_BYTES
-// NOTE: Chunk size is 4096, with partial chunk at end.
+/// 60000 original, 3000 recovery, seed 12, `SHARD_CHUNK_BYTES`-byte shards.
+///
+/// Chunk size is 4096 shards, with a partial chunk of original shards at the end.
 pub(crate) const HIGH_60000_3000_12: &str =
     "88e68e1d86a0fc168a549e195845d20b49ff85734db20d560c36ff2e14f78676";
 
-// 34000 original ; 2000 recovery ; 123 seed ; shard_bytes = 8
+/// 34000 original, 2000 recovery, seed 123, 8-byte shards.
 pub(crate) const HIGH_34000_2000_123_8: &str =
     "8bd33dbe0189b5bffcb843fd93fd8c85daada2533cc7df0c352773e846b701f5";
 
-// ==================================================
-// LOW RATE
-
-// 2 original ; 3 recovery ; 123 seed
+/// 2 original, 3 recovery, seed 123.
 pub(crate) const LOW_2_3: &str = "f682a6c87c2bcd3e0feddbeff5c34f9d14026b78c44e5fdb5cf3cf71ec15e1f4";
 
-// 2 original ; 3 recovery ; 223 seed
+/// 2 original, 3 recovery, seed 223.
 pub(crate) const LOW_2_3_223: &str =
     "2dc25a5dc42b2d1f94a80489e9f357a48f011f931cdac3ed7c85e2abb07063a2";
 
-// 2 original ; 5 recovery ; 125 seed
+/// 2 original, 5 recovery, seed 125.
 pub(crate) const LOW_2_5: &str = "24449ae058f54a33b3b7ee568761e68e36bd7171ee2a3271a0fbd2f07ac65a7c";
 
-// 3 original ; 5 recovery ; 135 seed
+/// 3 original, 5 recovery, seed 135.
 pub(crate) const LOW_3_5: &str = "c23920347f00328dceca9cb6012d797d97f366617cf27aae5c45b4f0b8491552";
 
-// 3000 original ; 60000 recovery ; 13 seed ; shard_bytes = SHARD_CHUNK_BYTES
-// NOTE: Chunk size is 4096, with partial chunk at end.
+/// 3000 original, 60000 recovery, seed 13, `SHARD_CHUNK_BYTES`-byte shards.
+///
+/// Chunk size is 4096 shards, with a partial chunk of recovery shards at the end.
 pub(crate) const LOW_3000_60000_13: &str =
     "d44f9c9ed9158f8aad140794e64a730577327f195753af21b810090966b4b4df";
 
-// 30000 original ; 3000 recovery ; 15 seed ; shard_bytes = SHARD_CHUNK_BYTES
-// NOTE: Chunk size is 4096, with partial chunk at end.
+/// 30000 original, 3000 recovery, seed 15, `SHARD_CHUNK_BYTES`-byte shards.
+///
+/// Chunk size is 32768 shards, so the recovery shards fit in one partial chunk.
 pub(crate) const LOW_30000_3000_15: &str =
     "202f99a2ade121d2404e967d5c04ff390f7a147070a2dcbe71dcf3baeafdf93a";
 
-// 2000 original ; 34000 recovery ; 123 seed ; shard_bytes = 8
+/// 2000 original, 34000 recovery, seed 123, 8-byte shards.
 pub(crate) const LOW_2000_34000_123_8: &str =
     "9bd2da4d03580d3e2471c60a49595b209a6f9a5f1d504d0c4bd017b953efdd99";
