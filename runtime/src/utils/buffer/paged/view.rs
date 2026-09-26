@@ -9,7 +9,6 @@
 use super::{CacheRef, tip::Buffer};
 use crate::{Blob, Error, IoBufMut, IoBufs};
 use commonware_utils::Widen;
-use futures::stream::{FuturesUnordered, StreamExt};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// Logical bytes served from memory at the end of a paged blob.
@@ -269,19 +268,43 @@ impl<B: Blob> View<'_, B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read remaining ranges from the underlying blob, concurrently.
-        let mut reads = cache_ranges
-            .iter_mut()
-            .map(|(item_buf, offset)| {
-                self.cache_ref
-                    .read_after_miss(self.blob, self.id, item_buf, *offset)
-            })
-            .collect::<FuturesUnordered<_>>();
-        while let Some(result) = reads.next().await {
-            result?;
-        }
+        // Keep the bulk-read state out of cache-hit futures. Only misses allocate it.
+        Box::pin(
+            self.cache_ref
+                .read_many_after_faults(self.blob, self.id, cache_ranges),
+        )
+        .await?;
 
         Ok(offsets.len() - blob_reads)
+    }
+
+    /// Read sorted, non-overlapping `(offset, len)` ranges into one owned buffer, in range order.
+    /// All ranges must be within bounds. Missing pages are coalesced across ranges.
+    ///
+    /// # Panics
+    ///
+    /// Panics if ranges are not sorted and non-overlapping.
+    pub async fn read_ranges(&self, ranges: &[(u64, usize)]) -> Result<IoBufs, Error> {
+        let len = ranges.iter().try_fold(0usize, |total, &(_, len)| {
+            total.checked_add(len).ok_or(Error::OffsetOverflow)
+        })?;
+        super::validate_read_ranges(len, ranges.iter().copied(), self.size)?;
+        // SAFETY: the tail/cache copies and read_many_after_faults fill every byte before the
+        // buffer is returned. Any failed read drops the buffer without exposing its contents.
+        let mut buf = unsafe { self.cache_ref.pool().alloc_len(len) };
+        let mut cache_ranges = split_read_ranges(
+            buf.as_mut(),
+            ranges.iter().copied(),
+            self.tail_offset,
+            self.tail,
+        );
+        self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        if !cache_ranges.is_empty() {
+            self.cache_ref
+                .read_many_after_faults(self.blob, self.id, cache_ranges)
+                .await?;
+        }
+        Ok(buf.into())
     }
 
     /// Like [`Self::read_many_into`], but synchronous and cache-only.
@@ -402,175 +425,4 @@ fn map_misses(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::map_misses;
-    use crate::{
-        BufferPool, BufferPoolConfig, Runner as _, Storage as _, buffer::paged::Writer,
-        deterministic, telemetry::metrics::Registry,
-    };
-    use commonware_utils::{NZU16, NZU32, NZUsize};
-    use std::num::NonZeroU16;
-
-    const PAGE_SIZE: NonZeroU16 = NZU16!(103);
-    const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
-
-    #[test]
-    fn test_reads_cross_buffer_chunks_and_cache() {
-        deterministic::Runner::default().start(|context| async move {
-            let pool = BufferPool::new(
-                BufferPoolConfig::for_storage()
-                    .with_size_classes([(NZUsize!(8), NZU32!(1))])
-                    .with_alignment(NZUsize!(1))
-                    .with_pool_min_size(0),
-                &mut Registry::default(),
-            );
-            let cache = super::CacheRef::new(pool, PAGE_SIZE, NZUsize!(4));
-            let (blob, size) = context
-                .open("test_partition", b"chunk_reads")
-                .await
-                .unwrap();
-            let page = PAGE_SIZE.get() as usize;
-            let mut writer = Writer::new(blob, size, page * 32, cache.clone())
-                .await
-                .unwrap();
-            let data: Vec<_> = (0..page * 20 + 13).map(|i| (i % 251) as u8).collect();
-            let persisted = page * 3 + 17;
-            writer.append(&data[..persisted]).await.unwrap();
-            writer.sync().await.unwrap();
-            for chunk in data[persisted..].chunks(97) {
-                writer.append(chunk).await.unwrap();
-            }
-
-            let mut all = vec![0; data.len()];
-            assert!(writer.try_read_sync_into(&mut all, 0));
-            assert_eq!(all, data);
-
-            let offsets = [
-                page - 8,
-                page * 3 - 8,
-                page * 4 - 8,
-                page * 8 - 8,
-                page * 16 - 8,
-            ]
-            .map(|offset| offset as u64);
-            let expected: Vec<_> = offsets
-                .iter()
-                .flat_map(|&offset| data[offset as usize..offset as usize + 17].iter().copied())
-                .collect();
-            let mut batch = vec![0; expected.len()];
-            assert!(
-                writer
-                    .try_read_many_sync_into(&mut batch, &offsets, NZUsize!(17))
-                    .is_empty()
-            );
-            assert_eq!(batch, expected);
-
-            let ranges = [
-                (0, 0),
-                ((page - 4) as u64, 16),
-                ((page * 3 - 4) as u64, 15),
-                ((page * 8 - 6) as u64, 19),
-                ((data.len() - 13) as u64, 13),
-                (data.len() as u64, 0),
-            ];
-            let expected_ranges: Vec<_> = ranges
-                .iter()
-                .flat_map(|&(offset, len)| {
-                    data[offset as usize..offset as usize + len].iter().copied()
-                })
-                .collect();
-            let mut ranged = vec![0; expected_ranges.len()];
-            assert!(
-                writer
-                    .try_read_ranges_sync_into(&mut ranged, &ranges)
-                    .is_empty()
-            );
-            assert_eq!(ranged, expected_ranges);
-
-            cache.clear();
-            writer
-                .read_many_into(&mut batch, &offsets, NZUsize!(17))
-                .await
-                .unwrap();
-            assert_eq!(batch, expected);
-            assert_eq!(
-                writer
-                    .read_at(0, data.len())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                data
-            );
-            writer.sync().await.unwrap();
-            drop(writer);
-            cache.clear();
-            let (blob, size) = context
-                .open("test_partition", b"chunk_reads")
-                .await
-                .unwrap();
-            let writer = Writer::new(blob, size, page * 32, cache).await.unwrap();
-            assert_eq!(
-                writer
-                    .read_at(0, data.len())
-                    .await
-                    .unwrap()
-                    .coalesce()
-                    .as_ref(),
-                data
-            );
-        });
-    }
-
-    #[test]
-    fn test_map_misses_with_cached_prefixes() {
-        let slots = [
-            (0, 4),
-            (10, 0),
-            (10, 8),
-            (18, 0),
-            (18, 5),
-            (u64::MAX - 4, 4),
-        ];
-        let mut suffix_a = [0; 2];
-        let mut suffix_b = [0; 5];
-        let mut suffix_c = [0; 1];
-        let missed = vec![
-            (suffix_a.as_mut_slice(), 16),
-            (suffix_b.as_mut_slice(), 18),
-            (suffix_c.as_mut_slice(), u64::MAX - 1),
-        ];
-        assert_eq!(map_misses(missed, |idx| slots[idx]), vec![2, 4, 5]);
-    }
-
-    /// A read straddling the persisted prefix and the in-memory tail is served synchronously once
-    /// the prefix page is cached (the unified `View` serves the prefix from the cache and the
-    /// suffix from the tail in one call).
-    #[test]
-    fn test_view_try_read_sync_straddles_cache_and_tail() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context: deterministic::Context| async move {
-            let cache_ref =
-                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let (blob, blob_size) = context
-                .open("test_partition", b"view_straddle")
-                .await
-                .unwrap();
-            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
-                .await
-                .unwrap();
-
-            // A full page (flushed to the blob) followed by a partial tail kept in the tip buffer.
-            let page_size = PAGE_SIZE.get() as usize;
-            writer.append(&vec![0xAA; page_size]).await.unwrap();
-            writer.append(b"TAIL").await.unwrap();
-            writer.sync().await.unwrap();
-
-            // Warm the cache for the first page, then read across the page/tail boundary.
-            writer.read_at(0, page_size).await.unwrap();
-            let mut buf = [0u8; 4];
-            assert!(writer.try_read_sync_into(&mut buf, page_size as u64 - 2));
-            assert_eq!(&buf, &[0xAA, 0xAA, b'T', b'A']);
-        });
-    }
-}
+mod tests;
