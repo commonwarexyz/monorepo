@@ -625,8 +625,8 @@ macro_rules! forward_spawner {
     };
 }
 
-/// Forwards [Storage::remove] and [Storage::scan] to the wrapped context, inside the [Storage]
-/// impl of a test context wrapper.
+/// Forwards [crate::Storage::remove] and [crate::Storage::scan] to the wrapped context, inside the
+/// [crate::Storage] impl of a test context wrapper.
 macro_rules! forward_remove_and_scan {
     () => {
         async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
@@ -886,7 +886,7 @@ pub struct Gated {
 }
 
 /// Coordinates one-shot gates for the operations a wrapper intercepts: blob reads for a
-/// [DelayedReadContext] or [DelayedReadBlob], and [Storage::open_versioned] for a
+/// [DelayedReadContext] or [DelayedReadBlob], and [crate::Storage::open_versioned] for a
 /// [DelayedOpenContext].
 #[derive(Clone, Default)]
 pub struct Gates {
