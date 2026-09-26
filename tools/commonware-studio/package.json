@@ -1,0 +1,32 @@
+{
+  "name": "commonware-studio",
+  "version": "1.0.0",
+  "description": "Interactive Simplex BFT Consensus, BLS12-381 DKG & QMDB Storage Studio for Commonware Primitives.",
+  "main": "src/index.js",
+  "type": "module",
+  "bin": {
+    "commonware-cli": "./bin/commonware-cli.js"
+  },
+  "scripts": {
+    "start": "node src/server/app.js",
+    "cli": "node bin/commonware-cli.js",
+    "test": "node tests/run-all.js"
+  },
+  "keywords": [
+    "commonware",
+    "simplex-consensus",
+    "bls12-381",
+    "dkg",
+    "threshold-signatures",
+    "qmdb",
+    "rust-primitives"
+  ],
+  "author": "Commonware Community",
+  "license": "MIT",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "ethers": "^6.13.5",
+    "express": "^4.21.2"
+  }
+}
