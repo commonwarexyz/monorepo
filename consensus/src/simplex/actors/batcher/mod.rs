@@ -2,6 +2,7 @@ mod actor;
 mod ingress;
 mod round;
 mod verifier;
+mod votes;
 
 use crate::{
     Relay, Reporter,
@@ -47,7 +48,7 @@ pub struct Config<S: Scheme, B: Blocker, Re: Reporter, Rl: Relay, T: Strategy> {
 
 #[cfg(test)]
 mod tests {
-    use super::{verifier::Batch, *};
+    use super::{verifier::Batch, votes::Outcome, *};
     use crate::{
         Viewable,
         simplex::{
@@ -66,7 +67,7 @@ mod tests {
             },
             types::{
                 Activity, Certificate, Finalization, Finalize, Kind, Notarization, Notarize,
-                Nullification, Nullify, Outcome, Proposal, Vote,
+                Nullification, Nullify, Proposal, Vote,
             },
         },
         types::{Epoch, Participant, Round, TermLength, View},

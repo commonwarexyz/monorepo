@@ -1,6 +1,7 @@
 use super::{
     Verifier,
     verifier::{Batch, ProposalState},
+    votes::{ObservedVote, Outcome, VoteTracker},
 };
 use crate::{
     Reporter,
@@ -9,7 +10,7 @@ use crate::{
         scheme::Scheme,
         types::{
             Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize, Kind,
-            NullifyFinalize, ObservedVote, Outcome, Proposal, Vote, VoteTracker,
+            NullifyFinalize, Proposal, Vote,
         },
     },
     types::{Participant, Round as Rnd},
