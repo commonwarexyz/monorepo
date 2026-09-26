@@ -198,8 +198,9 @@ fn resolver_responses_are_prioritized() {
                 mailbox_size: NonZeroUsize::new(8).unwrap(),
             },
         );
+        let voter_context = context.child("voter");
         let (voter, _inbox) = VoterMailbox::<Ed25519PublicKey, MinPk, Digest>::new(
-            &context.child("voter"),
+            &voter_context,
             &context,
             NonZeroUsize::new(8).unwrap(),
         );
@@ -332,6 +333,7 @@ fn local_cache_materialization_keeps_request_trace_parent_and_root_until_cancel(
                     mailbox_size: NonZeroUsize::new(8).unwrap(),
                 },
             );
+            let voter_context = context.child("voter");
             let (
                 voter,
                 Inbox {
@@ -339,7 +341,7 @@ fn local_cache_materialization_keeps_request_trace_parent_and_root_until_cancel(
                     ..
                 },
             ) = VoterMailbox::<Ed25519PublicKey, MinPk, Digest>::new(
-                &context.child("voter"),
+                &voter_context,
                 &context,
                 NonZeroUsize::new(8).unwrap(),
             );
@@ -432,6 +434,7 @@ fn stalled_codec_worker_keeps_control_and_queries_live() {
                 mailbox_size: NonZeroUsize::new(8).unwrap(),
             },
         );
+        let voter_context = context.child("voter");
         let (
             voter,
             Inbox {
@@ -439,7 +442,7 @@ fn stalled_codec_worker_keeps_control_and_queries_live() {
                 ..
             },
         ) = VoterMailbox::<Ed25519PublicKey, MinPk, Digest>::new(
-            &context.child("voter"),
+            &voter_context,
             &context,
             NonZeroUsize::new(8).unwrap(),
         );
@@ -543,6 +546,7 @@ fn wrong_view_response_is_rejected_without_blocking_its_peer() {
                 mailbox_size: NonZeroUsize::new(8).unwrap(),
             },
         );
+        let voter_context = context.child("voter");
         let (
             voter,
             Inbox {
@@ -550,7 +554,7 @@ fn wrong_view_response_is_rejected_without_blocking_its_peer() {
                 ..
             },
         ) = VoterMailbox::<Ed25519PublicKey, MinPk, Digest>::new(
-            &context.child("voter"),
+            &voter_context,
             &context,
             NonZeroUsize::new(8).unwrap(),
         );

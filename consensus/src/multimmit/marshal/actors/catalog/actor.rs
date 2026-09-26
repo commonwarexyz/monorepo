@@ -873,7 +873,7 @@ mod tests {
             );
             let _guard = tracing::subscriber::set_default(subscriber);
             let metrics = Metrics::new(&context);
-            let ambient = info_span!("ambient", handler_ns = tracing::field::Empty);
+            let ambient = info_span!("test.ambient", handler_ns = tracing::field::Empty);
             ambient.in_scope(|| {
                 let turn = Turn::new(
                     &Span::none(),
