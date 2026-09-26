@@ -297,8 +297,8 @@ fn processing_spans_begin_at_dequeue() {
             let baseline = stores.baseline;
             let mut running = stores.start(NZUsize!(8), gates);
             let callers = [
-                tracing::info_span!("first_persist"),
-                tracing::info_span!("second_persist"),
+                tracing::info_span!("test.first_persist"),
+                tracing::info_span!("test.second_persist"),
             ];
             running
                 .client
@@ -349,7 +349,7 @@ fn processing_spans_begin_at_dequeue() {
             );
             assert_eq!(pending.starts(), baseline + 1);
 
-            let roll = tracing::info_span!("ready_roll");
+            let roll = tracing::info_span!("test.ready_roll");
             running
                 .client
                 .checkpoint(cut(), origin(), roll.clone())
@@ -1296,7 +1296,7 @@ fn checkpoint_with_pending_appends_is_terminal() {
             .append(Span::none(), Span::none(), job(epoch, 1, 0, true))
             .unwrap();
         wait_for_starts(&pending, baseline + 1).await;
-        let roll = tracing::info_span!("busy_roll");
+        let roll = tracing::info_span!("test.busy_roll");
         client.checkpoint(cut(), origin(), roll.clone()).unwrap();
 
         let Some(Output::Failed {
@@ -1343,13 +1343,13 @@ fn append_failure_is_reported_once() {
             NZUsize!(2),
             TestGates::default(),
         );
-        let failing = tracing::info_span!("failing_root");
+        let failing = tracing::info_span!("test.failing_root");
         client
             .append(failing.clone(), Span::none(), job(epoch, 1, 7, true))
             .unwrap();
         client
             .append(
-                tracing::info_span!("later_root"),
+                tracing::info_span!("test.later_root"),
                 Span::none(),
                 job(epoch, 2, 1, true),
             )
@@ -1389,7 +1389,7 @@ fn sync_failure_is_reported_once() {
             handle,
             ..
         } = running;
-        let synced = tracing::info_span!("synced_root");
+        let synced = tracing::info_span!("test.synced_root");
         client
             .append(synced.clone(), Span::none(), job(epoch, 1, 0, true))
             .unwrap();

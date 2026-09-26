@@ -467,7 +467,7 @@ fn body_reads_wait_for_materialization_capacity() {
 
         let gate = reads.arm();
         let mut first_read = Box::pin(
-            client.block(first.reference()).instrument(info_span!("first_request")),
+            client.block(first.reference()).instrument(info_span!("test.first_request")),
         );
         let mut blocked = Box::pin(gate.blocked);
         commonware_macros::select! {
@@ -475,7 +475,7 @@ fn body_reads_wait_for_materialization_capacity() {
             result = &mut first_read => panic!("cold body read completed before reaching storage: {result:?}"),
         }
         let mut second_read = Box::pin(
-            client.block(second.reference()).instrument(info_span!("second_request")),
+            client.block(second.reference()).instrument(info_span!("test.second_request")),
         );
         commonware_macros::select! {
             result = &mut second_read => panic!("body request bypassed materialization backpressure: {result:?}"),
@@ -499,7 +499,7 @@ fn body_reads_wait_for_materialization_capacity() {
         assert!(handle.await.is_ok());
     });
     let paths = paths.0.lock();
-    for request in ["first_request", "second_request"] {
+    for request in ["test.first_request", "test.second_request"] {
         for operation in [
             "multimmit.marshal.materializer.open",
             "multimmit.marshal.materializer.read",
@@ -513,10 +513,10 @@ fn body_reads_wait_for_materialization_capacity() {
                 1,
                 "expected one {operation} under {request}: {paths:?}"
             );
-            let unrelated = if request == "first_request" {
-                "second_request"
+            let unrelated = if request == "test.first_request" {
+                "test.second_request"
             } else {
-                "first_request"
+                "test.first_request"
             };
             assert!(
                 !matching[0].contains(&unrelated),

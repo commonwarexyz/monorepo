@@ -16,11 +16,11 @@ fn synchronization_hints_link_only_distinct_spans(#[case] queued: bool, #[case] 
             let proof = Arc::new(committee.lqc(View::new(1)));
             let id = proof.id::<Sha256>();
             let actor = genesis_actor(&context, &committee, 4).await;
-            let first = info_span!(parent: None, "first_origin");
+            let first = info_span!(parent: None, "test.first_origin");
             let second = if shared_span {
                 first.clone()
             } else {
-                info_span!(parent: None, "second_origin")
+                info_span!(parent: None, "test.second_origin")
             };
             let first_id = first.id().unwrap().into_u64();
             let second_id = second.id().unwrap().into_u64();
