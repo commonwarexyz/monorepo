@@ -295,7 +295,11 @@ mod tests {
         BufferPooler, IoBuf, Runner, Spawner, Supervisor as _, deterministic, mocks,
         telemetry::metrics::MetricsExt as _,
     };
-    use commonware_stream::{Handshake as _, cups::Handshake as StreamHandshake, utils::Timeout};
+    use commonware_stream::{
+        Handshake as _,
+        cups::{Handshake as StreamHandshake, Version},
+        utils::Timeout,
+    };
     use commonware_utils::{NZU32, NZUsize, SystemTimeExt, bitmap::BitMap};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -329,6 +333,7 @@ mod tests {
         Timeout::new(
             StreamHandshake {
                 signer,
+                version: Version::V1,
                 synchrony_bound: Duration::from_secs(10),
                 max_handshake_age: Duration::from_secs(10),
             },

@@ -266,7 +266,7 @@ mod tests {
     use commonware_runtime::{
         Clock as _, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
     };
-    use commonware_stream::cups::Handshake;
+    use commonware_stream::cups::{Handshake, Version};
     use commonware_utils::{NZU32, NZUsize, channel::mpsc, sync::Mutex};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -491,7 +491,7 @@ mod tests {
             let (mut dealer_network, dealer_oracle) = lookup::Network::new(
                 context.child("dealer"),
                 lookup::Config::local(
-                    Handshake::new(dealer_signer),
+                    Handshake::new(dealer_signer, Version::V1),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     dealer_socket,
                     NZUsize!(2),
@@ -501,7 +501,7 @@ mod tests {
             let (mut participant_network, participant_oracle) = lookup::Network::new(
                 context.child("participant"),
                 lookup::Config::local(
-                    Handshake::new(participant_signer),
+                    Handshake::new(participant_signer, Version::V1),
                     b"_COMMONWARE_GLUE_DKG_LOOKUP_TEST",
                     participant_socket,
                     NZUsize!(2),

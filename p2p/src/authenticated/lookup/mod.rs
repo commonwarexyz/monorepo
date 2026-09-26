@@ -123,7 +123,7 @@
 //! use commonware_p2p::{authenticated::lookup::{self, Network}, Address, AddressableManager, Sender, Recipients};
 //! use commonware_cryptography::{ed25519, Signer, PrivateKey as _, PublicKey as _, };
 //! use commonware_runtime::{deterministic, IoBuf, Metrics, Quota, Runner, Spawner, Supervisor};
-//! use commonware_stream::cups::Handshake;
+//! use commonware_stream::cups::{Handshake, Version};
 //! use commonware_utils::{NZU32, NZUsize, ordered::Map};
 //! use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 //!
@@ -159,7 +159,7 @@
 //! const MAX_MESSAGE_SIZE: u32 = 1_024; // 1KB
 //! let max_peers_per_set = NZUsize!(4); // Local identity and three peers
 //! let p2p_cfg = lookup::Config::local(
-//!     Handshake::new(signer.clone()),
+//!     Handshake::new(signer.clone(), Version::V1),
 //!     application_namespace,
 //!     my_addr,
 //!     max_peers_per_set,
@@ -234,7 +234,7 @@ mod tests {
     };
     use commonware_stream::{
         Handshake, Receiver as StreamReceiver, Sender as StreamSender,
-        cups::{self, Handshake as StreamHandshake},
+        cups::{self, Handshake as StreamHandshake, Version},
     };
     use commonware_utils::{
         Hostname, NZU32, NZUsize, TryCollect,
@@ -2381,7 +2381,7 @@ mod tests {
                 .map(|(transport, _)| transport.clone())
                 .ok_or(TestHandshakeError::UnknownApplicationIdentity)?;
             self.authenticate().await?;
-            let (sender, receiver) = StreamHandshake::new(self.transport_signer)
+            let (sender, receiver) = StreamHandshake::new(self.transport_signer, Version::V1)
                 .dial(
                     context,
                     namespace,
@@ -2421,7 +2421,7 @@ mod tests {
             self.observations.listens.fetch_add(1, Ordering::Relaxed);
             let handshake = &self;
             let (transport_peer, sender, receiver) =
-                StreamHandshake::new(self.transport_signer.clone())
+                StreamHandshake::new(self.transport_signer.clone(), Version::V1)
                     .listen(
                         context,
                         namespace,

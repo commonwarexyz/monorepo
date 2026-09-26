@@ -1,55 +1,33 @@
 use crate::cups::Error;
 use commonware_codec::{
-    Encode, EncodeSize, Write,
+    Encode,
     varint::{Decoder, MAX_U32_VARINT_SIZE, UInt},
 };
-use commonware_runtime::{Buf, IoBuf, IoBufMut, IoBufs, Sink, Stream};
+use commonware_runtime::{Buf, IoBuf, IoBufs, Sink, Stream};
+
+/// Validates the frame size and returns its length as a u32.
+pub(crate) const fn validate_frame_len(
+    payload_len: usize,
+    max_message_size: u32,
+) -> Result<u32, Error> {
+    if payload_len > max_message_size as usize {
+        return Err(Error::SendTooLarge(payload_len));
+    }
+    Ok(payload_len as u32)
+}
 
 /// Validates the frame size and assembles the frame via the caller's closure.
 ///
-/// The `assemble` closure receives the varint prefix and must combine it with
-/// the payload. This allows callers to choose between:
-/// - Chunked: prepend the prefix as a separate buffer
-/// - Contiguous: write the prefix directly into a pre-allocated buffer
+/// The `assemble` closure receives the validated length as a u32.
+/// It chooses the prefix encoding and how to combine it with the payload.
 ///
 /// Returns an error if the message is too large.
 pub(crate) fn build_frame<T>(
     payload_len: usize,
     max_message_size: u32,
-    assemble: impl FnOnce(UInt<u32>) -> Result<T, Error>,
+    assemble: impl FnOnce(u32) -> Result<T, Error>,
 ) -> Result<T, Error> {
-    if payload_len > max_message_size as usize {
-        return Err(Error::SendTooLarge(payload_len));
-    }
-    let prefix = UInt(payload_len as u32);
-    assemble(prefix)
-}
-
-/// Returns the total size of a length-prefixed frame.
-pub(crate) fn framed_len(payload_len: usize, max_message_size: u32) -> Result<usize, Error> {
-    build_frame(payload_len, max_message_size, |prefix| {
-        Ok(prefix.encode_size() + payload_len)
-    })
-}
-
-/// Appends one length-prefixed frame to a contiguous output buffer.
-///
-/// The callback receives the offset of the frame payload, which is useful when
-/// callers need to operate on the payload bytes after copying them.
-pub(crate) fn append_frame(
-    frame: &mut IoBufMut,
-    payload_len: usize,
-    max_message_size: u32,
-    append_payload: impl FnOnce(&mut IoBufMut, usize) -> Result<(), Error>,
-) -> Result<usize, Error> {
-    build_frame(payload_len, max_message_size, |prefix| {
-        let start = frame.len();
-        prefix.write(frame);
-        let payload_offset = frame.len();
-        append_payload(frame, payload_offset)?;
-        assert_eq!(frame.len() - payload_offset, payload_len);
-        Ok(frame.len() - start)
-    })
+    assemble(validate_frame_len(payload_len, max_message_size)?)
 }
 
 /// Sends data to the sink with a varint length prefix.
@@ -65,8 +43,8 @@ pub async fn send_frame<S: Sink>(
 ) -> Result<(), Error> {
     let mut bufs = bufs.into();
 
-    let frame = build_frame(bufs.len(), max_message_size, |prefix| {
-        bufs.prepend(IoBuf::from(prefix.encode()));
+    let frame = build_frame(bufs.len(), max_message_size, |len| {
+        bufs.prepend(IoBuf::from(UInt(len).encode()));
         Ok(bufs)
     })?;
     sink.send(frame).await.map_err(Error::SendFailed)
