@@ -261,7 +261,7 @@ mod tests {
         fn on_record(&self, id: &span::Id, _: &span::Record<'_>, ctx: Context<'_, S>) {
             assert_ne!(
                 ctx.span(id).unwrap().name(),
-                "parent",
+                "test.parent",
                 "blob operations must not overwrite parent fields"
             );
         }
@@ -281,7 +281,7 @@ mod tests {
             .with(filter)
             .with(spans.clone());
         async {
-            let parent = tracing::info_span!("parent", bytes = 17_u64);
+            let parent = tracing::info_span!("test.parent", bytes = 17_u64);
             async {
                 let mut registry = Registry::default();
                 let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
