@@ -11,6 +11,7 @@ use commonware_actor::{Feedback, Unreliable};
 use commonware_codec::Encode;
 use commonware_cryptography::{
     Hasher, Sha256,
+    bls12381::primitives::variant::{MinPk, MinSig},
     certificate::{Scheme as _, mocks::Fixture},
     ed25519::PublicKey,
     sha256::Digest as Sha256Digest,
@@ -449,6 +450,8 @@ where
 #[test_traced("INFO")]
 fn test_fixed_range_all_online() {
     all_online(scheme::ed25519::fixture);
+    all_online(scheme::bls12381_threshold::fixture::<MinPk, _>);
+    all_online(scheme::bls12381_threshold::fixture::<MinSig, _>);
 }
 
 #[test_traced("INFO")]
@@ -842,6 +845,8 @@ where
 #[test_traced("INFO")]
 fn test_certificate_ingress_cancels_digest() {
     certificate_ingress(scheme::ed25519::fixture);
+    certificate_ingress(scheme::bls12381_threshold::fixture::<MinPk, _>);
+    certificate_ingress(scheme::bls12381_threshold::fixture::<MinSig, _>);
 }
 
 #[test_traced("INFO")]
@@ -1258,125 +1263,72 @@ fn test_certificate_ingress_is_bounded() {
     });
 }
 
-#[test_traced("INFO")]
-fn test_shutdown_reports_stopped() {
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
-        let participant = fixture.participants[0].clone();
-        let position = Height::new(70);
-        let application = PendingApplication::default();
-        let requested = application.requested.clone();
-        let (oracle, mut registrations) =
-            simulation(context.child("simulation"), &fixture, false).await;
-        let cfg = config(
-            &context,
-            fixture.schemes[0].clone(),
-            application,
-            RecordingReporter::default(),
-            oracle.control(participant.clone()),
-            EngineScope {
-                partition: "aggregation-shutdown".into(),
-                epoch: Epoch::new(11),
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
-        let handle = engine.start(registrations.remove(&participant).unwrap());
-
-        while !requested.lock().contains_key(&position) {
-            context.sleep(Duration::from_millis(1)).await;
-        }
-        context.child("stop").stop(0, None).await.unwrap();
-
-        assert_eq!(
-            handle.await.expect("aggregation engine failed"),
-            EngineOutcome::Stopped
-        );
-    });
+#[derive(Clone, Copy, Debug)]
+enum StopTrigger {
+    Runtime,
+    Stopper,
+    DroppedStopper,
+    NetworkClosed,
 }
 
 #[test_traced("INFO")]
-fn test_graceful_stop_reports_stopped() {
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
-        let participant = fixture.participants[0].clone();
-        let position = Height::new(71);
-        let application = PendingApplication::default();
-        let requested = application.requested.clone();
-        let (oracle, mut registrations) =
-            simulation(context.child("simulation"), &fixture, false).await;
-        let cfg = config(
-            &context,
-            fixture.schemes[0].clone(),
-            application,
-            RecordingReporter::default(),
-            oracle.control(participant.clone()),
-            EngineScope {
-                partition: "aggregation-graceful-stop".into(),
-                epoch: Epoch::new(11),
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
-        let (handle, stopper) = engine.start_stoppable(registrations.remove(&participant).unwrap());
+fn test_stop_triggers_report_stopped() {
+    for trigger in [
+        StopTrigger::Runtime,
+        StopTrigger::Stopper,
+        StopTrigger::DroppedStopper,
+        StopTrigger::NetworkClosed,
+    ] {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
+            let participant = fixture.participants[0].clone();
+            let position = Height::new(70);
+            let application = PendingApplication::default();
+            let requested = application.requested.clone();
+            let (oracle, mut registrations) =
+                simulation(context.child("simulation"), &fixture, false).await;
+            let cfg = config(
+                &context,
+                fixture.schemes[0].clone(),
+                application,
+                RecordingReporter::default(),
+                oracle.control(participant.clone()),
+                EngineScope {
+                    partition: "aggregation-stop".into(),
+                    epoch: Epoch::new(11),
+                    first: position,
+                    last: position,
+                    window: 1,
+                },
+            );
+            let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
+            let (handle, stopper) =
+                engine.start_stoppable(registrations.remove(&participant).unwrap());
 
-        while !requested.lock().contains_key(&position) {
-            context.sleep(Duration::from_millis(1)).await;
-        }
-        stopper.stop();
+            while !requested.lock().contains_key(&position) {
+                context.sleep(Duration::from_millis(1)).await;
+            }
+            // Keep the stopper and any replacement registration alive until the engine stops.
+            let mut stopper = Some(stopper);
+            let mut replacement = None;
+            match trigger {
+                StopTrigger::Runtime => context.child("stop").stop(0, None).await.unwrap(),
+                StopTrigger::Stopper => stopper.take().unwrap().stop(),
+                StopTrigger::DroppedStopper => stopper = None,
+                StopTrigger::NetworkClosed => {
+                    let control = oracle.control(participant);
+                    replacement = Some(control.register(0, QUOTA).await.unwrap());
+                }
+            }
 
-        assert_eq!(
-            handle.await.expect("aggregation engine failed"),
-            EngineOutcome::Stopped
-        );
-    });
-}
-
-#[test_traced("INFO")]
-fn test_network_receiver_closure_reports_stopped() {
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
-        let participant = fixture.participants[0].clone();
-        let position = Height::new(75);
-        let application = PendingApplication::default();
-        let requested = application.requested.clone();
-        let (oracle, mut registrations) =
-            simulation(context.child("simulation"), &fixture, false).await;
-        let cfg = config(
-            &context,
-            fixture.schemes[0].clone(),
-            application,
-            RecordingReporter::default(),
-            oracle.control(participant.clone()),
-            EngineScope {
-                partition: "aggregation-network-closure".into(),
-                epoch: Epoch::new(12),
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
-        let handle = engine.start(registrations.remove(&participant).unwrap());
-
-        while !requested.lock().contains_key(&position) {
-            context.sleep(Duration::from_millis(1)).await;
-        }
-        let _replacement = oracle
-            .control(participant)
-            .register(0, QUOTA)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            handle.await.expect("aggregation engine failed"),
-            EngineOutcome::Stopped
-        );
-    });
+            assert_eq!(
+                handle.await.expect("aggregation engine failed"),
+                EngineOutcome::Stopped,
+                "{trigger:?}"
+            );
+            drop((stopper, replacement));
+        });
+    }
 }
 
 #[test_traced("INFO")]
