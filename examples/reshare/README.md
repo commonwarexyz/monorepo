@@ -23,18 +23,12 @@ initial threshold secret and the genesis `EpochInfo`. Only the epoch-0 players
 run it because only they receive shares. To bootstrap:
 
 1. Start `dkg` for every epoch-0 player.
-2. Restart any `dkg` that crashes with the same command. It resumes the
-   ceremony, or reports the outcome again if it already completed.
-3. When a player completes, it writes `genesis.json` into its own directory and
+2. When a player completes, it writes `genesis.json` into its own directory and
    every non-player validator directory, then logs `wrote genesis, serving the
    bootstrap chain until stopped`. It keeps serving so players that have not
    completed can catch up from it.
-4. Once every player has logged that line, stop every `dkg` and start the
+3. Once every player has logged that line, stop every `dkg` and start the
    validators.
-
-A player that has not logged that line may not hold its epoch-0 share yet. Keep
-its `dkg` running until it logs the line. Never copy `genesis.json` into its
-directory.
 
 `validator` starts from the genesis written by `dkg` and runs the application
 chain, stateful QMDB, continuous reshare, DKG orchestrator, and DKG probe.
@@ -75,13 +69,10 @@ material from peers, persists that floor, and state-syncs QMDB from that floor
 before normal processing.
 
 Do not use `--state-sync` as a normal restart flag. A restart recovers from
-local storage. If a state sync floor is already persisted, a restart resumes
-state sync from it, or from a newer probed floor, without the flag. A late
-joiner that stops before its floor is persisted must pass `--state-sync` again,
-because without it the node starts from genesis and permanently disables state
-sync. Once a floor is persisted or state sync completes, the flag has no
-effect. A player that misses its private dealings cannot recover them by
-syncing: the ceremony completes without it and publicly reveals its share.
+local storage, and a node with a persisted state sync floor resumes state sync
+from it without the flag. A player that misses its private dealings cannot
+recover them by syncing: the ceremony completes without it and publicly reveals
+its share.
 
 ## Limits
 
