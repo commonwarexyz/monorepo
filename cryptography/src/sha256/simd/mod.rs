@@ -10,17 +10,26 @@
 //! Merkle-family primitives in this workspace: `position || left || right`
 //! (72 bytes, used by the MMR family) and `left || right` (64 bytes, used by
 //! the BMT). Both need one full block plus a fixed-layout padding block
-//! each. Callers passing one of these shapes as its exact constituent
-//! parts (a position and two digests, or two digests) load directly from
-//! those parts into vector registers, with no intermediate buffer. Any other
-//! pair of equal-length messages, in any part decomposition, uses a generic
-//! interleaved kernel. It reads each full block in place when a single part
-//! holds it, copies blocks that span parts, and pads the tail on the stack.
-//! Messages of different lengths fall back to serial hashing.
+//! each. The BMT padding block's schedule is the same for every node, so its
+//! kernels read it from a precomputed table. Callers passing one of these
+//! shapes as its exact constituent parts (a position and two digests, or two
+//! digests) load directly from those parts into vector registers, with no
+//! intermediate buffer. Any other pair of equal-length messages, in any part
+//! decomposition, uses a generic interleaved kernel. It reads each full
+//! block in place when a single part holds it, copies blocks that span
+//! parts, and pads the tail on the stack. Messages of different lengths fall
+//! back to serial hashing.
+//!
+//! On aarch64, batches of BMT nodes given as parts go four at a time to a
+//! kernel with four interleaved chains. The table-driven padding block has
+//! no schedule instructions to fill the gaps between dependent rounds, and
+//! on Neoverse V2 and V3 two chains leave the SHA2 unit idle there.
 //!
 //! AVX-512 hashes batches of 16 equal-length contiguous messages in independent
 //! SIMD lanes, producing the ordinary SHA-256 digest of each message.
 
+#[cfg(target_arch = "aarch64")]
+use super::Sha256;
 use super::{DIGEST_LENGTH, Digest, hash_specialized};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -205,6 +214,71 @@ pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option
         })
         .collect();
     Some(hash_many(&slices))
+}
+
+/// Hash independent messages, each given as `P` parts, sending groups of four
+/// BMT node-shaped messages (two 32-byte digests each) to the four-chain
+/// kernel and the rest to the pair kernels.
+///
+/// Returns `None` when the messages are not two-part or there are fewer than
+/// four.
+#[cfg(target_arch = "aarch64")]
+pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option<Vec<Digest>> {
+    if P != 2 || messages.len() < 4 {
+        return None;
+    }
+    let mut digests = Vec::with_capacity(messages.len());
+    let (quads, rest) = messages.as_chunks::<4>();
+    for quad in quads {
+        if let [Some(a), Some(b), Some(c), Some(d)] = quad.each_ref().map(|parts| node(parts))
+            && let Some(quad) = dispatch_quad_64([a.0, b.0, c.0, d.0], [a.1, b.1, c.1, d.1])
+        {
+            digests.extend(quad);
+            continue;
+        }
+        crate::hash_pairs::<Sha256, P>(quad, &mut digests);
+    }
+    crate::hash_pairs::<Sha256, P>(rest, &mut digests);
+    Some(digests)
+}
+
+/// Return the two digests of a BMT node-shaped message given as its
+/// constituent parts, or `None` for any other shape.
+#[cfg(target_arch = "aarch64")]
+fn node<'a, const P: usize>(
+    parts: &[&'a [u8]; P],
+) -> Option<(&'a [u8; DIGEST_LENGTH], &'a [u8; DIGEST_LENGTH])> {
+    let [left, right] = parts.as_slice() else {
+        return None;
+    };
+    Some(((*left).try_into().ok()?, (*right).try_into().ok()?))
+}
+
+/// Hash four BMT node-shaped messages, given as their constituent digests,
+/// with the four-chain kernel.
+///
+/// Returns `None` when the SHA2 instructions are unavailable.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+fn dispatch_quad_64(
+    left: [&[u8; DIGEST_LENGTH]; 4],
+    right: [&[u8; DIGEST_LENGTH]; 4],
+) -> Option<[Digest; 4]> {
+    cfg_if::cfg_if! {
+        if #[cfg(target_feature = "sha2")] {
+            // SAFETY: The sha2 target feature is statically enabled.
+            Some(unsafe { aarch64::hash_quad_64(left, right) })
+        } else if #[cfg(feature = "std")] {
+            if std::arch::is_aarch64_feature_detected!("sha2") {
+                // SAFETY: The sha2 target feature was just detected.
+                return Some(unsafe { aarch64::hash_quad_64(left, right) });
+            }
+            None
+        } else {
+            let _ = (left, right);
+            None
+        }
+    }
 }
 
 /// Hash 16 equal-length contiguous messages with AVX-512 software SHA-256.

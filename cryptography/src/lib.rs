@@ -320,7 +320,9 @@ commonware_macros::stability_scope!(BETA {
         /// Returns one digest per message in the same order. Output position
         /// `i` is equivalent to `Self::hash(&messages[i])`.
         fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Vec<Self::Digest> {
-            hash_pairs::<Self, P>(messages)
+            let mut digests = Vec::with_capacity(messages.len());
+            hash_pairs::<Self, P>(messages, &mut digests);
+            digests
         }
 
         /// Append `bytes` to the hasher's running state.
@@ -331,10 +333,12 @@ commonware_macros::stability_scope!(BETA {
         fn finalize(self) -> (Self, Self::Digest);
     }
 
-    /// Hash messages two at a time with [`Hasher::hash_pair`], hashing an odd
-    /// trailing message alone.
-    fn hash_pairs<H: Hasher, const P: usize>(messages: &[[&[u8]; P]]) -> Vec<H::Digest> {
-        let mut digests = Vec::with_capacity(messages.len());
+    /// Append the digests of `messages` to `digests`, hashing two at a time
+    /// with [`Hasher::hash_pair`] and an odd trailing message alone.
+    fn hash_pairs<H: Hasher, const P: usize>(
+        messages: &[[&[u8]; P]],
+        digests: &mut Vec<H::Digest>,
+    ) {
         let (pairs, rest) = messages.as_chunks::<2>();
         for [left, right] in pairs {
             let (left, right) = H::hash_pair(left, right);
@@ -342,7 +346,6 @@ commonware_macros::stability_scope!(BETA {
             digests.push(right);
         }
         digests.extend(rest.iter().map(|parts| H::hash(parts)));
-        digests
     }
 });
 

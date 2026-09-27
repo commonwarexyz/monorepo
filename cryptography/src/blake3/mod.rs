@@ -230,7 +230,9 @@ impl Hasher for Blake3 {
         if let Some(digests) = simd::hash_many_parts(messages) {
             return digests;
         }
-        crate::hash_pairs::<Self, P>(messages)
+        let mut digests = Vec::with_capacity(messages.len());
+        crate::hash_pairs::<Self, P>(messages, &mut digests);
+        digests
     }
 
     #[inline]

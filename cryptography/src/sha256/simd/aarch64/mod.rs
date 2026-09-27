@@ -1,6 +1,7 @@
 use super::{
     super::{DIGEST_LENGTH, Digest, IV},
-    POSITION_LEN,
+    BMT_NODE_LEN, POSITION_LEN,
+    blocks::padding_wk,
 };
 
 mod equal;
@@ -21,6 +22,10 @@ static K: Align16<[u32; 64]> = Align16([
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
+
+/// The SHA-256 schedule words plus round constants for the fixed padding
+/// block after a 64-byte BMT node.
+static FINAL_64_WK: Align16<[u32; 64]> = Align16(padding_wk(&K.0, BMT_NODE_LEN));
 
 /// Hash two MMR node-shaped messages (`position || left || right`, 72 bytes)
 /// with interleaved SHA2 instructions: one full block plus a fixed-layout
@@ -81,8 +86,8 @@ pub unsafe fn hash_pair_72(
 }
 
 /// Hash two BMT node-shaped messages (`left || right`, 64 bytes) with
-/// interleaved SHA2 instructions: one full block plus a compile-time
-/// constant padding block each.
+/// interleaved SHA2 instructions: one full block plus a constant padding
+/// block each, whose schedule comes from a precomputed table.
 ///
 /// Each message is given as its two constituent digests and loaded directly
 /// into vector registers, without first concatenating them into a scratch
@@ -91,7 +96,6 @@ pub unsafe fn hash_pair_72(
 /// # Safety
 ///
 /// The `sha2` target feature must be available.
-#[allow(asm_sub_register)]
 #[target_feature(enable = "sha2")]
 pub unsafe fn hash_pair_64(
     left_a: &[u8; DIGEST_LENGTH],
@@ -109,8 +113,8 @@ pub unsafe fn hash_pair_64(
             include_str!("sha256_pair_block1_64.asm"),
             include_str!("sha256_rounds_2x.asm"),
             include_str!("sha256_pair_chain.asm"),
-            include_str!("sha256_pair_tail0.asm"),
-            include_str!("sha256_rounds_2x.asm"),
+            "mov {k}, {padding}",
+            include_str!("sha256_rounds_2x_fixed.asm"),
             include_str!("sha256_pair_finish.asm"),
             left_a = in(reg) left_a.as_ptr(),
             left_b = in(reg) left_b.as_ptr(),
@@ -118,9 +122,9 @@ pub unsafe fn hash_pair_64(
             right_b = in(reg) right_b.as_ptr(),
             left_output = in(reg) left_digest.as_mut_ptr(),
             right_output = in(reg) right_digest.as_mut_ptr(),
-            tmp = out(reg) _,
             k = out(reg) _,
             k_start = in(reg) K.0.as_ptr(),
+            padding = in(reg) FINAL_64_WK.0.as_ptr(),
             state = in(reg) IV.as_ptr(),
             out("v0") _, out("v1") _, out("v2") _, out("v3") _,
             out("v4") _, out("v5") _, out("v6") _, out("v7") _,
@@ -132,4 +136,56 @@ pub unsafe fn hash_pair_64(
         );
     }
     (Digest(left_digest), Digest(right_digest))
+}
+
+/// Hash four BMT node-shaped messages (`left || right`, 64 bytes) with four
+/// interleaved chains of SHA2 instructions: one full block plus a constant
+/// padding block each, whose schedule comes from a precomputed table.
+///
+/// The padding block has no schedule instructions, so on Neoverse V2 and V3
+/// two chains leave the SHA2 unit idle between its dependent rounds. Four
+/// chains fill it, finishing more nodes per cycle than two pairs.
+///
+/// # Safety
+///
+/// The `sha2` target feature must be available.
+#[target_feature(enable = "sha2")]
+pub unsafe fn hash_quad_64(
+    left: [&[u8; DIGEST_LENGTH]; 4],
+    right: [&[u8; DIGEST_LENGTH]; 4],
+) -> [Digest; 4] {
+    let mut digests = [[0u8; DIGEST_LENGTH]; 4];
+    // SAFETY: The inputs are 32-byte digests, the output holds four 32-byte
+    // digests, the caller guarantees the SHA2 instructions are available,
+    // and all registers written by the asm are listed as outputs.
+    unsafe {
+        core::arch::asm!(
+            include_str!("sha256_quad_block1_64.asm"),
+            include_str!("sha256_rounds_4x.asm"),
+            include_str!("sha256_quad_chain.asm"),
+            include_str!("sha256_rounds_4x_fixed.asm"),
+            include_str!("sha256_quad_finish.asm"),
+            left_0 = in(reg) left[0].as_ptr(),
+            left_1 = in(reg) left[1].as_ptr(),
+            left_2 = in(reg) left[2].as_ptr(),
+            left_3 = in(reg) left[3].as_ptr(),
+            right_0 = in(reg) right[0].as_ptr(),
+            right_1 = in(reg) right[1].as_ptr(),
+            right_2 = in(reg) right[2].as_ptr(),
+            right_3 = in(reg) right[3].as_ptr(),
+            output = inout(reg) digests.as_mut_ptr() => _,
+            k = inout(reg) K.0.as_ptr() => _,
+            padding = inout(reg) FINAL_64_WK.0.as_ptr() => _,
+            state = in(reg) IV.as_ptr(),
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _,
+            out("v4") _, out("v5") _, out("v6") _, out("v7") _,
+            out("v8") _, out("v9") _, out("v10") _, out("v11") _,
+            out("v12") _, out("v13") _, out("v14") _, out("v15") _,
+            out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+            out("v20") _, out("v21") _, out("v22") _, out("v23") _,
+            out("v24") _, out("v25") _, out("v26") _,
+            options(nostack)
+        );
+    }
+    digests.map(Digest)
 }

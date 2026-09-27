@@ -249,6 +249,18 @@ impl<H: Hasher> BatchPlan<H> {
             })
             .collect();
         assert_eq!(H::hash_many_parts(&split), expected);
+
+        // Split in half as well, so 64-byte messages arrive as two 32-byte
+        // parts, the shape of a BMT node.
+        let halves: Vec<[&[u8]; 2]> = self
+            .messages
+            .iter()
+            .map(|message| {
+                let (left, right) = message.split_at(message.len() / 2);
+                [left, right]
+            })
+            .collect();
+        assert_eq!(H::hash_many_parts(&halves), expected);
     }
 }
 

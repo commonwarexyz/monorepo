@@ -207,9 +207,14 @@ impl Hasher for Sha256 {
         simd::hash_many(messages)
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Vec<Self::Digest> {
-        simd::hash_many_parts(messages).unwrap_or_else(|| crate::hash_pairs::<Self, P>(messages))
+        if let Some(digests) = simd::hash_many_parts(messages) {
+            return digests;
+        }
+        let mut digests = Vec::with_capacity(messages.len());
+        crate::hash_pairs::<Self, P>(messages, &mut digests);
+        digests
     }
 
     #[inline]
@@ -531,6 +536,21 @@ mod tests {
                 check([8, 100], count, run);
                 check([8, 1000, 3], count, run);
             }
+        }
+    }
+
+    /// Check batched BMT nodes whose digests are unaligned and overlap, since
+    /// the node kernels load directly from each part.
+    #[test]
+    fn test_hash_many_parts_unaligned_nodes_match_hash() {
+        let backing = message(200, 7);
+        let nodes: Vec<[&[u8]; 2]> = (0..9)
+            .map(|i| [&backing[i..i + 32], &backing[3 * i + 1..3 * i + 33]])
+            .collect();
+        for count in 0..=nodes.len() {
+            let nodes = &nodes[..count];
+            let expected: Vec<_> = nodes.iter().map(|parts| Sha256::hash(parts)).collect();
+            assert_eq!(Sha256::hash_many_parts(nodes), expected, "count={count}");
         }
     }
 

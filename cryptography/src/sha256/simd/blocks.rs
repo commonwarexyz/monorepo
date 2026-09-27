@@ -84,3 +84,35 @@ fn fill<'a>(parts: &mut Iter<'a, &'a [u8]>, part: &mut &'a [u8], out: &mut [u8])
         *part = rest;
     }
 }
+
+/// Return the schedule words plus round constants `k` of the padding block
+/// that follows a message of `len` bytes, where `len` is a multiple of the
+/// block length.
+///
+/// The block holds only the terminator and the bit length, so its schedule is
+/// the same for every message of that length.
+pub(super) const fn padding_wk(k: &[u32; 64], len: usize) -> [u32; 64] {
+    let mut schedule = [0u32; 64];
+    schedule[0] = 0x8000_0000;
+    schedule[15] = (len * 8) as u32;
+
+    let mut i = 16;
+    while i < schedule.len() {
+        let prev15 = schedule[i - 15];
+        let sigma0 = prev15.rotate_right(7) ^ prev15.rotate_right(18) ^ (prev15 >> 3);
+        let prev2 = schedule[i - 2];
+        let sigma1 = prev2.rotate_right(17) ^ prev2.rotate_right(19) ^ (prev2 >> 10);
+        schedule[i] = schedule[i - 16]
+            .wrapping_add(sigma0)
+            .wrapping_add(schedule[i - 7])
+            .wrapping_add(sigma1);
+        i += 1;
+    }
+
+    let mut i = 0;
+    while i < schedule.len() {
+        schedule[i] = schedule[i].wrapping_add(k[i]);
+        i += 1;
+    }
+    schedule
+}
