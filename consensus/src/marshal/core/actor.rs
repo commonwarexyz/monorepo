@@ -420,7 +420,6 @@ where
                 self = self
                     .install_floor(
                         finalization,
-                        false,
                         &mut resolver,
                         &mut buffer,
                         &mut waiters,
@@ -947,7 +946,7 @@ where
             }
             Message::SetFloor { finalization, .. } => {
                 self = self
-                    .install_floor(finalization, true, resolver, buffer, waiters, application)
+                    .install_floor(finalization, resolver, buffer, waiters, application)
                     .await;
             }
             Message::Prune { height, .. } => {
@@ -1202,7 +1201,6 @@ where
     async fn install_floor<Buf, R>(
         mut self: Box<Self>,
         finalization: Finalization<P::Scheme, V::Commitment>,
-        skip_if_superseded: bool,
         resolver: &mut R,
         buffer: &mut Buf,
         waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
@@ -1240,7 +1238,7 @@ where
 
         // A pending anchor at the same or a newer floor already blocks
         // progress. Keep waiting for it instead of replacing it.
-        if skip_if_superseded && self.floor.has_pending_anchor_at_or_after(round) {
+        if self.floor.has_pending_anchor_at_or_after(round) {
             return self;
         }
 
