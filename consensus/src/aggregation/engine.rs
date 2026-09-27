@@ -1,7 +1,9 @@
 //! Fixed per-epoch aggregation engine.
 
 use super::{
-    Config, Journal, JournalConfig, JournalIdentity, Recoverer, metrics, scheme,
+    Config, Recoverer,
+    journal::{Journal, JournalConfig},
+    metrics, scheme,
     types::{Ack, Certificate, Error, Item, RecoveryKey, RecoveryNamespace},
 };
 use crate::{
@@ -199,8 +201,11 @@ where
         let mailbox = Mailbox { sender };
         let recovery_namespace = cfg.scheme.recovery_namespace();
         let journal_config = JournalConfig {
-            identity: JournalIdentity::new(&cfg.scheme, cfg.epoch, cfg.first, cfg.last, cfg.window),
             partition: cfg.journal_partition,
+            epoch: cfg.epoch,
+            first: cfg.first,
+            last: cfg.last,
+            window: cfg.window,
             write_buffer: cfg.journal_write_buffer,
             replay_buffer: cfg.journal_replay_buffer,
             heights_per_section: cfg.journal_heights_per_section,

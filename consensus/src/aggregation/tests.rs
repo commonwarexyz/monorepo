@@ -1,6 +1,5 @@
 use super::{
-    CertificateOutcome, Config, Engine, EngineOutcome, Journal, JournalConfig, JournalError,
-    JournalIdentity, Recoverer,
+    CertificateOutcome, Config, Engine, EngineOutcome, Recoverer,
     scheme::{self, Scheme},
     types::{Ack, Certificate, Item, RecoveryKey, RecoveryNamespace},
 };
@@ -1490,13 +1489,10 @@ fn test_restart_reproposes_uncertified_position() {
     });
 }
 
-fn journal_identity<S, F>(fixture: F)
-where
-    S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-    F: FnOnce(&mut Context, &[u8], u32) -> Fixture<S>,
-{
+#[test_traced("INFO")]
+fn test_restart_after_completion_replays_without_proposing() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-        let fixture = fixture(&mut context, NAMESPACE, 1);
+        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
         let participant = fixture.participants[0].clone();
         let epoch = Epoch::new(11);
         let position = Height::new(80);
@@ -1560,102 +1556,6 @@ where
         );
         assert!(replay_requests.lock().is_empty());
         assert_eq!(replay_certificates.lock().len(), 1);
-    });
-}
-
-#[test_traced("INFO")]
-fn test_journal_replay_binds_engine_identity() {
-    journal_identity(scheme::ed25519::fixture);
-}
-
-#[test_traced("INFO")]
-fn test_journal_facade_rejects_mismatch_and_destroys_exact_journal() {
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-        let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
-        let scheme = fixture.schemes[0].clone();
-        let participant = fixture.participants[0].clone();
-        let epoch = Epoch::new(17);
-        let position = Height::new(140);
-        let partition = "aggregation-facade-destroy";
-        let (oracle, mut registrations) =
-            simulation(context.child("simulation"), &fixture, false).await;
-        let engine_cfg = config(
-            &context,
-            scheme.clone(),
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            oracle.control(participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let journal_cfg = JournalConfig {
-            identity: JournalIdentity::new::<scheme::ed25519::Scheme, Sha256Digest>(
-                &scheme,
-                epoch,
-                position,
-                position,
-                NonZeroU64::new(1).unwrap(),
-            ),
-            partition: partition.into(),
-            write_buffer: NZUsize!(4096),
-            replay_buffer: NZUsize!(4096),
-            heights_per_section: NonZeroU64::new(4).unwrap(),
-            compression: None,
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-        };
-        let (engine, _mailbox) = Engine::new(context.child("engine"), engine_cfg);
-        assert_eq!(
-            engine
-                .start(registrations.remove(&participant).unwrap())
-                .await
-                .unwrap(),
-            EngineOutcome::Completed
-        );
-
-        let mut mismatch = journal_cfg.clone();
-        mismatch.identity.epoch = epoch.next();
-        let journal_context = context.child("mismatch");
-        let result = Journal::<_, scheme::ed25519::Scheme, Sha256Digest>::init(
-            journal_context,
-            mismatch,
-            &mut context,
-            &scheme,
-            &Sequential,
-        )
-        .await;
-        assert!(matches!(result, Err(JournalError::EpochMismatch)));
-
-        let journal_context = context.child("verified");
-        let (journal, certificates) = Journal::<_, scheme::ed25519::Scheme, Sha256Digest>::init(
-            journal_context,
-            journal_cfg.clone(),
-            &mut context,
-            &scheme,
-            &Sequential,
-        )
-        .await
-        .unwrap();
-        assert_eq!(certificates.len(), 1);
-        assert_eq!(certificates[0].item.position, position);
-        journal.destroy().await.unwrap();
-
-        let journal_context = context.child("after_destroy");
-        let (journal, certificates) = Journal::<_, scheme::ed25519::Scheme, Sha256Digest>::init(
-            journal_context,
-            journal_cfg,
-            &mut context,
-            &scheme,
-            &Sequential,
-        )
-        .await
-        .unwrap();
-        assert!(certificates.is_empty());
-        journal.destroy().await.unwrap();
     });
 }
 
@@ -1766,82 +1666,11 @@ fn test_journal_replay_resumes_partial_mid_range() {
     });
 }
 
-fn journal_namespace_mismatch() {
+#[test_traced("INFO")]
+#[should_panic(expected = "aggregation journal identity mismatch")]
+fn test_journal_rejects_window_mismatch() {
     deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
         let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
-        let participant = fixture.participants[0].clone();
-        let epoch = Epoch::new(12);
-        let position = Height::new(90);
-        let partition = "aggregation_identity_mismatch";
-
-        let (first_oracle, mut first_registrations) =
-            simulation(context.child("first_simulation"), &fixture, false).await;
-        let first_cfg = config(
-            &context,
-            fixture.schemes[0].clone(),
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            first_oracle.control(participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (first_engine, _mailbox) = Engine::new(context.child("first_engine"), first_cfg);
-        assert_eq!(
-            first_engine
-                .start(first_registrations.remove(&participant).unwrap())
-                .await
-                .expect("first aggregation engine failed"),
-            EngineOutcome::Completed
-        );
-
-        let (mismatch_oracle, mut mismatch_registrations) =
-            simulation(context.child("mismatch_simulation"), &fixture, false).await;
-        let mismatch_scheme = scheme::ed25519::Scheme::signer(
-            b"different namespace",
-            fixture.schemes[0].participants().clone(),
-            fixture.private_keys[0].clone(),
-        )
-        .unwrap();
-        let mismatch_cfg = config(
-            &context,
-            mismatch_scheme,
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            mismatch_oracle.control(participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (mismatch_engine, _mailbox) =
-            Engine::new(context.child("mismatch_engine"), mismatch_cfg);
-        let _ = mismatch_engine
-            .start(mismatch_registrations.remove(&participant).unwrap())
-            .await;
-    });
-}
-
-#[test_traced("INFO")]
-#[should_panic(expected = "aggregation journal namespace digest mismatch")]
-fn test_journal_rejects_signing_namespace_mismatch() {
-    journal_namespace_mismatch();
-}
-
-fn journal_window_mismatch<S, F>(fixture: F)
-where
-    S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-    F: FnOnce(&mut Context, &[u8], u32) -> Fixture<S>,
-{
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-        let fixture = fixture(&mut context, NAMESPACE, 1);
         let participant = fixture.participants[0].clone();
         let epoch = Epoch::new(13);
         let position = Height::new(100);
@@ -1891,76 +1720,4 @@ where
             .start(mismatch_registrations.remove(&participant).unwrap())
             .await;
     });
-}
-
-#[test_traced("INFO")]
-#[should_panic(expected = "aggregation journal window mismatch")]
-fn test_journal_rejects_window_mismatch() {
-    journal_window_mismatch(scheme::ed25519::fixture);
-}
-
-fn journal_committee_mismatch<S, F>(fixture: F)
-where
-    S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-    F: Fn(&mut Context, &[u8], u32) -> Fixture<S>,
-{
-    deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
-        let first_fixture = fixture(&mut context, NAMESPACE, 1);
-        let first_participant = first_fixture.participants[0].clone();
-        let epoch = Epoch::new(14);
-        let position = Height::new(110);
-        let partition = "aggregation_committee_mismatch";
-
-        let (first_oracle, mut first_registrations) =
-            simulation(context.child("first_simulation"), &first_fixture, false).await;
-        let first_cfg = config(
-            &context,
-            first_fixture.schemes[0].clone(),
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            first_oracle.control(first_participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (first_engine, _mailbox) = Engine::new(context.child("first_engine"), first_cfg);
-        first_engine
-            .start(first_registrations.remove(&first_participant).unwrap())
-            .await
-            .expect("first aggregation engine failed");
-
-        let second_fixture = fixture(&mut context, NAMESPACE, 1);
-        let second_participant = second_fixture.participants[0].clone();
-        let (mismatch_oracle, mut mismatch_registrations) =
-            simulation(context.child("mismatch_simulation"), &second_fixture, false).await;
-        let mismatch_cfg = config(
-            &context,
-            second_fixture.schemes[0].clone(),
-            ImmediateApplication::default(),
-            RecordingReporter::default(),
-            mismatch_oracle.control(second_participant.clone()),
-            EngineScope {
-                partition: partition.into(),
-                epoch,
-                first: position,
-                last: position,
-                window: 1,
-            },
-        );
-        let (mismatch_engine, _mailbox) =
-            Engine::new(context.child("mismatch_engine"), mismatch_cfg);
-        let _ = mismatch_engine
-            .start(mismatch_registrations.remove(&second_participant).unwrap())
-            .await;
-    });
-}
-
-#[test_traced("INFO")]
-#[should_panic(expected = "aggregation journal committee mismatch")]
-fn test_journal_rejects_committee_mismatch() {
-    journal_committee_mismatch(scheme::ed25519::fixture);
 }

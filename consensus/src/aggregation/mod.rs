@@ -25,8 +25,9 @@
 //! coordinator bounds and deduplicates logical resolver requests across engine scopes; it does not
 //! decode, verify, archive, or route certificates. Resolver consumers deliver recovered
 //! certificates through [`Mailbox`], which applies the engine's range and signature checks.
-//! Archiving the complete range and retiring the engine and its journal remain
-//! application/orchestrator responsibilities.
+//! Archiving the complete range and retiring the engine remain application/orchestrator
+//! responsibilities. Every certificate is reported before the engine completes, so an
+//! orchestrator retires a completed engine's journal by removing its configured partition.
 
 pub mod scheme;
 pub mod types;
@@ -38,7 +39,6 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::{CertificateOutcome, Engine, EngineOutcome, Mailbox, Stopper};
         mod journal;
-        pub use journal::{Journal, JournalConfig, JournalError, JournalIdentity};
         mod metrics;
         mod recovery;
         pub use recovery::{Recoverer, Recovery, RecoveryCoordinator};
