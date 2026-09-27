@@ -78,27 +78,27 @@ impl Words<LANES> for __m256i {
     }
 
     #[inline(always)]
-    unsafe fn rotate16(self) -> Self {
+    unsafe fn xor_rotate16(self, other: Self) -> Self {
         // SAFETY: The caller establishes AVX2.
-        unsafe { rotate::<16, 16>(self) }
+        unsafe { rotate::<16, 16>(_mm256_xor_si256(self, other)) }
     }
 
     #[inline(always)]
-    unsafe fn rotate12(self) -> Self {
+    unsafe fn xor_rotate12(self, other: Self) -> Self {
         // SAFETY: The caller establishes AVX2.
-        unsafe { rotate::<12, 20>(self) }
+        unsafe { rotate::<12, 20>(_mm256_xor_si256(self, other)) }
     }
 
     #[inline(always)]
-    unsafe fn rotate8(self) -> Self {
+    unsafe fn xor_rotate8(self, other: Self) -> Self {
         // SAFETY: The caller establishes AVX2.
-        unsafe { rotate::<8, 24>(self) }
+        unsafe { rotate::<8, 24>(_mm256_xor_si256(self, other)) }
     }
 
     #[inline(always)]
-    unsafe fn rotate7(self) -> Self {
+    unsafe fn xor_rotate7(self, other: Self) -> Self {
         // SAFETY: The caller establishes AVX2.
-        unsafe { rotate::<7, 25>(self) }
+        unsafe { rotate::<7, 25>(_mm256_xor_si256(self, other)) }
     }
 
     #[inline(always)]

@@ -7,10 +7,13 @@
 //! lockstep across lanes. This fills vectors even when each message is too
 //! short for BLAKE3's chunk-level parallelism within a single message.
 //!
-//! AVX-512 hashes 16 messages per batch, AVX2 8, and NEON 4. Node pairs use
-//! a two-message kernel: on x86_64, AVX2 holds one message's state rows in
-//! each 128-bit half of a vector, and on aarch64 two interleaved scalar lanes
-//! give the core independent work to overlap.
+//! AVX-512 hashes 16 messages per batch, AVX2 8, and NEON 8 (two vectors per
+//! word), with narrower NEON kernels for smaller batches. Node pairs use a
+//! two-message kernel: on x86_64, AVX2 holds one message's state rows in each
+//! 128-bit half of a vector. On aarch64 with the SHA-3 extension, each vector
+//! holds one word of both messages, duplicated so that 64-bit `XAR` rotates
+//! it, and otherwise two interleaved scalar lanes give the core independent
+//! work to overlap.
 //!
 //! Kernel code keeps intrinsics out of closures: a closure does not inherit
 //! its caller's target features, so intrinsics inside it compile to
@@ -23,6 +26,8 @@ use blake3::{BLOCK_LEN, CHUNK_LEN, OUT_LEN};
 
 #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
 mod aarch64;
+#[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+pub(super) use aarch64::subtree;
 #[cfg(any(test, target_arch = "aarch64"))]
 mod portable;
 #[cfg(target_arch = "x86_64")]
@@ -70,17 +75,17 @@ trait Words<const LANES: usize>: Copy {
     /// Exclusive-or lanewise.
     unsafe fn xor(self, other: Self) -> Self;
 
-    /// Rotate each lane right by 16 bits.
-    unsafe fn rotate16(self) -> Self;
+    /// Exclusive-or lanewise, then rotate each lane right by 16 bits.
+    unsafe fn xor_rotate16(self, other: Self) -> Self;
 
-    /// Rotate each lane right by 12 bits.
-    unsafe fn rotate12(self) -> Self;
+    /// Exclusive-or lanewise, then rotate each lane right by 12 bits.
+    unsafe fn xor_rotate12(self, other: Self) -> Self;
 
-    /// Rotate each lane right by 8 bits.
-    unsafe fn rotate8(self) -> Self;
+    /// Exclusive-or lanewise, then rotate each lane right by 8 bits.
+    unsafe fn xor_rotate8(self, other: Self) -> Self;
 
-    /// Rotate each lane right by 7 bits.
-    unsafe fn rotate7(self) -> Self;
+    /// Exclusive-or lanewise, then rotate each lane right by 7 bits.
+    unsafe fn xor_rotate7(self, other: Self) -> Self;
 
     /// Load one block per lane as 16 little-endian message words.
     unsafe fn load(blocks: [&[u8; BLOCK_LEN]; LANES]) -> [Self; 16];
@@ -103,14 +108,17 @@ unsafe fn g<V: Words<L>, const L: usize>(
 ) {
     // SAFETY: The caller establishes the target features `V` requires.
     unsafe {
+        // The value being replaced is the receiver of each fused xor-rotate,
+        // so kernels whose instruction overwrites its first operand need no
+        // extra copy.
         state[a] = state[a].add(state[b]).add(x);
-        state[d] = state[d].xor(state[a]).rotate16();
+        state[d] = state[d].xor_rotate16(state[a]);
         state[c] = state[c].add(state[d]);
-        state[b] = state[b].xor(state[c]).rotate12();
+        state[b] = state[b].xor_rotate12(state[c]);
         state[a] = state[a].add(state[b]).add(y);
-        state[d] = state[d].xor(state[a]).rotate8();
+        state[d] = state[d].xor_rotate8(state[a]);
         state[c] = state[c].add(state[d]);
-        state[b] = state[b].xor(state[c]).rotate7();
+        state[b] = state[b].xor_rotate7(state[c]);
     }
 }
 
@@ -143,7 +151,8 @@ unsafe fn round<V: Words<L>, const L: usize>(
     }
 }
 
-/// Compress one block per lane into the lanes' chaining values.
+/// Compress one block per lane into the lanes' chaining values, with the
+/// same counter in every lane.
 ///
 /// # Safety
 ///
@@ -153,6 +162,27 @@ unsafe fn compress<V: Words<L>, const L: usize>(
     cv: &mut [V; 8],
     message: &[V; 16],
     counter: u64,
+    len: usize,
+    flags: u32,
+) {
+    // SAFETY: The caller establishes the target features `V` requires.
+    unsafe {
+        let counter = [V::splat(counter as u32), V::splat((counter >> 32) as u32)];
+        compress_lanes(cv, message, counter, len, flags);
+    }
+}
+
+/// Compress one block per lane into the lanes' chaining values, with each
+/// lane's counter split into its low and high words.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires.
+#[inline(always)]
+unsafe fn compress_lanes<V: Words<L>, const L: usize>(
+    cv: &mut [V; 8],
+    message: &[V; 16],
+    [counter_low, counter_high]: [V; 2],
     len: usize,
     flags: u32,
 ) {
@@ -171,8 +201,8 @@ unsafe fn compress<V: Words<L>, const L: usize>(
             V::splat(IV[1]),
             V::splat(IV[2]),
             V::splat(IV[3]),
-            V::splat(counter as u32),
-            V::splat((counter >> 32) as u32),
+            counter_low,
+            counter_high,
             V::splat(len as u32),
             V::splat(flags),
         ];
@@ -260,6 +290,72 @@ unsafe fn chunk<V: Words<L>, const L: usize>(
     }
 }
 
+/// Chaining values of `L` full chunks of one message, where lane `i` holds
+/// chunk `first + i`.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires.
+///
+/// # Panics
+///
+/// Panics if an input is shorter than [`CHUNK_LEN`].
+#[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+#[inline(always)]
+unsafe fn chunks<V: Words<L>, const L: usize>(
+    inputs: [&[u8]; L],
+    first: u64,
+) -> [[u8; OUT_LEN]; L] {
+    // SAFETY: The caller establishes the target features `V` requires.
+    unsafe {
+        // Load each lane's counter as the first two words of a block, which
+        // places the low and high words of every lane in two vectors.
+        let mut counters = [[0u8; BLOCK_LEN]; L];
+        for (lane, block) in counters.iter_mut().enumerate() {
+            block[..8].copy_from_slice(&(first + lane as u64).to_le_bytes());
+        }
+        let counters = V::load(counters.each_ref());
+        let counter = [counters[0], counters[1]];
+
+        let mut cv = iv::<V, L>();
+        let blocks = CHUNK_LEN / BLOCK_LEN;
+        for block in 0..blocks {
+            let flags = match block {
+                0 => CHUNK_START,
+                _ if block + 1 == blocks => CHUNK_END,
+                _ => 0,
+            };
+            let start = block * BLOCK_LEN;
+            let message = V::load(inputs.map(|input| {
+                input[start..start + BLOCK_LEN]
+                    .try_into()
+                    .expect("block is BLOCK_LEN bytes")
+            }));
+            compress_lanes(&mut cv, &message, counter, BLOCK_LEN, flags);
+        }
+        V::store(cv)
+    }
+}
+
+/// Non-root parent chaining values, where lane `i` merges the two child
+/// chaining values concatenated in `children[i]`.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires.
+#[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+#[inline(always)]
+unsafe fn parents<V: Words<L>, const L: usize>(
+    children: [&[u8; BLOCK_LEN]; L],
+) -> [[u8; OUT_LEN]; L] {
+    // SAFETY: The caller establishes the target features `V` requires.
+    unsafe {
+        let mut cv = iv::<V, L>();
+        compress(&mut cv, &V::load(children), 0, BLOCK_LEN, PARENT);
+        V::store(cv)
+    }
+}
+
 /// Merge the chaining values of two sibling subtrees of every lane.
 ///
 /// # Safety
@@ -337,8 +433,9 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
     }
 
     cfg_if::cfg_if! {
-        if #[cfg(target_arch = "aarch64")] {
-            // Two interleaved scalar lanes outrun a half-empty NEON batch.
+        if #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))] {
+            let [left, right] = aarch64::hash_pair([&left[..len], &right[..len]]);
+        } else if #[cfg(target_arch = "aarch64")] {
             // SAFETY: The portable words require no target features.
             let [left, right] = unsafe { hash::<[u32; 2], 2>([&left[..len], &right[..len]]) };
         } else if #[cfg(target_arch = "x86_64")] {
@@ -346,6 +443,19 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
         }
     }
     Some((Digest(left), Digest(right)))
+}
+
+/// Hash one message, with its chunks and parents in SIMD lanes when it spans
+/// at least two full chunks and a kernel is available.
+#[inline]
+pub(super) fn hash_one(message: &[u8]) -> Digest {
+    #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+    if message.len() >= 2 * CHUNK_LEN
+        && let Some(digest) = aarch64::hash_large(message)
+    {
+        return Digest(digest);
+    }
+    blake3::hash(message).into()
 }
 
 /// Hash independent messages with the widest batch kernel for the current CPU.
@@ -396,17 +506,18 @@ pub(super) fn hash_many_parts<const P: usize>(messages: &[[&[u8]; P]]) -> Option
 }
 
 /// Hash `messages` in batches of `L` equal-length messages with `kernel`,
-/// hashing the rest individually.
+/// hashing the rest individually with [`hash_one`]. The kernel receives each
+/// batch with its number of active lanes, and may hash a partial batch with a
+/// narrower kernel.
 ///
 /// A batch uses the kernel when it has at least `minimum` messages and more
-/// active lanes than hashing each message individually would fill. The
-/// [blake3] crate hashes a message's chunks in SIMD lanes once it has at least
-/// 4 of them, filling `min(chunks, L)` lanes, and hashes shorter messages one
-/// block at a time.
+/// active lanes than hashing each message individually would fill. A single
+/// message of at least 4 chunks hashes its chunks in SIMD lanes, filling about
+/// `min(chunks, L)` lanes, and shorter messages fill fewer.
 fn batch<const L: usize, M: AsRef<[u8]>>(
     messages: &[M],
     minimum: usize,
-    kernel: impl Fn([&[u8]; L]) -> [[u8; OUT_LEN]; L],
+    kernel: impl Fn([&[u8]; L], usize) -> [[u8; OUT_LEN]; L],
 ) -> Vec<Digest> {
     let mut digests = Vec::with_capacity(messages.len());
     for run in messages.chunk_by(|left, right| left.as_ref().len() == right.as_ref().len()) {
@@ -415,11 +526,7 @@ fn batch<const L: usize, M: AsRef<[u8]>>(
         let minimum = minimum.max((fill + 1).min(L));
         for batch in run.chunks(L) {
             if batch.len() < minimum {
-                digests.extend(
-                    batch
-                        .iter()
-                        .map(|message| Digest::from(blake3::hash(message.as_ref()))),
-                );
+                digests.extend(batch.iter().map(|message| hash_one(message.as_ref())));
                 continue;
             }
 
@@ -428,7 +535,7 @@ fn batch<const L: usize, M: AsRef<[u8]>>(
             for (input, message) in inputs[1..].iter_mut().zip(&batch[1..]) {
                 *input = message.as_ref();
             }
-            let outputs = kernel(inputs);
+            let outputs = kernel(inputs, batch.len());
             digests.extend(outputs[..batch.len()].iter().copied().map(Digest));
         }
     }
@@ -533,12 +640,15 @@ mod tests {
     #[test]
     fn test_batch_minimum() {
         let calls = core::cell::Cell::new(0);
-        let kernel = |inputs: [&[u8]; 4]| {
+        let active = core::cell::RefCell::new(Vec::new());
+        let kernel = |inputs: [&[u8]; 4], lanes: usize| {
             calls.set(calls.get() + 1);
+            active.borrow_mut().push(lanes);
             inputs.map(|input| *blake3::hash(input).as_bytes())
         };
         let check = |messages: &[Vec<u8>], minimum, expected_calls| {
             calls.set(0);
+            active.borrow_mut().clear();
             let expected: Vec<Digest> = messages
                 .iter()
                 .map(|message| blake3::hash(message).into())
@@ -551,6 +661,9 @@ mod tests {
         // more than one lane.
         let short: Vec<Vec<u8>> = (0..6).map(|i| vec![i; 100]).collect();
         check(&short, 2, 2);
+
+        // The kernel learns how many lanes of each batch are active.
+        assert_eq!(*active.borrow(), [4, 2]);
         check(&short, 3, 1);
         check(&short[..1], 1, 0);
         let three: Vec<Vec<u8>> = (0..6).map(|i| vec![i; 3 * CHUNK_LEN]).collect();

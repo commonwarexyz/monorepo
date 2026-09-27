@@ -74,13 +74,13 @@ pub(super) fn hash_pair(
 /// Hash independent messages in batches of 16 (AVX-512) or 8 (AVX2).
 pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     if supports_avx512() {
-        return Some(batch(messages, avx512::MINIMUM, |inputs| {
+        return Some(batch(messages, avx512::MINIMUM, |inputs, _| {
             // SAFETY: AVX-512F availability was established above.
             unsafe { avx512::hash_x16(inputs) }
         }));
     }
     if supports_avx2() {
-        return Some(batch(messages, avx2::MINIMUM, |inputs| {
+        return Some(batch(messages, avx2::MINIMUM, |inputs, _| {
             // SAFETY: AVX2 availability was established above.
             unsafe { avx2::hash_x8(inputs) }
         }));

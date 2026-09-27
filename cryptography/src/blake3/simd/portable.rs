@@ -20,23 +20,23 @@ impl<const L: usize> Words<L> for [u32; L] {
     }
 
     #[inline(always)]
-    unsafe fn rotate16(self) -> Self {
-        self.map(|word| word.rotate_right(16))
+    unsafe fn xor_rotate16(self, other: Self) -> Self {
+        core::array::from_fn(|lane| (self[lane] ^ other[lane]).rotate_right(16))
     }
 
     #[inline(always)]
-    unsafe fn rotate12(self) -> Self {
-        self.map(|word| word.rotate_right(12))
+    unsafe fn xor_rotate12(self, other: Self) -> Self {
+        core::array::from_fn(|lane| (self[lane] ^ other[lane]).rotate_right(12))
     }
 
     #[inline(always)]
-    unsafe fn rotate8(self) -> Self {
-        self.map(|word| word.rotate_right(8))
+    unsafe fn xor_rotate8(self, other: Self) -> Self {
+        core::array::from_fn(|lane| (self[lane] ^ other[lane]).rotate_right(8))
     }
 
     #[inline(always)]
-    unsafe fn rotate7(self) -> Self {
-        self.map(|word| word.rotate_right(7))
+    unsafe fn xor_rotate7(self, other: Self) -> Self {
+        core::array::from_fn(|lane| (self[lane] ^ other[lane]).rotate_right(7))
     }
 
     #[inline(always)]

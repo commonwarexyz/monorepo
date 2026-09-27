@@ -120,6 +120,19 @@ fn subtree(
         return merge_subtrees_non_root(&left, &right, Mode::Hash);
     }
 
+    // A subtree within one part hashes its chunks and parents in SIMD lanes.
+    #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))]
+    if len >= 2 * blake3::CHUNK_LEN
+        && let Some(part) = parts.first()
+        && offset + len <= base + part.len()
+        && let Some(cv) = simd::subtree(
+            &part[offset - base..offset - base + len],
+            (offset / blake3::CHUNK_LEN) as u64,
+        )
+    {
+        return cv;
+    }
+
     let mut hasher = CoreBlake3::new();
     hasher.set_input_offset(offset as u64);
     let end = offset + len;
@@ -162,6 +175,9 @@ impl Hasher for Blake3 {
     #[inline]
     fn hash(parts: &[&[u8]]) -> Self::Digest {
         if let [part] = parts {
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            return simd::hash_one(part);
+            #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
             return blake3::hash(part).into();
         }
         if let Some((buffer, len)) = gather(parts) {
@@ -482,6 +498,27 @@ mod tests {
             }
             let repeated = [&backing[1..=len]; 16];
             assert_eq!(Blake3::hash_many(&repeated), vec![expected[1]; 16]);
+        }
+    }
+
+    /// Check single messages of two or more chunks, which hash their chunks
+    /// and parents in lanes, across chunk-group, partial-chunk, and tree-shape
+    /// boundaries.
+    #[test]
+    fn test_hash_large_matches_reference() {
+        let data = random(4 * 1024 * 1024 + 1024, 1);
+        let lens = [
+            2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 24, 31, 33, 64, 65, 1024, 4096,
+        ]
+        .into_iter()
+        .flat_map(|chunks| {
+            let len = chunks * blake3::CHUNK_LEN;
+            [len - 1, len, len + 1, len + 777]
+        })
+        .filter(|&len| len >= 2 * blake3::CHUNK_LEN);
+        for len in lens {
+            let message = &data[..len];
+            assert_eq!(Blake3::hash(&[message]), reference(&[message]), "len={len}");
         }
     }
 

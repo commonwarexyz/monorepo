@@ -50,27 +50,27 @@ impl Words<LANES> for __m512i {
     }
 
     #[inline(always)]
-    unsafe fn rotate16(self) -> Self {
+    unsafe fn xor_rotate16(self, other: Self) -> Self {
         // SAFETY: The caller establishes AVX-512F.
-        unsafe { _mm512_ror_epi32::<16>(self) }
+        unsafe { _mm512_ror_epi32::<16>(_mm512_xor_si512(self, other)) }
     }
 
     #[inline(always)]
-    unsafe fn rotate12(self) -> Self {
+    unsafe fn xor_rotate12(self, other: Self) -> Self {
         // SAFETY: The caller establishes AVX-512F.
-        unsafe { _mm512_ror_epi32::<12>(self) }
+        unsafe { _mm512_ror_epi32::<12>(_mm512_xor_si512(self, other)) }
     }
 
     #[inline(always)]
-    unsafe fn rotate8(self) -> Self {
+    unsafe fn xor_rotate8(self, other: Self) -> Self {
         // SAFETY: The caller establishes AVX-512F.
-        unsafe { _mm512_ror_epi32::<8>(self) }
+        unsafe { _mm512_ror_epi32::<8>(_mm512_xor_si512(self, other)) }
     }
 
     #[inline(always)]
-    unsafe fn rotate7(self) -> Self {
+    unsafe fn xor_rotate7(self, other: Self) -> Self {
         // SAFETY: The caller establishes AVX-512F.
-        unsafe { _mm512_ror_epi32::<7>(self) }
+        unsafe { _mm512_ror_epi32::<7>(_mm512_xor_si512(self, other)) }
     }
 
     #[inline(always)]
