@@ -100,8 +100,9 @@ fn dkg_e2e_scheduled_restart() {
 }
 
 /// Random crashes can restart a participant that already persisted its
-/// epoch-zero share, including one that completed. The test runs over a seed
-/// range so it does not depend on a single crash schedule.
+/// epoch-zero share, including one that completed. The dedicated restart tests
+/// pin that path. This test runs over a seed range to try several crash
+/// schedules.
 #[test_group("slow")]
 #[test_traced("INFO")]
 fn dkg_e2e_random_crashes() {
@@ -178,8 +179,9 @@ fn dkg_e2e_laggard_catches_up_from_restarted_participant() {
     assert_eq!(engine.inits(&laggard), [false, false]);
 }
 
-/// A participant restarted after completing reports the same artifact,
-/// without running the ceremony again, and keeps running.
+/// A participant restarted after persisting its share, before marshal records
+/// the final block as processed, reports the finalized artifact without running
+/// the ceremony again, and keeps running.
 #[test]
 fn dkg_e2e_restart_after_completion() {
     run_restart_after_completion();

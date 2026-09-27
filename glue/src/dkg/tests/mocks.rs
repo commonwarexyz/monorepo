@@ -766,6 +766,7 @@ struct MemorySecretStoreInner {
     seeds: BTreeMap<Epoch, Summary>,
     dealings: BTreeMap<(Epoch, Vec<u8>), DealerPrivMsg>,
     prunes: Vec<Epoch>,
+    stall: bool,
 }
 
 impl MemorySecretStore {
@@ -784,11 +785,24 @@ impl MemorySecretStore {
     pub(crate) fn seed_share(&self, epoch: Epoch, share: Share) {
         self.inner.lock().shares.insert(epoch, share);
     }
+
+    /// Makes the next [`SecretStore::put_share`] persist its share and then
+    /// never return.
+    pub(crate) fn stall(&self) {
+        self.inner.lock().stall = true;
+    }
 }
 
 impl SecretStore for MemorySecretStore {
     async fn put_share(&mut self, epoch: Epoch, share: Share) {
-        self.inner.lock().shares.insert(epoch, share);
+        let stall = {
+            let mut inner = self.inner.lock();
+            inner.shares.insert(epoch, share);
+            std::mem::take(&mut inner.stall)
+        };
+        if stall {
+            std::future::pending::<()>().await;
+        }
     }
 
     async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {

@@ -61,9 +61,9 @@ where
         // share or processed the final block. Either implies marshal stores the
         // final block: the share is written only while handling that block,
         // marshal delivers a block only after durably storing it, and the
-        // processed height is always backed by a stored block. Report the
-        // outcome from that block and keep serving instead of running the
-        // ceremony again.
+        // bootstrap never installs a floor or prunes marshal, so the block at
+        // the processed height is always stored. Report the outcome from that
+        // block and keep serving instead of running the ceremony again.
         let last = self
             .epocher
             .last(epoch)

@@ -561,7 +561,7 @@ pub fn read_genesis(
 }
 
 /// Write the genesis epoch info into `node_dir`, overwriting an existing
-/// artifact that cannot be read and refusing to overwrite a different one.
+/// artifact that cannot be parsed and refusing to overwrite a different one.
 pub fn write_genesis(
     node_dir: &Path,
     info: &dkg::types::EpochInfo<MinSig, ed25519::PublicKey>,

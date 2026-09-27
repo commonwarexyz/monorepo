@@ -39,7 +39,7 @@ use commonware_p2p::{
 use commonware_parallel::Sequential;
 use commonware_runtime::{
     Clock as _, Handle, Quota, Runner as _, Spawner as _, Supervisor as _, deterministic,
-    telemetry::metrics::count_running_tasks,
+    reschedule, telemetry::metrics::count_running_tasks,
 };
 use commonware_utils::{
     NZU32, NZU64, NZUsize, Participant, channel::oneshot, ordered::Set, probability,
@@ -619,24 +619,34 @@ where
 
 pub(super) fn run_restart_after_completion() {
     let engine = DkgEngine::new(1);
+    let store = engine.store(&engine.participant(0));
 
-    // The ceremony completes and persists the share, then the runtime stops
-    // uncleanly without idling.
-    let (info, checkpoint) = complete(&engine, |oracle| oracle.manager(), Duration::ZERO);
-    let info = info.expect("DKG should succeed");
-    assert!(
-        engine
-            .store(&engine.participant(0))
-            .has_share(Epoch::zero())
-    );
+    // The ceremony persists the share while handling the final block, then
+    // stalls before acknowledging it, so marshal never records that block as
+    // processed. The runtime stops uncleanly once the share is saved.
+    store.stall();
+    let runner = deterministic::Runner::timed(Duration::from_secs(120));
+    let ((), checkpoint) = runner.start_and_recover({
+        let engine = engine.clone();
+        move |context| async move {
+            let oracle = network(&context);
+            let (_handle, _completion) = boot(&context, &oracle, &engine, oracle.manager()).await;
+            while !store.has_share(Epoch::zero()) {
+                reschedule().await;
+            }
+        }
+    });
 
     // Running the ceremony again could not activate its peer set and would
-    // report no artifact. The restart reports the finalized artifact instead
-    // and keeps running.
+    // report no artifact. The restart reports the finalized artifact from the
+    // stored final block instead and keeps running.
     let (restarted, _) = restart(&engine, checkpoint, |oracle| {
         FailingManager(oracle.manager())
     });
-    assert_eq!(restarted, Some(info));
+    assert!(
+        restarted.is_some(),
+        "restart should report the finalized artifact"
+    );
 }
 
 pub(super) fn run_restart_without_share() {
