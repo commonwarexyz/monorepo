@@ -106,13 +106,13 @@ pub async fn run(context: tokio::Context, args: Dkg) {
         epoch = genesis.epoch.get(),
         players = genesis.players.len(),
         next_players = genesis.next_players.len(),
-        written,
-        "wrote genesis, serving the bootstrap chain until stopped"
+        directories = written,
+        "dkg complete, serving peers until stopped"
     );
 
     // Keep serving the one-shot chain so participants that have not completed
     // can catch up. Stop every `dkg` process only after each one has logged
-    // "wrote genesis".
+    // "dkg complete".
     if let Err(err) = Handle::select([p2p_handle, engine_handle]).await {
         error!(?err, "bootstrap task failed");
     }

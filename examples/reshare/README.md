@@ -24,9 +24,9 @@ run it because only they receive shares. To bootstrap:
 
 1. Start `dkg` for every epoch-0 player.
 2. When a player completes, it writes `genesis.json` into its own directory and
-   every non-player validator directory, then logs `wrote genesis, serving the
-   bootstrap chain until stopped`. It keeps serving so players that have not
-   completed can catch up from it.
+   every non-player validator directory, then logs `dkg complete, serving peers
+   until stopped`. It keeps serving so players that have not completed can catch
+   up from it.
 3. Once every player has logged that line, stop every `dkg` and start the
    validators.
 

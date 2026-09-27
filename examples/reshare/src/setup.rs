@@ -127,7 +127,7 @@ fn port(args: &Setup, i: usize) -> anyhow::Result<u16> {
 fn print_commands(args: &Setup, network: &NetworkConfig) -> anyhow::Result<()> {
     println!("Run DKG with:");
     println!("mprocs {}", commands(args, "dkg", dkg_indexes(network)?));
-    println!("Once every dkg logs \"wrote genesis\", stop them all and run the cluster with:");
+    println!("Once every dkg logs \"dkg complete\", stop them all and run the cluster with:");
     println!("mprocs {}", commands(args, "validator", 0..args.peers));
     Ok(())
 }
