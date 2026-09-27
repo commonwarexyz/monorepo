@@ -347,14 +347,14 @@ where
 
     /// Start the actor.
     ///
-    /// The actor admits blocks that the resolver can serve with a certificate. See
-    /// [message sizes](crate::marshal#message-sizes).
+    /// The actor admits blocks that the resolver can serve with a certificate and that the
+    /// buffer can disseminate. See [message sizes](crate::marshal#message-sizes).
     ///
     /// # Panics
     ///
     /// Panics if the scheme cannot bound certificates for [`Config::max_participants`], if the
-    /// resolver cannot carry the widest notarization for that many participants, or if the
-    /// genesis anchor exceeds the bound.
+    /// resolver cannot carry the widest notarization for that many participants, if the backfill
+    /// sender cannot carry any block's buffer payload, or if the genesis anchor exceeds the bound.
     pub fn start<R, Buf>(
         mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -369,10 +369,8 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
-        self.bound = sizing::bound::<V::Commitment, P::Scheme>(
-            resolver.0.max_value_size(),
-            self.max_participants.get(),
-        );
+        self.bound =
+            sizing::bound::<V, P::Scheme>(resolver.0.max_value_size(), self.max_participants.get());
         if let Some(size) = self.genesis.take() {
             assert!(size <= self.bound, "genesis anchor exceeds size limit");
         }

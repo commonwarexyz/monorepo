@@ -6,7 +6,7 @@ use crate::{
     stateful::probe::sample,
 };
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Encode as _, EncodeSize as _};
+use commonware_codec::Encode as _;
 use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::{scheme::Scheme, types::Finalization},
@@ -16,7 +16,7 @@ use commonware_cryptography::Signer;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{Widen, channel::fallible::OneshotExt as _};
+use commonware_utils::channel::fallible::OneshotExt as _;
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
 use tracing::debug;
@@ -58,7 +58,6 @@ where
         mut sender: impl Sender<PublicKey = S::PublicKey>,
         mut receiver: impl Receiver<PublicKey = S::PublicKey>,
     ) {
-        let max: usize = Widen::widen(sender.max_message_size());
         let mut mailbox_drained = false;
         select_loop! {
             self.context,
@@ -101,35 +100,39 @@ where
                         continue;
                     }
                 };
-                let response = match request {
+                match request {
                     wire::Request::Latest => {
                         let Some(finalization) = sample::latest_finalization(&self.marshal).await
                         else {
                             continue;
                         };
-                        wire::Message::<S, V>::LatestResponse(finalization)
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::LatestResponse(finalization).encode(),
+                            false,
+                        );
                     }
                     wire::Request::Boundary(epoch) => {
                         let Some(finalization) = self.produce_finalization(epoch).await else {
                             continue;
                         };
-                        wire::Message::<S, V>::BoundaryResponse(finalization)
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::BoundaryResponse(finalization).encode(),
+                            false,
+                        );
                     }
                     wire::Request::Block(epoch) => {
                         let Some(block) = self.produce_block(epoch).await else {
                             continue;
                         };
-                        wire::Message::<S, V>::BlockResponse { epoch, block }
+                        sender.send(
+                            Recipients::One(peer),
+                            wire::Message::<S, V>::BlockResponse { epoch, block }.encode(),
+                            false,
+                        );
                     }
-                };
-
-                // Skip a response the sender cannot carry
-                let size = response.encode_size();
-                if size > max {
-                    debug!(?peer, size, max, "response exceeds max message size");
-                    continue;
                 }
-                sender.send(Recipients::One(peer), response.encode(), false);
             },
         }
     }

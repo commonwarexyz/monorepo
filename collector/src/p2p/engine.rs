@@ -12,14 +12,11 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, spawn_cell,
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
 };
-use commonware_utils::{Widen, channel::oneshot, futures::Pool};
+use commonware_utils::{channel::oneshot, futures::Pool};
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, error};
 
 /// Engine that will disperse messages and collect responses.
-///
-/// Replies larger than the response sender's
-/// [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) are dropped.
 pub struct Engine<E, B, Rq, Rs, P, M, H>
 where
     E: BufferPooler + Clock + Spawner,
@@ -158,14 +155,6 @@ where
 
             // Response from a handler
             Ok((peer, reply)) = processed.next_completed() else continue => {
-                // Skip oversized replies, since a peer request triggers them
-                let size = reply.encode_size();
-                let max: usize = Widen::widen(res_tx.max_message_size());
-                if size > max {
-                    debug!(?peer, size, max, "reply exceeds max message size");
-                    continue;
-                }
-
                 self.responses.inc();
 
                 // Send the response

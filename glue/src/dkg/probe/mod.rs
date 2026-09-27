@@ -141,8 +141,11 @@
 //!
 //! # Message Sizes
 //!
-//! A reply carries a finalization or boundary block that marshal holds. Serving skips any reply
-//! the sender cannot carry.
+//! A reply carries a finalization or boundary block that marshal holds, which leaves it at least
+//! 13 bytes smaller than marshal's backfill sender limit (see
+//! [marshal's message sizes](commonware_consensus::marshal#message-sizes)). A probe sender on the
+//! backfill network, directly or on one [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel,
+//! carries every reply, so the probe needs no [`Footprint`](commonware_p2p::Footprint) of its own.
 
 use crate::dkg::{
     ReshareBlock,
@@ -241,7 +244,7 @@ mod tests {
         types::{EpochInfo, EpochOutcome, Payload},
     };
     use commonware_actor::Feedback;
-    use commonware_codec::{Encode as _, EncodeSize as _};
+    use commonware_codec::Encode as _;
     use commonware_consensus::{
         Epochable as _, Heightable as _, Reporter as _,
         marshal::{self, Start, resolver::p2p as marshal_resolver},
@@ -264,7 +267,6 @@ mod tests {
             Config as NetworkConfig, Link, Network, Oracle, Receiver as SimReceiver,
             Sender as SimSender,
         },
-        utils::mocks::Capped,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
@@ -323,15 +325,13 @@ mod tests {
             context: &mut deterministic::Context,
             source_boundaries: Vec<Epoch>,
         ) -> Self {
-            Self::start_full(context, source_boundaries, Epoch::zero(), u32::MAX).await
+            Self::start_full(context, source_boundaries, Epoch::zero()).await
         }
 
-        /// Starts a source whose boundary sender carries at most `max` bytes, and a joiner.
         async fn start_full(
             context: &mut deterministic::Context,
             source_boundaries: Vec<Epoch>,
             bootstrap_epoch: Epoch,
-            max: u32,
         ) -> Self {
             let fixture = mocks::scheme_fixture_n(context, 4);
             let participants = fixture.participants.clone();
@@ -408,8 +408,7 @@ mod tests {
                 block_codec_config: (),
             });
             source_mailbox.attach(source_marshal.clone());
-            let source_handle =
-                source_actor.start((Capped::new(source_boundaries.0, max), source_boundaries.1));
+            let source_handle = source_actor.start(source_boundaries);
 
             let joiner_control = oracle.control(participants[1].clone());
             let joiner_boundaries = joiner_control
@@ -941,8 +940,7 @@ mod tests {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let mut harness =
-                Harness::start_full(&mut context, vec![Epoch::new(1)], Epoch::new(1), u32::MAX)
-                    .await;
+                Harness::start_full(&mut context, vec![Epoch::new(1)], Epoch::new(1)).await;
             let mut subscription = harness.joiner.subscribe();
 
             // Valid replies below the bootstrap epoch are stale by definition
@@ -1468,62 +1466,6 @@ mod tests {
                 },
                 _ = context.sleep(Duration::from_millis(100)) => {},
             };
-        });
-    }
-
-    #[test]
-    fn serving_skips_block_above_sender_limit() {
-        let runner = deterministic::Runner::timed(Duration::from_secs(30));
-        runner.start(|mut context| async move {
-            // Cap the source's boundary sender one byte below the epoch one block response
-            let participants = mocks::scheme_fixture_n(&mut context, 4).participants;
-            let (block, _) = boundary_block(Epoch::new(1), participants[0].clone(), &participants);
-            let response =
-                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockResponse {
-                    epoch: Epoch::new(1),
-                    block: block.into(),
-                };
-            let max = u32::try_from(response.encode_size() - 1).unwrap();
-            let mut harness =
-                Harness::start_full(&mut context, vec![Epoch::new(1)], Epoch::zero(), max).await;
-
-            // The source's marshal holds a boundary block its sender cannot carry
-            harness.client_boundary_sender.send(
-                Recipients::One(harness.participants[0].clone()),
-                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::BlockRequest(
-                    Epoch::new(1),
-                )
-                .encode()
-                .to_vec(),
-                false,
-            );
-            select! {
-                _ = harness.client_boundary_receiver.recv() => {
-                    panic!("oversized block response delivered");
-                },
-                _ = context.sleep(Duration::from_millis(100)) => {},
-            };
-
-            // The source keeps serving replies that fit
-            harness.client_boundary_sender.send(
-                Recipients::One(harness.participants[0].clone()),
-                wire::Message::<mocks::TestScheme, mocks::TestMarshalVariant>::LatestRequest
-                    .encode()
-                    .to_vec(),
-                false,
-            );
-            let (_peer, message) = harness
-                .client_boundary_receiver
-                .recv()
-                .await
-                .expect("latest response delivered");
-            let response = wire::read_response::<mocks::TestScheme, mocks::TestMarshalVariant, _>(
-                message,
-                &harness.schemes[2].certificate_codec_config(),
-            )
-            .expect("latest response decoded")
-            .expect("latest response");
-            assert!(matches!(response, wire::Response::Latest(_)));
         });
     }
 

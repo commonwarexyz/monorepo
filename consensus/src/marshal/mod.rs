@@ -48,9 +48,15 @@
 //! [`max_message_size`](commonware_p2p::LimitedSender::max_message_size) minus
 //! [`MAX_MESSAGE_OVERHEAD`](commonware_resolver::p2p::MAX_MESSAGE_OVERHEAD). When it starts, the
 //! actor fixes its bound: the largest [`core::Variant::Block`] that fits such a value with the
-//! widest notarization for [`Config::max_participants`]. The bound is the same in every epoch.
-//! [`core::Mailbox::max_block_size`] returns it. Every validator must configure the same
-//! `max_message_size` and `max_participants`, and changing either requires a coordinated restart.
+//! widest notarization for [`Config::max_participants`], and whose buffer payload fits the
+//! backfill sender with room for a [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel
+//! prefix. The bound is the same in every epoch. [`core::Mailbox::max_block_size`] returns it.
+//!
+//! Every validator must configure the same `max_message_size` and `max_participants`. Marshal
+//! serves stored blocks and certificates without checking their sizes again, so neither the
+//! backfill sender's `max_message_size` nor the bound may decrease across restarts, and raising
+//! `max_participants` can lower the bound. Otherwise a peer's request for a stored block may
+//! exceed the backfill sender's limit and panic in p2p.
 //!
 //! Every committee must have at most `max_participants` participants. A response carrying a
 //! larger committee's certificate may exceed the backfill sender's limit and panic in p2p.
@@ -75,15 +81,13 @@
 //! only the assigned shard, so such a block can be notarized, but it is never certified or
 //! finalized.
 //!
-//! Buffers disseminate admitted blocks:
+//! Buffers send without checking sizes. The buffer must share the backfill network, where every
+//! sender reports one `max_message_size`, directly or on one subchannel:
 //!
-//! - [`commonware_broadcast::buffered`] sends each block whole. Broadcast and backfill must share
-//!   a network with one `max_message_size`. An admitted block then fits the broadcast sender,
-//!   because a response adds more to the block than a
-//!   [`Muxer`](commonware_p2p::utils::mux::Muxer) subchannel prefix.
-//! - [`coding::shards::Engine`] drops a received shard above its sender limit without blocking
-//!   the sender, and skips sending a shard above that limit. [`Limits`] includes the largest
-//!   shard of its target block.
+//! - [`commonware_broadcast::buffered`] sends each block whole.
+//! - [`coding::shards::Engine`] sends each block's shards and relays the shards it receives,
+//!   which p2p bounds by the sender's limit. It sends no shards of a block whose coding
+//!   configuration is not its committee's.
 //!
 //! ## Storage
 //!

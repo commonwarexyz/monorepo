@@ -19,6 +19,7 @@ const fn notarization<C: Digest>(certificate: usize) -> Option<usize> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     response: usize,
+    // Includes room for a subchannel prefix, which the buffer may add and backfill may not
     buffer: usize,
 }
 
@@ -49,7 +50,9 @@ impl Limits {
             .expect("response size overflow");
 
         let buffer = V::buffer_size(participants, block)
-            .expect("variant cannot carry blocks for participants");
+            .expect("variant cannot carry blocks for participants")
+            .checked_add(MAX_U64_VARINT_SIZE)
+            .expect("buffer size overflow");
 
         Self { response, buffer }
     }
@@ -61,19 +64,49 @@ impl Footprint for Limits {
     }
 }
 
-/// Returns the largest encoded [`Variant::Block`] whose notarized response fits a resolver value
-/// of at most `value` bytes, for committees of at most `participants` under `S`.
+/// Returns the largest encoded [`Variant::Block`] marshal admits from a resolver that carries
+/// values of at most `value` bytes, for committees of at most `participants` under `S`.
+///
+/// The block's notarized response must fit `value`. The block's buffer payload, with a subchannel
+/// prefix, must fit the backfill sender, so it fits a buffer on the backfill network.
 ///
 /// # Panics
 ///
-/// Panics if `S` cannot bound certificates for `participants` participants or if `value` cannot
-/// carry the widest notarization.
-pub(crate) fn bound<C: Digest, S: Verifier>(value: usize, participants: usize) -> usize {
+/// Panics if `S` cannot bound certificates for `participants` participants, if `value` cannot
+/// carry the widest notarization, or if the backfill sender cannot carry any block's buffer
+/// payload.
+pub(crate) fn bound<V: Variant, S: Verifier>(value: usize, participants: usize) -> usize {
     let certificate = S::certificate_max_size(participants)
         .expect("scheme cannot bound certificates for max_participants");
-    notarization::<C>(certificate)
+    let response = notarization::<V::Commitment>(certificate)
         .and_then(|notarization| value.checked_sub(notarization))
-        .expect("backfill value cannot carry a notarization for max_participants")
+        .expect("backfill value cannot carry a notarization for max_participants");
+
+    // The backfill sender carries a value with resolver framing, and a buffer on its network
+    // carries at least that less a subchannel prefix. A resolver that carries every value
+    // saturates.
+    let limit = value.saturating_add(Widen::widen(MAX_MESSAGE_OVERHEAD));
+    let fits = |block| {
+        V::buffer_size(participants, block)
+            .and_then(|size| size.checked_add(MAX_U64_VARINT_SIZE))
+            .is_some_and(|size| size <= limit)
+    };
+    assert!(
+        fits(0),
+        "backfill sender cannot carry a buffer payload for max_participants"
+    );
+
+    // Buffer payloads never shrink as blocks grow, so search for the largest block that fits
+    let (mut low, mut high) = (0, response);
+    while low < high {
+        let mid = high - (high - low) / 2;
+        if fits(mid) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    low
 }
 
 #[cfg(test)]
@@ -126,12 +159,12 @@ mod tests {
 
         // The derived bound round trips to the target block
         let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
-        let value = limits.response - overhead;
+        let value = limits.footprint() - overhead;
         assert_eq!(
-            bound::<V::Commitment, Scoped<S>>(value, participants),
-            bound::<V::Commitment, S>(value, participants)
+            bound::<V, Scoped<S>>(value, participants),
+            bound::<V, S>(value, participants)
         );
-        let bound = bound::<V::Commitment, S>(value, participants);
+        let bound = bound::<V, S>(value, participants);
         assert_eq!(Some(bound), V::block_size(block));
 
         // A response adds a block and resolver framing to a notarization or finalization
@@ -232,7 +265,7 @@ mod tests {
     #[should_panic(expected = "scheme cannot bound certificates for max_participants")]
     fn bound_unbounded_certificate() {
         let participants = Widen::<usize>::widen(u32::MAX) + 1;
-        bound::<Sha256, ed25519::Scheme>(usize::MAX, participants);
+        bound::<StandardVariant, ed25519::Scheme>(usize::MAX, participants);
     }
 
     #[test]
@@ -240,8 +273,17 @@ mod tests {
     fn bound_below_notarization() {
         let certificate = ed25519::Scheme::certificate_max_size(4).unwrap();
         let notarization = notarization::<Sha256>(certificate).unwrap();
-        assert_eq!(bound::<Sha256, ed25519::Scheme>(notarization, 4), 0);
-        bound::<Sha256, ed25519::Scheme>(notarization - 1, 4);
+        assert_eq!(
+            bound::<StandardVariant, ed25519::Scheme>(notarization, 4),
+            0
+        );
+        bound::<StandardVariant, ed25519::Scheme>(notarization - 1, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "backfill sender cannot carry a buffer payload for max_participants")]
+    fn bound_unsupported_participants() {
+        bound::<CodingVariant, ed25519::Scheme>(1024 * 1024, 3);
     }
 
     #[test]
@@ -249,7 +291,7 @@ mod tests {
         let limits = Limits::new::<StandardVariant, ed25519::Scheme>(4, 1000);
         let empty = Limits::new::<StandardVariant, ed25519::Scheme>(4, 0);
         assert_eq!(limits.response, empty.response + 1000);
-        assert_eq!(limits.buffer, 1000);
+        assert_eq!(limits.buffer, 1000 + MAX_U64_VARINT_SIZE);
         assert_eq!(limits.footprint(), limits.response);
     }
 
@@ -341,7 +383,35 @@ mod tests {
             let limits =
                 Limits::new::<CodingVariant, ed25519::Scheme>(usize::from(participants), block);
             let widest = widest_shard(participants, block + CodingConfig::SIZE);
-            assert_eq!(widest, (limits.buffer, n));
+            assert_eq!(widest, (limits.buffer - MAX_U64_VARINT_SIZE, n));
+        }
+    }
+
+    #[test]
+    fn coding_bound_fits_shards() {
+        type S = bls12381_threshold::standard::Scheme<PublicKey, MinSig>;
+
+        // A small certificate leaves the widest shard, not the response, to set the footprint
+        for (participants, block) in [(33, 100), (100, 100)] {
+            let limits = Limits::new::<CodingVariant, S>(usize::from(participants), block);
+            let overhead: usize = Widen::widen(MAX_MESSAGE_OVERHEAD);
+            let value = limits.footprint() - overhead;
+            let bound = bound::<CodingVariant, S>(value, usize::from(participants));
+
+            // The bound admits the target block but stops short of what a response carries
+            let certificate = S::certificate_max_size(usize::from(participants)).unwrap();
+            let notarization =
+                notarization::<<CodingVariant as Variant>::Commitment>(certificate).unwrap();
+            let response = value - notarization;
+            assert!(bound >= CodingVariant::block_size(block).unwrap());
+            assert!(bound < response);
+
+            // Every shard of the largest admitted block, with a subchannel prefix, fits the
+            // backfill sender, and one more byte does not
+            let (widest, _) = widest_shard(participants, bound);
+            assert!(widest + MAX_U64_VARINT_SIZE <= limits.footprint());
+            let (widest, _) = widest_shard(participants, bound + 1);
+            assert!(widest + MAX_U64_VARINT_SIZE > limits.footprint());
         }
     }
 }

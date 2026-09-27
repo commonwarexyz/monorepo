@@ -330,10 +330,10 @@ mod tests {
     use commonware_p2p::{
         Footprint, Receiver,
         simulated::{Config as NetworkConfig, Network},
-        utils::mocks::{Capped, inert_channel},
+        utils::mocks::inert_channel,
     };
     use commonware_parallel::Sequential;
-    use commonware_runtime::{IoBuf, Runner, Supervisor as _, deterministic};
+    use commonware_runtime::{IoBuf, Quota, Runner, Supervisor as _, deterministic};
     use commonware_utils::{
         Acknowledgement, N3f1, NZU32, NZU64, NZUsize, TestRng, acknowledgement::Exact, ordered::Set,
     };
@@ -376,10 +376,11 @@ mod tests {
         executor.start(|context| async move {
             let signer = ed25519::PrivateKey::from_seed(0);
             let participants = Set::from_iter_dedup([signer.public_key()]);
-            let (_network, oracle) = Network::new_with_peers(
+            let size = Limits::new::<mocks::TestBlsVariant, mocks::TestSigner>(NZU32!(16));
+            let (network, oracle) = Network::new_with_peers(
                 context.child("network"),
                 NetworkConfig {
-                    max_size: 1024,
+                    max_size: u32::try_from(max(size.footprint())).unwrap(),
                     max_peers_per_set: NZUsize!(participants.len()),
                     disconnect_on_block: true,
                     tracked_peer_sets: NZUsize!(1),
@@ -387,6 +388,7 @@ mod tests {
                 participants.iter().cloned(),
             )
             .await;
+            network.start();
             let (actor, _mailbox) = utils::new_actor(
                 context.child("reshare"),
                 signer.clone(),
@@ -397,10 +399,12 @@ mod tests {
                 NZU64!(2),
             )
             .await;
-            let size = Limits::new::<mocks::TestBlsVariant, mocks::TestSigner>(NZU32!(16));
-            let max = u32::try_from(max(size.footprint())).unwrap();
-            let (sender, receiver) = inert_channel([signer.public_key()]);
-            actor.start((Capped::new(sender, max), receiver)).abort();
+            let channel = oracle
+                .control(signer.public_key())
+                .register(0, Quota::per_second(NZU32!(1)))
+                .await
+                .unwrap();
+            actor.start(channel).abort();
         });
     }
 

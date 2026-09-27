@@ -7,17 +7,8 @@ use commonware_runtime::{
     IoBuf, IoBufs, Metrics as RuntimeMetrics, Name, Supervisor,
     telemetry::metrics::{Metric, Registered, Registration},
 };
-use commonware_utils::Widen;
 use core::future;
-use std::{
-    convert::Infallible,
-    marker::PhantomData,
-    sync::{
-        Arc,
-        atomic::{AtomicU32, Ordering},
-    },
-    time::SystemTime,
-};
+use std::{convert::Infallible, marker::PhantomData, sync::Arc, time::SystemTime};
 
 /// Metrics implementation that registers nothing.
 #[derive(Clone, Copy, Debug, Default)]
@@ -129,76 +120,6 @@ pub fn inert_channel<P: PublicKey>(peers: impl AsRef<[P]>) -> (InertSender<P>, I
             _phantom: PhantomData,
         },
     )
-}
-
-/// Sender that reports a limit of `max` bytes and panics on larger payloads.
-///
-/// Clones share the limit, which [`Capped::set`] changes.
-#[derive(Clone, Debug)]
-pub struct Capped<S> {
-    inner: S,
-    max: Arc<AtomicU32>,
-}
-
-/// Checked sender returned by [`Capped`].
-#[derive(Debug)]
-pub struct CheckedCapped<C> {
-    inner: C,
-    max: u32,
-}
-
-impl<S> Capped<S> {
-    /// Wraps `inner` with a limit of `max` bytes.
-    pub fn new(inner: S, max: u32) -> Self {
-        Self {
-            inner,
-            max: Arc::new(AtomicU32::new(max)),
-        }
-    }
-
-    /// Sets the limit of this sender and its clones to `max` bytes.
-    pub fn set(&self, max: u32) {
-        self.max.store(max, Ordering::Relaxed);
-    }
-}
-
-impl<S: LimitedSender> LimitedSender for Capped<S> {
-    type PublicKey = S::PublicKey;
-    type Checked<'a>
-        = CheckedCapped<S::Checked<'a>>
-    where
-        Self: 'a;
-
-    fn check(
-        &mut self,
-        recipients: Recipients<Self::PublicKey>,
-    ) -> Result<Self::Checked<'_>, SystemTime> {
-        let max = self.max_message_size();
-        self.inner
-            .check(recipients)
-            .map(|inner| CheckedCapped { inner, max })
-    }
-
-    fn max_message_size(&self) -> u32 {
-        self.max.load(Ordering::Relaxed)
-    }
-}
-
-impl<C: CheckedSender> CheckedSender for CheckedCapped<C> {
-    type PublicKey = C::PublicKey;
-
-    fn recipients(&self) -> Vec<Self::PublicKey> {
-        self.inner.recipients()
-    }
-
-    fn send(self, message: impl Into<IoBufs> + Send, priority: bool) -> Unreliable<Feedback> {
-        let message = message.into();
-        assert!(
-            message.len() <= Widen::widen(self.max),
-            "message exceeds max size"
-        );
-        self.inner.send(message, priority)
-    }
 }
 
 #[cfg(test)]
