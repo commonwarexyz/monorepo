@@ -90,7 +90,7 @@ const TAG_SIZE: u32 = {
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
 const V1_HEADER_SIZE: usize = V1_HEADER_PLAINTEXT_SIZE + TAG_SIZE as usize;
 
-/// Maximum plaintext message size supported by any version.
+/// Maximum supported plaintext message size.
 pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
 
 /// Errors that can occur when interacting with a stream.
@@ -145,16 +145,6 @@ pub enum Version {
 }
 
 impl Version {
-    /// Returns the largest plaintext message size this version supports.
-    ///
-    /// A version 1 record, header included, must fit in a `u32`.
-    pub const fn max_size(self) -> u32 {
-        match self {
-            Self::V0 => MAX_SIZE,
-            Self::V1 => MAX_SIZE - V1_HEADER_SIZE as u32,
-        }
-    }
-
     /// Returns the SAKE version this protocol version runs.
     const fn sake(self) -> sake::Version {
         match self {
@@ -237,6 +227,15 @@ impl Version {
                     ));
                 }
                 let body_len = len as usize + sake::TAG_SIZE;
+
+                // Consume a buffered header on its own when it and the payload do not fit in one
+                // read request.
+                let skip = if skip.checked_add(body_len).is_some() {
+                    skip
+                } else {
+                    stream.recv(skip).await.map_err(Error::RecvFailed)?;
+                    0
+                };
                 stream
                     .recv(skip + body_len)
                     .await
@@ -339,7 +338,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         O: Sink,
     {
         assert!(
-            max_message_size <= self.version.max_size(),
+            max_message_size <= MAX_SIZE,
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
@@ -399,7 +398,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         F: Future<Output = bool> + Send,
     {
         assert!(
-            max_message_size <= self.version.max_size(),
+            max_message_size <= MAX_SIZE,
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
@@ -859,8 +858,7 @@ mod test {
     fn test_max_message_size_bounds() {
         assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
         deterministic::Runner::default().start(|context| async move {
-            let limit = Version::V1.max_size();
-            for max_message_size in [0, limit, limit + 1] {
+            for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
@@ -893,7 +891,7 @@ mod test {
                         }
                     };
                     let result = AssertUnwindSafe(attempt).catch_unwind().await;
-                    if max_message_size <= limit {
+                    if max_message_size <= MAX_SIZE {
                         assert!(result.unwrap().is_err());
                     } else {
                         assert_eq!(
