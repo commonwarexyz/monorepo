@@ -211,14 +211,6 @@ where
             .unwrap_or_default()
     }
 
-    /// Returns whether state sync is in progress.
-    pub(crate) fn in_progress(&self) -> bool {
-        matches!(
-            self.metadata.get(&SYNC_STATE_KEY),
-            Some(SyncState::InProgress(_))
-        )
-    }
-
     /// Returns the selected floor while state sync is in progress.
     pub(crate) fn in_progress_floor(&self) -> Option<&Finalization<S, C>> {
         match self.metadata.get(&SYNC_STATE_KEY) {
@@ -234,8 +226,9 @@ where
     /// the database sync engine can reopen partial sync state and validate the next selected floor.
     /// The storage target may still advance to marshal's durable processed height during startup.
     ///
-    /// If an interrupted state sync already stored a floor, the newly selected
-    /// floor must resume from the same or a later consensus round.
+    /// If a floor is already persisted, whether or not its sync has started, the
+    /// new floor must be at the same or a later consensus round, and a floor at
+    /// the same round must have the same payload.
     pub(crate) async fn begin_sync(mut self, floor: Finalization<S, C>) -> Self {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(existing)) => {

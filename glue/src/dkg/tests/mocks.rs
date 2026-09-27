@@ -637,6 +637,17 @@ pub(crate) fn genesis_block(leader: TestPublicKey) -> TestBlock {
     TestBlock::new::<Sha256>(context, digest, Height::zero(), 0)
 }
 
+/// Builds the canonical child of `parent`.
+pub(crate) fn child(parent: &TestBlock) -> TestBlock {
+    let height = parent.height().next();
+    TestBlock::new::<Sha256>(
+        parent.context().clone(),
+        parent.digest(),
+        height,
+        height.get(),
+    )
+}
+
 /// Builds a marshal mailbox whose actor is dropped before it starts.
 ///
 /// Reads through the returned mailbox resolve as unavailable, which is useful

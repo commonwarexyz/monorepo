@@ -961,7 +961,7 @@ mod tests {
                 .sync_metadata
                 .begin_sync(first_finalization)
                 .await;
-            assert!(harness.syncing.sync_metadata.in_progress());
+            assert!(harness.syncing.sync_metadata.in_progress_floor().is_some());
 
             // The interrupted sync has a recoverable artifact at 1, but has not recorded Complete.
             // Its coordinator can finish before a later target update is recorded.
@@ -1086,7 +1086,7 @@ mod tests {
                     "syncing-test",
                 )
                 .await;
-                assert!(metadata.in_progress());
+                assert!(metadata.in_progress_floor().is_some());
                 assert_eq!(metadata.sync_height(), None);
                 restarted.abort().await;
                 return;

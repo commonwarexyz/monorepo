@@ -400,7 +400,7 @@ where
         // installation, gap repair, and the initial dispatch all run before any
         // mailbox message arrives, so without this root their work would emit as
         // orphan traces.
-        (self, application, buffer, resolver, waiters) = async move {
+        (self, application, buffer, resolver) = async move {
             // Get tip and send to application
             let tip = self.get_latest().await;
             if let Some((height, digest, round)) = tip {
@@ -422,7 +422,6 @@ where
                         finalization,
                         false,
                         &mut resolver,
-                        &mut waiters,
                         &mut buffer,
                         &mut application,
                     )
@@ -441,7 +440,7 @@ where
             // Attempt to dispatch the next finalized block to the application, if it is ready.
             self = self.try_dispatch_blocks(&mut application).await;
 
-            (self, application, buffer, resolver, waiters)
+            (self, application, buffer, resolver)
         }
         .instrument(info_span!("marshal.actor.start"))
         .await;
@@ -947,7 +946,7 @@ where
             }
             Message::SetFloor { finalization, .. } => {
                 self = self
-                    .install_floor(finalization, true, resolver, waiters, buffer, application)
+                    .install_floor(finalization, true, resolver, buffer, application)
                     .await;
             }
             Message::Prune { height, .. } => {
@@ -1204,7 +1203,6 @@ where
         finalization: Finalization<P::Scheme, V::Commitment>,
         skip_if_superseded: bool,
         resolver: &mut R,
-        waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
@@ -1245,7 +1243,7 @@ where
         }
 
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            self.floor.await_anchor(finalization, None);
+            self.floor.await_anchor(finalization);
             let anchored;
             (self, anchored) = self.ingest(block, buffer, application, resolver).await;
             assert!(anchored, "failed to ingest pending floor anchor");
@@ -1257,15 +1255,8 @@ where
         // but retain their heights and commitments until the anchor makes the floor active.
         self.cleared_acks.extend(self.pending_acks.clear());
 
-        // The buffer reports arrivals only to its waiters, so wait on the
-        // anchor for as long as the floor is pending.
-        let aborter = buffer.subscribe_by_commitment(commitment).map(|rx| {
-            let key = SubscriptionKey::Commitment(commitment);
-            waiters.push(async move { rx.await.map_err(|_| key) })
-        });
-        self.floor.await_anchor(finalization, aborter);
-
         debug!(?round, ?commitment, "starting fetch for floor block");
+        self.floor.await_anchor(finalization);
         self.floor
             .fetch_if_permitted(resolver, Request::finalized_by_round(commitment, round))
             .ignore();

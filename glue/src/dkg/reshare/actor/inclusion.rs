@@ -984,8 +984,8 @@ where
         work: &mut ArtifactWork<B, V, C>,
     ) {
         // The first inclusion block needs the exact digest of its canonical
-        // predecessor. Keep requests lazy until finalized reporting establishes
-        // that prefix.
+        // predecessor. Keep requests lazy until the actor's tip covers that
+        // predecessor.
         let midpoint = self
             .epocher
             .midpoint(epoch)
@@ -1521,10 +1521,10 @@ mod tests {
             store::AckOutcome,
         },
         state_sync::Plan as StateSyncPlan,
-        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant},
+        tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant, child},
     };
     use commonware_actor::Feedback;
-    use commonware_consensus::{Heightable as _, Reporter, marshal};
+    use commonware_consensus::{Reporter, marshal};
     use commonware_cryptography::{
         Digestible as _, Signer,
         bls12381::{
@@ -1836,17 +1836,6 @@ mod tests {
         }
     }
 
-    /// Builds the canonical child of `parent`.
-    fn child(parent: &TestBlock) -> TestBlock {
-        let height = parent.height().next();
-        TestBlock::new::<Sha256>(
-            parent.context().clone(),
-            parent.digest(),
-            height,
-            height.get(),
-        )
-    }
-
     /// Reports a finalized block and returns its acknowledgement waiter.
     fn deliver(
         mailbox: &mut TestInclusionMailbox,
@@ -1863,7 +1852,7 @@ mod tests {
     /// Marshal can redeliver finalized blocks after the actor has moved past them. Each receipt
     /// is acknowledged, and a block from an earlier phase or epoch does not re-enter its handler.
     /// The DKG-mode harness is required for an epoch-zero final block without epoch info, while
-    /// the dealing handler it drives is shared by both modes.
+    /// the dealing and inclusion handlers it drives are shared by both modes.
     #[test]
     fn redelivered_receipts_survive_phase_changes() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
@@ -1941,9 +1930,120 @@ mod tests {
         });
     }
 
+    /// Inclusion entered from dealing inherits the covered prefix, so a boundary request is
+    /// served before inclusion finalizes a block of its own. The harness marshal has no running
+    /// actor, so inclusion cannot learn the prefix from marshal's processed position.
+    #[test]
+    fn inclusion_serves_requests_on_entry() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "inclusion-entry", NZU64!(4)).await;
+
+            // Epoch zero spans heights 0..=3 with its midpoint at 2.
+            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 3 {
+                blocks.push(Arc::new(child(blocks.last().unwrap())));
+            }
+
+            // Dealing covers every block below the midpoint.
+            let receipts = [0, 1].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // A proposal for the final block asks for epoch info before inclusion finalizes
+            // any block of its own.
+            let _inclusion = context.child("inclusion").spawn(|_| async move {
+                actor
+                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .await
+            });
+            let response = mailbox
+                .epoch_info(marshal::ancestry::from_iter([blocks[2].clone()]))
+                .await;
+            assert!(matches!(response, EpochInfoResponse::Available(_)));
+        });
+    }
+
+    /// Marshal finalizes one block per height, so a finalized block that conflicts with the
+    /// covered tip at its height is a contract violation. The actor panics instead of
+    /// acknowledging it as covered.
+    #[test]
+    #[should_panic(expected = "conflicting finalized block")]
+    fn conflicting_redelivery_panics() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "conflicting-redelivery", NZU64!(4)).await;
+
+            // Dealing covers genesis and its canonical child, the last block before the midpoint.
+            let genesis = Arc::new(mocks::genesis_block(public_key.clone()));
+            let canonical = Arc::new(child(&genesis));
+            let receipts = [&genesis, &canonical].map(|block| deliver(&mut mailbox, block));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // A sibling shares the canonical block's parent and height but not its digest.
+            let sibling = Arc::new(TestBlock::new::<Sha256>(
+                genesis.context().clone(),
+                genesis.digest(),
+                Height::new(1),
+                u64::MAX,
+            ));
+            assert_ne!(sibling.digest(), canonical.digest());
+
+            // Inclusion receives the sibling at the covered tip's height.
+            let _receipt = deliver(&mut mailbox, &sibling);
+            let _ = actor
+                .inclusion(Epoch::zero(), &info, &mut store, None)
+                .await;
+        });
+    }
+
     /// A follower covers the boundary it commits, so setup resumes in the next epoch and that
     /// epoch acknowledges a redelivered boundary without handling it as a block of its own. The
-    /// DKG-mode harness drives follow, setup, and dealing handlers shared by both modes.
+    /// harness is built in DKG mode although follow and setup run only in reshare mode. None of
+    /// the three handlers it drives reads the mode, so they behave as they would under reshare.
     #[test]
     fn follower_boundary_redelivery_is_acknowledged() {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));

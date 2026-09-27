@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_cryptography::{Digest, certificate::Scheme};
 use commonware_resolver::{Resolver, TargetedResolver};
-use commonware_utils::{futures::Aborter, vec::NonEmptyVec};
+use commonware_utils::vec::NonEmptyVec;
 
 /// Marshal's durable processed height and the stored block that backs it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,19 +56,11 @@ impl Floor {
     }
 }
 
-/// A floor finalization awaiting its anchor block.
-///
-/// Dropping the pending anchor aborts its buffer waiter, if one exists.
-struct Pending<S: Scheme, C: Digest> {
-    finalization: Finalization<S, C>,
-    _aborter: Option<Aborter>,
-}
-
 /// Durable floor state plus any update awaiting its anchor block.
 pub(super) struct State<S: Scheme, C: Digest> {
     processed: Option<Processed>,
     round: Round,
-    pending: Option<Pending<S, C>>,
+    pending: Option<Finalization<S, C>>,
 }
 
 impl<S: Scheme, C: Digest> State<S, C> {
@@ -88,10 +80,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
         Self {
             processed,
             round,
-            pending: Some(Pending {
-                finalization,
-                _aborter: None,
-            }),
+            pending: Some(finalization),
         }
     }
 
@@ -140,36 +129,23 @@ impl<S: Scheme, C: Digest> State<S, C> {
 
     /// Returns true if a pending floor already supersedes the candidate floor round.
     pub(super) fn has_pending_anchor_at_or_after(&self, round: Round) -> bool {
-        matches!(&self.pending, Some(pending) if pending.finalization.round() >= round)
+        matches!(&self.pending, Some(pending) if pending.round() >= round)
     }
 
     /// Returns true when `commitment` is the awaited anchor.
     pub(super) fn matches_pending_anchor(&self, commitment: C) -> bool {
-        matches!(
-            &self.pending,
-            Some(pending) if pending.finalization.proposal.payload == commitment
-        )
+        matches!(&self.pending, Some(pending) if pending.proposal.payload == commitment)
     }
 
     /// Records a verified floor finalization whose block anchor still needs to arrive.
-    ///
-    /// Taking or replacing the pending anchor drops `aborter`, which aborts its
-    /// buffer waiter.
-    pub(super) fn await_anchor(
-        &mut self,
-        finalization: Finalization<S, C>,
-        aborter: Option<Aborter>,
-    ) {
-        self.pending = Some(Pending {
-            finalization,
-            _aborter: aborter,
-        });
+    pub(super) fn await_anchor(&mut self, finalization: Finalization<S, C>) {
+        self.pending = Some(finalization);
     }
 
     /// Takes the pending anchor finalization, if any.
     #[must_use]
-    pub(super) fn take_pending_anchor(&mut self) -> Option<Finalization<S, C>> {
-        self.pending.take().map(|pending| pending.finalization)
+    pub(super) const fn take_pending_anchor(&mut self) -> Option<Finalization<S, C>> {
+        self.pending.take()
     }
 
     /// Takes the pending anchor if the processed round floor now covers its round.
@@ -178,9 +154,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
     /// an anchor at or below the round floor sits at or below the processed height.
     #[must_use]
     pub(super) fn take_superseded_anchor(&mut self, round: Round) -> Option<Finalization<S, C>> {
-        self.pending
-            .take_if(|pending| pending.finalization.round() <= round)
-            .map(|pending| pending.finalization)
+        self.pending.take_if(|pending| pending.round() <= round)
     }
 
     /// Returns true when the resolver request is above all processed floors.

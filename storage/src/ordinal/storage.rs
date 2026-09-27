@@ -129,33 +129,16 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
             }
         };
 
-        // Remove uncovered blobs and open the rest, checking for partial records
+        // Open all blobs and check for partial records
         for name in stored_blobs {
+            let (blob, mut len) = context.open(&config.partition, &name).await?;
             let index = match name.try_into() {
                 Ok(index) => u64::from_be_bytes(index),
                 Err(nm) => Err(Error::InvalidBlobName(hex(&nm)))?,
             };
 
-            // Remove sections the bits omit or mark no record in without opening them, so a
-            // discarded section is never repaired
-            let keep = match bits.as_ref().and_then(|bits| bits.get(&index)) {
-                Some(Some(bits)) => bits.count_ones() != 0,
-                Some(None) => true,
-                None => false,
-            };
-            if !keep {
-                context
-                    .remove(&config.partition, Some(&index.to_be_bytes()))
-                    .await?;
-                continue;
-            }
-
-            let (blob, mut len) = context
-                .open(&config.partition, &index.to_be_bytes())
-                .await?;
-
             // Check if blob size is aligned to record size
-            if len % record_size != 0 {
+            if bits.is_some() && len % record_size != 0 {
                 warn!(
                     blob = index,
                     invalid_size = len,
@@ -180,6 +163,22 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
         let mut items = 0;
         let mut intervals = RMap::new();
         if let Some(bits) = &bits {
+            // Drop sections the committed bits do not cover
+            let sections = blobs.keys().copied().collect::<Vec<_>>();
+            for section in sections {
+                let keep = match bits.get(&section) {
+                    Some(Some(bits)) => bits.count_ones() != 0,
+                    Some(None) => true,
+                    None => false,
+                };
+                if !keep {
+                    context
+                        .remove(&config.partition, Some(&section.to_be_bytes()))
+                        .await?;
+                    blobs.remove(&section);
+                }
+            }
+
             // Replay ignores records outside the committed bits, but recovery clears them so
             // stored blobs match the checkpointed view
             let empty = vec![0u8; Record::<V>::SIZE];

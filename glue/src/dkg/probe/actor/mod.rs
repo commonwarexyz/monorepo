@@ -47,6 +47,11 @@ where
     pub bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
     /// State-sync floor persisted by an interrupted sync, if any.
     ///
+    /// A node resuming a persisted floor must pass it here. Otherwise the
+    /// discovered info can describe an epoch older than that floor, and
+    /// [`state_sync::Plan::init`](crate::dkg::state_sync::Plan::init) panics
+    /// on that pair.
+    ///
     /// Latest-finalization replies below this floor's epoch are ignored, so
     /// the discovered [`Artifact::info`](crate::dkg::probe::Artifact::info)
     /// describes the epoch of whichever of this floor and

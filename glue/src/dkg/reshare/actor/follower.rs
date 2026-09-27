@@ -95,7 +95,8 @@ where
                             .epocher
                             .containing(block.height())
                             .expect("epocher must know of epoch");
-                        if block.height() == epoch_info.last() {
+                        let done = block.height() == epoch_info.last();
+                        if done {
                             let Some(Payload::EpochInfo(info)) = block.payload() else {
                                 panic!(
                                     "critical: boundary block {} does not contain EpochInfo for epoch {}",
@@ -112,15 +113,11 @@ where
                                 .commit_epoch(info.clone(), rng_seed, share.clone())
                                 .await;
                             self.register_epoch(&info, share).await;
-
-                            self.advance(&block);
-                            response.acknowledge();
-                            return true;
                         }
 
                         self.advance(&block);
                         response.acknowledge();
-                        false
+                        done
                     }
                     .instrument(process)
                     .await;

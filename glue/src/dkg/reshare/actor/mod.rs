@@ -3,9 +3,9 @@
 //! The actor bridges finalized epoch metadata, the Feldman-Desmedt reshare
 //! protocol, P2P dealer traffic, and certificate-scheme registration. Each loop
 //! iteration derives the active epoch from the first height the actor does not
-//! cover, loads the epoch's public [`EpochInfo`] from the finalized
-//! boundary block, and either participates in the ceremony or follows until the
-//! next boundary is finalized.
+//! cover, loads the epoch's public [`EpochInfo`] from the finalized boundary
+//! block, and either participates in the ceremony or follows until the next
+//! boundary is finalized.
 //!
 //! # Epoch Lifecycle
 //!
@@ -69,9 +69,15 @@
 //! Within a run, the actor covers every finalized block at or below the latest
 //! one it has applied and acknowledged. Startup covers marshal's processed
 //! position and every block below a state-sync floor. After a restart, marshal
-//! redelivers blocks above its processed position and the actor applies them
-//! again. Marshal can redeliver a finalized block with a fresh acknowledgement,
-//! and the actor acknowledges a covered block without repeating its effects.
+//! redelivers blocks above its processed position and the actor applies again
+//! those that startup does not cover. Marshal can redeliver a finalized block
+//! with a fresh acknowledgement, and the actor acknowledges a covered block
+//! without repeating its effects.
+//!
+//! Only a startup state-sync floor may skip blocks the actor does not cover. A
+//! floor installed while the actor runs must not, because the actor has no
+//! state for the skipped blocks. Dealing panics on a skip past its early phase
+//! and inclusion panics on a skip past its epoch. Other skips go unchecked.
 //!
 //! # Crash Recovery
 //!
@@ -86,7 +92,8 @@
 //! ```text
 //! restart
 //!   |
-//!   +--> marshal processed height determines candidate epoch
+//!   +--> first height above marshal's processed position, or the
+//!   |    state-sync floor if later, determines candidate epoch
 //!   |
 //!   +--> boundary block supplies canonical EpochInfo
 //!   |
@@ -107,10 +114,11 @@
 //!
 //! # Follower Mode
 //!
-//! The actor follows instead of participating when setup cannot read the boundary
-//! [`EpochInfo`] for the epoch containing the first height the actor does not
-//! cover, or when a state-sync floor skips part of the inclusion window. In either
-//! case the actor lacks the public history needed to reconstruct the ceremony.
+//! The actor follows instead of participating when setup cannot read the
+//! boundary [`EpochInfo`] for the epoch containing the first height the actor
+//! does not cover, or when a state-sync floor skips part of the inclusion
+//! window. In either case the actor lacks the public history needed to
+//! reconstruct the ceremony.
 //!
 //! ```text
 //! first uncovered height = H
@@ -475,7 +483,7 @@ where
 
         // The tip starts at marshal's processed position and covers every
         // block below a state-sync floor.
-        self.tip = startup(self.marshal.get_anchor().await, floor.as_ref());
+        self.tip = startup(self.marshal.get_anchor().await, floor);
 
         if matches!(self.mode, Mode::Dkg { .. }) {
             self.run_dkg(&mut store, &mut dealing_mux).await;

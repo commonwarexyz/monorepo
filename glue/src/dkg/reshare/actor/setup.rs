@@ -103,7 +103,7 @@ fn state_sync_skips_inclusion_prefix(
 /// position has not caught up to the floor.
 pub(super) fn startup<B: Block>(
     processed: Option<(Processed, B)>,
-    floor: Option<&B>,
+    floor: Option<B>,
 ) -> Option<FinalizedTip<B::Digest>> {
     let processed = processed.map(|(processed, block)| match processed {
         Processed::Block(height) => FinalizedTip {
@@ -361,10 +361,9 @@ mod tests {
     use super::{dealer_for_phase, startup, state_sync_skips_inclusion_prefix};
     use crate::dkg::{
         reshare::store::{AckOutcome, Store},
-        tests::mocks::{MemorySecretStore, TestBlock, TestBlsVariant, genesis_block},
+        tests::mocks::{MemorySecretStore, TestBlsVariant, child, genesis_block},
     };
     use commonware_consensus::{
-        Heightable as _,
         marshal::core::Processed,
         types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height},
     };
@@ -375,7 +374,6 @@ mod tests {
             primitives::sharing::Mode,
         },
         ed25519::{PrivateKey, PublicKey},
-        sha256::Sha256,
     };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{N3f1, NZU32, NZU64, ordered::Set, test_rng};
@@ -388,21 +386,14 @@ mod tests {
     fn startup_tip_covers_processed_and_floor() {
         let mut blocks = vec![genesis_block(PrivateKey::from_seed(0).public_key())];
         while blocks.len() < 5 {
-            let parent = blocks.last().unwrap();
-            let height = parent.height().next();
-            blocks.push(TestBlock::new::<Sha256>(
-                parent.context().clone(),
-                parent.digest(),
-                height,
-                height.get(),
-            ));
+            blocks.push(child(blocks.last().unwrap()));
         }
         let tip = |processed: Option<Processed>, floor: Option<usize>| {
             let processed = processed.map(|processed| {
                 let anchor = processed.anchor().get() as usize;
                 (processed, blocks[anchor].clone())
             });
-            startup(processed, floor.map(|floor| &blocks[floor]))
+            startup(processed, floor.map(|floor| blocks[floor].clone()))
                 .map(|tip| (tip.height, tip.digest))
         };
         let covered = |index: usize| Some((Height::new(index as u64), blocks[index].digest()));

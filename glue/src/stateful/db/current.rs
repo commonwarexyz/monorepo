@@ -1200,6 +1200,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, non_empty_range, probability};
+    use rstest::rstest;
     use std::num::{NonZeroU16, NonZeroUsize};
 
     #[boxed]
@@ -1713,31 +1714,56 @@ mod tests {
         });
     }
 
-    /// Finalize two targets, reopen at the first, apply without finalizing, then crash before any
-    /// sync. Recovery must yield a legitimate history, the first target must reopen, and the
-    /// discarded second target must be rejected.
-    #[test]
-    fn managed_db_bounded_init_then_apply_crash_recovers_history() {
+    /// Finalize two targets, reopen at the first, apply a batch of `writes` keys without
+    /// finalizing, then crash before any sync. Recovery must yield the first target or the applied
+    /// batch. The configured write buffer keeps a batch within it in memory and writes a larger one
+    /// to the blob whole, so `written` selects which history each case recovers. The first target
+    /// must reopen, and the discarded second target must be rejected.
+    #[rstest]
+    #[case::buffered(1, false)]
+    #[case::written(4, true)]
+    fn managed_db_bounded_init_then_apply_crash_recovers_history(
+        #[case] writes: u8,
+        #[case] written: bool,
+    ) {
         type FixedOp = FixedOperation<mmr::Family, Digest, Digest>;
 
-        // One operation per page makes the initialization truncation page aligned and one blob
-        // keeps both histories' writes overlapping.
+        // Operations the journal write buffer holds.
+        const CAPACITY: u64 = 4;
+
+        // One operation per page makes the initialization truncation page aligned, so the write
+        // buffer is empty when the applied batch arrives. A buffer of `CAPACITY` pages keeps an
+        // append of at most `CAPACITY` operations in memory, and a larger append bypasses it and
+        // writes every page to the blob at once. One blob keeps the applied batch over the
+        // discarded second target's bytes.
         fn config(pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-            let page_size = NonZeroU16::new(<FixedOp as FixedSize>::SIZE as u16).unwrap();
+            let size = <FixedOp as FixedSize>::SIZE;
+            let page_size = NonZeroU16::new(size as u16).unwrap();
             let mut config = fixed_config("bounded-init-crash", pooler);
             config.journal_config.page_cache =
                 CacheRef::from_pooler(pooler, page_size, PAGE_CACHE_SIZE);
+            config.journal_config.write_buffer =
+                NonZeroUsize::new(CAPACITY as usize * size).unwrap();
             config.journal_config.items_per_blob = NZU64!(1000);
             config.merkle_config.items_per_blob = NZU64!(1000);
             config
         }
 
-        fn batch_for(i: u8) -> (Digest, Digest, Digest) {
-            (
-                Sha256::hash(&[b"key", &[i]]),
-                Sha256::hash(&[b"value", &[i]]),
-                Sha256::hash(&[b"metadata", &[i]]),
-            )
+        // Batch `id` writes `writes` keys and metadata that no other batch uses.
+        async fn batch(
+            db: &Shared<FixedDb>,
+            id: u8,
+            writes: u8,
+        ) -> <FixedDb as ManagedDb<deterministic::Context>>::Merkleized {
+            let mut batch = db.new_batch_for_test::<_>().await;
+            for i in 0..writes {
+                batch = batch.write(
+                    Sha256::hash(&[b"key", &[id, i]]),
+                    Some(Sha256::hash(&[b"value", &[id, i]])),
+                );
+            }
+            let batch = batch.with_metadata(Sha256::hash(&[b"metadata", &[id]]));
+            Unmerkleized::merkleize(batch).await.unwrap()
         }
 
         // Keep unsynced writes and drop unsynced resizes at the crash.
@@ -1755,17 +1781,11 @@ mod tests {
                     .unwrap();
                 let db = Shared::new("test", db);
 
+                // Finalize two targets. The second writes one more key than the applied batch
+                // below, so the applied batch cannot cover all of its operations.
                 let mut targets = Vec::new();
-                for i in 1..=2 {
-                    let (key, value, metadata) = batch_for(i);
-                    let batch = db
-                        .new_batch_for_test::<_>()
-                        .await
-                        .write(key, Some(value))
-                        .with_metadata(metadata);
-                    let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                        .await
-                        .unwrap();
+                for (id, count) in [(1, 1), (2, writes + 1)] {
+                    let merkleized = batch(&db, id, count).await;
                     let (slot, database) = db.write().await;
                     slot.put(apply_and_finalize::<FixedDb>(database, merkleized).await);
                     let guard = db.read().await;
@@ -1776,7 +1796,8 @@ mod tests {
                 assert_ne!(first, second);
                 drop(db);
 
-                // Reopen at the first target, discarding the second.
+                // Reopen at the first target, discarding the second. Initialization syncs the
+                // truncated journal before returning.
                 let db = <FixedDb as ManagedDb<_>>::init(
                     context.child("bounded"),
                     config(&context),
@@ -1787,23 +1808,20 @@ mod tests {
                 assert_eq!(<FixedDb as ManagedDb<_>>::sync_target(&db), first);
                 let db = Shared::new("test", db);
 
-                // Apply over the discarded target's bytes, then crash without finalizing.
-                let (key, value, metadata) = batch_for(3);
-                let batch = db
-                    .new_batch_for_test::<_>()
-                    .await
-                    .write(key, Some(value))
-                    .with_metadata(metadata);
-                let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
-                    .await
-                    .unwrap();
+                // Apply over the discarded target's bytes, then crash without finalizing. The
+                // batch is one journal append of its updates, floor-raise moves, and commit: three
+                // operations for one key and six for four keys. Only the written case exceeds
+                // `CAPACITY`.
+                let merkleized = batch(&db, 3, writes).await;
                 let (slot, database) = db.write().await;
                 let database = <FixedDb as ManagedDb<_>>::apply(database, merkleized)
                     .await
                     .unwrap();
                 let applied = <FixedDb as ManagedDb<_>>::sync_target(&database);
                 assert_ne!(applied, first);
-                assert_ne!(applied, second);
+                assert!(applied.range.end() < second.range.end());
+                let ops = *(applied.range.end() - first.range.end());
+                assert_eq!(ops > CAPACITY, written);
                 slot.put(database);
                 (first, second, applied)
             });
@@ -1817,6 +1835,14 @@ mod tests {
             assert!(
                 recovered == first || recovered == applied,
                 "recovered {recovered:?} from neither history"
+            );
+
+            // The crash drops a buffered batch and keeps a written one whole, so each case
+            // recovers its own history.
+            assert_eq!(
+                recovered == applied,
+                written,
+                "write buffer geometry no longer selects this case's history"
             );
             drop(db);
 

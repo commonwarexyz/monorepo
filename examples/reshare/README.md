@@ -71,9 +71,12 @@ before normal processing.
 
 Do not use `--state-sync` as a normal restart flag. A restart recovers from
 local storage. If a state sync floor is already persisted, a restart resumes
-state sync from it, or from a newer probed floor, without the flag. A player
-that misses its private dealings cannot recover them by syncing: the ceremony
-completes without it and publicly reveals its share.
+state sync from it, or from a newer probed floor, without the flag. A late
+joiner that stops before its floor is persisted must pass `--state-sync` again,
+because without it the node starts from genesis and permanently disables state
+sync. Once a floor is persisted or state sync completes, the flag has no
+effect. A player that misses its private dealings cannot recover them by
+syncing: the ceremony completes without it and publicly reveals its share.
 
 ## Limits
 

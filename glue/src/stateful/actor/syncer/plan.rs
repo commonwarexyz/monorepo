@@ -92,10 +92,10 @@ where
 
     /// Persist a finalized floor to state sync from.
     ///
-    /// Once persisted, every startup must run state sync until it completes,
+    /// Once persisted, every startup runs state sync until it completes,
     /// whether or not it is requested. Has no effect if state sync has already
-    /// completed. A selection that is
-    /// not newer than the persisted floor is ignored.
+    /// completed. A selection that is not newer than the persisted floor is
+    /// ignored.
     ///
     /// # Panics
     ///
@@ -139,7 +139,7 @@ where
     /// [`Self::may_state_sync`] is also `true`, and the persisted floor keeps
     /// partially synced database state on the same recovery path.
     pub fn requires_state_sync_floor(&self) -> bool {
-        self.sync_metadata.in_progress()
+        self.floor().is_some()
     }
 
     /// Returns whether this startup should run peer state sync.

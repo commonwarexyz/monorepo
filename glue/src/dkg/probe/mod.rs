@@ -114,12 +114,12 @@
 //! ```
 //!
 //! The block's [`EpochInfo`] is packaged into an [`Artifact`] together with the sampled floor and
-//! published to subscribers. The floor and the epoch info are fixed atomically, so the artifact's
-//! epoch always equals the floor's epoch:
+//! published to subscribers. The info is fetched for the sampled floor's own epoch, so
+//! [`Artifact::info`] always describes the epoch of [`Artifact::floor`]:
 //!
 //! ```text
 //!   floor + boundary finalization + boundary block
-//!       --> Artifact { epoch, finalization, info, floor }
+//!       --> Artifact { finalization, info, floor }
 //! ```
 //!
 //! A floor in epoch zero resolves from the locally known genesis info without a boundary fetch.
@@ -935,14 +935,16 @@ mod tests {
         });
     }
 
+    /// Latest replies below the bootstrap epoch are ignored without blocking
+    /// peers, including when a persisted floor from an earlier epoch is set.
     #[rstest::rstest]
     #[case::none(false)]
     #[case::older(true)]
     fn ignores_latest_reply_below_bootstrap_epoch(#[case] older: bool) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            // A persisted floor below the bootstrap epoch must not lower the
-            // minimum epoch.
+            // In the `older` case, a persisted epoch-zero floor must not lower
+            // the minimum epoch below the bootstrap epoch.
             let fixture = mocks::scheme_fixture_n(&mut context, 4);
             let floor = older.then(|| {
                 finalization(
