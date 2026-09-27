@@ -1161,6 +1161,7 @@ impl EngineDefinition for ReshareEngine {
                 manager: dkg_manager,
                 provider: provider.clone(),
                 marshal: marshal.clone(),
+                probe: probe_mailbox.clone(),
                 application: deferred,
                 strategy: Sequential,
                 simplex: orchestrator::SimplexConfig {

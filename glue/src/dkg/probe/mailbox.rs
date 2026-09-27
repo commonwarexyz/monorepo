@@ -4,6 +4,7 @@ use commonware_actor::mailbox::{Policy, Sender};
 use commonware_consensus::{
     marshal::core::{Mailbox as MarshalMailbox, Variant},
     simplex::scheme::Scheme,
+    types::Epoch,
 };
 use commonware_cryptography::Signer;
 use commonware_utils::channel::oneshot;
@@ -22,12 +23,14 @@ where
         /// Channel used to resolve the subscriber.
         response: oneshot::Sender<ActorArtifact<S, V>>,
     },
-    /// Attach marshal and transition to boundary-serving mode once discovery no
+    /// Attach marshal and transition to boundary-serving mode once discovery
     /// no longer has pending subscribers.
     Attach {
         /// Marshal mailbox used to serve boundary requests.
         marshal: MarshalMailbox<S, V>,
     },
+    /// Discover the finalization that ends the active epoch.
+    CatchUp { epoch: Epoch, peer: S::PublicKey },
 }
 
 impl<S, V> Policy for Message<S, V>
@@ -87,5 +90,13 @@ where
     /// issuing discovery requests.
     pub fn attach(&self, marshal: MarshalMailbox<S, V>) {
         let _ = self.sender.enqueue(Message::Attach { marshal });
+    }
+
+    /// Discover the active epoch's boundary certificate from a peer that has advanced.
+    ///
+    /// The probe retries with connected peers until marshal stores the boundary.
+    /// Verified certificates enter marshal's normal commitment-based body acquisition.
+    pub(crate) fn catch_up(&self, epoch: Epoch, peer: S::PublicKey) {
+        let _ = self.sender.enqueue(Message::CatchUp { epoch, peer });
     }
 }

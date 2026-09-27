@@ -125,6 +125,7 @@ where
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
         let mut marshal = None;
+        let mut catch_up = None;
         let mut deadline = self.context.current() + self.retry_timeout.get();
 
         select_loop! {
@@ -170,6 +171,9 @@ where
                 Message::Attach { marshal: attached } => {
                     marshal = Some(attached);
                 }
+                Message::CatchUp { epoch, peer } => {
+                    catch_up = Some((epoch, peer));
+                }
             },
             Ok((peer, message)) = boundary_receiver.recv() else {
                 debug!("boundary receiver closed, shutting down");
@@ -197,8 +201,11 @@ where
             blocker: self.blocker,
             epocher: self.epocher,
             artifact: self.artifact,
+            verifier: self.verifier,
+            strategy: self.strategy,
+            retry_timeout: self.retry_timeout,
         }
-        .run(boundary_sender, boundary_receiver)
+        .run(boundary_sender, boundary_receiver, catch_up)
         .await;
     }
 
