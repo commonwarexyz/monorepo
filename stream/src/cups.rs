@@ -71,7 +71,7 @@ use commonware_runtime::{
     Buf as _, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut,
     IoBufs, Sink, Stream,
 };
-use commonware_utils::{DurationExt, SystemTimeExt};
+use commonware_utils::{DurationExt, SystemTimeExt, Widen};
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -223,10 +223,10 @@ impl Version {
                 let len = u32::decode(Copying(&header[..V1_HEADER_PLAINTEXT_SIZE]))?;
                 if len > max_message_size {
                     return Err(Error::RecvTooLarge(
-                        (len as usize).saturating_add(sake::TAG_SIZE),
+                        Widen::<usize>::widen(len).saturating_add(sake::TAG_SIZE),
                     ));
                 }
-                let body_len = len as usize + sake::TAG_SIZE;
+                let body_len = Widen::<usize>::widen(len) + sake::TAG_SIZE;
 
                 // Consume a buffered header on its own when it and the payload do not fit in one
                 // read request.
@@ -472,7 +472,7 @@ impl<O: Sink> Sender<O> {
             plaintext_len + TAG_SIZE as usize,
             self.max_message_size.saturating_add(TAG_SIZE),
         )?;
-        Ok(self.version.header_len(body_len) + body_len as usize)
+        Ok(self.version.header_len(body_len) + Widen::<usize>::widen(body_len))
     }
 
     /// Appends one encrypted frame directly into caller-provided storage.
@@ -796,7 +796,8 @@ mod test {
                 } else if length > MAX_MESSAGE_SIZE {
                     assert!(matches!(
                         result,
-                        Some(Err(Error::RecvTooLarge(n))) if n == length as usize + sake::TAG_SIZE
+                        Some(Err(Error::RecvTooLarge(n)))
+                            if n == Widen::<usize>::widen(length) + sake::TAG_SIZE
                     ));
                 } else {
                     assert!(result.is_none(), "a valid header must wait for its payload");
