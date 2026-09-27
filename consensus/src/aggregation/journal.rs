@@ -287,12 +287,6 @@ where
         rebind(&mut self.inner, |journal| journal.sync(section)).await?;
         Ok(())
     }
-
-    /// Syncs all journal sections.
-    pub async fn sync_all(&mut self) -> Result<(), JournalError> {
-        rebind(&mut self.inner, StorageJournal::sync_all).await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

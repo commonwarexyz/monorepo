@@ -69,6 +69,9 @@ struct DigestRequest<D: Digest> {
 }
 
 /// Result of submitting a recovered certificate to an active engine.
+///
+/// A resolver consumer should answer with the converted [`commonware_resolver::Outcome`].
+/// Other mappings can penalize honest peers or retire a key the engine still needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CertificateOutcome {
     /// The certificate was valid and advanced local state.
@@ -79,6 +82,17 @@ pub enum CertificateOutcome {
     Invalid,
     /// The bounded ingress queue was full; the caller should retry later.
     Backpressured,
+}
+
+impl From<CertificateOutcome> for commonware_resolver::Outcome {
+    fn from(outcome: CertificateOutcome) -> Self {
+        match outcome {
+            CertificateOutcome::Accepted => Self::Complete,
+            CertificateOutcome::Ignored => Self::Ignored,
+            CertificateOutcome::Invalid => Self::Invalid,
+            CertificateOutcome::Backpressured => Self::Ambiguous,
+        }
+    }
 }
 
 /// Reason an aggregation engine stopped.
@@ -114,7 +128,7 @@ pub struct Mailbox<S: commonware_cryptography::certificate::Scheme, D: Digest> {
 /// Gracefully stops one aggregation engine.
 ///
 /// Dropping this handle also requests shutdown. The engine finishes its current operation,
-/// cancels recovery, syncs its journal, and returns [`EngineOutcome::Stopped`].
+/// cancels recovery, and returns [`EngineOutcome::Stopped`].
 pub struct Stopper(oneshot::Sender<()>);
 
 impl Stopper {
@@ -128,15 +142,15 @@ impl<S: commonware_cryptography::certificate::Scheme, D: Digest> Mailbox<S, D> {
     /// Validates and applies a recovered certificate.
     pub async fn submit(&mut self, certificate: Certificate<S, D>) -> CertificateOutcome {
         let (response, receiver) = oneshot::channel();
-        if !self
-            .sender
-            .enqueue(CertificateMessage {
-                certificate,
-                response,
-            })
-            .accepted()
-        {
-            return CertificateOutcome::Backpressured;
+        match self.sender.enqueue(CertificateMessage {
+            certificate,
+            response,
+        }) {
+            Unreliable::Rejected => return CertificateOutcome::Backpressured,
+            Unreliable::Outcome(feedback) if !feedback.accepted() => {
+                return CertificateOutcome::Ignored;
+            }
+            Unreliable::Outcome(_) => {}
         }
         receiver.await.unwrap_or(CertificateOutcome::Ignored)
     }
@@ -312,7 +326,7 @@ where
         futures::pin_mut!(stopping);
         // `select!` is biased, so alternate network and maintenance priority to prevent starvation.
         let mut network_first = true;
-        let outcome = loop {
+        loop {
             if self.complete {
                 break EngineOutcome::Completed;
             }
@@ -417,16 +431,7 @@ where
                     response.send_lossy(outcome);
                 }
             }
-        };
-
-        self.cancel_all_recovery();
-        if let Some(mut journal) = self.journal.take() {
-            journal
-                .sync_all()
-                .await
-                .expect("unable to sync aggregation journal");
         }
-        outcome
     }
 
     fn fill_window(&mut self, recover_immediately: bool) {
@@ -511,7 +516,7 @@ where
         peer: &<S as Verifier>::PublicKey,
     ) -> Result<(), Error> {
         let position = ack.item.position;
-        if position < self.first || position > self.last || !self.pending.contains_key(&position) {
+        if !self.pending.contains_key(&position) {
             return Err(Error::AckPosition(position));
         }
         let Some(signer) = self.scheme.participants().index(peer) else {
@@ -570,34 +575,19 @@ where
 
     async fn accept_certificate(&mut self, certificate: Certificate<S, D>) {
         let position = certificate.item.position;
-        if certificate.epoch != self.epoch || position < self.frontier || position > self.last {
-            return;
-        }
-        if let Some(existing) = self.confirmed.get(&position) {
-            assert_eq!(
-                existing.item.digest, certificate.item.digest,
-                "conflicting certificates"
-            );
-            return;
-        }
-        self.record_certificate(certificate.clone()).await;
-        self.reporter.report(certificate.clone());
-        if let Some(pending) = self.pending.remove(&position)
-            && pending.recovering
-        {
+        let pending = self
+            .pending
+            .remove(&position)
+            .expect("accepted certificate must be pending");
+        if pending.recovering {
             self.recoverer.cancel(self.recovery_key(position));
         }
         self.rebroadcast_deadlines.remove(&position);
+        self.record_certificate(certificate.clone()).await;
+        self.reporter.report(certificate.clone());
         self.confirmed.insert(position, certificate);
         self.metrics.certificates.inc();
-        while self.confirmed.remove(&self.frontier).is_some() {
-            if self.frontier == self.last {
-                self.complete = true;
-                let _ = self.metrics.complete.try_set(1);
-                break;
-            }
-            self.frontier = self.frontier.next();
-        }
+        self.advance_frontier();
         let _ = self.metrics.frontier.try_set(self.frontier.get());
         self.fill_window(false);
     }
@@ -609,9 +599,6 @@ where
         let position = certificate.item.position;
         if certificate.epoch != self.epoch || position < self.first || position > self.last {
             return CertificateOutcome::Invalid;
-        }
-        if self.complete || position < self.frontier || self.confirmed.contains_key(&position) {
-            return CertificateOutcome::Ignored;
         }
         if !self.pending.contains_key(&position) {
             return CertificateOutcome::Ignored;
@@ -676,18 +663,6 @@ where
         }
     }
 
-    fn cancel_all_recovery(&mut self) {
-        for (&position, pending) in &mut self.pending {
-            if std::mem::take(&mut pending.recovering) {
-                self.recoverer.cancel(RecoveryKey {
-                    namespace: self.recovery_namespace,
-                    epoch: self.epoch,
-                    position,
-                });
-            }
-        }
-    }
-
     async fn init_journal(&mut self) -> bool {
         let context = self.context.child("journal");
         let (journal, certificates) = Journal::init(
@@ -710,7 +685,6 @@ where
 
     fn replay_certificate(&mut self, certificate: Certificate<S, D>) {
         let position = certificate.item.position;
-        self.recoverer.cancel(self.recovery_key(position));
         if position >= self.frontier {
             if let Some(existing) = self.confirmed.insert(position, certificate.clone()) {
                 assert_eq!(
@@ -718,16 +692,21 @@ where
                     "conflicting journal certificates"
                 );
             }
-            while self.confirmed.remove(&self.frontier).is_some() {
-                if self.frontier == self.last {
-                    self.complete = true;
-                    let _ = self.metrics.complete.try_set(1);
-                    break;
-                }
-                self.frontier = self.frontier.next();
-            }
+            self.advance_frontier();
         }
         self.reporter.report(certificate);
+    }
+
+    /// Advances the frontier past consecutive confirmed positions.
+    fn advance_frontier(&mut self) {
+        while self.confirmed.remove(&self.frontier).is_some() {
+            if self.frontier == self.last {
+                self.complete = true;
+                let _ = self.metrics.complete.try_set(1);
+                break;
+            }
+            self.frontier = self.frontier.next();
+        }
     }
 
     async fn record_certificate(&mut self, certificate: Certificate<S, D>) {
@@ -740,6 +719,27 @@ where
     }
 }
 
+impl<E, S, D, A, Z, B, T, R> Drop for Engine<E, S, D, A, Z, B, T, R>
+where
+    E: BufferPooler + Clock + Spawner + Storage + RuntimeMetrics + CryptoRng,
+    S: scheme::Scheme<D>,
+    D: Digest,
+    A: Automaton<Context = Height, Digest = D>,
+    Z: Reporter<Activity = Certificate<S, D>>,
+    B: Blocker<PublicKey = <S as Verifier>::PublicKey>,
+    T: Strategy,
+    R: Recoverer,
+{
+    // Release shared recovery admission even if the engine task is aborted.
+    fn drop(&mut self) {
+        for (position, pending) in std::mem::take(&mut self.pending) {
+            if pending.recovering {
+                self.recoverer.cancel(self.recovery_key(position));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,6 +749,12 @@ mod tests {
     };
     use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::{Hasher, Sha256, certificate::mocks::Fixture};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    };
+    use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
+    use std::num::NonZeroU64;
 
     #[derive(Clone)]
     struct NoopRecoverer;
@@ -762,12 +768,6 @@ mod tests {
             Feedback::Ok
         }
     }
-    use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
-    };
-    use commonware_utils::{NZU16, NZUsize, NonZeroDuration};
-    use std::num::NonZeroU64;
 
     #[derive(Clone)]
     struct NoopAutomaton;

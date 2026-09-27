@@ -1269,43 +1269,48 @@ enum StopTrigger {
     Stopper,
     DroppedStopper,
     NetworkClosed,
+    Abort,
 }
 
 #[test_traced("INFO")]
-fn test_stop_triggers_report_stopped() {
+fn test_stop_cancels_recovery_and_closes_mailbox() {
     for trigger in [
         StopTrigger::Runtime,
         StopTrigger::Stopper,
         StopTrigger::DroppedStopper,
         StopTrigger::NetworkClosed,
+        StopTrigger::Abort,
     ] {
         deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
             let fixture = scheme::ed25519::fixture(&mut context, NAMESPACE, 1);
             let participant = fixture.participants[0].clone();
+            let epoch = Epoch::new(11);
             let position = Height::new(70);
-            let application = PendingApplication::default();
-            let requested = application.requested.clone();
+            let recoverer = RecordingRecoverer::default();
+            let events = recoverer.events.clone();
             let (oracle, mut registrations) =
                 simulation(context.child("simulation"), &fixture, false).await;
-            let cfg = config(
+            let mut cfg = config(
                 &context,
                 fixture.schemes[0].clone(),
-                application,
+                PendingApplication::default(),
                 RecordingReporter::default(),
                 oracle.control(participant.clone()),
                 EngineScope {
                     partition: "aggregation-stop".into(),
-                    epoch: Epoch::new(11),
+                    epoch,
                     first: position,
                     last: position,
                     window: 1,
                 },
             );
-            let (engine, _mailbox) = Engine::new(context.child("engine"), cfg);
+            cfg.recoverer = recoverer;
+            cfg.recovery_after_rebroadcasts = NonZeroU64::new(1).unwrap();
+            let (engine, mut mailbox) = Engine::new(context.child("engine"), cfg);
             let (handle, stopper) =
                 engine.start_stoppable(registrations.remove(&participant).unwrap());
 
-            while !requested.lock().contains_key(&position) {
+            while events.lock().is_empty() {
                 context.sleep(Duration::from_millis(1)).await;
             }
             // Keep the stopper and any replacement registration alive until the engine stops.
@@ -1319,11 +1324,21 @@ fn test_stop_triggers_report_stopped() {
                     let control = oracle.control(participant);
                     replacement = Some(control.register(0, QUOTA).await.unwrap());
                 }
+                StopTrigger::Abort => handle.abort(),
             }
 
+            let result = handle.await;
+            if matches!(trigger, StopTrigger::Abort) {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), EngineOutcome::Stopped, "{trigger:?}");
+            }
+            let key = events.lock()[0].1;
+            assert_eq!((key.epoch, key.position), (epoch, position));
+            assert_eq!(*events.lock(), [(true, key), (false, key)], "{trigger:?}");
             assert_eq!(
-                handle.await.expect("aggregation engine failed"),
-                EngineOutcome::Stopped,
+                mailbox.submit(certificate(&fixture, epoch, position)).await,
+                CertificateOutcome::Ignored,
                 "{trigger:?}"
             );
             drop((stopper, replacement));
