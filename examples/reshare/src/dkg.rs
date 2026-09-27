@@ -5,14 +5,15 @@ use crate::{
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
-        Participants, RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
+        Participants, Partition, RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
     },
+    validator,
 };
 use clap::Args;
 use commonware_consensus::types::Epoch;
 use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519::PublicKey};
 use commonware_glue::dkg::{
-    bootstrap,
+    SecretStore as _, bootstrap,
     types::{EpochInfo, EpochOutcome},
 };
 use commonware_p2p::authenticated::{self, discovery};
@@ -26,6 +27,9 @@ use std::{
 use tracing::{error, info};
 
 type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
+
+/// Partition of the bootstrap ceremony's [`Secrets`] store.
+pub const PARTITION: Partition = Partition::Bootstrap;
 
 /// Run the one-shot DKG bootstrap, write the resulting genesis, and keep
 /// serving until stopped.
@@ -69,14 +73,14 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let dkg = p2p.register(DKG_CHANNEL, MESSAGE_RATE);
 
     let strategy = context.strategy(NZUsize!(2));
-    let store = Secrets::init(context.child("secrets")).await;
+    let mut store = Secrets::init(context.child("secrets"), PARTITION).await;
     let engine = bootstrap::Engine::new(
         context.child("bootstrap"),
         bootstrap::Config {
             signer: node.signer,
             manager: oracle.clone(),
             blocker: oracle.clone(),
-            secret_store: store,
+            secret_store: store.clone(),
             strategy,
             namespace: NAMESPACE,
             sharing_mode: SHARING_MODE,
@@ -97,6 +101,15 @@ pub async fn run(context: tokio::Context, args: Dkg) {
         .expect("bootstrap completion dropped")
         .info
         .expect("bootstrap DKG failed");
+
+    // Hand only the epoch-0 share to the validator store. The bootstrap store
+    // also holds this ceremony's epoch-0 seed and dealings, which the
+    // validator's first reshare must not reuse.
+    if let Some(share) = store.get_share(Epoch::zero()).await {
+        let mut handoff = Secrets::init(context.child("handoff"), validator::PARTITION).await;
+        handoff.put_share(Epoch::zero(), share).await;
+    }
+
     let mut genesis = info;
     genesis.outcome = EpochOutcome::Success;
     genesis.next_players = participants.get(genesis.epoch.next());

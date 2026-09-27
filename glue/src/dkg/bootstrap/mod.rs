@@ -87,6 +87,13 @@ pub struct Config<M, X, SS, T, D = Unit> {
     pub blocker: X,
 
     /// User-owned store for private DKG material.
+    ///
+    /// Must not be the store a [`reshare`] actor uses. Both ceremonies persist
+    /// dealer seeds and received dealings for epoch zero under the same keys. A
+    /// shared store makes the first reshare deal from this ceremony's seed, and
+    /// a crash during that reshare can make it recover this ceremony's dealings
+    /// as its own. Carry over only the resulting epoch-zero share. The engine
+    /// never prunes this store.
     pub secret_store: SS,
 
     /// Parallel verification strategy.

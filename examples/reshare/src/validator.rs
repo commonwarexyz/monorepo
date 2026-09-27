@@ -3,12 +3,13 @@
 use crate::{
     application::App,
     config::{NetworkConfig, NodeConfig},
+    dkg,
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
         DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, IO_BUFFER_SIZE, LogReporter, MAILBOX_SIZE,
         MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
-        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL, RESOLVER_CHANNEL, REVEAL,
-        Registrar, SHARING_MODE, Scheme, Secrets, VOTE_CHANNEL,
+        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, Partition, QMDB_CHANNEL, RESOLVER_CHANNEL,
+        REVEAL, Registrar, SHARING_MODE, Scheme, Secrets, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -68,6 +69,9 @@ pub struct Validator {
     pub state_sync: bool,
 }
 
+/// Partition of the validator's [`Secrets`] store.
+pub const PARTITION: Partition = Partition::Validator;
+
 /// Start every validator actor and run until one stops.
 #[boxed]
 pub async fn run(context: tokio::Context, args: Validator) {
@@ -75,6 +79,14 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");
     network.validate().expect("invalid network config");
     let genesis_info = types::read_genesis(&args.node_dir).expect("genesis is required");
+
+    // A player's genesis comes only from its own `dkg`, which hands the
+    // epoch-0 share to `secrets` before writing genesis. Nothing in the
+    // bootstrap store is needed after that, so erase it.
+    Secrets::init(context.child("bootstrap"), dkg::PARTITION)
+        .await
+        .destroy()
+        .await;
     let participants = Participants::new(&network).expect("invalid participants");
     let local = node.public_key();
     let partition_prefix = "validator";
@@ -107,7 +119,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let p2p_handle = p2p.start();
 
     let provider = DynamicProvider::default();
-    let mut store = Secrets::init(context.child("secrets")).await;
+    let mut store = Secrets::init(context.child("secrets"), PARTITION).await;
     if let Some(share) = store.get_share(Epoch::zero()).await {
         provider.register(
             Epoch::zero(),

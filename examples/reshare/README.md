@@ -50,8 +50,16 @@ data/
 `network.json` contains the ordered participant list, fixed committee size, and
 peer dial addresses. `genesis.json` is written by `dkg` and then consumed by
 `validator`. `runtime/` is the Commonware storage root for all blob partitions
-used by that node, including the `secrets` partition that holds its DKG shares,
-dealer seeds, and received dealings.
+used by that node.
+
+Private DKG material lives in two partitions of `runtime/`. `dkg` keeps the
+bootstrap ceremony's share, dealer seed, and received dealings in
+`bootstrap-secrets`. When the ceremony completes, `dkg` copies only the node's
+epoch-0 share, if it has one, into `secrets`. `validator` uses `secrets` for
+that share and for the shares, dealer seeds, and received dealings of every
+reshare, and erases `bootstrap-secrets` when it starts. The bootstrap ceremony
+and the first reshare both store epoch-0 seeds and dealings, so they must not
+share a partition.
 
 Committees rotate deterministically: for epoch `E`, the committee starts at
 offset `E % participants.len()` and takes `committee_size` consecutive

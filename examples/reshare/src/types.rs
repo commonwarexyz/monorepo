@@ -49,7 +49,7 @@ use commonware_utils::{
     ordered::Set,
     range::NonEmptyRange,
     sequence::{FixedBytes, U64, Unit},
-    sync::Mutex,
+    sync::{AsyncMutex, Mutex},
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use std::{
@@ -360,6 +360,9 @@ const KEY: usize = 1 + u64::SIZE + sha256::Digest::SIZE;
 /// Key of one entry in [`Secrets`].
 type Key = FixedBytes<KEY>;
 
+/// Metadata store backing [`Secrets`].
+type Store<E> = Metadata<E, Key, Vec<u8>>;
+
 /// Key of the `kind` entry for `epoch` and, for a dealing, `dealer`.
 fn key(kind: u8, epoch: Epoch, dealer: Option<sha256::Digest>) -> Key {
     let mut key = [0; KEY];
@@ -376,54 +379,91 @@ fn epoch(key: &Key) -> Epoch {
     Epoch::new(u64::from_be_bytes(key[1..9].try_into().unwrap()))
 }
 
-/// [`dkg::SecretStore`] holding shares, dealer seeds, and dealings in the
-/// `secrets` partition of the node's runtime storage.
+/// Runtime storage partition of a [`Secrets`] store.
 ///
-/// Material is stored unencrypted, which is suitable for this example only.
-/// Every put and prune is synced before it returns, and every get reads from
-/// memory.
+/// The bootstrap ceremony and the validator's first reshare both persist dealer
+/// seeds and received dealings for epoch 0, so each uses its own partition.
+#[derive(Clone, Copy)]
+pub enum Partition {
+    /// `bootstrap-secrets`, used by the `dkg` bootstrap ceremony.
+    Bootstrap,
+
+    /// `secrets`, used by `validator` for the epoch-0 share that `dkg` hands
+    /// over and for every reshare's material.
+    Validator,
+}
+
+/// [`dkg::SecretStore`] holding shares, dealer seeds, and dealings in one
+/// [`Partition`] of the node's runtime storage.
+///
+/// Clones share one store. Material is stored unencrypted, which is suitable
+/// for this example only. Every put and prune is synced before it returns, and
+/// every get reads from memory.
 pub struct Secrets<E: StorageContext> {
     // Taken while a sync runs, so this is empty only after a sync panicked or
     // was dropped.
-    metadata: Option<Metadata<E, Key, Vec<u8>>>,
+    metadata: Arc<AsyncMutex<Option<Store<E>>>>,
+}
+
+impl<E: StorageContext> Clone for Secrets<E> {
+    fn clone(&self) -> Self {
+        Self {
+            metadata: self.metadata.clone(),
+        }
+    }
 }
 
 impl<E: StorageContext> Secrets<E> {
-    /// Open the store, starting empty if nothing was stored.
-    pub async fn init(context: E) -> Self {
+    /// Open the store in `partition`, starting empty if nothing was stored.
+    pub async fn init(context: E, partition: Partition) -> Self {
+        let partition = match partition {
+            Partition::Bootstrap => "bootstrap-secrets",
+            Partition::Validator => "secrets",
+        };
         let metadata = Metadata::init(
             context,
             metadata::Config {
-                partition: "secrets".to_string(),
+                partition: partition.to_string(),
                 codec_config: ((..).into(), ()),
             },
         )
         .await
         .expect("failed to load secrets");
         Self {
-            metadata: Some(metadata),
+            metadata: Arc::new(AsyncMutex::new(Some(metadata))),
         }
     }
 
-    fn get<T: DecodeExt<()>>(&self, key: &Key) -> Option<T> {
-        let metadata = self
-            .metadata
+    async fn get<T: DecodeExt<()>>(&self, key: &Key) -> Option<T> {
+        let metadata = self.metadata.lock().await;
+        let value = metadata
             .as_ref()
-            .expect("secrets used after an interrupted sync");
-        let value = metadata.get(key)?;
+            .expect("secrets used after an interrupted sync")
+            .get(key)?;
         Some(T::decode(Copying(value)).expect("stored secret must decode"))
     }
 
     async fn put(&mut self, key: Key, value: impl Encode) {
-        let metadata = self
-            .metadata
+        let mut guard = self.metadata.lock().await;
+        let metadata = guard
             .take()
             .expect("secrets used after an interrupted sync");
         let metadata = metadata
             .put_sync(key, value.encode().into())
             .await
             .expect("failed to sync secrets");
-        self.metadata = Some(metadata);
+        *guard = Some(metadata);
+    }
+
+    /// Remove the store's partition and everything in it.
+    pub async fn destroy(self) {
+        let metadata = self
+            .metadata
+            .lock()
+            .await
+            .take()
+            .expect("secrets used after an interrupted sync");
+        metadata.destroy().await.expect("failed to destroy secrets");
     }
 }
 
@@ -433,7 +473,7 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
     }
 
     async fn get_share(&mut self, epoch: Epoch) -> Option<Share> {
-        self.get(&key(SHARE, epoch, None))
+        self.get(&key(SHARE, epoch, None)).await
     }
 
     async fn put_seed(&mut self, epoch: Epoch, seed: Summary) {
@@ -441,7 +481,7 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
     }
 
     async fn get_seed(&mut self, epoch: Epoch) -> Option<Summary> {
-        self.get(&key(SEED, epoch, None))
+        self.get(&key(SEED, epoch, None)).await
     }
 
     async fn put_dealing<P: commonware_cryptography::PublicKey>(
@@ -460,17 +500,17 @@ impl<E: StorageContext> dkg::SecretStore for Secrets<E> {
         dealer: &P,
     ) -> Option<DealerPrivMsg> {
         let dealer = Sha256::hash(&[dealer]);
-        self.get(&key(DEALING, epoch, Some(dealer)))
+        self.get(&key(DEALING, epoch, Some(dealer))).await
     }
 
     async fn prune(&mut self, min: Epoch) {
-        let mut metadata = self
-            .metadata
+        let mut guard = self.metadata.lock().await;
+        let mut metadata = guard
             .take()
             .expect("secrets used after an interrupted sync");
         metadata.retain(|key, _| epoch(key) >= min);
         let metadata = metadata.sync().await.expect("failed to sync secrets");
-        self.metadata = Some(metadata);
+        *guard = Some(metadata);
     }
 }
 
@@ -717,7 +757,8 @@ mod tests {
         let (_, checkpoint) = deterministic::Runner::default().start_and_recover({
             let (share, dealings) = (share.clone(), dealings.clone());
             |context| async move {
-                let mut secrets = Secrets::init(context.child("secrets")).await;
+                let mut secrets =
+                    Secrets::init(context.child("secrets"), Partition::Validator).await;
                 for epoch in [Epoch::new(1), Epoch::new(2)] {
                     secrets.put_share(epoch, share.clone()).await;
                     secrets.put_seed(epoch, seed).await;
@@ -735,7 +776,8 @@ mod tests {
         let (_, checkpoint) = deterministic::Runner::from(checkpoint).start_and_recover({
             let (share, dealings) = (share.clone(), dealings.clone());
             |context| async move {
-                let mut secrets = Secrets::init(context.child("secrets")).await;
+                let mut secrets =
+                    Secrets::init(context.child("secrets"), Partition::Validator).await;
                 for epoch in [Epoch::new(1), Epoch::new(2)] {
                     assert_eq!(secrets.get_share(epoch).await, Some(share.clone()));
                     assert_eq!(secrets.get_seed(epoch).await, Some(seed));
@@ -752,7 +794,7 @@ mod tests {
 
         // The prune survives the restart: epoch 1 is gone and epoch 2 remains.
         deterministic::Runner::from(checkpoint).start(|context| async move {
-            let mut secrets = Secrets::init(context.child("secrets")).await;
+            let mut secrets = Secrets::init(context.child("secrets"), Partition::Validator).await;
             assert_eq!(secrets.get_share(Epoch::new(1)).await, None);
             assert_eq!(secrets.get_seed(Epoch::new(1)).await, None);
             assert_eq!(secrets.get_share(Epoch::new(2)).await, Some(share));
@@ -764,6 +806,97 @@ mod tests {
                     Some(dealing)
                 );
             }
+        });
+    }
+
+    /// The `dkg` handoff copies only the epoch-0 share from the bootstrap
+    /// partition into the validator partition, and the share survives an
+    /// unclean restart.
+    #[test]
+    fn handoff_carries_only_share() {
+        // Deal a share and draw a seed and one dealing.
+        let participants = keys(2);
+        let (player, dealer) = (participants[0].clone(), participants[1].clone());
+        let players = Set::from_iter_dedup([player.clone()]);
+        let (_output, shares) =
+            deal::<MinSig, _, N3f1>(TestRng::new(1), SHARING_MODE, players).unwrap();
+        let share = shares.get_value(&player).unwrap().clone();
+        let mut rng = test_rng();
+        let seed = Summary::random(&mut rng);
+        let dealing = DealerPrivMsg::new(Scalar::random(&mut rng));
+
+        let (_, checkpoint) = deterministic::Runner::default().start_and_recover({
+            let (share, dealer) = (share.clone(), dealer.clone());
+            |context| async move {
+                // The engine's clone of the bootstrap store persists the
+                // ceremony's epoch-0 share, seed, and dealing.
+                let mut bootstrap =
+                    Secrets::init(context.child("secrets"), crate::dkg::PARTITION).await;
+                let mut engine = bootstrap.clone();
+                engine.put_share(Epoch::zero(), share).await;
+                engine.put_seed(Epoch::zero(), seed).await;
+                engine.put_dealing(Epoch::zero(), dealer, dealing).await;
+
+                // Hand over the share as `dkg` does, then crash.
+                let share = bootstrap.get_share(Epoch::zero()).await.unwrap();
+                let mut handoff =
+                    Secrets::init(context.child("handoff"), crate::validator::PARTITION).await;
+                handoff.put_share(Epoch::zero(), share).await;
+            }
+        });
+
+        // The validator partition holds the share and none of the ceremony's
+        // seed or dealing.
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let mut secrets =
+                Secrets::init(context.child("secrets"), crate::validator::PARTITION).await;
+            assert_eq!(secrets.get_share(Epoch::zero()).await, Some(share));
+            assert_eq!(secrets.get_seed(Epoch::zero()).await, None);
+            assert_eq!(secrets.get_dealing(Epoch::zero(), &dealer).await, None);
+        });
+    }
+
+    /// Destroying the bootstrap partition erases the ceremony's share, seed,
+    /// and dealing across a restart.
+    #[test]
+    fn destroy_erases_bootstrap() {
+        // Deal a share and draw a seed and one dealing.
+        let participants = keys(2);
+        let (player, dealer) = (participants[0].clone(), participants[1].clone());
+        let players = Set::from_iter_dedup([player.clone()]);
+        let (_output, shares) =
+            deal::<MinSig, _, N3f1>(TestRng::new(1), SHARING_MODE, players).unwrap();
+        let share = shares.get_value(&player).unwrap().clone();
+        let mut rng = test_rng();
+        let seed = Summary::random(&mut rng);
+        let dealing = DealerPrivMsg::new(Scalar::random(&mut rng));
+
+        // Persist the ceremony's material, then destroy the partition.
+        let (_, checkpoint) = deterministic::Runner::default().start_and_recover({
+            let dealer = dealer.clone();
+            |context| async move {
+                let mut bootstrap =
+                    Secrets::init(context.child("secrets"), crate::dkg::PARTITION).await;
+                bootstrap.put_share(Epoch::zero(), share).await;
+                bootstrap.put_seed(Epoch::zero(), seed).await;
+                bootstrap.put_dealing(Epoch::zero(), dealer, dealing).await;
+                drop(bootstrap);
+
+                // Reopen and erase the partition, as `validator` does.
+                Secrets::init(context.child("bootstrap"), crate::dkg::PARTITION)
+                    .await
+                    .destroy()
+                    .await;
+            }
+        });
+
+        // Nothing survives in the bootstrap partition.
+        deterministic::Runner::from(checkpoint).start(|context| async move {
+            let mut bootstrap =
+                Secrets::init(context.child("secrets"), crate::dkg::PARTITION).await;
+            assert_eq!(bootstrap.get_share(Epoch::zero()).await, None);
+            assert_eq!(bootstrap.get_seed(Epoch::zero()).await, None);
+            assert_eq!(bootstrap.get_dealing(Epoch::zero(), &dealer).await, None);
         });
     }
 }
