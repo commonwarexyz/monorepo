@@ -120,9 +120,9 @@ where
 
         let height = self
             .marshal
-            .get_processed_height()
+            .get_processed()
             .await
-            .map_or_else(Height::zero, Height::next);
+            .map_or_else(Height::zero, |processed| processed.height().next());
         let bounds = self
             .epocher
             .containing(height)

@@ -5,7 +5,7 @@ use super::{
     certified::Certified,
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
-    floor::{Floor, State as FloorState},
+    floor::{Floor, Processed, State as FloorState},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -233,6 +233,10 @@ where
             last_processed_height,
         )
         .await;
+        let last_processed = match last_processed_height {
+            Some(height) => Some(Self::processed(&finalized_blocks, height).await),
+            None => None,
+        };
 
         // Create metrics
         let finalized_height = context.gauge("finalized_height", "Finalized height of application");
@@ -241,13 +245,9 @@ where
             let _ = processed_height.try_set(last_processed_height.get());
         }
         let floor_state = pending_floor_anchor.map_or_else(
-            || FloorState::resolved(last_processed_height, last_processed_round),
+            || FloorState::resolved(last_processed, last_processed_round),
             |finalization| {
-                FloorState::awaiting_anchor(
-                    last_processed_height,
-                    last_processed_round,
-                    finalization,
-                )
+                FloorState::awaiting_anchor(last_processed, last_processed_round, finalization)
             },
         );
         let floor = floor_state.snapshot();
@@ -571,7 +571,8 @@ where
                 Ok(()) => {
                     // Apply in-memory progress updates for this acknowledged
                     // block. The metadata sync below makes drained updates durable.
-                    self.update_processed_height(height, resolver);
+                    // Only archived blocks are dispatched, so the block is stored.
+                    self.update_processed(Processed::Block(height), resolver);
                     self = self
                         .update_processed_round(height, buffer, application, resolver)
                         .await;
@@ -868,8 +869,21 @@ where
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
-            Message::GetProcessedHeight { response, .. } => {
-                response.send_lossy(self.stream.processed_height());
+            Message::GetProcessed { response, .. } => {
+                response.send_lossy(self.floor.processed());
+            }
+            Message::GetAnchor { response, .. } => {
+                let anchor = match self.floor.processed() {
+                    Some(processed) => {
+                        let block = self
+                            .get_finalized_block(processed.anchor())
+                            .await
+                            .expect("processed position must be backed by a stored block");
+                        Some((processed, block))
+                    }
+                    None => None,
+                };
+                response.send_lossy(anchor);
             }
             Message::HintFinalized {
                 height, targets, ..
@@ -1393,7 +1407,8 @@ where
         let dispatch_floor = height
             .previous()
             .expect("floor anchor above processed height must have predecessor");
-        self.update_processed_height(dispatch_floor, resolver);
+        let processed = Self::processed(&self.finalized_blocks, dispatch_floor).await;
+        self.update_processed(processed, resolver);
 
         // Release staged blocks skipped by the floor transition
         self.staged.retain(height);
@@ -1421,8 +1436,8 @@ where
             exact_retirements: commitments,
         });
 
-        // The floor is durable, so cache/finalized data below it can be pruned.
-        self = self.prune_after_floor(height).await;
+        // Keep the processed block so the application can restart from it.
+        self = self.prune_after_floor(dispatch_floor).await;
 
         // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
         // stops obsolete network work, but later local ingress can still satisfy these waiters,
@@ -1883,7 +1898,7 @@ where
     ///   try_dispatch_blocks  ->  sends durable blocks to app, enqueues pending acks
     ///
     /// Iteration M (ack handler, M > N):
-    ///   ack handler       ->  update_processed_height  ->  metadata buffered
+    ///   ack handler       ->  update_processed         ->  metadata buffered
     ///   stream.sync       ->  metadata durable
     /// ```
     async fn try_dispatch_blocks(
@@ -2393,19 +2408,32 @@ where
 
     /// Buffers a processed height update in memory and metrics. Does NOT sync
     /// to durable storage. Sync metadata after buffered updates to make them durable.
-    fn update_processed_height(
+    fn update_processed(
         &mut self,
-        height: Height,
+        processed: Processed,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
+        let height = processed.height();
         self.stream.acknowledge(height);
-        self.floor.set_processed_height(height);
+        self.floor.set_processed(processed);
         let _ = self
             .processed_height
             .try_set(self.floor.processed_height().get());
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
+    }
+
+    /// Classifies a processed height by whether its block is stored.
+    ///
+    /// A floor installed above a missing predecessor records that predecessor as processed. The
+    /// floor block is stored before the processed height is recorded.
+    async fn processed(finalized_blocks: &FB, height: Height) -> Processed {
+        match finalized_blocks.get(ArchiveID::Index(height.get())).await {
+            Ok(Some(_)) => Processed::Block(height),
+            Ok(None) => Processed::Absent(height),
+            Err(err) => panic!("failed to get processed block: {err}"),
+        }
     }
 
     /// Returns the latest recoverable round at or immediately after the processed height.

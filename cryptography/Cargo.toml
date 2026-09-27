@@ -71,12 +71,13 @@ features = ["js"]
 
 [dev-dependencies]
 anyhow.workspace = true
-arbitrary.workspace = true
+arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
 commonware-invariants.workspace = true
 commonware-math = { workspace = true, features = ["arbitrary"] }
 crc.workspace = true
 criterion.workspace = true
+ecdsa = { workspace = true, features = ["alloc"] }
 rayon.workspace = true
 rstest.workspace = true
 

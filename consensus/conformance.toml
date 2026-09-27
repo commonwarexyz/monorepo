@@ -66,10 +66,6 @@ hash = "e65856d6552c849b4a0aca45f794e17968cf18cda7f93e7d1ecab3dbd3958b51"
 n_cases = 65536
 hash = "a46d1f90f592010bd0af0cf76dcdbf66c84a40ab5687ee36119d2e9f59ace641"
 
-["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Backfiller<Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "1aa796eb4f51beab398cdb250179d49045b1facec197d3047efc1785e8dda2f0"
-
 ["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Certificate<Scheme,Sha256Digest>>"]
 n_cases = 65536
 hash = "bc3cd9b7b060514269f06186b180b5a855fbc65af9ddd0e461bfd05aa9c949ef"
@@ -117,14 +113,6 @@ hash = "bebb2d2616de0716732a4459600c57cade16ab94952bfa39089104983937ad85"
 ["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Proposal<Sha256Digest>>"]
 n_cases = 65536
 hash = "4ba1f5b5cbf271ae45313d8ac48b05c010166ca743334b9b8051a4a610c58fe7"
-
-["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Request>"]
-n_cases = 65536
-hash = "6f852b6ad6e5dd77804d80781b03c808e186e7e7c5611752f124c625c5c3ee17"
-
-["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Response<Scheme,Sha256Digest>>"]
-n_cases = 65536
-hash = "b9fbf2cfcbc37c87cb7aa8ede95c4ddf93c8bbd9f1a01e86ed72ba14bed920fa"
 
 ["commonware_consensus::simplex::types::tests::conformance::CodecConformance<Vote<Scheme,Sha256Digest>>"]
 n_cases = 65536
