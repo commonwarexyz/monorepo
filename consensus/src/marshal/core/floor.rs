@@ -95,6 +95,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
         self.configured.take()
     }
 
+    /// Returns the durable floor, without the configured or pending floor.
     pub(super) const fn snapshot(&self) -> Floor {
         Floor::new(self.processed, self.round)
     }
