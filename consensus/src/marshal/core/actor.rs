@@ -130,7 +130,7 @@ where
     strategy: T,
 
     // ---------- State ----------
-    // Current durable floor, the configured floor, and any update awaiting its anchor block
+    // Durable floor and floor updates not yet applied
     floor: FloorState<P::Scheme, V::Commitment>,
     // Application delivery cursor
     stream: Stream<E>,
