@@ -45,6 +45,7 @@ pub struct Floor {
 }
 
 impl Floor {
+    /// Creates a floor from its independent processed position and round floor.
     pub(super) const fn new(processed: Option<Processed>, round: Round) -> Self {
         Self { processed, round }
     }
@@ -78,6 +79,7 @@ pub(super) struct State<S: Scheme, C: Digest> {
 }
 
 impl<S: Scheme, C: Digest> State<S, C> {
+    /// Creates floor state from the configured floor, if any, and the restored floor.
     pub(super) const fn new(configured: Option<Finalization<S, C>>, floor: Floor) -> Self {
         Self {
             processed: floor.processed,

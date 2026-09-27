@@ -1252,10 +1252,10 @@ where
         // but retain their heights and commitments until the anchor makes the floor active.
         self.cleared_acks.extend(self.pending_acks.clear());
 
-        // The buffer reports arrivals only to its waiters, so wait on the
-        // anchor for as long as the floor is pending. A closed subscription
-        // leaves the waiter pending rather than reporting an error, which
-        // would cancel caller subscriptions on the anchor.
+        // The pending floor owns the waiter, which is released when the floor is
+        // replaced, applied, or superseded. A closed subscription never completes,
+        // so it cannot reach the error arm that cancels caller subscriptions on the
+        // anchor, and the floor falls back to the fetch below.
         let aborter = buffer
             .subscribe_by_commitment(commitment)
             .map(|rx| waiters.push(rx.or_else(|_| future::pending())));
