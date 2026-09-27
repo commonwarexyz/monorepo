@@ -2234,8 +2234,8 @@ mod tests {
         Ordinal<DelayedSyncContext<deterministic::Context>, FixedBytes<32>>,
         usize,
     ) {
-        // Arming counts every blob sync from here on. `drive_pending_syncs` releases each one
-        // whenever recovery stalls.
+        // Arming counts every blob sync from here on and holds the first one until
+        // `drive_pending_syncs` releases it.
         let pending = PendingSyncs::default();
         pending.arm();
         let delayed = DelayedSyncContext {
