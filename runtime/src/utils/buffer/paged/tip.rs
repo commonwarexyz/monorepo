@@ -1,6 +1,6 @@
 use crate::{BufferPool, IoBufMut, IoBufs};
 use bytes::BufMut;
-use commonware_codec::{FixedSize, Write};
+use commonware_codec::{EncodeSize, Write};
 
 /// Append-only buffering for the page-oriented writer.
 ///
@@ -111,32 +111,44 @@ impl Buffer {
         end > self.capacity
     }
 
-    /// Encodes one fixed-size value directly across the current and next allocations.
-    pub(super) fn append_value<T: FixedSize + Write>(&mut self, value: &T) {
-        // Limit the encoder to the declared size and reject short encodings before updating
-        // the logical length. The same bound applies when the value spans allocations.
-        let end = self
-            .len
-            .checked_add(T::SIZE)
-            .expect("buffer length overflow");
+    /// Encodes a value within the flush threshold and returns its logical offset.
+    ///
+    /// Returns `None` without encoding or changing the buffer if the value does not fit.
+    pub(super) fn try_append_value<T: EncodeSize + Write>(&mut self, value: &T) -> Option<u64> {
+        // Enforce the logical flush threshold independently of the tail's backing capacity.
+        let size = value.encode_size();
+        let end = self.len.checked_add(size)?;
+        if end > self.capacity {
+            return None;
+        }
+
+        let offset = self.size();
         let spare = self.tail_spare();
-        if T::SIZE <= spare {
-            let mut dst = (&mut self.tail).limit(T::SIZE);
-            value.write(&mut dst);
-            assert_eq!(dst.remaining_mut(), 0, "encoded size must match FixedSize");
+        if size <= spare {
+            // Write to the tail without a Limit so IoBufMut's put_slice and put_bytes overrides
+            // apply. The tail cannot grow, so a mis-sized encoder panics at the tail's capacity
+            // or at the length check.
+            let before = self.tail.len();
+            value.write(&mut self.tail);
+            assert_eq!(
+                self.tail.len() - before,
+                size,
+                "encoded size must match EncodeSize"
+            );
         } else {
             // Chaining writable regions lets the encoder cross an allocation boundary without
             // staging the value in a temporary buffer.
-            let mut next = self.allocate_growth(T::SIZE, spare);
+            let mut next = self.allocate_growth(size, spare);
             let mut dst = (&mut self.tail)
                 .limit(spare)
                 .chain_mut(&mut next)
-                .limit(T::SIZE);
+                .limit(size);
             value.write(&mut dst);
-            assert_eq!(dst.remaining_mut(), 0, "encoded size must match FixedSize");
+            assert_eq!(dst.remaining_mut(), 0, "encoded size must match EncodeSize");
             self.retire_tail(next);
         }
         self.len = end;
+        Some(offset)
     }
 
     /// Transfers every full logical page and retains at most one independent partial page.
@@ -277,6 +289,7 @@ impl Buffer {
 mod tests {
     use super::*;
     use crate::{BufferPoolConfig, telemetry::metrics::Registry};
+    use commonware_codec::FixedSize;
     use commonware_utils::{NZU32, NZUsize};
 
     fn test_pool() -> BufferPool {
@@ -383,7 +396,7 @@ mod tests {
         let mut buffer = Buffer::from(10, &[], 64, 8, test_pool());
         assert!(!buffer.append(&[1; 7]));
         let tail_ptr = buffer.parts().1.as_ptr();
-        buffer.append_value(&Pattern::<18>(2));
+        assert_eq!(buffer.try_append_value(&Pattern::<18>(2)), Some(17));
         assert_eq!(buffer.parts().0.chunk_at(0).unwrap().as_ptr(), tail_ptr);
         assert_eq!(contents(&buffer), [vec![1; 7], vec![2; 18]].concat());
         assert_eq!(buffer.size(), 35);
@@ -402,7 +415,7 @@ mod tests {
     #[test]
     fn test_zero_size_typed_append_stays_detached() {
         let mut buffer = Buffer::from(7, &[], 16, 8, test_pool());
-        buffer.append_value(&Pattern::<0>(9));
+        assert_eq!(buffer.try_append_value(&Pattern::<0>(9)), Some(7));
         assert!(buffer.is_empty());
         assert_eq!(buffer.size(), 7);
         assert_eq!(buffer.tail.capacity(), 0);
@@ -424,11 +437,11 @@ mod tests {
     #[rstest::rstest]
     #[case(&[])]
     #[case(&[0])]
-    #[should_panic(expected = "encoded size must match FixedSize")]
+    #[should_panic(expected = "encoded size must match EncodeSize")]
     fn test_typed_append_rejects_short_encoding(#[case] seed: &[u8]) {
         // An empty seed takes the growth path. A seeded byte leaves room in the existing tail.
         let mut buffer = Buffer::from(0, seed, 32, 16, test_pool());
-        buffer.append_value(&IncorrectSize(7));
+        buffer.try_append_value(&IncorrectSize(7));
     }
 
     #[rstest::rstest]
@@ -436,9 +449,10 @@ mod tests {
     #[case(&[0])]
     #[should_panic]
     fn test_typed_append_rejects_long_encoding(#[case] seed: &[u8]) {
-        // Both destinations must bound the encoder even when their backing has spare capacity.
+        // Both paths must reject an encoder that writes past its declared size, even when the
+        // tail has spare capacity.
         let mut buffer = Buffer::from(0, seed, 32, 16, test_pool());
-        buffer.append_value(&IncorrectSize(9));
+        buffer.try_append_value(&IncorrectSize(9));
     }
 
     #[test]

@@ -21,8 +21,10 @@
 //!
 //! ## Delivery
 //!
-//! The actor will deliver a block to the reporter at-least-once. The reporter should be prepared to
-//! handle duplicate deliveries. However the blocks will be in order.
+//! The actor delivers each finalized block from its starting height onward, in height order and
+//! at least once. Installing a floor can skip ahead. A restart or a floor installation can
+//! redeliver already reported blocks with fresh acknowledgements, so reporters must handle
+//! duplicates.
 //!
 //! ## Finalization
 //!
@@ -45,18 +47,18 @@
 //! The actor uses a combination of internal and external ([`store::Certificates`], [`store::Blocks`]) storage
 //! to store blocks and finalizations. Internal storage (in-memory caches) is used for data that is only
 //! needed for a short period of time, such as unverified blocks or notarizations. External storage
-//! (archive backends) is used to persist finalized blocks and certificates indefinitely.
+//! (archive backends) is used to persist finalized blocks and certificates.
 //!
-//! Marshal will store all blocks after a configurable starting height (or, floor) onward.
+//! Marshal stores finalized blocks from a configurable starting height (or, floor) onward.
 //! This allows for state sync from a specific height rather than from genesis. The floor
-//! is supplied as a finalization; marshal fetches the corresponding block asynchronously
-//! before dispatching application blocks above it. When updating the starting height,
-//! marshal will attempt to prune blocks in external storage that are no longer needed, if
-//! the backing [`store::Blocks`] supports pruning.
+//! is supplied as a finalization. Marshal fetches the corresponding block asynchronously
+//! before dispatching application blocks starting at that height. Installing a floor may prune
+//! older history if [`store::Blocks`] supports pruning, but keeps the stored block preceding
+//! the floor.
 //!
-//! _Setting a configurable starting height will prevent others from backfilling blocks below said height. This
-//! feature is only recommended for applications that support state sync (i.e., those that don't require full
-//! block history to participate in consensus)._
+//! _History below the starting height may be unavailable to peers. This feature is only
+//! recommended for applications that support state sync and do not require full block history to
+//! participate in consensus._
 //!
 //! ## Limitations and Future Work
 //!
@@ -132,7 +134,9 @@ impl<D: Digest> From<archive::Identifier<'_, D>> for Identifier<D> {
 /// An update reported to the application, either a new finalized tip or a finalized block.
 ///
 /// Finalized tips are reported as soon as known, whether or not we hold all blocks up to that height.
-/// Finalized blocks are reported to the application in monotonically increasing order (no gaps permitted).
+/// Finalized blocks are reported from the starting height onward, in height order without gaps.
+/// Installing a floor can skip ahead. A restart or a floor installation can redeliver already
+/// reported blocks with fresh acknowledgements.
 #[derive(Clone, Debug)]
 pub enum Update<B: Block, A: Acknowledgement = Exact> {
     /// A new finalized tip and the finalization round.
@@ -143,15 +147,14 @@ pub enum Update<B: Block, A: Acknowledgement = Exact> {
     Tip(Round, Height, B::Digest),
     /// A new finalized block and an [Acknowledgement] for the application to signal once processed.
     ///
-    /// To ensure all blocks are delivered at least once, marshal waits to mark a block as delivered
-    /// until the application explicitly acknowledges the update. If the [Acknowledgement] is dropped before
-    /// handling, marshal will exit (assuming the application is shutting down).
+    /// Marshal waits to mark a block as delivered until the application explicitly acknowledges the
+    /// update. Dropping an [Acknowledgement] while marshal still waits for it stops marshal.
     ///
     /// Cloning the update shares the immutable block, so applications can fan it out without requiring
     /// block clones. Marshal only considers the block delivered once every acknowledgement is handled.
     ///
-    /// Marshal only emits a block after it has durably persisted the said block. This ensures applications
-    /// that make stateful changes based on a block in other locations can access the same block on restart (often
-    /// some logic on startup attempts on infallible read on the last processed block).
+    /// Marshal only emits a block after durably persisting it, so applications that keep state
+    /// derived from a block can read the same block after a restart. See [core::Processed] for
+    /// the block that backs the processed height.
     Block(Arc<B>, A),
 }

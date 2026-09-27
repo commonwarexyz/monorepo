@@ -9,7 +9,10 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Participants, Payload, SchemeInfo},
 };
 use commonware_consensus::{
-    marshal::{Identifier, core::Variant as MarshalVariant},
+    marshal::{
+        Identifier,
+        core::{Processed, Variant as MarshalVariant},
+    },
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
@@ -163,7 +166,7 @@ where
         // not yet recorded its block as processed.
         let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
         let processed = if state_sync_floor.is_some() || current_epoch.is_none() {
-            self.marshal.get_processed_height().await
+            self.marshal.get_processed().await.map(Processed::height)
         } else {
             None
         };
