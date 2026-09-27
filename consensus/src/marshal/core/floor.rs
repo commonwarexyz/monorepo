@@ -72,26 +72,11 @@ pub(super) struct State<S: Scheme, C: Digest> {
 }
 
 impl<S: Scheme, C: Digest> State<S, C> {
-    pub(super) const fn resolved(processed: Option<Processed>, round: Round) -> Self {
+    pub(super) const fn new(processed: Option<Processed>, round: Round) -> Self {
         Self {
             processed,
             round,
             pending: None,
-        }
-    }
-
-    pub(super) const fn awaiting_anchor(
-        processed: Option<Processed>,
-        round: Round,
-        finalization: Finalization<S, C>,
-    ) -> Self {
-        Self {
-            processed,
-            round,
-            pending: Some(Pending {
-                finalization,
-                _aborter: None,
-            }),
         }
     }
 
@@ -156,12 +141,6 @@ impl<S: Scheme, C: Digest> State<S, C> {
             finalization,
             _aborter: aborter,
         });
-    }
-
-    /// Takes the pending anchor finalization, if any.
-    #[must_use]
-    pub(super) fn take_pending_anchor(&mut self) -> Option<Finalization<S, C>> {
-        self.pending.take().map(|pending| pending.finalization)
     }
 
     /// Takes the pending anchor if `commitment` is its payload.
@@ -358,7 +337,7 @@ mod tests {
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
-        State::resolved(Some(Processed::Block(Height::new(5))), round(5))
+        State::new(Some(Processed::Block(Height::new(5))), round(5))
     }
 
     #[test]
@@ -494,7 +473,7 @@ mod tests {
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor = State::<TestScheme, TestDigest>::resolved(None, round(5));
+        let floor = State::<TestScheme, TestDigest>::new(None, round(5));
         let mut resolver = TestResolver::default();
 
         assert!(matches!(
