@@ -126,8 +126,6 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
 /// in contrast to [`MerkleizedBatch`].
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     parent: Arc<MerkleizedBatch<F, D, S>>,
-    /// The parent's size, cached to avoid chasing its `Arc`s on every node access.
-    parent_size: Position<F>,
     /// The number of leaves visible through this batch, maintained on append.
     leaves: Location<F>,
     appended: Vec<D>,
@@ -143,7 +141,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Create a new batch from `parent`.
     pub fn new(parent: Arc<MerkleizedBatch<F, D, S>>) -> Self {
         Self {
-            parent_size: parent.size(),
             leaves: parent.leaves(),
             parent,
             appended: Vec::new(),
@@ -173,7 +170,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// The total number of nodes visible through this batch.
     pub(crate) fn size(&self) -> Position<F> {
-        Position::new(*self.parent_size + self.appended.len() as u64)
+        Position::new(*self.parent.size() + self.appended.len() as u64)
     }
 
     /// The number of leaves visible through this batch.
@@ -186,8 +183,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Positions past the parent live only in `appended` ([`Self::store_node`] never puts them in
     /// `overwrites`), so they skip the `overwrites` probe.
     fn get_node(&self, base: &Mem<F, D>, pos: Position<F>) -> Option<D> {
-        if pos >= self.parent_size {
-            let index = (*pos - *self.parent_size) as usize;
+        let parent_size = self.parent.size();
+        if pos >= parent_size {
+            let index = (*pos - *parent_size) as usize;
             return self.appended.get(index).copied();
         }
         if let Some(d) = self.overwrites.get(&pos) {
@@ -201,8 +199,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Store a digest at the given position.
     fn store_node(&mut self, pos: Position<F>, digest: D) {
-        if pos >= self.parent_size {
-            let index = (*pos - *self.parent_size) as usize;
+        let parent_size = self.parent.size();
+        if pos >= parent_size {
+            let index = (*pos - *parent_size) as usize;
             self.appended[index] = digest;
         } else {
             self.overwrites.insert(pos, digest);
