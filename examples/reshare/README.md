@@ -63,16 +63,22 @@ carries the epoch-0 `EpochInfo`.
 
 ## State Sync
 
-`validator --state-sync` is only for a new late joiner whose key is already in a
-future committee. It uses `dkg::probe` to select a finalized floor and its epoch
-material from peers, persists that floor, and state-syncs QMDB from that floor
-before normal processing.
+Start a late joiner with `validator --state-sync`. A late joiner is a node that
+joins after launch and whose key is in a future committee. It uses `dkg::probe`
+to fetch a recent finalized block and that epoch's public material from peers,
+saves the block as its sync floor, and state-syncs QMDB from it instead of
+replaying from genesis.
 
-Do not use `--state-sync` as a normal restart flag. A restart recovers from
-local storage, and a node with a persisted state sync floor resumes state sync
-from it without the flag. A player that misses its private dealings cannot
-recover them by syncing: the ceremony completes without it and publicly reveals
-its share.
+The flag only matters until a node saves a sync floor or starts from genesis.
+After that, the node follows its storage: it resumes an unfinished sync or
+continues from its local blocks, so keeping the flag on restarts is harmless.
+
+Do not pass the flag to the nodes that start the network from genesis. The probe
+waits for replies from peers that already hold a finalized block, so if every
+launching node waits on it, no node starts the chain.
+
+A player that misses its private dealings cannot recover them by syncing. The
+ceremony completes without it and publicly reveals its share.
 
 ## Limits
 
