@@ -358,9 +358,19 @@ impl<
 
     /// Attempt to propose a new block.
     #[allow(clippy::async_yields_async)]
-    async fn try_propose(&mut self) -> Option<Request<Context<D, S::PublicKey>, D>> {
-        // Check if we are ready to propose
-        let context = self.state.try_propose()?;
+    async fn try_propose(
+        &mut self,
+        resolver: &mut resolver::Mailbox<S, D>,
+    ) -> Option<Request<Context<D, S::PublicKey>, D>> {
+        let (context, fetches) = self.state.try_propose();
+        for CertificateFetch { proposal, view } in fetches {
+            resolver.resolve(proposal, view, Kind::Notarization, None);
+        }
+        let context = context?;
+        let ancestry = self
+            .state
+            .ancestry(context.parent.0)
+            .expect("proposal ancestry ready");
 
         // Request proposal from application
         let span = info_span!(
@@ -371,7 +381,7 @@ impl<
         );
         let receiver = async {
             debug!(round = ?context.round, "requested proposal from automaton");
-            self.automaton.propose(context.clone()).await
+            self.automaton.propose(context.clone(), ancestry).await
         }
         .instrument(span.clone())
         .await;
@@ -398,6 +408,10 @@ impl<
             }
             Verify::Wait => return None,
         };
+        let ancestry = self
+            .state
+            .ancestry(context.parent.0)
+            .expect("verification ancestry ready");
 
         // Request verification
         let span = info_span!(
@@ -409,7 +423,7 @@ impl<
         let receiver = async {
             debug!(?proposal, "requested proposal verification");
             self.automaton
-                .verify(context.clone(), proposal.payload)
+                .verify(context.clone(), proposal.payload, ancestry)
                 .await
         }
         .instrument(span.clone())
@@ -445,7 +459,7 @@ impl<
         // State and Round prevent duplicate requests when both checkpoints
         // observe the same view.
         if pending_propose.is_none() {
-            *pending_propose = self.try_propose().await;
+            *pending_propose = self.try_propose(resolver).await;
         }
         if pending_verify.is_none() {
             *pending_verify = self.try_verify(resolver).await;
@@ -1125,6 +1139,7 @@ impl<
                     resolver.resolve(proposal, view, Kind::Notarization, None);
                 }
                 for proposal in candidates {
+                    let ancestry = self.state.ancestry(proposal.parent).expect("certification ancestry ready");
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
@@ -1135,7 +1150,7 @@ impl<
                         view = view.traced()
                     );
                     #[allow(clippy::async_yields_async)]
-                    let receiver = async { self.automaton.certify(round, proposal.payload).await }
+                    let receiver = async { self.automaton.certify(round, proposal.payload, ancestry).await }
                         .instrument(span.clone())
                         .await;
                     let handle = certify_pool.push(async move { (round, span, receiver.await) });
@@ -1314,5 +1329,131 @@ impl<
             .sync_all()
             .await
             .expect("unable to sync journal");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        simplex::{
+            elector::{Config as _, RoundRobin},
+            mocks,
+            scheme::ed25519,
+        },
+        types::{Epoch, TermLength, ViewDelta},
+    };
+    use commonware_cryptography::{
+        Sha256, certificate::Scheme as _, ed25519::PublicKey, sha256::Digest as Sha256Digest,
+    };
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_utils::{NZU16, NZU32, NZUsize, non_empty};
+    use core::panic;
+    use std::{sync::Arc, time::Duration};
+
+    #[derive(Clone)]
+    struct UnusedBlocker;
+
+    impl Blocker for UnusedBlocker {
+        type PublicKey = PublicKey;
+
+        fn block(&mut self, _: PublicKey) -> commonware_actor::Feedback {
+            panic!("proposal repair cannot block peers");
+        }
+
+        fn blocked(&mut self) -> commonware_p2p::BlockedSubscription<PublicKey> {
+            panic!("proposal repair does not subscribe to blocked peers");
+        }
+    }
+
+    #[test]
+    fn proposal_repairs_dispatch_without_ready_context() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let fixture = ed25519::fixture(&mut context, b"proposal_repairs", 4);
+            let scheme = fixture.schemes[2].clone();
+            let epoch = Epoch::new(9);
+            let genesis = mocks::application::genesis::<Sha256>(epoch);
+            let elector = RoundRobin::<Sha256>::default().with_term(
+                TermLength::new(NZU32!(9)),
+                Duration::from_secs(4),
+                ViewDelta::new(8),
+            );
+            let reporter = mocks::reporter::Reporter::new(
+                context.child("reporter"),
+                mocks::reporter::Config {
+                    participants: fixture.participants.clone().try_into().unwrap(),
+                    scheme: scheme.clone(),
+                    elector: elector.clone(),
+                },
+            );
+            let (_application_actor, application) = mocks::application::Application::new(
+                context.child("application"),
+                mocks::application::Config::<Sha256, _> {
+                    relay: Arc::new(mocks::relay::Relay::new()),
+                    me: fixture.participants[2].clone(),
+                    propose_latency: (1.0, 0.0),
+                    verify_latency: (1.0, 0.0),
+                    certify_latency: (1.0, 0.0),
+                    should_certify: mocks::application::Certifier::Always,
+                },
+            );
+            let (mut actor, _mailbox) = Actor::new(
+                context.child("voter"),
+                Config {
+                    elector: elector.build(scheme.participants()),
+                    scheme,
+                    blocker: UnusedBlocker,
+                    automaton: application.clone(),
+                    relay: application,
+                    reporter,
+                    partition: "proposal_repairs".into(),
+                    epoch,
+                    floor: Floor::Genesis(genesis),
+                    mailbox_size: NZUsize!(16),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    skip_budget: 4,
+                    view_retention: ViewDelta::new(10),
+                    replay_buffer: NZUsize!(1024),
+                    write_buffer: NZUsize!(1024),
+                    page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                },
+            );
+            actor.state.set_genesis(genesis);
+            assert_eq!(actor.state.try_propose().0.unwrap().view(), View::new(1));
+            for view in [2, 4, 6] {
+                let proposal = Proposal::new(
+                    Rnd::new(epoch, View::new(view)),
+                    View::new(view - 1),
+                    Sha256Digest::from([view as u8; 32]),
+                );
+                let votes: Vec<_> = fixture
+                    .schemes
+                    .iter()
+                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                    .collect();
+                let certificate = Notarization::from_notarizes(
+                    &fixture.verifier,
+                    non_empty![@&votes],
+                    &Sequential,
+                )
+                .unwrap();
+                assert!(actor.state.add_notarization(certificate).0);
+            }
+            let (sender, mut receiver) = mailbox::new(context.child("resolver"), NZUsize!(16));
+            let mut resolver = resolver::Mailbox::new(sender);
+            assert!(actor.try_propose(&mut resolver).await.is_none());
+            for (proposal, view) in [(3, 1), (5, 3), (7, 5)] {
+                assert!(
+                    matches!(receiver.try_recv().unwrap(), resolver::MailboxMessage::Resolve {
+                    proposal: candidate, view: missing, kind: Kind::Notarization, target: None, ..
+                } if candidate == View::new(proposal) && missing == View::new(view))
+                );
+            }
+            assert!(actor.try_propose(&mut resolver).await.is_none());
+            assert!(receiver.try_recv().is_err());
+        });
     }
 }
