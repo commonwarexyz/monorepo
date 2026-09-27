@@ -2,9 +2,10 @@
 //!
 //! Batches hash eight messages with two NEON vectors per word, so two
 //! independent mixing chains fill the vector pipes that one four-lane chain
-//! leaves idle. Partial batches use four-lane words, whose fused xor-rotates
-//! use the SVE2 `XAR` instruction when available. Pairs use duplicated words
-//! and the SHA-3 extension's `XAR` when available.
+//! leaves idle. When SVE2 is available, their 12, 8, and 7 bit xor-rotates use
+//! the `XAR` instruction. Partial batches use four-lane words, whose fused
+//! xor-rotates all use `XAR` when available. Pairs use duplicated words and
+//! the SHA-3 extension's `XAR` when available.
 //!
 //! A single message of two or more chunks hashes its chunks in the same lanes,
 //! with a separate chunk counter per lane, and merges their chaining values
@@ -295,6 +296,74 @@ impl Words<LANES> for Xar {
     }
 }
 
+/// NEON words that use the SVE2 `XAR` instruction for the 12, 8, and 7 bit
+/// xor-rotates and `REV32` for the 16 bit one.
+///
+/// Eight-lane batches have enough independent work to be limited by
+/// instruction throughput rather than latency. Keeping one xor-rotate per
+/// mixing step off `XAR` balances the load on cores that issue `XAR` on fewer
+/// pipes than plain vector instructions, while still removing most of the
+/// shift sequences.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct Hybrid(uint32x4_t);
+
+impl Words<LANES> for Hybrid {
+    #[inline(always)]
+    unsafe fn splat(word: u32) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(vdupq_n_u32(word)) }
+    }
+
+    #[inline(always)]
+    unsafe fn add(self, other: Self) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(vaddq_u32(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor(self, other: Self) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(veorq_u32(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate16(self, other: Self) -> Self {
+        // SAFETY: The caller establishes NEON.
+        unsafe { Self(rotate16(veorq_u32(self.0, other.0))) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate12(self, other: Self) -> Self {
+        // SAFETY: The caller establishes SVE2.
+        unsafe { Self(xar::<12>(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate8(self, other: Self) -> Self {
+        // SAFETY: The caller establishes SVE2.
+        unsafe { Self(xar::<8>(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn xor_rotate7(self, other: Self) -> Self {
+        // SAFETY: The caller establishes SVE2.
+        unsafe { Self(xar::<7>(self.0, other.0)) }
+    }
+
+    #[inline(always)]
+    unsafe fn load(blocks: [&[u8; BLOCK_LEN]; LANES]) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { <uint32x4_t as Words<LANES>>::load(blocks).map(Self) }
+    }
+
+    #[inline(always)]
+    unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; LANES] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { <uint32x4_t as Words<LANES>>::store(words.map(|word| word.0)) }
+    }
+}
+
 /// Two four-lane words hashed side by side: eight messages whose independent
 /// mixing chains fill the vector pipes one four-lane chain leaves idle.
 #[derive(Clone, Copy)]
@@ -529,6 +598,19 @@ unsafe fn hash_x4_xar(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] {
     unsafe { super::hash::<Xar, LANES>(inputs) }
 }
 
+/// Hash eight equal-length messages with SVE2 `XAR` for three of the four
+/// rotations.
+///
+/// # Safety
+///
+/// The caller must establish SVE2 availability.
+#[target_feature(enable = "neon")]
+unsafe fn hash_x8_xar(inputs: [&[u8]; 2 * LANES]) -> [[u8; OUT_LEN]; 2 * LANES] {
+    // SAFETY: NEON is enabled for this function, and the caller establishes
+    // SVE2.
+    unsafe { super::hash::<Dual<Hybrid>, { 2 * LANES }>(inputs) }
+}
+
 /// Hash two equal-length messages with duplicated words and SHA-3 `XAR`
 /// rotations.
 ///
@@ -680,6 +762,9 @@ unsafe fn chunk_cvs(
     // when detected.
     unsafe {
         if active > LANES {
+            if features.sve2 {
+                return chunks_neon::<Dual<Hybrid>, { 2 * LANES }>(inputs, first);
+            }
             return chunks_neon::<Dual<uint32x4_t>, { 2 * LANES }>(inputs, first);
         }
         let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
@@ -713,6 +798,9 @@ unsafe fn parent_cvs(
     // when detected.
     unsafe {
         if active > LANES {
+            if features.sve2 {
+                return parents_neon::<Dual<Hybrid>, { 2 * LANES }>(children);
+            }
             return parents_neon::<Dual<uint32x4_t>, { 2 * LANES }>(children);
         }
         let mut outputs = [[0u8; OUT_LEN]; 2 * LANES];
@@ -835,6 +923,10 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
     }
     Some(batch(messages, MINIMUM, |inputs, active| {
         if active > LANES {
+            if supports_sve2() {
+                // SAFETY: NEON and SVE2 availability were established above.
+                return unsafe { hash_x8_xar(inputs) };
+            }
             // SAFETY: NEON availability was established above.
             return unsafe { hash_x8(inputs) };
         }
@@ -878,6 +970,8 @@ mod tests {
 
         // SAFETY: SVE2 availability was checked above.
         super::super::tests::check_lanes::<LANES>(|inputs| unsafe { hash_x4_xar(inputs) });
+        // SAFETY: SVE2 availability was checked above.
+        super::super::tests::check_lanes::<{ 2 * LANES }>(|inputs| unsafe { hash_x8_xar(inputs) });
     }
 
     #[test]
