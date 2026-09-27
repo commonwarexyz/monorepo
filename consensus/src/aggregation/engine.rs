@@ -198,10 +198,8 @@ where
     pub fn new(context: E, cfg: Config<S, D, A, Z, B, T, R>) -> (Self, Mailbox<S, D>) {
         assert!(cfg.first <= cfg.last, "aggregation range must not be empty");
         let metrics = metrics::Metrics::init(&context);
-        let mailbox_capacity = NonZeroUsize::new(
-            usize::try_from(cfg.window.get()).expect("aggregation window exceeds usize"),
-        )
-        .expect("aggregation window must be non-zero");
+        let mailbox_capacity =
+            NonZeroUsize::try_from(cfg.window).expect("aggregation window exceeds usize");
         let (sender, certificate_mailbox) =
             mailbox::new_unreliable(context.child("mailbox"), mailbox_capacity);
         let mailbox = Mailbox { sender };
