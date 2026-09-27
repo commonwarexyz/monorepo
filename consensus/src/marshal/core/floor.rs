@@ -64,20 +64,33 @@ struct Pending<S: Scheme, C: Digest> {
     _aborter: Option<Aborter>,
 }
 
-/// Durable floor state plus any update awaiting its anchor block.
+/// Durable floor state, the configured floor until startup takes it, and any update
+/// awaiting its anchor block.
 pub(super) struct State<S: Scheme, C: Digest> {
     processed: Option<Processed>,
     round: Round,
+    configured: Option<Finalization<S, C>>,
     pending: Option<Pending<S, C>>,
 }
 
 impl<S: Scheme, C: Digest> State<S, C> {
-    pub(super) const fn new(processed: Option<Processed>, round: Round) -> Self {
+    pub(super) const fn new(
+        processed: Option<Processed>,
+        round: Round,
+        configured: Option<Finalization<S, C>>,
+    ) -> Self {
         Self {
             processed,
             round,
+            configured,
             pending: None,
         }
+    }
+
+    /// Takes the configured floor, if any.
+    #[must_use]
+    pub(super) const fn take_configured(&mut self) -> Option<Finalization<S, C>> {
+        self.configured.take()
     }
 
     pub(super) const fn snapshot(&self) -> Floor {
@@ -337,7 +350,7 @@ mod tests {
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
-        State::new(Some(Processed::Block(Height::new(5))), round(5))
+        State::new(Some(Processed::Block(Height::new(5))), round(5), None)
     }
 
     #[test]
@@ -473,7 +486,7 @@ mod tests {
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor = State::<TestScheme, TestDigest>::new(None, round(5));
+        let floor = State::<TestScheme, TestDigest>::new(None, round(5), None);
         let mut resolver = TestResolver::default();
 
         assert!(matches!(

@@ -130,10 +130,8 @@ where
     strategy: T,
 
     // ---------- State ----------
-    // Current durable floor and any update awaiting its anchor block
+    // Current durable floor, the configured floor, and any update awaiting its anchor block
     floor: FloorState<P::Scheme, V::Commitment>,
-    // Configured floor, passed to `install_floor` when the actor starts running
-    configured: Option<Finalization<P::Scheme, V::Commitment>>,
     // Application delivery cursor
     stream: Stream<E>,
     // Pending application acknowledgements
@@ -246,7 +244,7 @@ where
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
         }
-        let floor_state = FloorState::new(last_processed, last_processed_round);
+        let floor_state = FloorState::new(last_processed, last_processed_round, configured);
         let floor = floor_state.snapshot();
 
         // Initialize mailbox
@@ -262,7 +260,6 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 floor: floor_state,
-                configured,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
                 cleared_acks: Vec::new(),
@@ -414,7 +411,7 @@ where
 
             // A configured floor follows the same path as `SetFloor`: verify it,
             // then apply a local anchor or await it from the buffer or peers.
-            if let Some(finalization) = self.configured.take() {
+            if let Some(finalization) = self.floor.take_configured() {
                 self = self
                     .install_floor(
                         finalization,
