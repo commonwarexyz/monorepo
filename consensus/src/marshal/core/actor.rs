@@ -52,7 +52,7 @@ use commonware_utils::{
 };
 use futures::{
     FutureExt as _, TryFutureExt as _,
-    future::{join, join_all},
+    future::{self, join, join_all},
     try_join,
 };
 use rand_core::CryptoRng;
@@ -474,24 +474,21 @@ where
                 }
                 Err(key) => {
                     // A closed buffer subscription marks the key as permanently unavailable.
-                    // The pending floor's waiter shares the key but owns no subscribers, so
-                    // log only when local subscribers were canceled.
-                    if self.block_subscriptions.remove(&key) {
-                        match key {
-                            SubscriptionKey::Digest(digest) => {
-                                debug!(
-                                    ?digest,
-                                    "buffer subscription closed, canceling local subscribers"
-                                );
-                            }
-                            SubscriptionKey::Commitment(commitment) => {
-                                debug!(
-                                    ?commitment,
-                                    "buffer subscription closed, canceling local subscribers"
-                                );
-                            }
+                    match key {
+                        SubscriptionKey::Digest(digest) => {
+                            debug!(
+                                ?digest,
+                                "buffer subscription closed, canceling local subscribers"
+                            );
+                        }
+                        SubscriptionKey::Commitment(commitment) => {
+                            debug!(
+                                ?commitment,
+                                "buffer subscription closed, canceling local subscribers"
+                            );
                         }
                     }
+                    self.block_subscriptions.remove(&key);
                 }
             },
             // Handle application acknowledgements (drain all ready acks, sync once)
@@ -1261,11 +1258,12 @@ where
         self.cleared_acks.extend(self.pending_acks.clear());
 
         // The buffer reports arrivals only to its waiters, so wait on the
-        // anchor for as long as the floor is pending.
-        let aborter = buffer.subscribe_by_commitment(commitment).map(|rx| {
-            let key = SubscriptionKey::Commitment(commitment);
-            waiters.push(async move { rx.await.map_err(|_| key) })
-        });
+        // anchor for as long as the floor is pending. A closed subscription
+        // leaves the waiter pending rather than reporting an error, which
+        // would cancel caller subscriptions on the anchor.
+        let aborter = buffer
+            .subscribe_by_commitment(commitment)
+            .map(|rx| waiters.push(rx.or_else(|_| future::pending())));
         self.floor.await_anchor(finalization, aborter);
 
         debug!(?round, ?commitment, "starting fetch for floor block");

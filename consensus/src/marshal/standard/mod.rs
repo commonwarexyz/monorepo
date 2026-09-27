@@ -1658,6 +1658,69 @@ mod tests {
         });
     }
 
+    /// Closing a pending floor's buffer waiter leaves caller subscriptions on the same anchor
+    /// registered, and the anchor still installs the floor through their waiter.
+    #[test_traced("WARN")]
+    fn test_standard_closed_floor_waiter_preserves_subscriptions() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // A floor whose anchor is missing locally.
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let anchor = make_raw_block(Sha256::hash(&[b"floor-parent"]), Height::new(5), 500);
+            let commitment = StandardHarness::commitment(&anchor);
+            let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let buffer = RecordingBuffer::default();
+            let (mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "closed-floor-waiter",
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                Some(buffer.clone()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            )
+            .await;
+
+            // The floor waits on the buffer for its anchor.
+            mailbox.set_floor(StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(5)),
+                    View::new(4),
+                    commitment,
+                ),
+                &schemes,
+                QUORUM,
+            ));
+            while buffer.commitment_subscription_count() != 1 {
+                reschedule().await;
+            }
+
+            // A caller waits on the same anchor through its own buffer waiter.
+            let subscription =
+                mailbox.subscribe_by_commitment(commitment, CommitmentFallback::Wait);
+            while buffer.commitment_subscription_count() != 2 {
+                reschedule().await;
+            }
+
+            // The buffer closes the floor's subscription. Waiters are polled before the mailbox,
+            // so the query observes the closure.
+            buffer.close_commitment_subscription(0);
+            assert!(
+                mailbox
+                    .get_block(Identifier::Height(Height::new(5)))
+                    .await
+                    .is_none()
+            );
+
+            // The caller's subscription is still open, and its anchor reaches both the caller
+            // and the floor.
+            assert!(!buffer.commitment_subscription_closed(1));
+            assert!(buffer.deliver_commitment_subscription(1, anchor.clone()));
+            assert_eq!(subscription.await.unwrap().digest(), anchor.digest());
+            assert_eq!(started_rx.await.unwrap(), Height::new(5));
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_standard_floor_preserves_registered_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -4032,8 +4095,8 @@ mod tests {
     /// Recorded `send` call on the [`RecordingBuffer`].
     type BufferSend = (Round, Arc<B>, Recipients<PublicKey>);
 
-    /// A buffer that records each `send` invocation, keeps subscriptions open,
-    /// and optionally serves locally inserted blocks.
+    /// A buffer that records each `send` invocation, holds subscriptions until a
+    /// test delivers or closes them, and optionally serves locally inserted blocks.
     #[derive(Clone, Default)]
     struct RecordingBuffer {
         blocks: Arc<Mutex<Vec<B>>>,
@@ -4093,6 +4156,12 @@ mod tests {
 
         fn commitment_subscription_closed(&self, index: usize) -> bool {
             self.commitment_subscriptions.lock()[index].is_closed()
+        }
+
+        /// Closes the commitment subscription at `index` without delivering a block. A closed
+        /// sender takes its slot, so indices stay stable.
+        fn close_commitment_subscription(&self, index: usize) {
+            self.commitment_subscriptions.lock()[index] = oneshot::channel().0;
         }
 
         /// Sends `block` to the commitment subscription at `index` and reports whether its
