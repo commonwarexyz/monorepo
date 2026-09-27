@@ -30,16 +30,13 @@ where
     Op: EncodeShared + 'static,
 {
     let ops = ops.into();
-    let first_leaf = batch.leaves();
     let ancestors = batch.retain_ancestors();
     let mem = merkle.snapshot();
     let strategy = merkle.strategy().clone();
     strategy
-        .spawn(ops.len(), move |strategy| {
+        .spawn(ops.len(), move |_| {
             let hasher = qmdb::hasher::<H>();
-            let leaf_digests = batch::hash_leaves(&strategy, &hasher, first_leaf, &ops);
-
-            let batch = batch.add_leaf_digests(leaf_digests);
+            let batch = batch.add_many(&hasher, &ops);
             let merkleized = batch.merkleize(&mem, &hasher);
             let root = merkleized.root(&mem, &hasher, inactive_peaks)?;
             drop(ancestors);
