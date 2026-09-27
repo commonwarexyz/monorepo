@@ -19,7 +19,7 @@ use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{Widen, channel::fallible::OneshotExt as _};
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// The service phase of the DKG probe actor.
 ///
@@ -126,7 +126,7 @@ where
                 // Skip a response the sender cannot carry
                 let size = response.encode_size();
                 if size > max {
-                    warn!(?peer, size, max, "response exceeds max message size");
+                    debug!(?peer, size, max, "response exceeds max message size");
                     continue;
                 }
                 sender.send(Recipients::One(peer), response.encode(), false);

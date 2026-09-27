@@ -12,7 +12,7 @@ use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
 use commonware_utils::{Widen, channel::fallible::OneshotExt};
 use futures::future::{self, Either};
 use rand_core::CryptoRng;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// The service phase of [`Probe`](super::Probe).
 ///
@@ -98,7 +98,7 @@ where
                 let response = wire::Message::<S, V>::Response(finalization);
                 let size = response.encode_size();
                 if size > max {
-                    warn!(?peer, size, max, "response exceeds max message size");
+                    debug!(?peer, size, max, "response exceeds max message size");
                     continue;
                 }
                 sender.send(Recipients::One(peer), response.encode(), false);

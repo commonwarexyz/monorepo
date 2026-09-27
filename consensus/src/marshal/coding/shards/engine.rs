@@ -1191,7 +1191,7 @@ where
                 return;
             };
             if !Self::fits(sender, &shard) {
-                warn!(%commitment, index, "skipping shard above sender limit");
+                debug!(%commitment, index, "skipping shard above sender limit");
                 continue;
             }
             let _ = sender.send(Recipients::One(peer.clone()), shard, true);
@@ -1208,7 +1208,7 @@ where
             if Self::fits(sender, &leader_shard) {
                 let _ = sender.send(Recipients::Some(non_participants), leader_shard, true);
             } else {
-                warn!(%commitment, "skipping leader shard above sender limit");
+                debug!(%commitment, "skipping leader shard above sender limit");
             }
         }
 
@@ -1243,7 +1243,7 @@ where
     ) {
         let commitment = shard.commitment();
         if !Self::fits(sender, &shard) {
-            warn!(?commitment, "skipping shard above sender limit");
+            debug!(?commitment, "skipping shard above sender limit");
             return;
         }
         let peers = sender.send(Recipients::All, shard, true);

@@ -14,7 +14,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{Widen, channel::oneshot, futures::Pool};
 use std::collections::{HashMap, HashSet};
-use tracing::{debug, error, warn};
+use tracing::{debug, error};
 
 /// Engine that will disperse messages and collect responses.
 ///
@@ -162,7 +162,7 @@ where
                 let size = reply.encode_size();
                 let max: usize = Widen::widen(res_tx.max_message_size());
                 if size > max {
-                    warn!(?peer, size, max, "reply exceeds max message size");
+                    debug!(?peer, size, max, "reply exceeds max message size");
                     continue;
                 }
 
