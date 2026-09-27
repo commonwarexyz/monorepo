@@ -42,15 +42,24 @@ use futures::{
 };
 use rand_core::CryptoRng;
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, VecDeque},
     num::NonZeroUsize,
     time::{Duration, SystemTime},
 };
 use tracing::{debug, info, warn};
 
-enum Pending<S: commonware_cryptography::certificate::Scheme, D: Digest> {
+enum Shares<S: commonware_cryptography::certificate::Scheme, D: Digest> {
     Unverified(BTreeMap<Participant, Ack<S, D>>),
     Verified(D, BTreeMap<Participant, Ack<S, D>>),
+}
+
+/// State of one uncertified position in the window.
+struct Pending<S: commonware_cryptography::certificate::Scheme, D: Digest> {
+    shares: Shares<S, D>,
+    /// Aborts the digest request, if still outstanding, when the position leaves the window.
+    _digest_request: Aborter,
+    rebroadcasts: u64,
+    recovering: bool,
 }
 
 struct DigestRequest<D: Digest> {
@@ -158,7 +167,6 @@ where
     frontier: Height,
     complete: bool,
     digest_requests: FuturesPool<'static, DigestRequest<D>>,
-    digest_aborters: BTreeMap<Height, Aborter>,
     pending: BTreeMap<Height, Pending<S, D>>,
     confirmed: BTreeMap<Height, Certificate<S, D>>,
     rebroadcast_timeout: Duration,
@@ -166,8 +174,6 @@ where
     recovery_after_rebroadcasts: u64,
     recovery_namespace: RecoveryNamespace,
     recoverer: R,
-    recovery_ticks: BTreeMap<Height, u64>,
-    recovery_requested: BTreeSet<RecoveryKey>,
     journal: Option<Journal<E, S, D>>,
     journal_config: JournalConfig,
     priority_acks: bool,
@@ -226,7 +232,6 @@ where
             frontier: cfg.first,
             complete: false,
             digest_requests: FuturesPool::default(),
-            digest_aborters: BTreeMap::new(),
             pending: BTreeMap::new(),
             confirmed: BTreeMap::new(),
             rebroadcast_timeout: cfg.rebroadcast_timeout.into(),
@@ -234,8 +239,6 @@ where
             recovery_after_rebroadcasts: cfg.recovery_after_rebroadcasts.get(),
             recovery_namespace,
             recoverer: cfg.recoverer,
-            recovery_ticks: BTreeMap::new(),
-            recovery_requested: BTreeSet::new(),
             journal: None,
             journal_config,
             priority_acks: cfg.priority_acks,
@@ -386,7 +389,6 @@ where
                         result,
                         timer,
                     } = request;
-                    self.digest_aborters.remove(&position);
                     match result {
                         Ok(digest) => {
                             timer.observe(self.context.as_ref());
@@ -443,19 +445,22 @@ where
             if self.pending.contains_key(&position) || self.confirmed.contains_key(&position) {
                 continue;
             }
-            self.pending
-                .insert(position, Pending::Unverified(BTreeMap::new()));
-            self.recovery_ticks.insert(
+            let digest_request = self.request_digest(position);
+            self.pending.insert(
                 position,
-                if recover_immediately {
-                    self.recovery_after_rebroadcasts
-                } else {
-                    0
+                Pending {
+                    shares: Shares::Unverified(BTreeMap::new()),
+                    _digest_request: digest_request,
+                    rebroadcasts: if recover_immediately {
+                        self.recovery_after_rebroadcasts
+                    } else {
+                        0
+                    },
+                    recovering: false,
                 },
             );
             self.rebroadcast_deadlines
                 .put(position, self.context.current() + self.rebroadcast_timeout);
-            self.request_digest(position);
             if recover_immediately {
                 self.fetch_recovery(position);
             }
@@ -463,11 +468,10 @@ where
         debug_assert!(self.pending.len() + self.confirmed.len() <= self.window as usize);
     }
 
-    fn request_digest(&mut self, position: Height) {
-        assert!(!self.digest_aborters.contains_key(&position));
+    fn request_digest(&mut self, position: Height) -> Aborter {
         let mut automaton = self.automaton.clone();
         let timer = self.metrics.digest_duration.timer(self.context.as_ref());
-        let aborter = self.digest_requests.push(async move {
+        self.digest_requests.push(async move {
             let result = automaton
                 .propose(position)
                 .await
@@ -478,8 +482,7 @@ where
                 result,
                 timer,
             }
-        });
-        assert!(self.digest_aborters.insert(position, aborter).is_none());
+        })
     }
 
     async fn handle_digest(
@@ -488,19 +491,15 @@ where
         digest: D,
         sender: &mut WrappedSender<impl Sender<PublicKey = <S as Verifier>::PublicKey>, Ack<S, D>>,
     ) {
-        let shares = match self.pending.remove(&position) {
-            Some(Pending::Unverified(shares)) => shares,
-            Some(Pending::Verified(_, _)) => {
-                unreachable!("digest completed for an already verified position")
-            }
-            None => return,
+        let Some(pending) = self.pending.get_mut(&position) else {
+            return;
         };
-        let matching = shares
-            .into_iter()
-            .filter(|(_, ack)| ack.item.digest == digest)
-            .collect();
-        self.pending
-            .insert(position, Pending::Verified(digest, matching));
+        let Shares::Unverified(shares) = &mut pending.shares else {
+            unreachable!("digest completed for an already verified position");
+        };
+        let mut matching = std::mem::take(shares);
+        matching.retain(|_, ack| ack.item.digest == digest);
+        pending.shares = Shares::Verified(digest, matching);
         let Some(ack) = Ack::sign(&self.scheme, Item { position, digest }) else {
             return;
         };
@@ -523,11 +522,11 @@ where
         if signer != ack.attestation.signer {
             return Err(Error::PeerMismatch);
         }
-        match self.pending.get(&position).expect("checked") {
-            Pending::Verified(digest, shares) if *digest != ack.item.digest => {
+        match &self.pending.get(&position).expect("checked").shares {
+            Shares::Verified(digest, _) if *digest != ack.item.digest => {
                 return Err(Error::AckDigest(position));
             }
-            Pending::Verified(_, shares) | Pending::Unverified(shares)
+            Shares::Verified(_, shares) | Shares::Unverified(shares)
                 if shares.contains_key(&signer) =>
             {
                 return Err(Error::AckDuplicate(peer.to_string(), position));
@@ -545,10 +544,10 @@ where
         let Some(pending) = self.pending.get_mut(&position) else {
             return false;
         };
-        let shares = match pending {
-            Pending::Unverified(shares) => shares,
-            Pending::Verified(digest, _) if *digest != ack.item.digest => return false,
-            Pending::Verified(_, shares) => shares,
+        let shares = match &mut pending.shares {
+            Shares::Unverified(shares) => shares,
+            Shares::Verified(digest, _) if *digest != ack.item.digest => return false,
+            Shares::Verified(_, shares) => shares,
         };
         shares.entry(ack.attestation.signer).or_insert(ack.clone());
         let matching: Vec<_> = shares
@@ -585,11 +584,12 @@ where
         }
         self.record_certificate(certificate.clone()).await;
         self.reporter.report(certificate.clone());
-        self.pending.remove(&position);
-        self.digest_aborters.remove(&position);
+        if let Some(pending) = self.pending.remove(&position)
+            && pending.recovering
+        {
+            self.recoverer.cancel(self.recovery_key(position));
+        }
         self.rebroadcast_deadlines.remove(&position);
-        self.recovery_ticks.remove(&position);
-        self.cancel_recovery(position);
         self.confirmed.insert(position, certificate);
         self.metrics.certificates.inc();
         while self.confirmed.remove(&self.frontier).is_some() {
@@ -637,26 +637,21 @@ where
         position: Height,
         sender: &mut WrappedSender<impl Sender<PublicKey = <S as Verifier>::PublicKey>, Ack<S, D>>,
     ) {
-        if !self.pending.contains_key(&position) {
+        let Some(pending) = self.pending.get_mut(&position) else {
             return;
-        }
+        };
         self.rebroadcast_deadlines
             .put(position, self.context.current() + self.rebroadcast_timeout);
-        let ticks = self
-            .recovery_ticks
-            .get_mut(&position)
-            .expect("active position missing recovery ticks");
-        *ticks = ticks.saturating_add(1);
-        if *ticks >= self.recovery_after_rebroadcasts {
+        pending.rebroadcasts = pending.rebroadcasts.saturating_add(1);
+        let recover = pending.rebroadcasts >= self.recovery_after_rebroadcasts;
+        let ack = match (&pending.shares, self.scheme.me()) {
+            (Shares::Verified(_, shares), Some(me)) => shares.get(&me).cloned(),
+            _ => None,
+        };
+        if recover {
             self.fetch_recovery(position);
         }
-        let Some(me) = self.scheme.me() else {
-            return;
-        };
-        let Some(Pending::Verified(_, shares)) = self.pending.get(&position) else {
-            return;
-        };
-        if let Some(ack) = shares.get(&me).cloned() {
+        if let Some(ack) = ack {
             sender.send(Recipients::All, ack, self.priority_acks);
         }
     }
@@ -671,25 +666,27 @@ where
 
     fn fetch_recovery(&mut self, position: Height) {
         let key = self.recovery_key(position);
-        if self.recovery_requested.contains(&key) {
-            return;
-        }
-        if matches!(self.recoverer.fetch(key), Unreliable::Outcome(feedback) if feedback.accepted())
-        {
-            self.recovery_requested.insert(key);
-        }
-    }
-
-    fn cancel_recovery(&mut self, position: Height) {
-        let key = self.recovery_key(position);
-        if self.recovery_requested.remove(&key) {
-            self.recoverer.cancel(key);
+        let pending = self
+            .pending
+            .get_mut(&position)
+            .expect("recovery requested for an inactive position");
+        if !pending.recovering {
+            pending.recovering = matches!(
+                self.recoverer.fetch(key),
+                Unreliable::Outcome(feedback) if feedback.accepted()
+            );
         }
     }
 
     fn cancel_all_recovery(&mut self) {
-        for key in std::mem::take(&mut self.recovery_requested) {
-            self.recoverer.cancel(key);
+        for (&position, pending) in &mut self.pending {
+            if std::mem::take(&mut pending.recovering) {
+                self.recoverer.cancel(RecoveryKey {
+                    namespace: self.recovery_namespace,
+                    epoch: self.epoch,
+                    position,
+                });
+            }
         }
     }
 
@@ -858,9 +855,16 @@ mod tests {
                     strategy: Sequential,
                 },
             );
-            engine
-                .pending
-                .insert(position, Pending::Verified(digest, BTreeMap::new()));
+            let digest_request = engine.request_digest(position);
+            engine.pending.insert(
+                position,
+                Pending {
+                    shares: Shares::Verified(digest, BTreeMap::new()),
+                    _digest_request: digest_request,
+                    rebroadcasts: 0,
+                    recovering: false,
+                },
+            );
 
             for scheme in schemes.iter().take(3) {
                 let scheme = WrappedScheme::new(scheme.clone(), Behavior::Honest);
