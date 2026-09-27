@@ -5,10 +5,10 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, Block, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, FileSecretStore, IO_BUFFER_SIZE,
-        LogReporter, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL,
-        RESOLVER_CHANNEL, REVEAL, Registrar, SHARING_MODE, Scheme, VOTE_CHANNEL,
+        DKG_CHANNEL, DKG_PROBE_CHANNEL, DynamicProvider, IO_BUFFER_SIZE, LogReporter, MAILBOX_SIZE,
+        MAX_MESSAGE_SIZE, MAX_PARTICIPANTS, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
+        PAGE_CACHE_SIZE, PAGE_SIZE, Participants, QMDB_CHANNEL, RESOLVER_CHANNEL, REVEAL,
+        Registrar, SHARING_MODE, Scheme, Secrets, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -59,7 +59,7 @@ use tracing::error;
 /// Start a validator node.
 #[derive(Args)]
 pub struct Validator {
-    /// Validator node directory containing config, genesis, secrets, and runtime storage.
+    /// Validator node directory containing config, genesis, and runtime storage.
     #[arg(long, default_value = "./data/validator-0")]
     pub node_dir: PathBuf,
 
@@ -107,10 +107,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let p2p_handle = p2p.start();
 
     let provider = DynamicProvider::default();
-    let store = FileSecretStore::load(args.node_dir.join("secrets.json"))
-        .expect("failed to load secret store");
-    let mut store_for_genesis = store.clone();
-    if let Some(share) = store_for_genesis.get_share(Epoch::zero()).await {
+    let mut store = Secrets::init(context.child("secrets")).await;
+    if let Some(share) = store.get_share(Epoch::zero()).await {
         provider.register(
             Epoch::zero(),
             Scheme::signer(

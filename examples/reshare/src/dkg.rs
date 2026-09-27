@@ -4,9 +4,8 @@ use crate::{
     config::{NetworkConfig, NodeConfig},
     types::{
         self, BACKFILL_CHANNEL, BLOCKS_PER_EPOCH, BROADCAST_CHANNEL, CERTIFICATE_CHANNEL,
-        DKG_CHANNEL, FileSecretStore, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE,
-        MESSAGE_RATE, NAMESPACE, Participants, RESOLVER_CHANNEL, REVEAL, SHARING_MODE,
-        VOTE_CHANNEL,
+        DKG_CHANNEL, MAILBOX_SIZE, MAX_MESSAGE_SIZE, MAX_SUPPORTED_MODE, MESSAGE_RATE, NAMESPACE,
+        Participants, RESOLVER_CHANNEL, REVEAL, SHARING_MODE, Secrets, VOTE_CHANNEL,
     },
 };
 use clap::Args;
@@ -32,7 +31,7 @@ type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
 /// serving until stopped.
 #[derive(Args)]
 pub struct Dkg {
-    /// Validator node directory containing config, secrets, and runtime storage.
+    /// Validator node directory containing config and runtime storage.
     #[arg(long, default_value = "./data/validator-0")]
     pub node_dir: PathBuf,
 }
@@ -70,8 +69,7 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let dkg = p2p.register(DKG_CHANNEL, MESSAGE_RATE);
 
     let strategy = context.strategy(NZUsize!(2));
-    let store = FileSecretStore::load(args.node_dir.join("secrets.json"))
-        .expect("failed to load secret store");
+    let store = Secrets::init(context.child("secrets")).await;
     let engine = bootstrap::Engine::new(
         context.child("bootstrap"),
         bootstrap::Config {
