@@ -228,9 +228,12 @@ where
 mod tests {
     use super::{Config, Syncer, resolve_state_sync_floor};
     use crate::stateful::{
-        Application, Input, Proposed,
+        Application, Config as StatefulConfig, Input, Proposed, Stateful,
         actor::syncer::{StateSyncMetadata, SyncPlan, init_databases_from_marshal},
-        db::{Anchor, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig, TipUpdate},
+        db::{
+            Anchor, AttachableResolverSet, Barrier, DatabaseSet, StateSyncSet, SyncEngineConfig,
+            TipUpdate,
+        },
         tests::{
             fixtures::{self, MarshalFixture},
             mocks::{TestBlock, TestMerkleized, TestScheme, TestUnmerkleized, TestVariant, anchor},
@@ -250,7 +253,7 @@ mod tests {
         sha256::{Digest as Sha256Digest, Sha256},
     };
     use commonware_runtime::{
-        Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic,
+        Clock as _, Runner as _, Spawner as _, Supervisor as _, deterministic, reschedule,
     };
     use commonware_utils::{
         NZU64, NZUsize,
@@ -338,6 +341,10 @@ mod tests {
             drop(tip_updates);
             Ok((Self::default(), anchor))
         }
+    }
+
+    impl AttachableResolverSet<WedgeSet> for () {
+        async fn attach_databases(&self, _databases: WedgeSet) {}
     }
 
     #[derive(Clone)]
@@ -730,6 +737,84 @@ mod tests {
 
             assert_eq!(startup.anchor.height, Height::new(2));
             assert_eq!(startup.databases.committed_targets().await, 2);
+        });
+    }
+
+    /// A floor selected before a stop resumes state sync on a restart without a request, even
+    /// when marshal installed it before Stateful started.
+    #[test]
+    fn restart_resumes_floor_installed_before_stateful() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|mut context| async move {
+            let prefix = "syncer-selected-floor";
+            let fixture = scheme_mocks::fixture(&mut context, prefix.as_bytes(), 1);
+            let block = TestBlock::new(2, 2);
+            let selected = fixtures::finalization(&fixture, 2, block.digest());
+
+            // Select the floor, let marshal durably install it, and stop before Stateful starts.
+            let plan = SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), prefix)
+                .await
+                .with_floor(selected)
+                .await;
+            let marshal = fixtures::prunable_marshal_fixture(
+                context.child("marshal"),
+                prefix,
+                fixture.schemes[0].clone(),
+                Some(&block),
+                plan.floor().cloned(),
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            while marshal.mailbox.get_processed().await != Some(Processed::Absent(Height::new(1))) {
+                reschedule().await;
+            }
+            marshal.abort().await;
+            drop(plan);
+
+            // Restart without a request. The empty database matches only the genesis target, so
+            // recovering from marshal's installed floor would fail startup.
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), prefix).await;
+            let marshal = fixtures::prunable_marshal_fixture(
+                context.child("marshal"),
+                prefix,
+                fixture.schemes[0].clone(),
+                None,
+                plan.floor().cloned(),
+                NZUsize!(1),
+                false,
+            )
+            .await;
+            let (stateful, mailbox) = Stateful::init(
+                context.child("stateful"),
+                StatefulConfig {
+                    application: WedgeApp,
+                    db_config: 0,
+                    provider: (),
+                    marshal: (marshal.mailbox.clone(), marshal.floor),
+                    mailbox_size: NZUsize!(1),
+                    plan,
+                    resolvers: (),
+                    sync_config: SyncEngineConfig {
+                        fetch_batch_size: NZU64!(1),
+                        apply_batch_size: NZU64!(1),
+                        max_outstanding_requests: 1,
+                        update_channel_size: NZUsize!(1),
+                        max_retained_roots: 1,
+                    },
+                    prune_config: None,
+                },
+            );
+            let actor = stateful.start();
+
+            // State sync resumes and completes at the installed floor.
+            mailbox.subscribe_databases().await;
+            actor.abort();
+            let _ = actor.await;
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), prefix).await;
+            assert_eq!(plan.sync_height(), Some(block.height()));
+            marshal.abort().await;
         });
     }
 

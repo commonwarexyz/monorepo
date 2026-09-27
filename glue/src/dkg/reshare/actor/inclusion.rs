@@ -3,7 +3,7 @@ use crate::dkg::{
     network::{Directory, Manager},
     reshare::{
         Actor, EpochInfoResponse, Message,
-        actor::Mode,
+        actor::{FinalizedTip, Mode},
         mailbox::LogReservation,
         metrics::Phase,
         store::{Dealer, Player, Store},
@@ -12,10 +12,7 @@ use crate::dkg::{
 };
 use commonware_actor::mailbox::Sender as ActorSender;
 use commonware_consensus::{
-    marshal::{
-        ancestry::BoxedAncestry,
-        core::{Processed, Variant as MarshalVariant},
-    },
+    marshal::{ancestry::BoxedAncestry, core::Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
     types::{Epoch, EpochPhase, Epocher, FixedEpocher, Height},
 };
@@ -406,13 +403,6 @@ where
     }
 }
 
-/// Latest finalized block whose reporter effects and digest are locally known.
-#[derive(Clone, Copy)]
-struct FinalizedTip<D> {
-    height: Height,
-    digest: D,
-}
-
 struct PendingLogScan<'a, V: BlsVariant, P, D> {
     epoch: Epoch,
     info: &'a Info<V, P>,
@@ -691,18 +681,10 @@ where
         }
 
         // The loop owns one outstanding log reservation and at most one
-        // materialized artifact request. The finalized tip bounds ancestry scans
+        // materialized artifact request. The actor's tip bounds ancestry scans
         // to blocks not yet reflected in storage. Queued ancestries remain lazy
         // until the sole verifier is free.
         let mut served_at: Option<Height> = None;
-        let mut finalized_tip = match self.marshal.get_processed().await {
-            Some(Processed::Block(height)) => self
-                .marshal
-                .get_info(height)
-                .await
-                .map(|(_, digest)| FinalizedTip { height, digest }),
-            Some(Processed::Absent(_)) | None => None,
-        };
         let mut work = ArtifactWork::default();
         let mut scan = ArtifactScan::default();
 
@@ -760,13 +742,7 @@ where
                     if !response.is_closed() {
                         work.requests.push(span, ancestry, response);
                         if advance.is_none() {
-                            self.advance_artifact_requests(
-                                epoch,
-                                info,
-                                finalized_tip,
-                                &mut scan,
-                                &mut work,
-                            );
+                            self.advance_artifact_requests(epoch, info, &mut scan, &mut work);
                         }
                     }
                 }
@@ -775,6 +751,10 @@ where
                     block,
                     response,
                 } => {
+                    if self.covered(&block) {
+                        response.acknowledge();
+                        continue;
+                    }
                     let process = info_span!(
                         parent: &span,
                         "dkg.reshare.actor.inclusion.finalized",
@@ -829,11 +809,6 @@ where
                             return ControlFlow::Break(());
                         }
 
-                        finalized_tip = Some(FinalizedTip {
-                            height: block.height(),
-                            digest: block.digest(),
-                        });
-
                         // Re-offer our dealer log if finalization reached the height we
                         // served it into without the log landing on-chain. When our log
                         // does finalize, observe_dealer_log above clears it via
@@ -847,6 +822,7 @@ where
                             served_at = None;
                         }
 
+                        self.advance(&block);
                         response.acknowledge();
                         ControlFlow::Continue(done)
                     }
@@ -882,13 +858,7 @@ where
             },
             _ = &mut advance => {
                 advance = None.into();
-                self.advance_artifact_requests(
-                    epoch,
-                    info,
-                    finalized_tip,
-                    &mut scan,
-                    &mut work,
-                );
+                self.advance_artifact_requests(epoch, info, &mut scan, &mut work);
             },
         };
 
@@ -1010,7 +980,6 @@ where
         &mut self,
         epoch: Epoch,
         info: &'a Info<V, C::PublicKey>,
-        finalized_tip: Option<FinalizedTip<B::Digest>>,
         scan: &mut ArtifactScan<'a, B, V, C>,
         work: &mut ArtifactWork<B, V, C>,
     ) {
@@ -1023,7 +992,7 @@ where
             .expect("epocher must know epoch midpoint");
         let prefix_ready = midpoint
             .previous()
-            .is_none_or(|predecessor| finalized_tip.is_some_and(|tip| tip.height >= predecessor));
+            .is_none_or(|predecessor| self.tip.is_some_and(|tip| tip.height >= predecessor));
         if !prefix_ready || scan.is_active() || work.verification.task.is_some() {
             return;
         }
@@ -1039,7 +1008,7 @@ where
                 epoch,
                 info,
                 epocher: self.epocher.clone(),
-                finalized_tip,
+                finalized_tip: self.tip,
                 final_height,
             },
             request,
@@ -1548,14 +1517,14 @@ mod tests {
     use crate::dkg::{
         fence::Fence,
         reshare::{
-            actor::{Config, DkgConfig, utils},
+            actor::{Config, DkgConfig, Setup, utils},
             store::AckOutcome,
         },
         state_sync::Plan as StateSyncPlan,
         tests::mocks::{self, MemorySecretStore, TestBlock, TestBlsVariant},
     };
     use commonware_actor::Feedback;
-    use commonware_consensus::{Reporter, marshal};
+    use commonware_consensus::{Heightable as _, Reporter, marshal};
     use commonware_cryptography::{
         Digestible as _, Signer,
         bls12381::{
@@ -1570,7 +1539,10 @@ mod tests {
         transcript::Summary,
     };
     use commonware_math::algebra::Random as _;
-    use commonware_p2p::simulated::{Config as NetworkConfig, Network};
+    use commonware_p2p::{
+        simulated::{Config as NetworkConfig, Network},
+        utils::mocks::inert_channel,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{ContextCell, Runner, Spawner, Supervisor, deterministic};
     use commonware_utils::{
@@ -1862,6 +1834,197 @@ mod tests {
             signed_log,
             public_key,
         }
+    }
+
+    /// Builds the canonical child of `parent`.
+    fn child(parent: &TestBlock) -> TestBlock {
+        let height = parent.height().next();
+        TestBlock::new::<Sha256>(
+            parent.context().clone(),
+            parent.digest(),
+            height,
+            height.get(),
+        )
+    }
+
+    /// Reports a finalized block and returns its acknowledgement waiter.
+    fn deliver(
+        mailbox: &mut TestInclusionMailbox,
+        block: &Arc<TestBlock>,
+    ) -> <Exact as Acknowledgement>::Waiter {
+        let (ack, waiter) = Exact::handle();
+        assert_eq!(
+            mailbox.report(marshal::Update::Block(block.clone(), ack)),
+            Feedback::Ok
+        );
+        waiter
+    }
+
+    /// Marshal can redeliver finalized blocks after the actor has moved past them. Each receipt
+    /// is acknowledged, and a block from an earlier phase or epoch does not re-enter its handler.
+    /// The DKG-mode harness is required for an epoch-zero final block without epoch info, while
+    /// the dealing handler it drives is shared by both modes.
+    #[test]
+    fn redelivered_receipts_survive_phase_changes() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                info,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "redelivered-receipts", NZU64!(4)).await;
+
+            // Epoch zero spans heights 0..=3 and epoch one spans 4..=7. Each early phase ends one
+            // block before its epoch midpoint.
+            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 6 {
+                blocks.push(Arc::new(child(blocks.last().unwrap())));
+            }
+
+            // Dealing completes epoch zero's early phase.
+            let receipts = [0, 1].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::zero(),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key.clone()]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt.await.expect("early receipt must be acknowledged");
+            }
+
+            // Inclusion receives a redelivered early block and a repeated midpoint before the
+            // final block completes the epoch.
+            let receipts = [1, 2, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .inclusion(Epoch::zero(), &info, &mut store, None)
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt
+                    .await
+                    .expect("inclusion receipt must be acknowledged");
+            }
+
+            // The next epoch's dealing receives redelivered epoch-zero blocks before its own
+            // early phase.
+            let receipts = [2, 3, 4, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::new(1),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt
+                    .await
+                    .expect("next-epoch receipt must be acknowledged");
+            }
+        });
+    }
+
+    /// A follower covers the boundary it commits, so setup resumes in the next epoch and that
+    /// epoch acknowledges a redelivered boundary without handling it as a block of its own. The
+    /// DKG-mode harness drives follow, setup, and dealing handlers shared by both modes.
+    #[test]
+    fn follower_boundary_redelivery_is_acknowledged() {
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            let InclusionHarness {
+                _network,
+                mut actor,
+                mut mailbox,
+                mut store,
+                public_key,
+                ..
+            } = setup_inclusion_harness(&mut context, "follower-redelivery", NZU64!(4)).await;
+
+            // Epoch zero's final block carries epoch one's public info.
+            let participants = Set::from_iter_dedup([public_key.clone()]);
+            let (output, _) = deal::<TestBlsVariant, _, N3f1>(
+                TestRng::new(0),
+                SharingMode::NonZeroCounter,
+                participants.clone(),
+            )
+            .expect("trusted sharing");
+            let next = EpochInfo {
+                outcome: EpochOutcome::Success,
+                epoch: Epoch::new(1),
+                output,
+                players: participants.clone(),
+                next_players: participants,
+                directory: Unit,
+            };
+            let mut blocks = vec![Arc::new(mocks::genesis_block(public_key.clone()))];
+            while blocks.len() < 3 {
+                blocks.push(Arc::new(child(blocks.last().unwrap())));
+            }
+            blocks.push(Arc::new(
+                child(&blocks[2]).with_payload::<Sha256, TestBlsVariant, PrivateKey>(
+                    NZU32!(16),
+                    Payload::EpochInfo(next),
+                ),
+            ));
+            while blocks.len() < 6 {
+                blocks.push(Arc::new(child(blocks.last().unwrap())));
+            }
+
+            // Following acknowledges a repeated block and commits epoch one at the boundary.
+            let receipts = [0, 1, 1, 2, 3].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(actor.follow(&mut store).await.is_continue());
+            for receipt in receipts {
+                receipt
+                    .await
+                    .expect("follower receipt must be acknowledged");
+            }
+            assert_eq!(store.current().map(|info| info.epoch), Some(Epoch::new(1)));
+
+            // Setup resumes at the first height after the covered boundary.
+            let Some(Setup::Participate(prepared)) = actor.setup(&mut store, None).await else {
+                panic!("setup must prepare the next epoch");
+            };
+            assert_eq!(prepared.epoch, Epoch::new(1));
+            assert_eq!(prepared.phase, EpochPhase::Early);
+
+            // The next epoch's dealing receives the redelivered boundary before its own early
+            // phase.
+            let receipts = [3, 4, 5].map(|height| deliver(&mut mailbox, &blocks[height]));
+            assert!(
+                actor
+                    .dealing(
+                        Epoch::new(1),
+                        &mut store,
+                        None,
+                        None,
+                        inert_channel([public_key]),
+                    )
+                    .await
+                    .is_continue()
+            );
+            for receipt in receipts {
+                receipt
+                    .await
+                    .expect("next-epoch receipt must be acknowledged");
+            }
+        });
     }
 
     #[test]

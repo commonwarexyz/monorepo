@@ -81,6 +81,10 @@ where
                     block,
                     response,
                 } => {
+                    if self.covered(&block) {
+                        response.acknowledge();
+                        continue;
+                    }
                     let process = info_span!(
                         parent: &span,
                         "dkg.reshare.actor.follower.finalized",
@@ -109,10 +113,12 @@ where
                                 .await;
                             self.register_epoch(&info, share).await;
 
+                            self.advance(&block);
                             response.acknowledge();
                             return true;
                         }
 
+                        self.advance(&block);
                         response.acknowledge();
                         false
                     }

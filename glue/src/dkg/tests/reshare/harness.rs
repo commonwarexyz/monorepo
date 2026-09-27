@@ -878,6 +878,12 @@ impl EngineDefinition for ReshareEngine {
         .expect("blocks archive");
 
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
+        let stateful_startup_context = context.child("stateful_startup");
+        let mut plan = SyncPlan::init(
+            stateful_startup_context.child("plan"),
+            partition_prefix.clone(),
+        )
+        .await;
         let (probe_actor, probe_mailbox) = dkg_probe::Actor::new(dkg_probe::Config {
             context: context.child("dkg_probe"),
             manager: dkg_manager.clone(),
@@ -886,6 +892,7 @@ impl EngineDefinition for ReshareEngine {
                 participants: self.initial.info.participants(),
                 directory: self.initial.info.directory.clone(),
             },
+            floor: plan.floor().cloned(),
             verifier: Scheme::certificate_verifier(
                 NAMESPACE,
                 *self.initial.info.output.public().public(),
@@ -900,12 +907,6 @@ impl EngineDefinition for ReshareEngine {
         });
         let probe_handle = probe_actor.start(probe_boundary_network);
 
-        let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(
-            stateful_startup_context.child("plan"),
-            partition_prefix.clone(),
-        )
-        .await;
         let should_state_sync = plan.should_state_sync(delayed);
         if should_state_sync {
             *self
@@ -979,7 +980,7 @@ impl EngineDefinition for ReshareEngine {
                     .floor
                     .clone(),
             };
-            plan = plan.with_floor(finalization);
+            plan = plan.with_floor(finalization).await;
         }
         let (marshal_actor, marshal, floor) = MarshalActor::init(
             context.child("marshal"),

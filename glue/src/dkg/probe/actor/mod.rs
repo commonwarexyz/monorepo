@@ -5,7 +5,12 @@ use crate::{
 };
 use commonware_actor::mailbox::{self as actor_mailbox, Receiver as ActorReceiver};
 use commonware_codec::Read;
-use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::FixedEpocher};
+use commonware_consensus::{
+    Epochable as _,
+    marshal::core::Variant,
+    simplex::{scheme::Scheme, types::Finalization},
+    types::FixedEpocher,
+};
 use commonware_cryptography::Signer;
 use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
@@ -40,6 +45,15 @@ where
     pub manager: M,
     /// The weakly subjective checkpoint to bootstrap from.
     pub bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
+    /// State-sync floor persisted by an interrupted sync, if any.
+    ///
+    /// Latest-finalization replies below this floor's epoch are ignored, so
+    /// the discovered [`Artifact::info`](crate::dkg::probe::Artifact::info)
+    /// describes the epoch of whichever of this floor and
+    /// [`Artifact::floor`](crate::dkg::probe::Artifact::floor) is later. The
+    /// solicited committee and its peer-set ID come from
+    /// [`Config::bootstrap`] alone.
+    pub floor: Option<Finalization<S, V::Commitment>>,
     /// All-epoch certificate verifier built from the constant BLS identity.
     pub verifier: S,
     /// Public epoch information carried by genesis.
@@ -81,6 +95,7 @@ where
     mailbox: ActorReceiver<Message<S, V>>,
     manager: M,
     bootstrap: Bootstrap<S::PublicKey, <V::ApplicationBlock as ReshareBlock>::Directory>,
+    floor: Option<Finalization<S, V::Commitment>>,
     verifier: S,
     genesis: EpochInfo<
         <V::ApplicationBlock as ReshareBlock>::Variant,
@@ -119,6 +134,7 @@ where
                 mailbox,
                 manager: config.manager,
                 bootstrap: config.bootstrap,
+                floor: config.floor,
                 verifier: config.verifier,
                 genesis: config.genesis,
                 strategy: config.strategy,
@@ -150,13 +166,18 @@ where
         BSE: Sender<PublicKey = S::PublicKey>,
         BRE: Receiver<PublicKey = S::PublicKey>,
     {
+        // Replies must reach both the trust point and the persisted floor's
+        // epoch. Discovery tracks the committee at the bootstrap epoch alone.
+        let minimum = self
+            .floor
+            .map_or(self.bootstrap.epoch, |floor| floor.epoch())
+            .max(self.bootstrap.epoch);
         Discovery {
             context: self.context,
             mailbox: self.mailbox,
             manager: self.manager,
-            sample: Sample::new(self.bootstrap.epoch),
-            bootstrap_participants: self.bootstrap.participants,
-            bootstrap_directory: self.bootstrap.directory,
+            sample: Sample::new(minimum),
+            bootstrap: self.bootstrap,
             verifier: self.verifier,
             genesis: self.genesis,
             strategy: self.strategy,

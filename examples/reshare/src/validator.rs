@@ -172,6 +172,8 @@ pub async fn run(context: tokio::Context, args: Validator) {
         genesis_info.clone(),
         genesis_target,
     );
+    let stateful_startup = context.child("stateful_startup");
+    let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
     let (probe_actor, probe_mailbox) = probe::Actor::new(probe::Config {
         context: context.child("dkg_probe"),
         manager: oracle.clone(),
@@ -180,6 +182,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
             participants: genesis_info.participants(),
             directory: Unit,
         },
+        floor: plan.floor().cloned(),
         verifier: Scheme::certificate_verifier(NAMESPACE, *genesis_info.output.public().public()),
         genesis: genesis_info.clone(),
         strategy: Sequential,
@@ -191,8 +194,6 @@ pub async fn run(context: tokio::Context, args: Validator) {
     });
     let probe_handle = probe_actor.start(dkg_probe_network);
 
-    let stateful_startup = context.child("stateful_startup");
-    let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
     let should_state_sync = plan.should_state_sync(args.state_sync);
     let probe_artifact = if should_state_sync {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");
@@ -204,7 +205,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
                 artifact.info.output.public().clone(),
             ),
         );
-        plan = plan.with_floor(artifact.floor.clone());
+        plan = plan.with_floor(artifact.floor.clone()).await;
         Some(artifact)
     } else {
         None

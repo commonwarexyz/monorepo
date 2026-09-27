@@ -36,17 +36,18 @@
 //! The plan reads the durable state sync state and keeps that metadata handle
 //! until [`Stateful`] consumes it, avoiding multiple opens of the same metadata
 //! partition during startup. Callers use [`SyncPlan::should_state_sync`] to
-//! decide whether to discover and attach a finalized floor via
-//! [`SyncPlan::with_floor`]. The same plan then drives marshal (via
-//! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
-//! actors are guaranteed to agree on the startup decision. Once the durable
-//! complete height is set, the node never performs peer state sync again and
-//! must recover from the later of the stored height and marshal's processed
-//! height on future startups.
+//! decide whether to discover a finalized floor and persist it via
+//! [`SyncPlan::with_floor`]. After floor selection, the same plan drives
+//! marshal (via [`SyncPlan::marshal_start`]) and stateful (via
+//! [`Config::plan`]). Both read the floor from durable metadata, so they agree
+//! on the startup decision and a crash before either actor starts still resumes
+//! state sync. Once the durable complete height is set, the node never performs
+//! peer state sync again and must recover from the later of the stored height
+//! and marshal's processed height on future startups.
 //!
 //! The actor supports two sync paths:
 //!
-//! - **Marshal sync** (no floor attached): [`Stateful::start`] prepares the
+//! - **Marshal sync** (no persisted floor): [`Stateful::start`] prepares the
 //!   databases before the actor is spawned. New nodes initialize from
 //!   genesis. Restarted nodes open the database set at the later of
 //!   marshal's processed anchor and the stored state sync height.
@@ -55,19 +56,20 @@
 //!   actor then starts directly in normal processing mode while marshal continues
 //!   backfilling blocks from the network.
 //!
-//! - **State sync** (floor attached): Run a one-time QMDB state sync from
+//! - **State sync** (persisted floor): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
 //!   [`db::StateSyncSet::sync`]. The actor retains finalized blocks and their
 //!   acknowledgements in batches up to marshal's configured pending-ack window size, waits for
 //!   the live sync coordinator to record the newest block's target, and releases each batch.
 //!   If state sync completes before the window fills, the pending blocks are handled
 //!   during the transition to normal processing. Durable metadata records the selected
-//!   floor before database mutation and is marked complete only after the converged state
-//!   and any required handoff blocks are durable. A crash before completion restarts from
-//!   that floor. The storage target is advanced to the block backing marshal's durable
-//!   processed position when necessary, because marshal does not redeliver blocks at or below
-//!   that position. Journal state that has pruned the resulting range start is discarded
-//!   and rebuilt. Initialization removes state beyond the target and reuses the retained prefix.
+//!   floor before marshal starts from it and is marked complete only after the converged
+//!   state and any required handoff blocks are durable. A crash before completion restarts
+//!   state sync from that floor, or from a newer selection, even without a request. The
+//!   storage target is advanced to the block backing marshal's durable processed position
+//!   when necessary, because marshal does not redeliver blocks at or below that position.
+//!   Journal state that has pruned the resulting range start is discarded and rebuilt.
+//!   Initialization removes state beyond the target and reuses the retained prefix.
 //!   A lagging floor sampled during restart cannot move the floor backward.
 //!   Subsequent restarts after completion take the marshal sync path to ensure a contiguous stream.
 //!

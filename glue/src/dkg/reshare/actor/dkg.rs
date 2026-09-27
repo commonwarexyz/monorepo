@@ -118,11 +118,7 @@ where
     ) -> Result<Option<PreparedEpoch<V, C>>, M::Error> {
         self.metrics.set_phase(Phase::Setup);
 
-        let height = self
-            .marshal
-            .get_processed()
-            .await
-            .map_or_else(Height::zero, |processed| processed.height().next());
+        let height = self.tip.map_or_else(Height::zero, |tip| tip.height.next());
         let bounds = self
             .epocher
             .containing(height)

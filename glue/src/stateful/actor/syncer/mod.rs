@@ -219,7 +219,7 @@ where
         )
     }
 
-    /// Returns the floor selected before an interrupted state sync.
+    /// Returns the selected floor while state sync is in progress.
     pub(crate) fn in_progress_floor(&self) -> Option<&Finalization<S, C>> {
         match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(floor)) => Some(floor),
@@ -229,8 +229,9 @@ where
 
     /// Marks state sync as in progress for the selected floor.
     ///
-    /// This must be persisted before any state sync database mutation begins so the database
-    /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
+    /// This must be persisted before marshal starts from the floor or any state sync database
+    /// mutation begins. A crash then resumes state sync instead of recovering from marshal, and
+    /// the database sync engine can reopen partial sync state and validate the next selected floor.
     /// The storage target may still advance to marshal's durable processed height during startup.
     ///
     /// If an interrupted state sync already stored a floor, the newly selected

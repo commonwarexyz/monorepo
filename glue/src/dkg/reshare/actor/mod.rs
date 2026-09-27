@@ -2,8 +2,8 @@
 //!
 //! The actor bridges finalized epoch metadata, the Feldman-Desmedt reshare
 //! protocol, P2P dealer traffic, and certificate-scheme registration. Each loop
-//! iteration derives the active epoch from marshal's processed height, loads the
-//! epoch's public [`EpochInfo`] from the finalized
+//! iteration derives the active epoch from the first height the actor does not
+//! cover, loads the epoch's public [`EpochInfo`] from the finalized
 //! boundary block, and either participates in the ceremony or follows until the
 //! next boundary is finalized.
 //!
@@ -66,6 +66,13 @@
 //! only logs and epoch info that appear in finalized blocks update durable state
 //! or registered schemes.
 //!
+//! Within a run, the actor covers every finalized block at or below the latest
+//! one it has applied and acknowledged. Startup covers marshal's processed
+//! position and every block below a state-sync floor. After a restart, marshal
+//! redelivers blocks above its processed position and the actor applies them
+//! again. Marshal can redeliver a finalized block with a fresh acknowledgement,
+//! and the actor acknowledges a covered block without repeating its effects.
+//!
 //! # Crash Recovery
 //!
 //! Recovery state is split by sensitivity. Public, replayable protocol messages
@@ -93,20 +100,20 @@
 //!
 //! Reusing the persisted dealer seed makes regenerated dealer shares identical
 //! after a restart. Persisted acknowledgements and finalized logs let a player or
-//! observer rebuild the same outcome even though P2P messages and finalized-block
-//! notifications are not replayed by the runtime. If the node lacks a valid share
-//! for a dealer role, it simply observes or plays instead of manufacturing local
-//! state.
+//! observer rebuild the same outcome even though P2P messages are not replayed
+//! and marshal does not redeliver processed blocks. If the node lacks a valid
+//! share for a dealer role, it simply observes or plays instead of manufacturing
+//! local state.
 //!
 //! # Follower Mode
 //!
 //! The actor follows instead of participating when setup cannot read the boundary
-//! [`EpochInfo`] for the epoch containing marshal's next unprocessed height, or
-//! when a state-sync floor skips part of the inclusion window. In either
+//! [`EpochInfo`] for the epoch containing the first height the actor does not
+//! cover, or when a state-sync floor skips part of the inclusion window. In either
 //! case the actor lacks the public history needed to reconstruct the ceremony.
 //!
 //! ```text
-//! processed height + 1 = H
+//! first uncovered height = H
 //!        |
 //!        v
 //! H is in epoch N
@@ -149,7 +156,7 @@ use commonware_consensus::{
     Heightable as _,
     marshal::core::{CommitmentFallback, Mailbox as MarshalMailbox, Variant as MarshalVariant},
     simplex::scheme::Scheme as SimplexScheme,
-    types::{EpochPhase, FixedEpocher},
+    types::{EpochPhase, FixedEpocher, Height},
 };
 use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
@@ -173,6 +180,13 @@ use std::{
 
 type DkgCompletion<V, P, D> = Box<dyn FnOnce(Option<EpochInfo<V, P, D>>) + Send>;
 
+/// Height and digest of the latest finalized block the actor covers.
+#[derive(Clone, Copy)]
+struct FinalizedTip<D> {
+    height: Height,
+    digest: D,
+}
+
 mod dealing;
 mod dkg;
 mod follower;
@@ -180,7 +194,7 @@ mod inclusion;
 mod setup;
 #[cfg(test)]
 mod utils;
-use setup::{Setup, StateSyncStart};
+use setup::{Setup, StateSyncStart, startup};
 
 /// Configuration for the crate-private one-shot DKG mode.
 pub(crate) struct DkgConfig<V, P, D>
@@ -325,6 +339,8 @@ where
     epocher: FixedEpocher,
     metrics: ReshareMetrics<C::PublicKey>,
     mode: Mode<V, C::PublicKey, B::Directory>,
+    /// Latest finalized block the actor covers.
+    tip: Option<FinalizedTip<B::Digest>>,
     batch_verifier: PhantomData<BV>,
 }
 
@@ -375,6 +391,7 @@ where
                 epocher,
                 metrics,
                 mode: Mode::Reshare,
+                tip: None,
                 batch_verifier: config.batch_verifier,
             },
             Mailbox::new(sender),
@@ -436,7 +453,7 @@ where
         // floor commitment and retain its height with the epoch metadata. Setup
         // uses that bound to decide whether the public dealer-log window is
         // replayable.
-        let mut state_sync = if let Some(state_sync) = state_sync {
+        let (mut state_sync, floor) = if let Some(state_sync) = state_sync {
             let share = self.recovered_share(&mut store, &state_sync.info).await;
             self.register_epoch(&state_sync.info, share).await;
             let floor = self
@@ -447,32 +464,32 @@ where
                 )
                 .await
                 .expect("marshal must yield state sync floor block");
-            Some(StateSyncStart {
+            let start = StateSyncStart {
                 info: state_sync.info,
                 floor: floor.height(),
-            })
+            };
+            (Some(start), Some(floor))
         } else {
-            None
+            (None, None)
         };
+
+        // The tip starts at marshal's processed position and covers every
+        // block below a state-sync floor.
+        self.tip = startup(self.marshal.get_anchor().await, floor.as_ref());
 
         if matches!(self.mode, Mode::Dkg { .. }) {
             self.run_dkg(&mut store, &mut dealing_mux).await;
             return;
         }
 
-        let mut current_epoch = state_sync.as_ref().map(|start| start.info.epoch);
         loop {
-            let Some(prepared) = self
-                .setup(&mut store, current_epoch.take(), state_sync.take())
-                .await
-            else {
+            let Some(prepared) = self.setup(&mut store, state_sync.take()).await else {
                 return;
             };
             let Setup::Participate(prepared) = prepared else {
                 if self.follow(&mut store).await.is_break() {
                     return;
                 }
-                current_epoch = store.current().map(|info| info.epoch);
                 continue;
             };
             let mut prepared = *prepared;
@@ -506,7 +523,37 @@ where
             {
                 return;
             }
-            current_epoch = Some(prepared.epoch.next());
         }
+    }
+
+    /// Returns whether the actor already covers `block`, either from startup or
+    /// because it completed the block's effects.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `block` conflicts with the tip at the same height.
+    fn covered(&self, block: &B) -> bool {
+        self.tip.is_some_and(|tip| {
+            if block.height() == tip.height {
+                assert_eq!(block.digest(), tip.digest, "conflicting finalized block");
+            }
+            block.height() <= tip.height
+        })
+    }
+
+    /// Records `block` as the tip after its effects complete.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the tip already covers `block`.
+    fn advance(&mut self, block: &B) {
+        assert!(
+            self.tip.is_none_or(|tip| block.height() > tip.height),
+            "completed block must advance the tip"
+        );
+        self.tip = Some(FinalizedTip {
+            height: block.height(),
+            digest: block.digest(),
+        });
     }
 }

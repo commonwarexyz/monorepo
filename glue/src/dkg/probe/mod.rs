@@ -3,7 +3,7 @@
 //! A node that is starting fresh cannot construct epoch-scoped state until it learns the current
 //! epoch's participant set. That set lives in the [`EpochInfo`] of a finalized boundary block.
 //! The [`Actor`] discovers that block, publishes the resulting [`Artifact`] (which also carries
-//! the state-sync floor), and then serves the same boundary material to other joining peers.
+//! the sampled state-sync floor), and then serves the same boundary material to other joining peers.
 //!
 //! This protocol is an extension of [`stateful::probe`](crate::stateful::probe): it begins with
 //! the same solicit-and-sample floor discovery (built on the same shared sample core) and adds
@@ -73,10 +73,10 @@
 //! ```
 //!
 //! Replies are verified with the all-epoch verifier. At most one reply is counted per peer, only
-//! configured members may reply, and replies below the bootstrap epoch are ignored (the chain
-//! reached that epoch by definition, so any current member holds a finalization at or above its
-//! boundary). Once `f + 1` distinct peers have replied, the highest finalization becomes the
-//! state-sync floor and names the target epoch:
+//! configured members may reply, and replies below the bootstrap epoch or below the epoch of a
+//! persisted [`Config::floor`] are ignored without blocking (the chain reached both epochs, so an
+//! older reply is stale rather than proof of misbehavior). Once `f + 1` distinct peers have
+//! replied, the highest finalization becomes the sampled floor and names the target epoch:
 //!
 //! ```text
 //!   peer 1 --LatestResponse(round 10)-->\               replies
@@ -222,18 +222,23 @@ where
     pub info: EpochInfo<V, S::PublicKey, Dir>,
     /// Highest finalization from the `f + 1` peer sample.
     ///
-    /// This is the state-sync floor: it is at least as recent as the freshest
-    /// honest reply in the sample.
+    /// This is the sampled state-sync floor. It is at least as recent as the
+    /// freshest honest reply in the sample. A node resuming a persisted
+    /// [`Config::floor`] keeps that floor unless this one is newer.
     pub floor: Finalization<S, D>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{Actor, Bootstrap, Config, wire};
-    use crate::dkg::{
-        probe::Artifact,
-        tests::mocks,
-        types::{EpochInfo, EpochOutcome, Payload},
+    use crate::{
+        dkg::{
+            probe::Artifact,
+            state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+            tests::{max_supported_mode, mocks},
+            types::{EpochInfo, EpochOutcome, Payload},
+        },
+        stateful::SyncPlan,
     };
     use commonware_actor::Feedback;
     use commonware_codec::Encode as _;
@@ -254,7 +259,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_p2p::{
-        Receiver as _, Recipients, Sender as _,
+        Provider as _, Receiver as _, Recipients, Sender as _,
         simulated::{
             Config as NetworkConfig, Link, Network, Oracle, Receiver as SimReceiver,
             Sender as SimSender,
@@ -317,15 +322,17 @@ mod tests {
             context: &mut deterministic::Context,
             source_boundaries: Vec<Epoch>,
         ) -> Self {
-            Self::start_full(context, source_boundaries, Epoch::zero()).await
+            let fixture = mocks::scheme_fixture_n(context, 4);
+            Self::start_full(context, fixture, source_boundaries, Epoch::zero(), None).await
         }
 
         async fn start_full(
             context: &mut deterministic::Context,
+            fixture: mocks::SchemeFixture,
             source_boundaries: Vec<Epoch>,
             bootstrap_epoch: Epoch,
+            floor: Option<Finalization<mocks::TestScheme, mocks::TestDigest>>,
         ) -> Self {
-            let fixture = mocks::scheme_fixture_n(context, 4);
             let participants = fixture.participants.clone();
 
             let (network, oracle) = Network::new_with_peers(
@@ -390,6 +397,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                floor: None,
                 verifier: fixture.schemes[0].clone(),
                 genesis: genesis.clone(),
                 strategy: Sequential,
@@ -415,6 +423,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                floor,
                 verifier: fixture.schemes[1].clone(),
                 genesis,
                 strategy: Sequential,
@@ -926,12 +935,33 @@ mod tests {
         });
     }
 
-    #[test]
-    fn ignores_latest_reply_below_bootstrap_epoch() {
+    #[rstest::rstest]
+    #[case::none(false)]
+    #[case::older(true)]
+    fn ignores_latest_reply_below_bootstrap_epoch(#[case] older: bool) {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
-            let mut harness =
-                Harness::start_full(&mut context, vec![Epoch::new(1)], Epoch::new(1)).await;
+            // A persisted floor below the bootstrap epoch must not lower the
+            // minimum epoch.
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let floor = older.then(|| {
+                finalization(
+                    Proposal::new(
+                        Round::new(Epoch::zero(), View::new(1)),
+                        View::zero(),
+                        Sha256::hash(&[b"floor"]),
+                    ),
+                    &fixture.schemes,
+                )
+            });
+            let mut harness = Harness::start_full(
+                &mut context,
+                fixture,
+                vec![Epoch::new(1)],
+                Epoch::new(1),
+                floor,
+            )
+            .await;
             let mut subscription = harness.joiner.subscribe();
 
             // Valid replies below the bootstrap epoch are stale by definition
@@ -955,6 +985,100 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             let artifact = subscription.try_recv().expect("artifact resolved");
             assert_eq!(artifact.floor, target);
+        });
+    }
+
+    /// A node resuming an interrupted state sync ignores latest replies below
+    /// its persisted floor's epoch, so the discovered info describes the floor
+    /// it resumes from. The bootstrap committee is tracked at the bootstrap
+    /// epoch's peer-set ID, not the floor's.
+    #[test]
+    fn ignores_latest_reply_below_floor_epoch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Select an in-progress floor in epoch 2, which persists it, then
+            // reload it as a restarted node.
+            let fixture = mocks::scheme_fixture_n(&mut context, 4);
+            let persisted = finalization(
+                Proposal::new(
+                    Round::new(Epoch::new(2), View::new(3)),
+                    View::new(2),
+                    Sha256::hash(&[b"persisted"]),
+                ),
+                &fixture.schemes,
+            );
+            let plan = SyncPlan::<_, mocks::TestScheme, mocks::TestMarshalVariant>::init(
+                context.child("plan"),
+                "floor",
+            )
+            .await
+            .with_floor(persisted.clone())
+            .await;
+            drop(plan);
+            let plan = SyncPlan::<_, mocks::TestScheme, mocks::TestMarshalVariant>::init(
+                context.child("restart"),
+                "floor",
+            )
+            .await;
+            assert_eq!(plan.floor(), Some(&persisted));
+
+            // Valid replies at the bootstrap epoch are below the floor's
+            // epoch: they must neither complete the sample nor block peers,
+            // even though the source can serve that epoch's boundary.
+            let mut harness = Harness::start_full(
+                &mut context,
+                fixture,
+                vec![Epoch::new(1), Epoch::new(2)],
+                Epoch::new(1),
+                plan.floor().cloned(),
+            )
+            .await;
+            let mut subscription = harness.joiner.subscribe();
+            let stale = harness.target_finalization();
+            harness.reply_latest_from_client(stale.clone());
+            harness.reply_latest_from_backup(stale);
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "below-floor replies must not complete the sample"
+            );
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "stale replies must not block peers");
+
+            // Replies in the floor's epoch resolve that epoch's info. The
+            // network starts with only set 0, so set 1 proves the committee is
+            // tracked at the bootstrap epoch's ID rather than the floor's.
+            let sampled = harness.latest_finalization(Epoch::new(2), Sha256::hash(&[b"sampled"]));
+            harness.reply_latest_from_client(sampled.clone());
+            harness.reply_latest_from_backup(sampled.clone());
+            context.sleep(Duration::from_millis(100)).await;
+            let artifact = subscription.try_recv().expect("artifact resolved");
+            assert_eq!(artifact.floor, sampled);
+            assert_eq!(artifact.info.epoch, Epoch::new(2));
+            let mut manager = harness.oracle.manager();
+            assert!(manager.peer_set(1).await.is_some());
+            assert!(manager.peer_set(2).await.is_none());
+
+            // The plan keeps the later persisted floor, and the DKG startup
+            // material pairs the plan's floor with the discovered info.
+            let plan = plan.with_floor(artifact.floor.clone()).await;
+            assert_eq!(plan.floor(), Some(&persisted));
+            StateSyncPlan::init(
+                context.child("dkg"),
+                StateSyncConfig {
+                    partition_prefix: "floor".into(),
+                    max_participants: NZU32!(16),
+                    max_supported_mode: max_supported_mode(),
+                },
+                Some(StateSync {
+                    info: artifact.info,
+                    floor: plan.floor().cloned().expect("resumed floor"),
+                }),
+            )
+            .await;
         });
     }
 
@@ -1495,6 +1619,7 @@ mod tests {
                     participants: genesis.participants(),
                     directory: Unit,
                 },
+                floor: None,
                 verifier: fixture.schemes[0].clone(),
                 genesis,
                 strategy: Sequential,

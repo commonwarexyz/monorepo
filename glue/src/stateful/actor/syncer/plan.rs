@@ -15,9 +15,13 @@ use tracing::warn;
 ///
 /// 1. [`SyncPlan::init`] reads the durable state sync state.
 /// 2. If [`SyncPlan::may_state_sync`] returns `true`, the caller may fetch a
-///    finalized floor and attach it via [`SyncPlan::with_floor`]. An interrupted
+///    finalized floor and persist it via [`SyncPlan::with_floor`]. An interrupted
 ///    sync already has a persisted floor, while a fresh sync needs one from the
 ///    caller. Otherwise the caller skips floor selection entirely.
+///
+/// Marshal (via [`SyncPlan::marshal_start`]) and [`Stateful`](crate::stateful::Stateful)
+/// only use the persisted floor, so a crash before either actor starts still resumes
+/// state sync on the next startup.
 ///
 /// The plan owns the opened metadata store and is later consumed by
 /// [`Stateful`](crate::stateful::Stateful), so startup does not reopen the same
@@ -33,7 +37,6 @@ where
     V: Variant,
 {
     sync_metadata: StateSyncMetadata<E, S, V::Commitment>,
-    floor: Option<Finalization<S, V::Commitment>>,
 }
 
 impl<E, S, V> SyncPlan<E, S, V>
@@ -55,11 +58,7 @@ where
             partition_prefix,
         )
         .await;
-        let floor = sync_metadata.in_progress_floor().cloned();
-        Self {
-            sync_metadata,
-            floor,
-        }
+        Self { sync_metadata }
     }
 
     /// Returns whether state sync can still run on this node.
@@ -69,10 +68,9 @@ where
     /// durable completed state sync height, so future boots must recover from that
     /// height or marshal's processed height instead of running peer state sync again.
     ///
-    /// When `true`, the caller can optionally attach a finalized floor via
-    /// [`SyncPlan::with_floor`]. If a floor is not attached, the node will
-    /// attempt to sync from genesis via marshal unless it is resuming an
-    /// interrupted state sync.
+    /// When `true`, the caller can optionally persist a finalized floor via
+    /// [`SyncPlan::with_floor`]. If no floor is persisted, the node will
+    /// attempt to sync from genesis via marshal.
     pub fn may_state_sync(&self) -> bool {
         self.sync_metadata.sync_height().is_none()
     }
@@ -87,23 +85,28 @@ where
         self.sync_metadata.partition_prefix()
     }
 
-    /// Returns the selected or persisted in-progress state sync floor.
-    pub const fn floor(&self) -> Option<&Finalization<S, V::Commitment>> {
-        self.floor.as_ref()
+    /// Returns the persisted in-progress state sync floor.
+    pub fn floor(&self) -> Option<&Finalization<S, V::Commitment>> {
+        self.sync_metadata.in_progress_floor()
     }
 
-    /// Attach a finalized floor to state sync from.
+    /// Persist a finalized floor to state sync from.
     ///
-    /// Has no effect if state sync has already completed. When resuming an
-    /// interrupted sync, a lagging selection is ignored in favor of the
-    /// persisted floor.
+    /// Once persisted, every startup must run state sync until it completes,
+    /// whether or not it is requested. Has no effect if state sync has already
+    /// completed. A selection that is
+    /// not newer than the persisted floor is ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the selected floor cannot be persisted.
     #[must_use]
-    pub fn with_floor(mut self, floor: Finalization<S, V::Commitment>) -> Self {
+    pub async fn with_floor(mut self, floor: Finalization<S, V::Commitment>) -> Self {
         if !self.may_state_sync() {
             return self;
         }
 
-        if let Some(selected) = &self.floor
+        if let Some(selected) = self.floor()
             && floor.round() <= selected.round()
         {
             warn!(
@@ -114,38 +117,36 @@ where
             return self;
         }
 
-        self.floor = Some(floor);
+        self.sync_metadata = self.sync_metadata.begin_sync(floor).await;
         self
     }
 
     /// Returns marshal's startup anchor for this plan.
     ///
-    /// If a finalized floor was attached or persisted by an interrupted sync,
-    /// marshal starts from that floor. Otherwise marshal starts from genesis
-    /// and relies on its own durable progress to override that anchor when
-    /// available.
+    /// If a floor is persisted, marshal starts from that floor. Otherwise
+    /// marshal starts from genesis and relies on its own durable progress to
+    /// override that anchor when available.
     pub fn marshal_start<B>(&self, genesis: B) -> Start<S, V::Commitment, B> {
-        self.floor
-            .as_ref()
+        self.floor()
             .cloned()
             .map_or_else(|| Start::Genesis(genesis), Start::Floor)
     }
 
-    /// Returns whether startup must resume an interrupted state sync.
+    /// Returns whether a state sync floor is persisted.
     ///
-    /// This is `true` after a previous process crashed while state sync was
-    /// in progress. In that case [`Self::may_state_sync`] is also `true`, and
-    /// the persisted floor keeps partially synced database state on the same
-    /// recovery path.
+    /// This is `true` from the time [`Self::with_floor`] persists a floor until
+    /// state sync completes, including across restarts. In that case
+    /// [`Self::may_state_sync`] is also `true`, and the persisted floor keeps
+    /// partially synced database state on the same recovery path.
     pub fn requires_state_sync_floor(&self) -> bool {
         self.sync_metadata.in_progress()
     }
 
     /// Returns whether this startup should run peer state sync.
     ///
-    /// A caller can request peer state sync for a fresh node. An interrupted
-    /// state sync always requires peer state sync, even if the caller did not
-    /// explicitly request it.
+    /// A caller can request peer state sync for a fresh node. A persisted floor
+    /// always requires peer state sync, even if the caller did not explicitly
+    /// request it on this startup.
     pub fn should_state_sync(&self, requested: bool) -> bool {
         self.may_state_sync() && (requested || self.requires_state_sync_floor())
     }
@@ -194,10 +195,52 @@ mod tests {
             .expect("recover finalization")
     }
 
+    /// A selected floor is durable before marshal or Stateful starts, so every restart without a
+    /// state sync request resumes from the latest selection.
+    #[test]
+    fn selected_floor_survives_restart_before_actor_start() {
+        let mut checkpoint = None;
+        let mut state = None;
+        for boot in 0..3 {
+            let runner =
+                checkpoint.map_or_else(deterministic::Runner::default, deterministic::Runner::from);
+            let (next, recovered) = runner.start_and_recover(move |mut context| async move {
+                let (schemes, previous) = state.unwrap_or_else(|| {
+                    let fixture =
+                        scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
+                    (fixture.schemes, None)
+                });
+
+                // Each restart finds the previous boot's selection without a request.
+                let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
+                    context.child("plan"),
+                    "selected_floor_before_actor_start",
+                )
+                .await;
+                if let Some(previous) = previous {
+                    assert!(plan.should_state_sync(false));
+                    assert_eq!(plan.floor(), Some(&previous));
+                }
+
+                // Select a newer floor for marshal, then stop before either actor starts.
+                let selected = finalization(&schemes, 7 + boot, 7 + boot as u8);
+                let plan = plan.with_floor(selected.clone()).await;
+                assert!(matches!(
+                    plan.marshal_start(()),
+                    Start::Floor(ref floor) if floor == &selected
+                ));
+                (schemes, Some(selected))
+            });
+            state = Some(next);
+            checkpoint = Some(recovered);
+        }
+    }
+
     #[test]
     fn stored_sync_height_disables_state_sync() {
-        deterministic::Runner::default().start(|context| async move {
+        deterministic::Runner::default().start(|mut context| async move {
             let partition_prefix = "stored_sync_height";
+            let fixture = scheme_mocks::fixture(&mut context, b"_COMMONWARE_GLUE_SYNC_PLAN", 1);
 
             let plan = SyncPlan::<_, TestScheme, TestVariant>::init(
                 context.child("plan"),
@@ -226,6 +269,11 @@ mod tests {
             assert!(!plan.should_state_sync(true));
             assert_eq!(plan.sync_height(), Some(Height::new(7)));
             assert!(plan.floor().is_none());
+
+            // A completed sync ignores a later selection instead of persisting it.
+            let plan = plan.with_floor(finalization(&fixture.schemes, 8, 8)).await;
+            assert!(plan.floor().is_none());
+            assert_eq!(plan.sync_height(), Some(Height::new(7)));
         });
     }
 
@@ -325,7 +373,7 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            let plan = plan.with_floor(finalization(&fixture.schemes, 6, 6));
+            let plan = plan.with_floor(finalization(&fixture.schemes, 6, 6)).await;
             assert_eq!(
                 plan.floor().expect("interrupted sync must have a floor"),
                 &stored,
@@ -339,7 +387,7 @@ mod tests {
                 partition_prefix,
             )
             .await;
-            let plan = plan.with_floor(newer.clone());
+            let plan = plan.with_floor(newer.clone()).await;
             assert_eq!(plan.floor(), Some(&newer));
         });
     }
@@ -355,9 +403,11 @@ mod tests {
                 "with_floor_does_not_replace_newer_selection",
             )
             .await;
-            let plan =
-                plan.with_floor(newer.clone())
-                    .with_floor(finalization(&fixture.schemes, 8, 8));
+            let plan = plan
+                .with_floor(newer.clone())
+                .await
+                .with_floor(finalization(&fixture.schemes, 8, 8))
+                .await;
 
             assert_eq!(plan.floor(), Some(&newer));
         });

@@ -2,8 +2,9 @@
 //!
 //! This store exists only to recover state a restarted actor cannot otherwise
 //! re-obtain. After a crash the actor does not re-receive P2P messages and
-//! marshal does not re-deliver finalized blocks, so this store keeps a plaintext
-//! journal of the public messages a restarted node would otherwise lose:
+//! marshal does not redeliver finalized blocks it already processed, so this
+//! store keeps a plaintext journal of the public messages a restarted node would
+//! otherwise lose:
 //!
 //! - public dealer messages and player acknowledgements, so a player can rebuild
 //!   the acks it already emitted (its private dealings are recovered from

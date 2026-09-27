@@ -57,8 +57,9 @@ pub struct Config {
 /// floor is the finalized block selected for application state sync and gives
 /// marshal a block from which to resume delivery.
 ///
-/// The probe fixes the floor and the epoch info atomically, so the info
-/// always describes the epoch containing the floor.
+/// The info must describe the epoch containing the floor, and [`Plan::init`]
+/// panics otherwise. See [`crate::dkg`] for how startup pairs a probe artifact
+/// with a persisted floor.
 pub struct StateSync<S, D, V, Dir = Unit>
 where
     S: Scheme<D>,

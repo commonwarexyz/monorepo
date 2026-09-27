@@ -31,7 +31,7 @@ run it because only they receive shares. After DKG completes, the generated
 validators can start from the same genesis.
 
 `validator` starts the application chain, stateful QMDB, continuous reshare, DKG
-orchestrator, DKG anchor, and stateful probe.
+orchestrator, and DKG probe.
 
 ## Node Layout
 
@@ -65,12 +65,15 @@ carries the epoch-0 `EpochInfo`.
 ## State Sync
 
 `validator --state-sync` is only for a new late joiner whose key is already in a
-future committee. It asks peers for a finalized anchor, uses `stateful::probe` to
-select a floor, and state-syncs QMDB from that floor before normal processing.
+future committee. It uses `dkg::probe` to select a finalized floor and its epoch
+material from peers, persists that floor, and state-syncs QMDB from that floor
+before normal processing.
 
 Do not use `--state-sync` as a normal restart flag. A restart recovers from
-local storage. A player that misses its private dealings cannot recover them by
-syncing: the ceremony completes without it and publicly reveals its share.
+local storage. If a state sync floor is already persisted, a restart resumes
+state sync from it, or from a newer probed floor, without the flag. A player
+that misses its private dealings cannot recover them by syncing: the ceremony
+completes without it and publicly reveals its share.
 
 ## Limits
 

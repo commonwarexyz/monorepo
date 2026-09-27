@@ -1530,6 +1530,90 @@ mod tests {
         })
     }
 
+    /// A pending floor anchor that reaches the buffer installs the floor. With
+    /// `subscribe`, a query queued behind a subscription for the buffered anchor
+    /// observes the installed floor.
+    fn buffered_anchor_installs_floor(subscribe: bool) {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+
+            // No links are added, so the resolver fetch started by `set_floor`
+            // can never complete. The anchor can only arrive through the buffer.
+            let setup = StandardHarness::setup_validator(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                participants[0].clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let app = setup.application;
+            let mailbox = setup.mailbox;
+            let buffer = setup.extra;
+
+            // Record a pending floor whose anchor is unavailable locally.
+            let height = Height::new(5);
+            let anchor = make_raw_block(Sha256::hash(&[b"floor-parent"]), height, 500);
+            let finalization = StandardHarness::make_finalization(
+                Proposal::new(
+                    Round::new(Epoch::zero(), View::new(5)),
+                    View::new(4),
+                    anchor.digest(),
+                ),
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(finalization);
+
+            // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
+            // recorded a pending anchor before the buffer receives the block.
+            assert!(
+                mailbox
+                    .get_block(Identifier::Height(height))
+                    .await
+                    .is_none()
+            );
+
+            // The anchor reaches the buffer while only the pending floor's waiter awaits it.
+            let _ = buffer.broadcast(Recipients::All, anchor.clone());
+
+            // A query queued behind the subscription observes the installed floor.
+            if subscribe {
+                let subscription =
+                    mailbox.subscribe_by_commitment(anchor.digest(), CommitmentFallback::Wait);
+                let (_, block) = mailbox.get_anchor().await.unwrap();
+                assert_eq!(block.digest(), anchor.digest());
+                assert_eq!(subscription.await.unwrap().digest(), anchor.digest());
+            }
+
+            // Dispatch resumes at the anchor.
+            while !app.blocks().contains_key(&height) {
+                reschedule().await;
+            }
+            assert_eq!(app.tip(), Some((height, anchor.digest())));
+        })
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_unsubscribed_buffered_anchor_installs_floor() {
+        buffered_anchor_installs_floor(false);
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_late_subscription_observes_buffered_anchor_floor() {
+        buffered_anchor_installs_floor(true);
+    }
+
     #[test_traced("WARN")]
     fn test_standard_floor_preserves_registered_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -3962,6 +4046,10 @@ mod tests {
         fn commitment_subscription_count(&self) -> usize {
             self.commitment_subscriptions.lock().len()
         }
+
+        fn commitment_subscription_closed(&self, index: usize) -> bool {
+            self.commitment_subscriptions.lock()[index].is_closed()
+        }
     }
 
     impl crate::marshal::core::Buffer<Standard<B>> for RecordingBuffer {
@@ -5579,6 +5667,76 @@ mod tests {
                 StandardHarness::make_notarization(floor_proposal, &schemes, QUORUM);
             StandardHarness::report_notarization(&mut mailbox, floor_notarization).await;
             assert_eq!(started_rx.await.unwrap(), Height::new(5));
+        });
+    }
+
+    /// A pending floor releases its buffer waiter when a newer floor replaces it
+    /// and when its anchor installs through another path.
+    #[test_traced("WARN")]
+    fn test_standard_pending_floor_releases_buffer_waiter() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            // Two floors whose anchors are missing locally.
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let old = make_raw_block(Sha256::hash(&[b"old-parent"]), Height::new(5), 500);
+            let new = make_raw_block(Sha256::hash(&[b"new-parent"]), Height::new(6), 600);
+            let old_proposal = Proposal::new(
+                Round::new(Epoch::zero(), View::new(5)),
+                View::new(4),
+                StandardHarness::commitment(&old),
+            );
+            let new_proposal = Proposal::new(
+                Round::new(Epoch::zero(), View::new(6)),
+                View::new(5),
+                StandardHarness::commitment(&new),
+            );
+            let (application, started_rx) = HoldingBlockReporter::new_after(Height::zero());
+            let buffer = RecordingBuffer::default();
+            let (mut mailbox, _buffer, _resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "pending-floor-releases-waiter",
+                ConstantProvider::new(schemes[0].clone()),
+                application,
+                Some(buffer.clone()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16).into()),
+            )
+            .await;
+
+            // The first floor waits on the buffer for its anchor.
+            mailbox.set_floor(StandardHarness::make_finalization(
+                old_proposal,
+                &schemes,
+                QUORUM,
+            ));
+            while buffer.commitment_subscription_count() != 1 {
+                reschedule().await;
+            }
+
+            // A newer floor replaces it and releases the first waiter.
+            mailbox.set_floor(StandardHarness::make_finalization(
+                new_proposal.clone(),
+                &schemes,
+                QUORUM,
+            ));
+            while !buffer.commitment_subscription_closed(0) {
+                reschedule().await;
+            }
+            assert_eq!(buffer.commitment_subscription_count(), 2);
+            assert!(!buffer.commitment_subscription_closed(1));
+
+            // A notarization that finds the newer anchor installs the floor and
+            // releases the second waiter.
+            buffer.insert(new);
+            StandardHarness::report_notarization(
+                &mut mailbox,
+                StandardHarness::make_notarization(new_proposal, &schemes, QUORUM),
+            )
+            .await;
+            assert_eq!(started_rx.await.unwrap(), Height::new(6));
+            while !buffer.commitment_subscription_closed(1) {
+                reschedule().await;
+            }
         });
     }
 
@@ -7417,8 +7575,8 @@ mod tests {
     }
 
     /// A round-floor advance that supersedes the pending floor anchor must
-    /// release the floor transition rather than strand it once its anchor
-    /// fetch is pruned.
+    /// release the floor transition and its buffer waiter rather than strand
+    /// it once its anchor fetch is pruned.
     #[test_traced("WARN")]
     fn test_standard_round_floor_advance_releases_superseded_pending_floor() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -7468,12 +7626,13 @@ mod tests {
             // A configured floor for the pruned height 2 block is above the
             // recovered round floor, so marshal fetches it as a pending anchor.
             let application = Application::<B>::manual_ack();
+            let buffer = RecordingBuffer::default();
             let (mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 partition_prefix,
                 ConstantProvider::new(schemes[0].clone()),
                 application.clone(),
-                Some(RecordingBuffer::default()),
+                Some(buffer.clone()),
                 Start::Floor(anchor_finalization),
             )
             .await;
@@ -7513,6 +7672,12 @@ mod tests {
                 || resolver.retain_count() > retains_before,
             )
             .await;
+
+            // The superseded anchor releases its buffer waiter.
+            assert_eq!(buffer.commitment_subscription_count(), 1);
+            while !buffer.commitment_subscription_closed(0) {
+                reschedule().await;
+            }
 
             // The anchor is now provably at or below the processed height. If
             // marshal still wants it, serve it. Either way the superseded

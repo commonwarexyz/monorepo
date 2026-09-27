@@ -1,3 +1,4 @@
+use super::FinalizedTip;
 use crate::dkg::{
     ParticipantsProvider, Registrar, ReshareBlock, SecretStore,
     network::{Directory, Manager},
@@ -9,6 +10,7 @@ use crate::dkg::{
     types::{EpochInfo, EpochOutcome, Participants, Payload, SchemeInfo},
 };
 use commonware_consensus::{
+    Block,
     marshal::{
         Identifier,
         core::{Processed, Variant as MarshalVariant},
@@ -93,28 +95,36 @@ fn state_sync_skips_inclusion_prefix(
         == EpochPhase::Late
 }
 
-/// Selects the first height setup may process.
+/// Selects the latest finalized block the actor covers at startup.
 ///
-/// State sync never starts below its certified floor. Otherwise, an existing
-/// ceremony restarts at its epoch boundary, and a fresh setup resumes after
-/// Marshal's processed height.
-fn startup_height(
-    epocher: &FixedEpocher,
-    current_epoch: Option<Epoch>,
-    state_sync_floor: Option<Height>,
-    processed: Option<Height>,
-) -> Height {
-    if let Some(floor) = state_sync_floor {
-        // A certified floor remains the lower bound when Marshal's processed
-        // height has not caught up to its resolved floor block.
-        return processed.map_or(floor, |height| height.next().max(floor));
-    }
-    if let Some(epoch) = current_epoch {
-        return epocher
-            .first(epoch)
-            .expect("epocher must know hinted epoch");
-    }
-    processed.map_or_else(Height::zero, Height::next)
+/// Marshal's processed position comes with the stored block that backs it. An
+/// absent processed block is the parent of that stored block. State sync covers
+/// every block below its certified floor, even while Marshal's processed
+/// position has not caught up to the floor.
+pub(super) fn startup<B: Block>(
+    processed: Option<(Processed, B)>,
+    floor: Option<&B>,
+) -> Option<FinalizedTip<B::Digest>> {
+    let processed = processed.map(|(processed, block)| match processed {
+        Processed::Block(height) => FinalizedTip {
+            height,
+            digest: block.digest(),
+        },
+        Processed::Absent(height) => FinalizedTip {
+            height,
+            digest: block.parent(),
+        },
+    });
+    let floor = floor.and_then(|block| {
+        Some(FinalizedTip {
+            height: block.height().previous()?,
+            digest: block.parent(),
+        })
+    });
+    processed
+        .into_iter()
+        .chain(floor)
+        .max_by_key(|tip| tip.height)
 }
 
 /// Retains a dealer that can still produce a selectable log.
@@ -156,21 +166,12 @@ where
     pub(super) async fn setup(
         &mut self,
         store: &mut Store<E, SS, V, C::PublicKey, B::Directory>,
-        current_epoch: Option<Epoch>,
         state_sync: Option<StateSyncStart<V, C::PublicKey, B::Directory>>,
     ) -> Option<Setup<V, C>> {
         self.metrics.set_phase(Phase::Setup);
 
-        // Reconcile the epoch hint with Marshal progress and the certified
-        // state-sync floor. The floor remains authoritative while Marshal has
-        // not yet recorded its block as processed.
-        let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
-        let processed = if state_sync_floor.is_some() || current_epoch.is_none() {
-            self.marshal.get_processed().await.map(Processed::height)
-        } else {
-            None
-        };
-        let height = startup_height(&self.epocher, current_epoch, state_sync_floor, processed);
+        // Resume at the first height the tip does not cover.
+        let height = self.tip.map_or_else(Height::zero, |tip| tip.height.next());
         let bounds = self
             .epocher
             .containing(height)
@@ -183,6 +184,7 @@ where
         // participation requires the finalized boundary block.
         let current = store.current().filter(|current| current.epoch == epoch);
         let already_committed = current.is_some();
+        let state_sync_floor = state_sync.as_ref().map(|start| start.floor);
         let follow = state_sync_skips_inclusion_prefix(&self.epocher, state_sync_floor);
         let info = match current.or_else(|| state_sync.map(|start| start.info)) {
             Some(info) => info,
@@ -356,49 +358,68 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{dealer_for_phase, startup_height, state_sync_skips_inclusion_prefix};
+    use super::{dealer_for_phase, startup, state_sync_skips_inclusion_prefix};
     use crate::dkg::{
         reshare::store::{AckOutcome, Store},
-        tests::mocks::{MemorySecretStore, TestBlsVariant},
+        tests::mocks::{MemorySecretStore, TestBlock, TestBlsVariant, genesis_block},
     };
-    use commonware_consensus::types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height};
+    use commonware_consensus::{
+        Heightable as _,
+        marshal::core::Processed,
+        types::{Epoch, EpochPhase, Epocher as _, FixedEpocher, Height},
+    };
     use commonware_cryptography::{
-        Signer,
+        Digestible as _, Signer,
         bls12381::{
             dkg::feldman_desmedt::{Info, Player, Reveal, deal},
             primitives::sharing::Mode,
         },
         ed25519::{PrivateKey, PublicKey},
+        sha256::Sha256,
     };
     use commonware_runtime::{Runner, Supervisor as _, deterministic};
     use commonware_utils::{N3f1, NZU32, NZU64, ordered::Set, test_rng};
 
     const TEST_NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_DKG_RESHARE_SETUP_TEST";
 
+    /// State sync never resumes below its certified floor, and marshal's
+    /// processed position takes its digest from the stored block that backs it.
     #[test]
-    fn state_sync_start_does_not_precede_certified_floor() {
-        let epocher = FixedEpocher::new(NZU64!(64));
-        let epoch = Epoch::new(3);
-        let floor = epocher.midpoint(epoch).expect("test epoch");
-        let older = floor
-            .previous()
-            .and_then(Height::previous)
-            .expect("test floor has earlier height");
+    fn startup_tip_covers_processed_and_floor() {
+        let mut blocks = vec![genesis_block(PrivateKey::from_seed(0).public_key())];
+        while blocks.len() < 5 {
+            let parent = blocks.last().unwrap();
+            let height = parent.height().next();
+            blocks.push(TestBlock::new::<Sha256>(
+                parent.context().clone(),
+                parent.digest(),
+                height,
+                height.get(),
+            ));
+        }
+        let tip = |processed: Option<Processed>, floor: Option<usize>| {
+            let processed = processed.map(|processed| {
+                let anchor = processed.anchor().get() as usize;
+                (processed, blocks[anchor].clone())
+            });
+            startup(processed, floor.map(|floor| &blocks[floor]))
+                .map(|tip| (tip.height, tip.digest))
+        };
+        let covered = |index: usize| Some((Height::new(index as u64), blocks[index].digest()));
+        let stored = |height| Some(Processed::Block(Height::new(height)));
+        let absent = |height| Some(Processed::Absent(Height::new(height)));
 
-        assert_eq!(
-            startup_height(&epocher, Some(epoch), Some(floor), None),
-            floor
-        );
-        assert_eq!(
-            startup_height(&epocher, Some(epoch), Some(floor), Some(older)),
-            floor
-        );
+        // Without state sync, the actor resumes after marshal's processed position.
+        assert_eq!(tip(None, None), None);
+        assert_eq!(tip(stored(2), None), covered(2));
+        assert_eq!(tip(absent(2), None), covered(2));
 
-        let newer = floor.next();
-        assert_eq!(
-            startup_height(&epocher, Some(epoch), Some(floor), Some(newer)),
-            newer.next()
-        );
+        // A floor covers every block below it until marshal passes it.
+        assert_eq!(tip(None, Some(0)), None);
+        assert_eq!(tip(None, Some(3)), covered(2));
+        assert_eq!(tip(stored(1), Some(3)), covered(2));
+        assert_eq!(tip(absent(2), Some(3)), covered(2));
+        assert_eq!(tip(stored(4), Some(3)), covered(4));
     }
 
     #[test]

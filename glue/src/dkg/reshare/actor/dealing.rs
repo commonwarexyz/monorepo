@@ -99,6 +99,10 @@ where
                     block,
                     response,
                 } => {
+                    if self.covered(&block) {
+                        response.acknowledge();
+                        continue;
+                    }
                     let process = info_span!(
                         parent: &span,
                         "dkg.reshare.actor.dealing.finalized",
@@ -133,6 +137,7 @@ where
                             .midpoint(epoch)
                             .and_then(|midpoint| midpoint.previous())
                             == Some(block.height());
+                        self.advance(&block);
                         response.acknowledge();
                         done
                     }

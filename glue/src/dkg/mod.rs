@@ -77,11 +77,15 @@
 //! stale material once marshal's recovered epoch advances beyond the synced
 //! epoch. This API is independent of the optional [`crate::stateful`] actor.
 //!
-//! [`probe`] fixes the state-sync floor and the epoch info atomically: the
-//! floor is the highest finalization from an `f + 1` sample of the configured
-//! bootstrap committee, and the epoch info is fetched for that floor's own
-//! epoch. The actors therefore always start in the floor's epoch with its
-//! public info in hand. If the network crosses an epoch boundary while
+//! [`probe`] pairs a sampled floor with that floor's epoch info: the floor is
+//! the highest finalization from an `f + 1` sample of the configured bootstrap
+//! committee, and the epoch info is fetched for that floor's own epoch. A node
+//! resuming an interrupted state sync keeps its persisted floor unless the
+//! sampled floor is newer, so it must pass that floor as
+//! [`probe::Config::floor`]. The probe then ignores replies below that floor's
+//! epoch, so the info describes the epoch of whichever floor the node keeps.
+//! The actors therefore start in the epoch of the floor they sync from, with
+//! its public info in hand. If the network crosses an epoch boundary while
 //! application state sync is still running, the node starts at the floor's
 //! epoch and catches up through ordinary marshal delivery: backup vote or
 //! certificate traffic from a future epoch hints marshal to fetch the missing
