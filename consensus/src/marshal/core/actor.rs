@@ -474,21 +474,24 @@ where
                 }
                 Err(key) => {
                     // A closed buffer subscription marks the key as permanently unavailable.
-                    match key {
-                        SubscriptionKey::Digest(digest) => {
-                            debug!(
-                                ?digest,
-                                "buffer subscription closed, canceling local subscribers"
-                            );
-                        }
-                        SubscriptionKey::Commitment(commitment) => {
-                            debug!(
-                                ?commitment,
-                                "buffer subscription closed, canceling local subscribers"
-                            );
+                    // The pending floor's waiter shares the key but owns no subscribers, so
+                    // log only when local subscribers were canceled.
+                    if self.block_subscriptions.remove(&key) {
+                        match key {
+                            SubscriptionKey::Digest(digest) => {
+                                debug!(
+                                    ?digest,
+                                    "buffer subscription closed, canceling local subscribers"
+                                );
+                            }
+                            SubscriptionKey::Commitment(commitment) => {
+                                debug!(
+                                    ?commitment,
+                                    "buffer subscription closed, canceling local subscribers"
+                                );
+                            }
                         }
                     }
-                    self.block_subscriptions.remove(&key);
                 }
             },
             // Handle application acknowledgements (drain all ready acks, sync once)

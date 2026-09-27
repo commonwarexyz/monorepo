@@ -1508,14 +1508,15 @@ mod tests {
                     .is_none()
             );
 
-            // Deliver the anchor through the broadcast buffer, completing the waiter.
+            // Deliver the anchor through the broadcast buffer, completing the
+            // subscription's waiter and the pending floor's waiter.
             let _ = buffer.broadcast(Recipients::All, anchor.clone());
 
-            // The waiter must wake the subscriber.
+            // The subscriber must receive the anchor.
             let received = subscription.await.unwrap();
             assert_eq!(received.digest(), anchor.digest());
 
-            // The waiter must also install the floor anchor and resume dispatch.
+            // The anchor must also install the floor and resume dispatch.
             while !app.blocks().contains_key(&Height::new(ANCHOR_HEIGHT)) {
                 context.sleep(Duration::from_millis(50)).await;
             }

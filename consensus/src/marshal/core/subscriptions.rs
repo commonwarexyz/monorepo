@@ -56,8 +56,9 @@ impl<V: Variant> Subscriptions<V> {
         }
     }
 
-    pub(super) fn remove(&mut self, key: &KeyFor<V>) {
-        self.entries.remove(key);
+    /// Removes the subscribers waiting on `key`, returning whether any were registered.
+    pub(super) fn remove(&mut self, key: &KeyFor<V>) -> bool {
+        self.entries.remove(key).is_some()
     }
 
     pub(super) fn retain_open(&mut self) {
@@ -324,7 +325,8 @@ mod tests {
 
             let (sender, _receiver) = oneshot::channel();
             subscriptions.insert(Span::none(), key, sender, &mut waiters, &buffer);
-            subscriptions.remove(&key);
+            assert!(subscriptions.remove(&key));
+            assert!(!subscriptions.remove(&key));
 
             select! {
                 completion = waiters.next_completed() => {
