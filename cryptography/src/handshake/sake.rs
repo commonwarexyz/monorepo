@@ -21,9 +21,10 @@
 //! not hidden by the construction. SAKE has no 0-RTT mode or resumption mechanism. Application
 //! data can be sent only after the three messages complete.
 //!
-//! The BLAKE3 transcript first commits the caller-provided application namespace as one packet,
-//! then forks it with the protocol namespace of the [Version]: `_COMMONWARE_CRYPTOGRAPHY_SAKE` for
-//! [Version::V1] and the original `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` for [Version::V0]. Distinct
+//! The BLAKE3 transcript first commits the caller-provided application namespace as one packet. A
+//! protocol built on SAKE may then fork it with its own label ([Context::fork]). SAKE then forks it
+//! with the protocol namespace of the [Version]: `_COMMONWARE_CRYPTOGRAPHY_SAKE` for [Version::V1]
+//! and the original `_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE` for [Version::V0]. Distinct
 //! labels derive the listener-to-dialer and dialer-to-listener traffic keys and confirmations.
 //! These namespace bytes, transcript order, and labels are protocol constants.
 //!
@@ -291,7 +292,7 @@ impl<S, P> Context<S, P> {
         my_identity: S,
         peer_identity: P,
     ) -> Self {
-        let transcript = Transcript::new(namespace, version.transcript()).fork(version.namespace());
+        let transcript = Transcript::new(namespace, version.transcript());
         Self {
             version,
             transcript,
@@ -300,6 +301,15 @@ impl<S, P> Context<S, P> {
             my_identity,
             peer_identity,
         }
+    }
+
+    /// Forks the transcript with the label of a protocol built on SAKE.
+    ///
+    /// SAKE forks its own protocol namespace after every label added here, so handshakes that
+    /// different protocols run with the same application namespace do not share a transcript.
+    pub fn fork(mut self, label: &'static [u8]) -> Self {
+        self.transcript = self.transcript.fork(label);
+        self
     }
 }
 
@@ -315,8 +325,9 @@ pub fn dial_start<S: Signer, P: PublicKey>(
         ok_timestamps,
         my_identity,
         peer_identity,
-        mut transcript,
+        transcript,
     } = ctx;
+    let mut transcript = transcript.fork(version.namespace());
     let esk = SecretKey::new(rng);
     let epk = esk.public();
     let dialer_identity = my_identity.public_key().encode();
@@ -403,8 +414,9 @@ pub fn listen_start<S: Signer, P: PublicKey>(
         my_identity,
         peer_identity,
         ok_timestamps,
-        mut transcript,
+        transcript,
     } = ctx;
+    let mut transcript = transcript.fork(version.namespace());
     if !ok_timestamps.contains(&msg.time_ms) {
         return Err(Error::InvalidTimestamp(msg.time_ms, ok_timestamps));
     }

@@ -17,10 +17,10 @@
 //! listener's bouncer may reject that claim before authentication. Accepting it only permits the
 //! handshake to continue. A successful handshake authenticates the returned identity.
 //!
-//! Version 1 prefixes the application namespace with the length-delimited label
-//! `_COMMONWARE_STREAM_CUPS` ([commonware_utils::union_unique]) before SAKE commits it, so its
-//! handshakes differ from SAKE handshakes that another protocol runs with the same application
-//! namespace. Version 0 passes the application namespace to SAKE unchanged.
+//! Version 1 forks the SAKE transcript with `_COMMONWARE_STREAM_CUPS` after the application
+//! namespace and before SAKE's own protocol namespace ([sake::Context::fork]), so its handshakes
+//! differ from SAKE handshakes that another protocol runs with the same application namespace.
+//! Version 0 does not fork it.
 //!
 //! Peers must agree on a unique, application-specific namespace, a [Version], and have clocks
 //! within the configured timestamp acceptance windows. The version is not negotiated: a mismatch
@@ -71,7 +71,7 @@ use commonware_runtime::{
     Buf as _, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut,
     IoBufs, Sink, Stream,
 };
-use commonware_utils::{DurationExt, SystemTimeExt, union_unique};
+use commonware_utils::{DurationExt, SystemTimeExt};
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -90,7 +90,7 @@ const TAG_SIZE: u32 = {
 const V1_HEADER_PLAINTEXT_SIZE: usize = u32::SIZE;
 const V1_HEADER_SIZE: usize = V1_HEADER_PLAINTEXT_SIZE + TAG_SIZE as usize;
 
-/// Maximum supported plaintext message size.
+/// Maximum plaintext message size supported by any version.
 pub const MAX_SIZE: u32 = u32::MAX - TAG_SIZE;
 
 /// Errors that can occur when interacting with a stream.
@@ -130,8 +130,8 @@ impl From<HandshakeError> for Error {
     }
 }
 
-/// Protocol version used by [Handshake], selecting the SAKE version, the namespace SAKE commits, and
-/// the record format.
+/// Protocol version used by [Handshake], selecting the SAKE version, the transcript scope, and the
+/// record format.
 ///
 /// Both peers must use the same version. The version is not negotiated, so keep the older version
 /// until every peer has upgraded.
@@ -139,12 +139,22 @@ impl From<HandshakeError> for Error {
 pub enum Version {
     /// [sake::Version::V0] handshakes and records framed by a visible length prefix.
     V0,
-    /// [sake::Version::V1] handshakes under a CUPS-scoped namespace, and records framed by an
-    /// encrypted, authenticated length header.
+    /// [sake::Version::V1] handshakes scoped to CUPS, and records framed by an encrypted,
+    /// authenticated length header.
     V1,
 }
 
 impl Version {
+    /// Returns the largest plaintext message size this version supports.
+    ///
+    /// A version 1 record, header included, must fit in a `u32`.
+    pub const fn max_size(self) -> u32 {
+        match self {
+            Self::V0 => MAX_SIZE,
+            Self::V1 => MAX_SIZE - V1_HEADER_SIZE as u32,
+        }
+    }
+
     /// Returns the SAKE version this protocol version runs.
     const fn sake(self) -> sake::Version {
         match self {
@@ -153,14 +163,14 @@ impl Version {
         }
     }
 
-    /// Returns the namespace SAKE commits for an application namespace.
+    /// Scopes a SAKE context to CUPS.
     ///
-    /// Each version must give SAKE a version and namespace pair that no other version gives it, so a
-    /// mismatch fails the handshake.
-    fn namespace(self, namespace: &[u8]) -> Vec<u8> {
+    /// Each version must give SAKE a version and transcript scope that no other version gives it, so
+    /// a mismatch fails the handshake.
+    fn scope<S, P>(self, context: Context<S, P>) -> Context<S, P> {
         match self {
-            Self::V0 => namespace.to_vec(),
-            Self::V1 => union_unique(NAMESPACE, namespace),
+            Self::V0 => context,
+            Self::V1 => context.fork(NAMESPACE),
         }
     }
 
@@ -248,8 +258,7 @@ pub struct Handshake<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
-    /// Protocol version, selecting the SAKE version, the namespace SAKE commits, and the record
-    /// format.
+    /// Protocol version, selecting the SAKE version, the transcript scope, and the record format.
     pub version: Version,
 
     /// Maximum time drift allowed for future timestamps.
@@ -330,7 +339,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         O: Sink,
     {
         assert!(
-            max_message_size <= MAX_SIZE,
+            max_message_size <= self.version.max_size(),
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
@@ -339,14 +348,14 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let (current_time, ok_timestamps) = self.time_information(&context);
         let (state, syn) = dial_start(
             context,
-            Context::new(
-                &self.version.namespace(namespace),
+            self.version.scope(Context::new(
+                namespace,
                 self.version.sake(),
                 current_time,
                 ok_timestamps,
                 self.signer,
                 peer,
-            ),
+            )),
         );
         send_handshake_frame(&mut sink, syn).await?;
 
@@ -390,7 +399,7 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         F: Future<Output = bool> + Send,
     {
         assert!(
-            max_message_size <= MAX_SIZE,
+            max_message_size <= self.version.max_size(),
             "maximum message size exceeds stream limit"
         );
         let pool = context.network_buffer_pool().clone();
@@ -404,14 +413,14 @@ impl<S: Signer> crate::Handshake for Handshake<S> {
         let (current_time, ok_timestamps) = self.time_information(&context);
         let (state, syn_ack) = listen_start(
             context,
-            Context::new(
-                &self.version.namespace(namespace),
+            self.version.scope(Context::new(
+                namespace,
                 self.version.sake(),
                 current_time,
                 ok_timestamps,
                 self.signer,
                 peer.clone(),
-            ),
+            )),
             msg1,
         )?;
         send_handshake_frame(&mut sink, syn_ack).await?;
@@ -850,7 +859,8 @@ mod test {
     fn test_max_message_size_bounds() {
         assert_eq!(MAX_SIZE + TAG_SIZE, u32::MAX);
         deterministic::Runner::default().start(|context| async move {
-            for max_message_size in [0, MAX_SIZE, MAX_SIZE + 1] {
+            let limit = Version::V1.max_size();
+            for max_message_size in [0, limit, limit + 1] {
                 for dialer in [true, false] {
                     let (sink, _) = mocks::Channel::init();
                     let (_, stream) = mocks::Channel::init();
@@ -883,7 +893,7 @@ mod test {
                         }
                     };
                     let result = AssertUnwindSafe(attempt).catch_unwind().await;
-                    if max_message_size <= MAX_SIZE {
+                    if max_message_size <= limit {
                         assert!(result.unwrap().is_err());
                     } else {
                         assert_eq!(

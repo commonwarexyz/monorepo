@@ -27,14 +27,14 @@ commonware_macros::stability_scope!(BETA {
     /// authenticated peer that is returned.
     ///
     /// `max_message_size` sets the plaintext message limit for the returned streams. Callers must
-    /// supply a limit no greater than [`Self::MAX_SIZE`]. Implementations must reject larger outbound
-    /// messages and enforce the limit before allocating for an inbound message. Protocol overhead
-    /// does not count toward this limit.
+    /// supply a limit no greater than the handshake supports, which is at most [`Self::MAX_SIZE`].
+    /// Implementations must reject larger outbound messages and enforce the limit before allocating
+    /// for an inbound message. Protocol overhead does not count toward this limit.
     ///
     /// Callers must enforce a deadline, for example with [utils::Timeout]. Dropping the handshake
     /// future cancels the attempt, and implementations must release the underlying connection.
     pub trait Handshake: Clone + Send + Sync + 'static {
-        /// Largest plaintext message supported by the established streams, in bytes.
+        /// Largest plaintext message limit any handshake of this type supports, in bytes.
         const MAX_SIZE: u32;
 
         /// Public key identifying an authenticated peer.
@@ -58,7 +58,8 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// # Panics
         ///
-        /// Implementations may panic if `max_message_size` exceeds [`Self::MAX_SIZE`].
+        /// Implementations may panic if `max_message_size` exceeds the limit this handshake
+        /// supports, which is at most [`Self::MAX_SIZE`].
         #[allow(clippy::type_complexity)]
         fn dial<C, I, O>(
             self,
@@ -82,7 +83,8 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// # Panics
         ///
-        /// Implementations may panic if `max_message_size` exceeds [`Self::MAX_SIZE`].
+        /// Implementations may panic if `max_message_size` exceeds the limit this handshake
+        /// supports, which is at most [`Self::MAX_SIZE`].
         #[allow(clippy::type_complexity)]
         fn listen<C, I, O, B, F>(
             self,
