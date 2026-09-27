@@ -244,7 +244,8 @@ where
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
         }
-        let floor_state = FloorState::new(last_processed, last_processed_round, configured);
+        let floor_state =
+            FloorState::new(configured, Floor::new(last_processed, last_processed_round));
         let floor = floor_state.snapshot();
 
         // Initialize mailbox

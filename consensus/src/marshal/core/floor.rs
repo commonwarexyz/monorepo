@@ -45,6 +45,10 @@ pub struct Floor {
 }
 
 impl Floor {
+    pub(super) const fn new(processed: Option<Processed>, round: Round) -> Self {
+        Self { processed, round }
+    }
+
     /// Returns the latest durably processed position, if any.
     pub const fn processed(&self) -> Option<Processed> {
         self.processed
@@ -74,14 +78,10 @@ pub(super) struct State<S: Scheme, C: Digest> {
 }
 
 impl<S: Scheme, C: Digest> State<S, C> {
-    pub(super) const fn new(
-        processed: Option<Processed>,
-        round: Round,
-        configured: Option<Finalization<S, C>>,
-    ) -> Self {
+    pub(super) const fn new(configured: Option<Finalization<S, C>>, floor: Floor) -> Self {
         Self {
-            processed,
-            round,
+            processed: floor.processed,
+            round: floor.round,
             configured,
             pending: None,
         }
@@ -94,10 +94,7 @@ impl<S: Scheme, C: Digest> State<S, C> {
     }
 
     pub(super) const fn snapshot(&self) -> Floor {
-        Floor {
-            processed: self.processed,
-            round: self.round,
-        }
+        Floor::new(self.processed, self.round)
     }
 
     /// Returns the durable processed position, if any.
@@ -350,7 +347,10 @@ mod tests {
     }
 
     fn floor() -> State<TestScheme, TestDigest> {
-        State::new(Some(Processed::Block(Height::new(5))), round(5), None)
+        State::new(
+            None,
+            Floor::new(Some(Processed::Block(Height::new(5))), round(5)),
+        )
     }
 
     #[test]
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn fetch_if_permitted_without_height_floor_allows_genesis_height() {
-        let floor = State::<TestScheme, TestDigest>::new(None, round(5), None);
+        let floor = State::<TestScheme, TestDigest>::new(None, Floor::new(None, round(5)));
         let mut resolver = TestResolver::default();
 
         assert!(matches!(
