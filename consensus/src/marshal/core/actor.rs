@@ -1232,15 +1232,15 @@ where
             .put_finalization(round, digest, &finalization)
             .await;
 
-        // A pending anchor at the same or a newer floor already blocks
+        // A pending floor at the same or a newer round already blocks
         // progress. Keep waiting for it instead of replacing it.
-        if self.floor.has_pending_anchor_at_or_after(round) {
+        if self.floor.pending_supersedes(round) {
             return self;
         }
 
         // A local anchor replaces any older pending floor and installs through ingest.
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            self.floor.await_anchor(finalization, None);
+            self.floor.set_pending(finalization, None);
             let anchored;
             (self, anchored) = self.ingest(block, buffer, application, resolver).await;
             assert!(anchored, "failed to ingest pending floor anchor");
@@ -1252,14 +1252,14 @@ where
         // but retain their heights and commitments until the anchor makes the floor active.
         self.cleared_acks.extend(self.pending_acks.clear());
 
-        // The pending floor owns the waiter, which is released when the floor is
-        // replaced, applied, or superseded. A closed subscription never completes,
-        // so it cannot reach the error arm that cancels caller subscriptions on the
-        // anchor, and the floor falls back to the fetch below.
+        // The pending floor holds the waiter, which is released when the floor is
+        // replaced, applied, or superseded. A closed subscription leaves the waiter
+        // pending rather than reaching the error arm, which would cancel caller
+        // subscriptions on the anchor. The fetch below is issued either way.
         let aborter = buffer
             .subscribe_by_commitment(commitment)
             .map(|rx| waiters.push(rx.or_else(|_| future::pending())));
-        self.floor.await_anchor(finalization, aborter);
+        self.floor.set_pending(finalization, aborter);
 
         debug!(?round, ?commitment, "starting fetch for floor block");
         self.floor
@@ -1316,7 +1316,7 @@ where
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(block.clone());
 
-        let Some(finalization) = self.floor.take_matching_anchor(V::commitment(&block)) else {
+        let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
             return (self, false);
         };
 
@@ -2519,7 +2519,7 @@ where
             return self;
         }
 
-        self.floor.set_processed_round(round);
+        self.floor.set_round(round);
 
         // Retain view-indexed cache data for a window behind the previously
         // processed finalized block.
@@ -2534,7 +2534,7 @@ where
 
         // A superseded anchor is an ancestor of a processed block, so the floor
         // it announced is already active. Retire the acks it displaced and resume.
-        if self.floor.take_superseded_anchor(round).is_none() {
+        if self.floor.take_superseded(round).is_none() {
             return self;
         }
         let commitments = self.take_superseded_ack_commitments();

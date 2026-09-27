@@ -1658,8 +1658,8 @@ mod tests {
         });
     }
 
-    /// Closing a pending floor's buffer waiter leaves caller subscriptions on the same anchor
-    /// registered, and the anchor still installs the floor through their waiter.
+    /// Closing a pending floor's buffer subscription leaves caller subscriptions on the same
+    /// anchor registered, and the anchor still installs the floor through their waiter.
     #[test_traced("WARN")]
     fn test_standard_closed_floor_waiter_preserves_subscriptions() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1703,7 +1703,7 @@ mod tests {
             }
 
             // The buffer closes the floor's subscription. Waiters are polled before the mailbox,
-            // so the query observes the closure.
+            // so the closure is handled before the query is served.
             buffer.close_commitment_subscription(0);
             assert!(
                 mailbox
