@@ -2122,6 +2122,56 @@ where
     });
 }
 
+/// Test that local pinned nodes are found for a target whose lower bound precedes its inactivity
+/// floor.
+pub(crate) fn test_local_pinned_nodes_below_floor<H: SyncTestHarness>() {
+    let executor = deterministic::Runner::default();
+    executor.start(|mut context| async move {
+        let config = H::config(&context.next_u64().to_string(), &context);
+        let mut db = H::init_db_with_config(context.child("db"), config.clone()).await;
+
+        // Rewrite the same keys until a peak lies wholly below the floor, so a floor taken from
+        // the target's lower bound would produce a different root.
+        let start = Location::new(1);
+        let mut round = 0;
+        loop {
+            round += 1;
+            assert!(round <= 64, "inactivity floor never passed a peak");
+            db = H::apply_ops(db, H::create_ops(100)).await;
+            let end = db.bounds().end;
+            let floor = db.inactivity_floor_loc();
+            if <H::Family as merkle::Family>::inactive_peaks(end, floor)
+                > <H::Family as merkle::Family>::inactive_peaks(end, start)
+            {
+                break;
+            }
+        }
+        let target = Target {
+            root: H::sync_target_root(&db),
+            range: non_empty_range!(start, db.bounds().end),
+        };
+        drop(db.sync().await.unwrap());
+
+        let journal = <JournalOf<H> as sync::Journal<H::Family>>::new(
+            context.child("journal"),
+            sync::DatabaseConfig::journal_config(&config),
+            target.range.clone(),
+        )
+        .await
+        .unwrap();
+        let pinned = <DbOf<H> as sync::Database>::local_pinned_nodes(
+            context.child("probe"),
+            &config,
+            &target,
+            &journal,
+        )
+        .await
+        .unwrap();
+        assert!(pinned.is_some());
+        drop(journal);
+    });
+}
+
 mod harnesses {
     use super::SyncTestHarness;
     use crate::{
@@ -2280,7 +2330,7 @@ mod harnesses {
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2342,7 +2392,7 @@ mod harnesses {
             ctx: Context,
             config: crate::qmdb::any::ordered::variable::test::VarConfig,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2404,7 +2454,7 @@ mod harnesses {
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2466,7 +2516,7 @@ mod harnesses {
             ctx: Context,
             config: crate::qmdb::any::unordered::variable::test::VarConfig,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2535,14 +2585,14 @@ mod harnesses {
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
             let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2620,14 +2670,14 @@ mod harnesses {
             let seed = ctx.next_u64();
             let config =
                 crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx, ());
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::ordered::variable::test::VarConfig,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2704,14 +2754,14 @@ mod harnesses {
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
             let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
-            Self::Db::init(ctx, cfg).await.unwrap()
+            Self::Db::init(ctx, cfg, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential>,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2788,14 +2838,14 @@ mod harnesses {
             let seed = ctx.next_u64();
             let config =
                 crate::qmdb::any::unordered::variable::test::create_test_config(seed, &ctx);
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn init_db_with_config(
             ctx: Context,
             config: crate::qmdb::any::unordered::variable::test::VarConfig,
         ) -> Self::Db {
-            Self::Db::init(ctx, config).await.unwrap()
+            Self::Db::init(ctx, config, None).await.unwrap()
         }
 
         async fn apply_ops(
@@ -2972,6 +3022,11 @@ macro_rules! sync_tests_for_harness {
             #[test_traced]
             fn test_sync_waits_for_boundary_retry_after_target_update() {
                 super::test_sync_waits_for_boundary_retry_after_target_update::<$harness>();
+            }
+
+            #[test_traced]
+            fn test_local_pinned_nodes_below_floor() {
+                super::test_local_pinned_nodes_below_floor::<$harness>();
             }
         }
     };

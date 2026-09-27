@@ -452,7 +452,6 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
-
     executor.start(|mut context| async move {
         let (oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;
@@ -533,7 +532,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(rng);
     let executor = deterministic::Runner::new(cfg);
-
     executor.start(|mut context| async move {
         let (mut oracle, participants, schemes, mut registrations) =
             setup_network::<P>(&mut context, &input).await;

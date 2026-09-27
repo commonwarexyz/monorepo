@@ -48,8 +48,14 @@ impl<
 {
     /// Returns a [Db] qmdb initialized from `cfg`. Any uncommitted log operations will be
     /// discarded and the state of the db will be as of the last committed operation.
-    pub async fn init(context: E, cfg: Config<T, S>) -> Result<Self, Error<F>> {
-        crate::qmdb::any::init(context, cfg).await
+    /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+    /// `None` selects the latest retained state.
+    pub async fn init(
+        context: E,
+        cfg: Config<T, S>,
+        max_size: Option<Location<F>>,
+    ) -> Result<Self, Error<F>> {
+        crate::qmdb::any::init(context, cfg, max_size).await
     }
 }
 
@@ -113,11 +119,14 @@ pub mod partitioned {
     {
         /// Returns a [Db] QMDB initialized from `cfg`. Uncommitted log operations will be
         /// discarded and the state of the db will be as of the last committed operation.
+        /// `Some(max_size)` selects the latest retained commit with at most `max_size` operations.
+        /// `None` selects the latest retained state.
         pub async fn init(
             context: E,
             cfg: Config<T, S, core::num::NonZeroUsize>,
+            max_size: Option<Location<F>>,
         ) -> Result<Self, Error<F>> {
-            crate::qmdb::any::init(context, cfg).await
+            crate::qmdb::any::init(context, cfg, max_size).await
         }
     }
 
@@ -197,20 +206,20 @@ pub(crate) mod test {
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
         let cfg = fixed_db_config::<TwoCap>("partition", &context);
-        crate::qmdb::any::init(context, cfg).await.unwrap()
+        crate::qmdb::any::init(context, cfg, None).await.unwrap()
     }
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
         let cfg = fixed_db_config("partition", &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
         let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
-        AnyTest::init(context, cfg).await.unwrap()
+        AnyTest::init(context, cfg, None).await.unwrap()
     }
 
     /// Create n random operations using the default seed (0). Some portion of
@@ -501,7 +510,7 @@ pub(crate) mod test {
             let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
             let db =
                 Db::<mmr::Family, Context, FixedBytes<2>, i32, Sha256, OneCap, Sequential>::init(
-                    context, config,
+                    context, config, None,
                 )
                 .await
                 .unwrap();
@@ -647,7 +656,7 @@ pub(crate) mod test {
         }
 
         let cfg = fixed_db_config_partitioned::<OneCap>(partition, &context);
-        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg)
+        let db = PartDb::<P, Sequential>::init(context.child("populate"), cfg, None)
             .await
             .unwrap();
 
@@ -703,7 +712,7 @@ pub(crate) mod test {
             let ctx = context
                 .child("reopen")
                 .with_attribute("concurrency", concurrency);
-            let db = PartDb::<P, Sequential>::init(ctx, cfg).await.unwrap();
+            let db = PartDb::<P, Sequential>::init(ctx, cfg, None).await.unwrap();
             assert_eq!(
                 db.root(),
                 root,
@@ -727,7 +736,7 @@ pub(crate) mod test {
                 partitioned::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 1, S>;
 
             let cfg = fixed_db_config_partitioned::<OneCap>("parallel_fresh", &context);
-            let db = FreshDb::<Sequential>::init(context.child("create"), cfg)
+            let db = FreshDb::<Sequential>::init(context.child("create"), cfg, None)
                 .await
                 .unwrap();
             let root = db.root();
@@ -735,7 +744,7 @@ pub(crate) mod test {
 
             let mut cfg = fixed_db_config_partitioned::<OneCap>("parallel_fresh", &context);
             cfg.init_concurrency = NZUsize!(4);
-            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg)
+            let db = FreshDb::<Sequential>::init(context.child("reopen"), cfg, None)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -753,7 +762,7 @@ pub(crate) mod test {
 
             // Populate a db so the log has committed operations to replay.
             let cfg = fixed_db_config_partitioned::<OneCap>("parallel_replay_fail", &context);
-            let db = FailDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = FailDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -920,7 +929,7 @@ pub(crate) mod test {
             // A log with live keys, updates, and deletes: the bitmap holds one bit per active
             // key plus the final commit.
             let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv", &context);
-            let db = BitmapDb::<Sequential>::init(context.child("populate"), cfg)
+            let db = BitmapDb::<Sequential>::init(context.child("populate"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -948,7 +957,7 @@ pub(crate) mod test {
             // Delete every remaining key: all worker shares are empty and only the final
             // commit's bit stays set.
             let cfg = fixed_db_config_partitioned::<OneCap>("ordered_bitmap_equiv", &context);
-            let db = BitmapDb::<Sequential>::init(context.child("wipe"), cfg)
+            let db = BitmapDb::<Sequential>::init(context.child("wipe"), cfg, None)
                 .await
                 .unwrap();
             let mut batch = db.new_batch();
@@ -1129,6 +1138,7 @@ pub(crate) mod test {
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
+            drop(db);
             let mut db = open_db(context.child("second")).await;
             assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
@@ -1166,6 +1176,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
+            drop(db);
             let mut db = open_db(context.child("fifth")).await;
             assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
@@ -1204,6 +1215,7 @@ pub(crate) mod test {
             let root = db.root();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
+            drop(db);
             let mut db = open_db(context.child("second")).await;
             assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
@@ -1239,6 +1251,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
+            drop(db);
             let mut db = open_db(context.child("fifth")).await;
             assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
@@ -1561,6 +1574,7 @@ pub(crate) mod test {
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, OneCap, Sequential>::init(
                 context.child("first"),
                 config,
+                None,
             )
             .await
             .unwrap();
@@ -1572,6 +1586,7 @@ pub(crate) mod test {
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, TwoCap, Sequential>::init(
                 context.child("second"),
                 config,
+                None,
             )
             .await
             .unwrap();
@@ -1588,7 +1603,7 @@ pub(crate) mod test {
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
         let cfg = fixed_db_config("fixed-bytes-partition", &context);
-        FixedDb::init(context, cfg).await.unwrap()
+        FixedDb::init(context, cfg, None).await.unwrap()
     }
 
     #[test_traced("WARN")]
