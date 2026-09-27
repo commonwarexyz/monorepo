@@ -1237,8 +1237,8 @@ where
             return self;
         }
 
+        // A local anchor replaces any older pending floor and installs through ingest.
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            // Replace any older pending floor, then install this one through ingest
             self.floor.await_anchor(finalization, None);
             let anchored;
             (self, anchored) = self.ingest(block, buffer, application, resolver).await;
