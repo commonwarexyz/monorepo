@@ -42,9 +42,6 @@ cfg_if::cfg_if! {
         mod metrics;
         mod recovery;
         pub use recovery::{Recoverer, Recovery, RecoveryCoordinator};
-
-        #[cfg(test)]
-        pub mod mocks;
     }
 }
 
