@@ -45,8 +45,8 @@ impl Sink for Tap {
 /// Runs a full CUPS connection for `version` and returns every byte each peer wrote.
 ///
 /// The log covers the identity prelude, the handshake messages, and records of every length class
-/// in both directions, so it pins both the record format and the SAKE version each CUPS version
-/// runs. Ephemeral keys and timestamps come from the deterministic runtime, so a change to its
+/// in both directions, so it pins the record format, the SAKE version, and the namespace SAKE
+/// commits for each CUPS version. Ephemeral keys and timestamps come from the deterministic runtime, so a change to its
 /// scheduling can also move the log.
 fn exchange(seed: u64, version: Version) -> Vec<u8> {
     let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(seed));

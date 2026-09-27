@@ -17,9 +17,10 @@
 //! listener's bouncer may reject that claim before authentication. Accepting it only permits the
 //! handshake to continue. A successful handshake authenticates the returned identity.
 //!
-//! Version 1 scopes the application namespace to CUPS with `_COMMONWARE_STREAM_CUPS` before SAKE
-//! commits it, so its handshakes never coincide with SAKE handshakes run for another protocol.
-//! Version 0 passes the application namespace to SAKE unchanged.
+//! Version 1 prefixes the application namespace with the length-delimited label
+//! `_COMMONWARE_STREAM_CUPS` ([commonware_utils::union_unique]) before SAKE commits it, so its
+//! handshakes differ from SAKE handshakes that another protocol runs with the same application
+//! namespace. Version 0 passes the application namespace to SAKE unchanged.
 //!
 //! Peers must agree on a unique, application-specific namespace, a [Version], and have clocks
 //! within the configured timestamp acceptance windows. The version is not negotiated: a mismatch
@@ -70,7 +71,7 @@ use commonware_runtime::{
     Buf as _, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut,
     IoBufs, Sink, Stream,
 };
-use commonware_utils::{DurationExt, SystemTimeExt, Widen, union_unique};
+use commonware_utils::{DurationExt, SystemTimeExt, union_unique};
 use rand_core::CryptoRng;
 use std::{future::Future, ops::Range, time::Duration};
 use thiserror::Error;
@@ -129,7 +130,8 @@ impl From<HandshakeError> for Error {
     }
 }
 
-/// Protocol version used by [Handshake], selecting both the SAKE version and the record format.
+/// Protocol version used by [Handshake], selecting the SAKE version, the namespace SAKE commits, and
+/// the record format.
 ///
 /// Both peers must use the same version. The version is not negotiated, so keep the older version
 /// until every peer has upgraded.
@@ -137,8 +139,8 @@ impl From<HandshakeError> for Error {
 pub enum Version {
     /// [sake::Version::V0] handshakes and records framed by a visible length prefix.
     V0,
-    /// [sake::Version::V1] handshakes and records framed by an encrypted, authenticated length
-    /// header.
+    /// [sake::Version::V1] handshakes under a CUPS-scoped namespace, and records framed by an
+    /// encrypted, authenticated length header.
     V1,
 }
 
@@ -152,6 +154,9 @@ impl Version {
     }
 
     /// Returns the namespace SAKE commits for an application namespace.
+    ///
+    /// Each version must give SAKE a version and namespace pair that no other version gives it, so a
+    /// mismatch fails the handshake.
     fn namespace(self, namespace: &[u8]) -> Vec<u8> {
         match self {
             Self::V0 => namespace.to_vec(),
@@ -216,10 +221,12 @@ impl Version {
                 let plaintext_len = cipher.recv_in_place(&mut header)?;
                 assert_eq!(plaintext_len, V1_HEADER_PLAINTEXT_SIZE);
                 let len = u32::decode(Copying(&header[..V1_HEADER_PLAINTEXT_SIZE]))?;
-                let body_len = Widen::<usize>::widen(len) + sake::TAG_SIZE;
                 if len > max_message_size {
-                    return Err(Error::RecvTooLarge(body_len));
+                    return Err(Error::RecvTooLarge(
+                        (len as usize).saturating_add(sake::TAG_SIZE),
+                    ));
                 }
+                let body_len = len as usize + sake::TAG_SIZE;
                 stream
                     .recv(skip + body_len)
                     .await
@@ -241,7 +248,8 @@ pub struct Handshake<S> {
     /// Signer used to authenticate the local peer.
     pub signer: S,
 
-    /// Protocol version, selecting the SAKE version and the record format.
+    /// Protocol version, selecting the SAKE version, the namespace SAKE commits, and the record
+    /// format.
     pub version: Version,
 
     /// Maximum time drift allowed for future timestamps.
@@ -780,8 +788,7 @@ mod test {
                 } else if length > MAX_MESSAGE_SIZE {
                     assert!(matches!(
                         result,
-                        Some(Err(Error::RecvTooLarge(n)))
-                            if n == Widen::<usize>::widen(length) + sake::TAG_SIZE
+                        Some(Err(Error::RecvTooLarge(n))) if n == length as usize + sake::TAG_SIZE
                     ));
                 } else {
                     assert!(result.is_none(), "a valid header must wait for its payload");

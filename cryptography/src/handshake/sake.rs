@@ -33,10 +33,10 @@
 //! signature verification. The message encodings are identical across versions.
 //!
 //! - [Version::V0] signs [Syn] over the timestamp, listener identity, and ephemeral key, and
-//!   commits the dialer identity only afterwards. With a signature scheme that lets anyone derive a
-//!   second public key under which an existing signature verifies, a dialer can complete a
-//!   handshake while claiming an identity derived from its signature instead of its own. Whether a
-//!   derived identity can match one a listener admits depends on the signature scheme. V0 uses
+//!   commits the dialer identity only afterwards. If the signature scheme lacks conservative
+//!   exclusive ownership (it admits key substitution), a dialer can complete a handshake under a
+//!   public key other than its own under which its [Syn] signature also verifies. Whether such a
+//!   key can match one a listener admits depends on the signature scheme. V0 uses
 //!   [transcript::Version::V0], which is sound here because SAKE commits a fixed sequence of
 //!   canonical encodings at fixed positions.
 //! - [Version::V1] commits both identities before every signature, so each signature covers the
@@ -85,8 +85,9 @@ const LABEL_CONFIRMATION_D2L: &[u8] = b"confirmation_d2l";
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Version {
     /// Commits the dialer identity after the [Syn] signature. If the signature scheme lacks
-    /// conservative exclusive ownership (it admits key substitution), a dialer can claim a public
-    /// key other than its own under which its [Syn] signature also verifies.
+    /// conservative exclusive ownership (it admits key substitution), a dialer can complete a
+    /// handshake under a public key other than its own under which its [Syn] signature also
+    /// verifies.
     V0,
     /// Commits both identities before every signature and uses injective transcript framing.
     V1,
@@ -94,6 +95,10 @@ pub enum Version {
 
 impl Version {
     /// Returns the protocol namespace forked from the application namespace.
+    ///
+    /// Each version must produce transcripts that no other version produces. V0 and V1 rely on this
+    /// namespace for that, because after [Syn] their transcripts can otherwise commit identical
+    /// bytes.
     const fn namespace(self) -> &'static [u8] {
         match self {
             Self::V0 => b"_COMMONWARE_CRYPTOGRAPHY_HANDSHAKE",
