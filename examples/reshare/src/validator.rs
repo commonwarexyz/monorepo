@@ -16,7 +16,10 @@ use commonware_broadcast::buffered;
 use commonware_consensus::{
     Reporters,
     marshal::{
-        self, core::Actor as MarshalActor, resolver::p2p as marshal_resolver, standard::Deferred,
+        self,
+        core::Actor as MarshalActor,
+        resolver::p2p as marshal_resolver,
+        standard::{Deferred, Standard},
     },
     simplex::{
         SkipBudget,
@@ -25,13 +28,14 @@ use commonware_consensus::{
     },
     types::{Epoch, FixedEpocher, ViewDelta},
 };
-use commonware_cryptography::{ed25519, sha256::Sha256};
+use commonware_cryptography::{bls12381::primitives::variant::MinSig, ed25519, sha256::Sha256};
 use commonware_glue::{
     dkg::{
         SecretStore as _,
         fence::Fence,
         orchestrator, probe, reshare,
         state_sync::{Config as StateSyncConfig, Plan as StateSyncPlan, StateSync},
+        types::EpochInfo,
     },
     stateful::{
         Config as StatefulConfig, Stateful, SyncPlan,
@@ -39,12 +43,16 @@ use commonware_glue::{
     },
 };
 use commonware_macros::boxed;
-use commonware_p2p::authenticated::{self, discovery};
+use commonware_p2p::authenticated::{
+    self,
+    discovery::{self, Oracle},
+};
 use commonware_parallel::Sequential;
-use commonware_runtime::{Handle, Supervisor as _, buffer::paged::CacheRef, tokio};
+use commonware_runtime::{Handle, Spawner, Supervisor as _, buffer::paged::CacheRef, tokio};
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZDuration, NZU64, NZUsize, sequence::Unit};
+use rand_core::CryptoRng;
 use std::{marker::PhantomData, path::PathBuf, time::Duration};
 use tracing::error;
 
@@ -174,24 +182,12 @@ pub async fn run(context: tokio::Context, args: Validator) {
     );
     let stateful_startup = context.child("stateful_startup");
     let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
-    let (probe_actor, probe_mailbox) = probe::Actor::new(probe::Config {
-        context: context.child("dkg_probe"),
-        manager: oracle.clone(),
-        bootstrap: probe::Bootstrap {
-            epoch: Epoch::zero(),
-            participants: genesis_info.participants(),
-            directory: Unit,
-        },
-        floor: plan.floor().cloned(),
-        verifier: Scheme::certificate_verifier(NAMESPACE, *genesis_info.output.public().public()),
-        genesis: genesis_info.clone(),
-        strategy: Sequential,
-        blocker: oracle.clone(),
-        blocks_per_epoch: BLOCKS_PER_EPOCH,
-        retry_timeout: NZDuration!(Duration::from_millis(500)),
-        mailbox_size: MAILBOX_SIZE,
-        block_codec_config: (),
-    });
+    let (probe_actor, probe_mailbox) = probe::Actor::new(probe_config(
+        context.child("dkg_probe"),
+        oracle.clone(),
+        &genesis_info,
+        &plan,
+    ));
     let probe_handle = probe_actor.start(dkg_probe_network);
 
     let should_state_sync = plan.should_state_sync(args.state_sync);
@@ -394,6 +390,43 @@ pub async fn run(context: tokio::Context, args: Validator) {
     }
 }
 
+/// Configure the DKG probe with `plan`'s persisted state sync floor.
+fn probe_config<E>(
+    context: E,
+    oracle: Oracle<ed25519::PublicKey>,
+    genesis: &EpochInfo<MinSig, ed25519::PublicKey>,
+    plan: &SyncPlan<E, Scheme, Standard<Block>>,
+) -> probe::Config<
+    E,
+    Oracle<ed25519::PublicKey>,
+    Scheme,
+    Standard<Block>,
+    Sequential,
+    Oracle<ed25519::PublicKey>,
+>
+where
+    E: Spawner + CryptoRng + commonware_storage::Context,
+{
+    probe::Config {
+        context,
+        manager: oracle.clone(),
+        bootstrap: probe::Bootstrap {
+            epoch: Epoch::zero(),
+            participants: genesis.participants(),
+            directory: Unit,
+        },
+        floor: plan.floor().cloned(),
+        verifier: Scheme::certificate_verifier(NAMESPACE, *genesis.output.public().public()),
+        genesis: genesis.clone(),
+        strategy: Sequential,
+        blocker: oracle,
+        blocks_per_epoch: BLOCKS_PER_EPOCH,
+        retry_timeout: NZDuration!(Duration::from_millis(500)),
+        mailbox_size: MAILBOX_SIZE,
+        block_codec_config: (),
+    }
+}
+
 fn archive_config<C>(
     prefix: &str,
     name: &str,
@@ -418,10 +451,21 @@ fn archive_config<C>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_consensus::{
+        simplex::types::{Finalization, Finalize, Proposal},
+        types::{Round, View},
+    };
+    use commonware_cryptography::{Hasher as _, Signer as _, bls12381::dkg::feldman_desmedt::deal};
+    use commonware_glue::dkg::types::EpochOutcome;
+    use commonware_runtime::{Runner as _, deterministic};
+    use commonware_utils::{N3f1, TestRng, non_empty, ordered::Set};
     use futures::{FutureExt as _, future::pending};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        net::SocketAddr,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     struct CountDrop(Arc<AtomicUsize>);
@@ -462,5 +506,82 @@ mod tests {
             Some(Ok(()))
         ));
         assert_eq!(dropped.load(Ordering::Relaxed), 7);
+    }
+
+    /// A node restarting during state sync configures its probe with the floor
+    /// the interrupted sync persisted.
+    #[test]
+    fn probe_resumes_persisted_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            // Deal a genesis committee and sign a floor in epoch 1 with it.
+            let signers = (0..4)
+                .map(ed25519::PrivateKey::from_seed)
+                .collect::<Vec<_>>();
+            let players = Set::from_iter_dedup(signers.iter().map(|signer| signer.public_key()));
+            let (output, shares) =
+                deal::<MinSig, _, N3f1>(TestRng::new(0), SHARING_MODE, players.clone())
+                    .expect("genesis deal");
+            let schemes = shares
+                .values()
+                .iter()
+                .map(|share| {
+                    Scheme::signer(
+                        NAMESPACE,
+                        players.clone(),
+                        output.public().clone(),
+                        share.clone(),
+                    )
+                    .expect("genesis signer share")
+                })
+                .collect::<Vec<_>>();
+            let proposal = Proposal::new(
+                Round::new(Epoch::new(1), View::new(1)),
+                View::zero(),
+                Sha256::hash(&[b"floor"]),
+            );
+            let finalizes = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()).expect("sign finalize"))
+                .collect::<Vec<_>>();
+            let floor = Finalization::from_finalizes(
+                &schemes[0],
+                non_empty![@finalizes.iter()],
+                &Sequential,
+            )
+            .expect("finalization quorum");
+            let genesis = EpochInfo {
+                outcome: EpochOutcome::Success,
+                epoch: Epoch::zero(),
+                output,
+                players: players.clone(),
+                next_players: players,
+                directory: Unit,
+            };
+
+            // Persist the floor, then reload the plan as a restarted node.
+            let plan = SyncPlan::<_, Scheme, Standard<Block>>::init(context.child("plan"), "probe")
+                .await
+                .with_floor(floor.clone())
+                .await;
+            drop(plan);
+            let plan = SyncPlan::init(context.child("restart"), "probe").await;
+
+            // The probe carries the persisted floor.
+            let address = SocketAddr::from(([127, 0, 0, 1], 3000));
+            let (_, oracle) = discovery::Network::new(
+                context.child("network"),
+                discovery::Config::local(
+                    Handshake::new(signers[0].clone()),
+                    NAMESPACE,
+                    address,
+                    address,
+                    Vec::new(),
+                    NZUsize!(signers.len()),
+                    MAX_MESSAGE_SIZE,
+                ),
+            );
+            let config = probe_config(context.child("probe"), oracle, &genesis, &plan);
+            assert_eq!(config.floor, Some(floor));
+        });
     }
 }

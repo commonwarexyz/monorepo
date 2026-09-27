@@ -31,7 +31,7 @@ use commonware_consensus::{
         elector::RoundRobin,
         types::Context,
     },
-    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{Epoch, Epocher, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
     BatchVerifier, Digest as _, Digestible, Hasher, PublicKey, Sha256, Signer as _,
@@ -54,10 +54,11 @@ use commonware_runtime::{
 };
 use commonware_storage::{archive::prunable, translator::TwoCap};
 use commonware_utils::{
-    NZU16, NZU32, NZU64, NZUsize,
+    NZU16, NZU32, NZU64, NZUsize, TryCollect,
     channel::{fallible::OneshotExt, oneshot},
     ordered::Set,
     sequence::Unit,
+    vec::NonEmptyVec,
 };
 use rand_core::{CryptoRng, Rng};
 use std::{
@@ -120,7 +121,12 @@ pub struct Config<M, X, SS, T, D = Unit> {
     pub blocks_per_epoch: NonZeroU64,
 }
 
-/// Completion produced when the one-shot DKG chain finalizes its final block.
+/// Completion produced when this node processes the one-shot DKG chain's final
+/// block, at startup when a prior run already persisted this node's share or
+/// processed that block, or without an artifact when the ceremony cannot
+/// activate its peer set.
+///
+/// The [`Engine`] keeps running after reporting it.
 pub struct Completion<V: Variant, D: Directory<ed25519::PublicKey> = Unit> {
     /// Final DKG artifact, if the ceremony succeeded.
     ///
@@ -233,6 +239,18 @@ impl<V: Variant, D: Directory<ed25519::PublicKey>> ReshareBlock for Block<V, D> 
 }
 
 /// Self-contained DKG engine.
+///
+/// After reporting [`Completion`], the engine keeps running and serves the
+/// one-shot chain so participants that have not completed can catch up. Keep
+/// it running until every participant has completed.
+///
+/// At startup, the engine asks the other participants for the final block's
+/// finalization, so a participant that fell behind catches up from peers that
+/// only serve the chain.
+///
+/// A restarted engine does not run the ceremony again once this node has
+/// persisted its share or processed the final block. It reports the outcome
+/// carried by the stored final block and keeps serving.
 pub struct Engine<E, V, M, X, SS, T, D = Unit>
 where
     V: Variant,
@@ -459,6 +477,25 @@ where
             },
         )
         .await;
+
+        // The one-shot chain never extends past the epoch-zero final block.
+        // Fetch that block's finalization from the other participants so this
+        // node catches up from peers that only serve the chain, without relying
+        // on consensus traffic. Marshal skips the fetch when the finalization is
+        // already stored, and retries targets that do not have it yet.
+        let last = FixedEpocher::new(self.config.blocks_per_epoch)
+            .last(Epoch::zero())
+            .expect("epocher must know epoch zero");
+        if let Ok(targets) = self
+            .config
+            .participants
+            .iter()
+            .filter(|participant| **participant != public_key)
+            .cloned()
+            .try_collect::<NonEmptyVec<_>>()
+        {
+            marshal_mailbox.hint_finalized(last, targets);
+        }
 
         let (fence, _gate) = Fence::new(Epoch::zero());
         let (reshare_actor, reshare_mailbox) = reshare::Actor::new_dkg(

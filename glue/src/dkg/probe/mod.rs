@@ -160,7 +160,7 @@ pub use actor::{Actor, Config};
 mod mailbox;
 pub use mailbox::Mailbox;
 
-mod wire;
+pub(crate) mod wire;
 
 /// The weakly subjective checkpoint a joining node bootstraps from.
 #[derive(Clone, Debug, PartialEq, Eq)]

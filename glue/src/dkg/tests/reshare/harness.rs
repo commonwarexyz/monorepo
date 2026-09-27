@@ -61,10 +61,10 @@ use commonware_cryptography::{
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::Random;
-use commonware_p2p::{Address, Provider, TrackedPeers, simulated};
+use commonware_p2p::{Address, Message as P2pMessage, Provider, Receiver, TrackedPeers, simulated};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
+    BufMut, BufferPooler, Clock, Handle, IoBuf, Metrics, Quota, Spawner, Storage, Supervisor as _,
     buffer::paged::CacheRef, deterministic::Context as DeterministicContext,
 };
 use commonware_storage::{
@@ -237,6 +237,33 @@ impl DkgManager for TestManager {
             }
             _ => panic!("network and directory must use the same transport"),
         }
+    }
+}
+
+/// Probe receiver that swaps each peer's first latest-finalization reply for
+/// `reply`, if set.
+#[derive(Debug)]
+struct Swap<R: Receiver> {
+    inner: R,
+    reply: Option<IoBuf>,
+    swapped: HashSet<R::PublicKey>,
+}
+
+impl<R: Receiver> Receiver for Swap<R> {
+    type Error = R::Error;
+    type PublicKey = R::PublicKey;
+
+    async fn recv(&mut self) -> Result<P2pMessage<Self::PublicKey>, Self::Error> {
+        let (peer, message) = self.inner.recv().await?;
+        let Some(reply) = &self.reply else {
+            return Ok((peer, message));
+        };
+        let latest = dkg_probe::wire::Tag::read(&mut message.clone())
+            .is_ok_and(|tag| tag == dkg_probe::wire::Tag::LatestResponse);
+        if latest && self.swapped.insert(peer.clone()) {
+            return Ok((peer, reply.clone()));
+        }
+        Ok((peer, message))
     }
 }
 
@@ -596,6 +623,7 @@ pub(super) struct ReshareEngine {
     state_sync_floor: Option<Height>,
     processed_hold: Arc<Mutex<Option<(ed25519::PublicKey, u64)>>>,
     epoch_cross_during_sync: bool,
+    stale: Option<Height>,
     processed: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     marshals: Arc<Mutex<BTreeMap<ed25519::PublicKey, Marshal>>>,
     failures: Arc<HashSet<u64>>,
@@ -712,6 +740,7 @@ impl ReshareEngine {
             state_sync_floor: None,
             processed_hold: Arc::new(Mutex::new(None)),
             epoch_cross_during_sync: false,
+            stale: None,
             processed: Arc::new(Mutex::new(BTreeMap::new())),
             marshals: Arc::new(Mutex::new(BTreeMap::new())),
             failures: Arc::new(HashSet::new()),
@@ -751,6 +780,14 @@ impl ReshareEngine {
     /// still syncing to its floor.
     pub(super) const fn with_epoch_cross_during_sync(mut self) -> Self {
         self.epoch_cross_during_sync = true;
+        self
+    }
+
+    /// On every restart, swap each bootstrap member's first latest-finalization
+    /// reply to the probe for the finalization at `height`, fetched from another
+    /// node's marshal.
+    pub(super) const fn with_stale(mut self, height: Height) -> Self {
+        self.stale = Some(height);
         self
     }
 
@@ -811,13 +848,13 @@ impl EngineDefinition for ReshareEngine {
         let signer = self.signers[index].clone();
         let partition_prefix = format!("reshare-e2e-{index}");
         let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let restarted = self.stores.lock().contains_key(public_key);
+
         // A node restarting means its configured processed hold has served its
         // purpose: release it so the restarted node can progress.
         {
             let mut hold = self.processed_hold.lock();
-            if hold.as_ref().is_some_and(|(held, _)| held == public_key)
-                && self.stores.lock().contains_key(public_key)
-            {
+            if hold.as_ref().is_some_and(|(held, _)| held == public_key) && restarted {
                 hold.take();
             }
         }
@@ -876,6 +913,39 @@ impl EngineDefinition for ReshareEngine {
         )
         .await
         .expect("blocks archive");
+
+        // Optionally make every bootstrap member look stale to a restarted
+        // node's probe, once per member.
+        let reply = match self.stale {
+            Some(height) if restarted => {
+                let source = self
+                    .marshals
+                    .lock()
+                    .iter()
+                    .find(|(key, _)| *key != public_key)
+                    .map(|(_, marshal)| marshal.clone())
+                    .expect("stale reply source must be available");
+                let finalization = source
+                    .get_finalization(height)
+                    .await
+                    .expect("stale reply must be finalized");
+                Some(IoBuf::from(
+                    dkg_probe::wire::Message::<Scheme, MarshalVariant>::LatestResponse(
+                        finalization,
+                    )
+                    .encode(),
+                ))
+            }
+            _ => None,
+        };
+        let probe_boundary_network = (
+            probe_boundary_network.0,
+            Swap {
+                inner: probe_boundary_network.1,
+                reply,
+                swapped: HashSet::new(),
+            },
+        );
 
         let genesis = Block::genesis(self.participants[0].clone(), self.initial.info.clone());
         let stateful_startup_context = context.child("stateful_startup");

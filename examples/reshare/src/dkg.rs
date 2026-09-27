@@ -17,18 +17,19 @@ use commonware_glue::dkg::{
     types::{EpochInfo, EpochOutcome},
 };
 use commonware_p2p::authenticated::{self, discovery};
-use commonware_runtime::{Strategizer, Supervisor as _, tokio};
+use commonware_runtime::{Handle, Strategizer, Supervisor as _, tokio};
 use commonware_stream::encrypted::Handshake;
 use commonware_utils::{NZUsize, sequence::Unit};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
-use tracing::info;
+use tracing::{error, info};
 
 type ReshareEpochInfo = EpochInfo<MinSig, PublicKey>;
 
-/// Run the one-shot DKG bootstrap and write the resulting genesis.
+/// Run the one-shot DKG bootstrap, write the resulting genesis, and keep
+/// serving until stopped.
 #[derive(Args)]
 pub struct Dkg {
     /// Validator node directory containing config, secrets, and runtime storage.
@@ -36,7 +37,8 @@ pub struct Dkg {
     pub node_dir: PathBuf,
 }
 
-/// Run the bootstrap engine to completion and distribute the genesis artifact.
+/// Run the bootstrap engine, distribute the genesis artifact on completion, and
+/// keep serving peers that have not completed.
 pub async fn run(context: tokio::Context, args: Dkg) {
     let node = NodeConfig::load(&args.node_dir).expect("failed to load node config");
     let network = NetworkConfig::load(&args.node_dir).expect("failed to load network config");
@@ -100,23 +102,32 @@ pub async fn run(context: tokio::Context, args: Dkg) {
     let mut genesis = info;
     genesis.outcome = EpochOutcome::Success;
     genesis.next_players = participants.get(genesis.epoch.next());
-    let written = write_genesis_to_sibling_validators(&args.node_dir, &network, &genesis)
+    let written = write_genesis_to_sibling_validators(&args.node_dir, &local, &network, &genesis)
         .expect("failed to write genesis");
     info!(
         epoch = genesis.epoch.get(),
         players = genesis.players.len(),
         next_players = genesis.next_players.len(),
         written,
-        "wrote genesis"
+        "wrote genesis, serving the bootstrap chain until stopped"
     );
-    p2p_handle.abort();
-    engine_handle.abort();
+
+    // Keep serving the one-shot chain so participants that have not completed
+    // can catch up. Stop every `dkg` process only after each one has logged
+    // "wrote genesis".
+    if let Err(err) = Handle::select([p2p_handle, engine_handle]).await {
+        error!(?err, "bootstrap task failed");
+    }
 }
 
 /// Write `genesis` into every sibling validator directory that belongs to
-/// `network`, or into `node_dir` alone when none are found.
+/// `network`, except those of players other than `local`, or into `node_dir`
+/// alone when none are found.
+///
+/// A player's directory gets `genesis.json` only from that player's own `dkg`.
 fn write_genesis_to_sibling_validators(
     node_dir: &Path,
+    local: &PublicKey,
     network: &NetworkConfig,
     genesis: &ReshareEpochInfo,
 ) -> anyhow::Result<usize> {
@@ -134,7 +145,11 @@ fn write_genesis_to_sibling_validators(
         let Ok(node) = NodeConfig::load(&candidate) else {
             continue;
         };
-        if !network.participants.contains(&node.public_key()) {
+        let public_key = node.public_key();
+        if !network.participants.contains(&public_key) {
+            continue;
+        }
+        if public_key != *local && genesis.players.position(&public_key).is_some() {
             continue;
         }
         types::write_genesis(&candidate, genesis)?;
@@ -159,7 +174,7 @@ mod tests {
     use commonware_utils::{N3f1, ordered::Set, test_rng};
 
     #[test]
-    fn writes_dkg_genesis_to_all_generated_validators() {
+    fn writes_dkg_genesis_to_own_and_non_player_validators() {
         let root =
             std::env::temp_dir().join(format!("commonware-reshare-dkg-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -217,12 +232,19 @@ mod tests {
             directory: Unit,
         };
 
-        let written =
-            write_genesis_to_sibling_validators(&root.join("validator-0"), &network, &genesis)
-                .unwrap();
+        let written = write_genesis_to_sibling_validators(
+            &root.join("validator-0"),
+            &network.participants[0],
+            &network,
+            &genesis,
+        )
+        .unwrap();
 
-        assert_eq!(written, 4);
-        for i in 0..4 {
+        // Player 0 writes its own directory and every non-player's, but not
+        // the directory of player 1.
+        assert_eq!(written, 3);
+        assert!(!types::genesis_path(&root.join("validator-1")).exists());
+        for i in [0, 2, 3] {
             assert_eq!(
                 types::read_genesis(&root.join(format!("validator-{i}"))).unwrap(),
                 genesis

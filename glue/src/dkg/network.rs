@@ -143,7 +143,9 @@ pub trait Manager: Provider {
 
     /// Error returned when a peer set cannot be activated.
     ///
-    /// DKG actors stop when this error is returned.
+    /// The orchestrator and the probe stop when this error is returned. The
+    /// one-shot bootstrap keeps running and, if its ceremony has not completed,
+    /// reports a completion without an artifact.
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// Activates `peers` for `epoch` using the epoch's `directory`.

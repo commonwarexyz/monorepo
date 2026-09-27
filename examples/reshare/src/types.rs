@@ -345,6 +345,7 @@ impl Reporter for LogReporter {
 /// JSON-file-backed [`dkg::SecretStore`] holding shares, dealer seeds, and dealings.
 ///
 /// Material is stored as plaintext JSON, which is suitable for this example only.
+/// Every write replaces the file atomically and is durable before it returns.
 #[derive(Clone)]
 pub struct FileSecretStore {
     path: PathBuf,
@@ -384,12 +385,10 @@ impl FileSecretStore {
     }
 
     fn flush(&self) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let contents = serde_json::to_string_pretty(&*self.inner.lock())?;
-        fs::write(&self.path, contents)?;
-        Ok(())
+        // Hold the lock through the write so concurrent writers cannot
+        // interleave in the staged file.
+        let data = self.inner.lock();
+        crate::config::write_json(&self.path, &*data)
     }
 
     fn dealing_key<P: commonware_cryptography::PublicKey>(epoch: Epoch, dealer: &P) -> String {
@@ -686,6 +685,9 @@ mod tests {
         ));
         let _ = std::fs::remove_file(&path);
         let store = FileSecretStore::load(&path).unwrap();
+
+        // A crash before the rename leaves a staged file behind.
+        std::fs::write(crate::config::staged(&path), b"torn").unwrap();
         let player = keys(1).pop().unwrap();
         let players = Set::from_iter_dedup([player.clone()]);
         let (_output, shares) =
@@ -696,7 +698,13 @@ mod tests {
             let mut store = store.clone();
             async move {
                 store.put_share(Epoch::new(1), share.clone()).await;
-                assert_eq!(store.get_share(Epoch::new(1)).await, Some(share));
+                assert_eq!(store.get_share(Epoch::new(1)).await, Some(share.clone()));
+
+                // The write replaced the file through the leftover staged file,
+                // so a fresh load sees it and no staged file remains.
+                let mut reloaded = FileSecretStore::load(&store.path).unwrap();
+                assert_eq!(reloaded.get_share(Epoch::new(1)).await, Some(share));
+                assert!(!crate::config::staged(&store.path).exists());
 
                 let seed = Summary::random(test_rng());
                 store.put_seed(Epoch::new(1), seed).await;

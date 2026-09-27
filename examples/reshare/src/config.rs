@@ -7,7 +7,13 @@ use commonware_cryptography::{
 };
 use commonware_formatting::{from_hex, hex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
-use std::{fs, net::SocketAddr, path::Path};
+use std::{
+    ffi::OsString,
+    fs::{self, File},
+    io::Write as _,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 /// Per-node config stored in `node.json`: signer and listen/dial addresses.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -97,10 +103,45 @@ pub fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> anyhow::Result<T>
     Ok(serde_json::from_str(&contents)?)
 }
 
-/// Write `value` to `path` as pretty-printed JSON.
+/// Write `value` to `path` as pretty-printed JSON, atomically and durably (see [`persist`]).
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
     let contents = serde_json::to_string_pretty(value)?;
-    fs::write(path, contents)?;
+    persist(path, contents.as_bytes())
+}
+
+/// Path of the sibling file that [`persist`] stages `path`'s new contents in.
+///
+/// The name carries the process id, so processes writing the same `path` never
+/// share a staged file.
+pub fn staged(path: &Path) -> PathBuf {
+    let mut staged = OsString::from(path.as_os_str());
+    staged.push(format!(".{}.tmp", std::process::id()));
+    staged.into()
+}
+
+/// Replace `path` with `contents` so that a crash leaves either the previous or
+/// the new contents, durable once this returns.
+///
+/// `path`'s parent directory must already exist. The contents are written to
+/// [`staged`], synced, and renamed over `path`, and then the parent directory is
+/// synced so the rename survives a crash. Callers in one process must not
+/// persist the same `path` concurrently.
+pub fn persist(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let staged = staged(path);
+    let mut file = File::create(&staged)?;
+
+    // Keep the replaced file's permissions, which a rename would otherwise reset.
+    if let Ok(metadata) = fs::metadata(path) {
+        file.set_permissions(metadata.permissions())?;
+    }
+    file.write_all(contents)?;
+    file.sync_all()?;
+    fs::rename(&staged, path)?;
+    File::open(parent)?.sync_all()?;
     Ok(())
 }
 
