@@ -192,7 +192,7 @@ pub async fn run(context: tokio::Context, args: Validator) {
     let probe_handle = probe_actor.start(dkg_probe_network);
 
     let stateful_startup = context.child("stateful_startup");
-    let mut plan = SyncPlan::init(&stateful_startup, partition_prefix).await;
+    let mut plan = SyncPlan::init(stateful_startup.child("plan"), partition_prefix).await;
     let should_state_sync = plan.should_state_sync(args.state_sync);
     let probe_artifact = if should_state_sync {
         let artifact = probe_mailbox.subscribe().await.expect("probe stopped");

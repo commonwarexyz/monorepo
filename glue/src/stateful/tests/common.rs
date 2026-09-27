@@ -119,8 +119,8 @@ where
 {
     async fn processed_height(&self) -> u64 {
         self.marshal
-            .get_processed_height()
+            .get_processed()
             .await
-            .map_or(0, |height| height.get())
+            .map_or(0, |processed| processed.height().get())
     }
 }

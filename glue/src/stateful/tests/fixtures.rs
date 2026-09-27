@@ -10,7 +10,7 @@ use commonware_consensus::{
         resolver::handler,
     },
     simplex::types::{Finalization, Finalize, Proposal},
-    types::{Epoch, FixedEpocher, Round, View, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
 };
 use commonware_cryptography::{
     Digestible as _,
@@ -32,42 +32,59 @@ use commonware_utils::{
     sync::Mutex,
     vec::NonEmptyVec,
 };
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
 
+/// Acknowledges reports immediately or retains their receipts for ordered release.
 #[derive(Clone)]
-struct FixtureReporter {
+pub(crate) struct FixtureReporter {
     acknowledge: bool,
-    pending: Arc<Mutex<Vec<Exact>>>,
+    pending: Arc<Mutex<VecDeque<(Height, Exact)>>>,
+}
+
+impl FixtureReporter {
+    pub(crate) fn new(acknowledge: bool) -> Self {
+        Self {
+            acknowledge,
+            pending: Arc::default(),
+        }
+    }
+
+    pub(crate) fn pending_ack_heights(&self) -> Vec<Height> {
+        self.pending
+            .lock()
+            .iter()
+            .map(|(height, _)| *height)
+            .collect()
+    }
+
+    pub(crate) fn acknowledge_next(&self) -> Option<Height> {
+        let (height, ack) = self.pending.lock().pop_front()?;
+        ack.acknowledge();
+        Some(height)
+    }
 }
 
 impl Reporter for FixtureReporter {
     type Activity = Update<TestBlock>;
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
-        if let Update::Block(_, ack) = activity {
+        if let Update::Block(block, ack) = activity {
             if self.acknowledge {
                 ack.acknowledge();
             } else {
-                self.pending.lock().push(ack);
+                self.pending.lock().push_back((block.height(), ack));
             }
         }
         Feedback::Ok
     }
 }
 
-#[derive(Clone, Copy)]
-enum Dispatch {
-    Stopped,
-    Acknowledge,
-    Hold,
-}
-
-struct Options<'a> {
+struct Options<'a, R> {
     seed: Option<(&'a TestBlock, Finalization<TestScheme, Sha256Digest>)>,
     block: Option<&'a TestBlock>,
     floor: Option<Finalization<TestScheme, Sha256Digest>>,
     max_pending_acks: NonZeroUsize,
-    dispatch: Dispatch,
+    reporter: Option<R>,
 }
 
 /// Backfill resolver for a started marshal fixture: its archives are pre-seeded, so
@@ -218,11 +235,6 @@ pub(crate) async fn marshal_fixture(
     max_pending_acks: NonZeroUsize,
     start: bool,
 ) -> MarshalFixture {
-    let dispatch = if start {
-        Dispatch::Acknowledge
-    } else {
-        Dispatch::Stopped
-    };
     marshal_fixture_inner(
         context,
         prefix,
@@ -232,7 +244,7 @@ pub(crate) async fn marshal_fixture(
             block: None,
             floor: None,
             max_pending_acks,
-            dispatch,
+            reporter: start.then(|| FixtureReporter::new(true)),
         },
     )
     .await
@@ -247,11 +259,6 @@ pub(crate) async fn marshal_fixture_with_finalized_block(
     max_pending_acks: NonZeroUsize,
     start: bool,
 ) -> MarshalFixture {
-    let dispatch = if start {
-        Dispatch::Acknowledge
-    } else {
-        Dispatch::Stopped
-    };
     marshal_fixture_inner(
         context,
         prefix,
@@ -261,7 +268,7 @@ pub(crate) async fn marshal_fixture_with_finalized_block(
             block: Some(block),
             floor: None,
             max_pending_acks,
-            dispatch,
+            reporter: start.then(|| FixtureReporter::new(true)),
         },
     )
     .await
@@ -286,7 +293,33 @@ pub(crate) async fn marshal_fixture_with_floor(
             block: Some(block),
             floor: Some(finalization),
             max_pending_acks,
-            dispatch: Dispatch::Hold,
+            reporter: Some(FixtureReporter::new(false)),
+        },
+    )
+    .await
+}
+
+/// Initializes a started marshal actor that delivers blocks to `reporter`.
+pub(crate) async fn marshal_fixture_with_reporter<R>(
+    context: deterministic::Context,
+    prefix: &str,
+    scheme: TestScheme,
+    max_pending_acks: NonZeroUsize,
+    reporter: R,
+) -> MarshalFixture
+where
+    R: Reporter<Activity = Update<TestBlock>>,
+{
+    marshal_fixture_inner(
+        context,
+        prefix,
+        scheme,
+        Options {
+            seed: None,
+            block: None,
+            floor: None,
+            max_pending_acks,
+            reporter: Some(reporter),
         },
     )
     .await
@@ -310,11 +343,7 @@ pub(crate) async fn prunable_marshal_fixture(
         block,
         floor,
         max_pending_acks,
-        dispatch: if acknowledge {
-            Dispatch::Acknowledge
-        } else {
-            Dispatch::Hold
-        },
+        reporter: Some(FixtureReporter::new(acknowledge)),
     };
     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
     let finalizations_by_height = prunable::Archive::init(
@@ -355,12 +384,15 @@ pub(crate) async fn prunable_marshal_fixture(
     .await
 }
 
-async fn marshal_fixture_inner(
+async fn marshal_fixture_inner<R>(
     context: deterministic::Context,
     prefix: &str,
     scheme: TestScheme,
-    mut options: Options<'_>,
-) -> MarshalFixture {
+    mut options: Options<'_, R>,
+) -> MarshalFixture
+where
+    R: Reporter<Activity = Update<TestBlock>>,
+{
     let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
     let mut finalizations_by_height = immutable::Archive::init(
         context.child("finalizations_by_height"),
@@ -409,11 +441,11 @@ async fn marshal_fixture_inner(
     .await
 }
 
-async fn start_marshal_fixture<FC, FB>(
+async fn start_marshal_fixture<FC, FB, R>(
     context: deterministic::Context,
     prefix: &str,
     scheme: TestScheme,
-    options: Options<'_>,
+    options: Options<'_, R>,
     page_cache: CacheRef,
     finalizations_by_height: FC,
     finalized_blocks: FB,
@@ -425,6 +457,7 @@ where
             Scheme = TestScheme,
         >,
     FB: marshal::store::Blocks<Block = Arc<TestBlock>>,
+    R: Reporter<Activity = Update<TestBlock>>,
 {
     let provider = ConstantProvider::new(scheme);
     let (actor, mailbox, floor) = MarshalActor::<_, TestVariant, _, _, _, _, _>::init(
@@ -453,20 +486,16 @@ where
         },
     )
     .await;
-    if matches!(options.dispatch, Dispatch::Stopped) {
+    let Some(reporter) = options.reporter else {
         return MarshalFixture {
             mailbox,
             floor,
             guards: Box::new(actor),
         };
-    }
+    };
 
     let (resolver_receiver, resolver_handler) =
         handler::init(context.child("resolver_handler"), NZUsize!(8));
-    let reporter = FixtureReporter {
-        acknowledge: matches!(options.dispatch, Dispatch::Acknowledge),
-        pending: Arc::new(Mutex::new(Vec::new())),
-    };
     let handle = actor.start_unbuffered(reporter, (resolver_receiver, IgnoreResolver));
     MarshalFixture {
         mailbox,

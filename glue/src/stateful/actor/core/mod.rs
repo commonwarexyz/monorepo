@@ -257,11 +257,8 @@ where
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(self) {
         let (marshal, _) = self.marshal;
-        let syncer::StartupResult {
-            sync: SyncResult { databases, anchor },
-            skip_finalized_until,
-        } = syncer::init_databases_from_marshal::<E, A, S, V>(
-            self.context.as_present(),
+        let SyncResult { databases, anchor } = syncer::init_databases_from_marshal::<E, A, S, V>(
+            self.context.child("databases"),
             &marshal,
             self.db_config,
             self.plan.into_sync_metadata(),
@@ -284,7 +281,6 @@ where
             marshal,
             processor,
             deferred_verifications: Vec::new(),
-            skip_finalized_until,
         }
         .start()
         .await
@@ -399,7 +395,8 @@ mod tests {
             )
             .await;
 
-            let plan = SyncPlan::init(&context, "pending-floor-stateful".to_string()).await;
+            let plan =
+                SyncPlan::init(context.child("plan"), "pending-floor-stateful".to_string()).await;
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
@@ -458,7 +455,7 @@ mod tests {
             .await;
 
             let (resolver, startup_started, startup_release) = NoopResolver::gated();
-            let plan = SyncPlan::init(&context, format!("{prefix}-stateful")).await;
+            let plan = SyncPlan::init(context.child("plan"), format!("{prefix}-stateful")).await;
             let (stateful, mut mailbox) = Stateful::init(
                 context.child("stateful"),
                 Config {
