@@ -150,6 +150,7 @@ impl<E: Context, V: CodecFixed<Cfg = ()>> Inner<E, V> {
                 continue;
             }
 
+            // Open a section the bits keep
             let (blob, mut len) = context
                 .open(&config.partition, &index.to_be_bytes())
                 .await?;
