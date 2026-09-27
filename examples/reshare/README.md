@@ -67,15 +67,11 @@ Start a late joiner with `validator --state-sync`. A late joiner is a node that
 joins after launch and whose key is in a future committee. It uses `dkg::probe`
 to fetch a recent finalized block and that epoch's public material from peers,
 saves the block as its sync floor, and state-syncs QMDB from it instead of
-replaying from genesis.
+replaying from genesis. Nodes that launch the network run without the flag.
 
 The flag only matters until a node saves a sync floor or starts from genesis.
 After that, the node follows its storage: it resumes an unfinished sync or
 continues from its local blocks, so keeping the flag on restarts is harmless.
-
-Do not pass the flag to the nodes that start the network from genesis. The probe
-waits for replies from peers that already hold a finalized block, so if every
-launching node waits on it, no node starts the chain.
 
 A player that misses its private dealings cannot recover them by syncing. The
 ceremony completes without it and publicly reveals its share.
