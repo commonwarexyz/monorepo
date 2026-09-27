@@ -8580,7 +8580,7 @@ mod tests {
     /// a round above the round floor naming a block marshal never stored at a
     /// height it already processed. Marshal cannot cross-check certificates
     /// against each other, so it must stay crash-safe when one lands in
-    /// `apply_pending_floor`'s stale-anchor branch.
+    /// `apply_floor`'s stale-anchor branch.
     ///
     /// The two repair blocks are delivered in ascending height order, so the
     /// batch entry must keep the lowest written height. Tracking the latest

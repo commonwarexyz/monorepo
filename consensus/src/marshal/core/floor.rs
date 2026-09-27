@@ -143,14 +143,6 @@ impl<S: Scheme, C: Digest> State<S, C> {
         matches!(&self.pending, Some(pending) if pending.finalization.round() >= round)
     }
 
-    /// Returns true when `commitment` is the awaited anchor.
-    pub(super) fn matches_pending_anchor(&self, commitment: C) -> bool {
-        matches!(
-            &self.pending,
-            Some(pending) if pending.finalization.proposal.payload == commitment
-        )
-    }
-
     /// Records a verified floor finalization whose block anchor still needs to arrive.
     ///
     /// Taking or replacing the pending anchor drops `aborter`, which aborts its
@@ -170,6 +162,14 @@ impl<S: Scheme, C: Digest> State<S, C> {
     #[must_use]
     pub(super) fn take_pending_anchor(&mut self) -> Option<Finalization<S, C>> {
         self.pending.take().map(|pending| pending.finalization)
+    }
+
+    /// Takes the pending anchor if `commitment` is its payload.
+    #[must_use]
+    pub(super) fn take_matching_anchor(&mut self, commitment: C) -> Option<Finalization<S, C>> {
+        self.pending
+            .take_if(|pending| pending.finalization.proposal.payload == commitment)
+            .map(|pending| pending.finalization)
     }
 
     /// Takes the pending anchor if the processed round floor now covers its round.

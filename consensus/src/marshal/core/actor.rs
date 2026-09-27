@@ -422,8 +422,8 @@ where
                         finalization,
                         false,
                         &mut resolver,
-                        &mut waiters,
                         &mut buffer,
+                        &mut waiters,
                         &mut application,
                     )
                     .await;
@@ -947,7 +947,7 @@ where
             }
             Message::SetFloor { finalization, .. } => {
                 self = self
-                    .install_floor(finalization, true, resolver, waiters, buffer, application)
+                    .install_floor(finalization, true, resolver, buffer, waiters, application)
                     .await;
             }
             Message::Prune { height, .. } => {
@@ -1204,8 +1204,8 @@ where
         finalization: Finalization<P::Scheme, V::Commitment>,
         skip_if_superseded: bool,
         resolver: &mut R,
-        waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         buffer: &mut Buf,
+        waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
     where
@@ -1245,6 +1245,7 @@ where
         }
 
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
+            // Replace any older pending floor, then install this one through ingest
             self.floor.await_anchor(finalization, None);
             let anchored;
             (self, anchored) = self.ingest(block, buffer, application, resolver).await;
@@ -1321,23 +1322,20 @@ where
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(block.clone());
 
-        if !self.floor.matches_pending_anchor(V::commitment(&block)) {
+        let Some(finalization) = self.floor.take_matching_anchor(V::commitment(&block)) else {
             return (self, false);
-        }
+        };
 
         self = self
-            .apply_pending_floor(block, buffer, application, resolver)
+            .apply_floor(finalization, block, buffer, application, resolver)
             .await;
         (self, true)
     }
 
-    /// Applies the pending floor transition using its matching anchor block.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no pending floor anchor is installed.
-    async fn apply_pending_floor<Buf: Buffer<V>>(
+    /// Applies the floor transition that `finalization` announces using its anchor block.
+    async fn apply_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
+        finalization: Finalization<P::Scheme, V::Commitment>,
         block: V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -1363,10 +1361,6 @@ where
                 existing = %self.floor.processed_height(),
                 "floor not updated, at or below existing"
             );
-            let finalization = self
-                .floor
-                .take_pending_anchor()
-                .expect("pending floor anchor missing");
             self = self
                 .update_processed_round_floor(
                     height,
@@ -1390,10 +1384,6 @@ where
         }
 
         let digest = block.digest();
-        let finalization = self
-            .floor
-            .take_pending_anchor()
-            .expect("pending floor anchor missing");
         let round = finalization.round();
         let stored: V::StoredBlock = block.into();
         (self.finalized_blocks, self.finalizations_by_height) = try_join!(
