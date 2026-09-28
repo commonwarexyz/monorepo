@@ -77,9 +77,8 @@ use commonware_utils::{Acknowledgement, acknowledgement::Exact};
 use std::sync::Arc;
 
 mod config;
+pub use crate::ancestry;
 pub use config::{Config, Start};
-
-pub mod ancestry;
 pub mod core;
 pub mod resolver;
 pub mod standard;
@@ -91,6 +90,7 @@ mod conformance;
 commonware_macros::stability_scope!(ALPHA {
     pub(crate) mod application;
     pub mod coding;
+    mod ledger;
 });
 
 #[cfg(test)]

@@ -845,6 +845,12 @@ where
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
+            Message::GetFinalizationAtOrBelow {
+                height, response, ..
+            } => {
+                let finalization = self.get_finalization_at_or_below(height).await;
+                response.send_lossy(finalization);
+            }
             Message::GetProcessed { response, .. } => {
                 response.send_lossy(self.floor.processed());
             }
@@ -2003,6 +2009,20 @@ where
         }
     }
 
+    /// Get the newest finalization in the archive at or below `height`, with the height it
+    /// certifies.
+    async fn get_finalization_at_or_below(
+        &self,
+        height: Height,
+    ) -> Option<(Height, Finalization<P::Scheme, V::Commitment>)> {
+        let stored = Self::stored_finalization_at_or_below(&self.finalizations_by_height, height)?;
+        let finalization = self
+            .get_finalization_by_height(stored)
+            .await
+            .expect("finalization missing from stored range");
+        Some((stored, finalization))
+    }
+
     /// Check whether a finalization exists in the archive at `height` without
     /// fetching it.
     async fn has_finalization_by_height(&self, height: Height) -> bool {
@@ -2376,6 +2396,18 @@ where
         }
     }
 
+    /// Returns the newest height at or below `height` with a stored finalization.
+    fn stored_finalization_at_or_below(
+        finalizations_by_height: &FC,
+        height: Height,
+    ) -> Option<Height> {
+        finalizations_by_height
+            .ranges_from(Height::zero())
+            .take_while(|(start, _)| *start <= height)
+            .last()
+            .map(|(_, end)| end.min(height))
+    }
+
     /// Returns the latest recoverable round at or immediately after the processed height.
     ///
     /// A finalization above the processed height advances the round floor only when its matching
@@ -2386,10 +2418,7 @@ where
         height: Option<Height>,
     ) -> Round {
         let processed_round = height.and_then(|height| {
-            finalizations_by_height
-                .ranges_from(Height::zero())
-                .filter_map(|(start, end)| (start <= height).then_some(end.min(height)))
-                .max()
+            Self::stored_finalization_at_or_below(finalizations_by_height, height)
         });
         let processed_round = match processed_round {
             Some(finalization_height) => match finalizations_by_height

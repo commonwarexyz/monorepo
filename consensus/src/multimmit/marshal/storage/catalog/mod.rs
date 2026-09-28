@@ -54,7 +54,6 @@ use super::{
 use crate::{
     multimmit::{
         marshal::{
-            OutputIndex,
             config::{ArchiveConfig, ArchiveMode, Config, Retention, Start},
             types::Families,
         },
@@ -63,7 +62,7 @@ use crate::{
             genesis_history,
         },
     },
-    types::{Height, View},
+    types::{Height, OutputIndex, View},
 };
 pub(crate) use admission::{AdmissionFuture, AdmissionWrite};
 use commonware_codec::{CodecShared, EncodeSize as _};

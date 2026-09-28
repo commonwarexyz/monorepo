@@ -256,7 +256,6 @@ mod tests {
         Epochable as _, Viewable as _,
         multimmit::{
             marshal::{
-                OutputIndex,
                 actors::catalog::Error as CatalogError,
                 config::{ArchiveConfig, Retention, Start},
                 storage::{
@@ -273,7 +272,7 @@ mod tests {
             },
         },
         simplex::marshal::mocks::block::EmptyBlock,
-        types::{Epoch, Height, View},
+        types::{Epoch, Height, OutputIndex, View},
     };
     use commonware_codec::Encode as _;
     use commonware_cryptography::{
