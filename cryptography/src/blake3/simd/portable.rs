@@ -51,6 +51,12 @@ impl<const L: usize> Words<L> for [u32; L] {
     }
 
     #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; L], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The portable words require no target features.
+        unsafe { super::pad(inputs, start, len) }
+    }
+
+    #[inline(always)]
     unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; L] {
         core::array::from_fn(|lane| {
             let mut output = [0u8; OUT_LEN];

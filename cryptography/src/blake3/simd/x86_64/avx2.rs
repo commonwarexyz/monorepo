@@ -122,6 +122,12 @@ impl Words<LANES> for __m256i {
     }
 
     #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; LANES], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes AVX2.
+        unsafe { crate::blake3::simd::pad(inputs, start, len) }
+    }
+
+    #[inline(always)]
     unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; LANES] {
         // SAFETY: The caller establishes AVX2, and each unaligned 32-byte
         // store fills one 32-byte output.

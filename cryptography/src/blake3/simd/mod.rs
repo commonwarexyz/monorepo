@@ -39,6 +39,12 @@ mod portable;
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
+/// Words for one message in general-purpose registers.
+#[cfg(target_arch = "aarch64")]
+type Scalar = [u32; 1];
+#[cfg(target_arch = "x86_64")]
+use x86_64::Scalar;
+
 /// The BLAKE3 initial chaining value (the SHA-256 initial hash values).
 const IV: [u32; 8] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
@@ -96,8 +102,39 @@ trait Words<const LANES: usize>: Copy {
     /// Load one block per lane as 16 little-endian message words.
     unsafe fn load(blocks: [&[u8; BLOCK_LEN]; LANES]) -> [Self; 16];
 
+    /// Load bytes `start..start + len` of each lane's input, fewer than
+    /// [`BLOCK_LEN`], zero-padded to one block, as 16 little-endian message
+    /// words.
+    unsafe fn load_partial(inputs: [&[u8]; LANES], start: usize, len: usize) -> [Self; 16];
+
     /// Store 8 chaining value words as one little-endian output per lane.
     unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; LANES];
+}
+
+/// Load bytes `start..start + len` of each lane's input, zero-padded to one
+/// block, by copying them into a zeroed block.
+///
+/// # Safety
+///
+/// The caller must establish the target features `V` requires.
+///
+/// # Panics
+///
+/// Panics if `len` exceeds [`BLOCK_LEN`] or an input is shorter than
+/// `start + len` bytes.
+#[inline(always)]
+unsafe fn pad<V: Words<L>, const L: usize>(
+    inputs: [&[u8]; L],
+    start: usize,
+    len: usize,
+) -> [V; 16] {
+    let mut padded = [[0u8; BLOCK_LEN]; L];
+    for (padded, input) in padded.iter_mut().zip(inputs) {
+        padded[..len].copy_from_slice(&input[start..start + len]);
+    }
+
+    // SAFETY: The caller establishes the target features `V` requires.
+    unsafe { V::load(padded.each_ref()) }
 }
 
 /// Mix one column or diagonal of the state with two message words.
@@ -284,11 +321,7 @@ unsafe fn chunk<V: Words<L>, const L: usize>(
                 V::load(blocks)
             } else {
                 // The final block of the message is zero-padded.
-                let mut padded = [[0u8; BLOCK_LEN]; L];
-                for (padded, input) in padded.iter_mut().zip(inputs) {
-                    padded[..block_len].copy_from_slice(&input[start..start + block_len]);
-                }
-                V::load(padded.each_ref())
+                V::load_partial(inputs, start, block_len)
             };
             compress(&mut cv, &message, index as u64, block_len, flags);
         }
@@ -448,20 +481,21 @@ unsafe fn hash<V: Words<L>, const L: usize>(inputs: [&[u8]; L]) -> [[u8; OUT_LEN
 /// or either exceeds [`PAIR_LEN`](super::PAIR_LEN) bytes.
 #[inline]
 pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Digest)> {
-    let (left, len) = gather(left)?;
-    let (right, right_len) = gather(right)?;
-    if len != right_len {
-        return None;
-    }
-
     cfg_if::cfg_if! {
-        if #[cfg(all(target_arch = "aarch64", any(target_feature = "neon", feature = "std")))] {
-            let [left, right] = aarch64::hash_pair([&left[..len], &right[..len]]);
-        } else if #[cfg(target_arch = "aarch64")] {
+        if #[cfg(target_arch = "x86_64")] {
+            let [left, right] = x86_64::hash_pair(left, right)?;
+        } else {
+            let (left, len) = gather(left)?;
+            let (right, right_len) = gather(right)?;
+            if len != right_len {
+                return None;
+            }
+            let inputs = [&left[..len], &right[..len]];
+            #[cfg(any(target_feature = "neon", feature = "std"))]
+            let [left, right] = aarch64::hash_pair(inputs);
+            #[cfg(not(any(target_feature = "neon", feature = "std")))]
             // SAFETY: The portable words require no target features.
-            let [left, right] = unsafe { hash::<[u32; 2], 2>([&left[..len], &right[..len]]) };
-        } else if #[cfg(target_arch = "x86_64")] {
-            let [left, right] = x86_64::hash_pair(&left, &right, len)?;
+            let [left, right] = unsafe { hash::<[u32; 2], 2>(inputs) };
         }
     }
     Some((Digest(left), Digest(right)))
@@ -471,18 +505,18 @@ pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<(Digest, Dige
 /// at least two full chunks and a kernel is available.
 ///
 /// A message of at most one chunk is one chain of dependent compressions, so
-/// it is compressed with the portable words directly, in general-purpose
-/// registers. The [blake3] crate compresses it behind its incremental chunk
-/// state, with portable code on aarch64 and with the state rows in vectors on
-/// x86_64, where vector instruction latency (two cycles on Zen 5) lengthens
-/// the chain.
+/// it is compressed in general-purpose registers with [`Scalar`] words. The
+/// [blake3] crate compresses it behind its incremental chunk state, with
+/// portable code on aarch64 and with the state rows in vectors on x86_64,
+/// where vector instruction latency (two cycles on Zen 5) lengthens the
+/// chain.
 #[inline]
 pub(super) fn hash_one(message: &[u8]) -> Digest {
     if message.len() <= CHUNK_LEN {
-        // SAFETY: The portable words require no target features.
+        // SAFETY: Scalar words require no target features.
         let [digest] = unsafe {
-            let cv = chunk::<[u32; 1], 1>([message], 0, message.len(), ROOT);
-            <[u32; 1]>::store(cv)
+            let cv = chunk::<Scalar, 1>([message], 0, message.len(), ROOT);
+            <Scalar as Words<1>>::store(cv)
         };
         return Digest(digest);
     }

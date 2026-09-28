@@ -30,6 +30,35 @@ unsafe fn interleave(rows: [__m512i; 4]) -> [__m512i; 4] {
     }
 }
 
+/// Transpose one block per lane, held as sixteen row vectors, into 16 message
+/// words.
+#[inline(always)]
+unsafe fn transpose(rows: [__m512i; LANES]) -> [__m512i; 16] {
+    // SAFETY: The caller establishes AVX-512F.
+    unsafe {
+        // Group `g` interleaves lanes `4g..4g + 4`: output `s` holds, in
+        // 128-bit block `k`, word `4k + s` of those lanes.
+        let g0 = interleave([rows[0], rows[1], rows[2], rows[3]]);
+        let g1 = interleave([rows[4], rows[5], rows[6], rows[7]]);
+        let g2 = interleave([rows[8], rows[9], rows[10], rows[11]]);
+        let g3 = interleave([rows[12], rows[13], rows[14], rows[15]]);
+
+        // Gather block `k` of every group into word `4k + s`.
+        let mut words = [_mm512_setzero_si512(); 16];
+        for s in 0..4 {
+            let low01 = _mm512_shuffle_i32x4::<0x44>(g0[s], g1[s]);
+            let high01 = _mm512_shuffle_i32x4::<0xEE>(g0[s], g1[s]);
+            let low23 = _mm512_shuffle_i32x4::<0x44>(g2[s], g3[s]);
+            let high23 = _mm512_shuffle_i32x4::<0xEE>(g2[s], g3[s]);
+            words[s] = _mm512_shuffle_i32x4::<0x88>(low01, low23);
+            words[s + 4] = _mm512_shuffle_i32x4::<0xDD>(low01, low23);
+            words[s + 8] = _mm512_shuffle_i32x4::<0x88>(high01, high23);
+            words[s + 12] = _mm512_shuffle_i32x4::<0xDD>(high01, high23);
+        }
+        words
+    }
+}
+
 impl Words<LANES> for __m512i {
     #[inline(always)]
     unsafe fn splat(word: u32) -> Self {
@@ -82,27 +111,26 @@ impl Words<LANES> for __m512i {
             for (row, block) in rows.iter_mut().zip(blocks) {
                 *row = _mm512_loadu_si512(block.as_ptr().cast());
             }
+            transpose(rows)
+        }
+    }
 
-            // Group `g` interleaves lanes `4g..4g + 4`: output `s` holds, in
-            // 128-bit block `k`, word `4k + s` of those lanes.
-            let g0 = interleave([rows[0], rows[1], rows[2], rows[3]]);
-            let g1 = interleave([rows[4], rows[5], rows[6], rows[7]]);
-            let g2 = interleave([rows[8], rows[9], rows[10], rows[11]]);
-            let g3 = interleave([rows[12], rows[13], rows[14], rows[15]]);
+    #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; LANES], start: usize, len: usize) -> [Self; 16] {
+        assert!(len < BLOCK_LEN, "partial block is shorter than a block");
+        let mask = (1 << len) - 1;
 
-            // Gather block `k` of every group into word `4k + s`.
-            let mut words = [_mm512_setzero_si512(); 16];
-            for s in 0..4 {
-                let low01 = _mm512_shuffle_i32x4::<0x44>(g0[s], g1[s]);
-                let high01 = _mm512_shuffle_i32x4::<0xEE>(g0[s], g1[s]);
-                let low23 = _mm512_shuffle_i32x4::<0x44>(g2[s], g3[s]);
-                let high23 = _mm512_shuffle_i32x4::<0xEE>(g2[s], g3[s]);
-                words[s] = _mm512_shuffle_i32x4::<0x88>(low01, low23);
-                words[s + 4] = _mm512_shuffle_i32x4::<0xDD>(low01, low23);
-                words[s + 8] = _mm512_shuffle_i32x4::<0x88>(high01, high23);
-                words[s + 12] = _mm512_shuffle_i32x4::<0xDD>(high01, high23);
+        // SAFETY: The caller establishes AVX-512F and AVX-512BW, and each
+        // masked load reads only the `len` bytes of its block.
+        unsafe {
+            let mut rows = [_mm512_setzero_si512(); LANES];
+            for (row, input) in rows.iter_mut().zip(inputs) {
+                // Loading straight from the message, rather than from a
+                // zero-padded copy, leaves no load spanning the copy's stores.
+                let block = &input[start..start + len];
+                *row = _mm512_maskz_loadu_epi8(mask, block.as_ptr().cast());
             }
-            words
+            transpose(rows)
         }
     }
 
@@ -146,10 +174,10 @@ impl Words<LANES> for __m512i {
 ///
 /// # Safety
 ///
-/// The caller must establish AVX-512F availability.
-#[target_feature(enable = "avx512f")]
+/// The caller must establish AVX-512F and AVX-512BW availability.
+#[target_feature(enable = "avx512f,avx512bw")]
 pub(super) unsafe fn hash_x16(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] {
-    // SAFETY: AVX-512F is enabled for this function.
+    // SAFETY: AVX-512F and AVX-512BW are enabled for this function.
     unsafe { crate::blake3::simd::hash::<__m512i, LANES>(inputs) }
 }
 
@@ -173,10 +201,10 @@ pub(super) unsafe fn leaves_x16(
 ///
 /// # Safety
 ///
-/// The caller must establish AVX-512F availability.
-#[target_feature(enable = "avx512f")]
+/// The caller must establish AVX-512F and AVX-512BW availability.
+#[target_feature(enable = "avx512f,avx512bw")]
 pub(super) unsafe fn tails_x16(inputs: [&[u8]; LANES]) -> [[u8; OUT_LEN]; LANES] {
-    // SAFETY: AVX-512F is enabled for this function.
+    // SAFETY: AVX-512F and AVX-512BW are enabled for this function.
     unsafe { crate::blake3::simd::tails::<__m512i, LANES>(inputs) }
 }
 

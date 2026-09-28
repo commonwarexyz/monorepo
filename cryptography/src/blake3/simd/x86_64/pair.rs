@@ -241,6 +241,62 @@ unsafe fn hash<const VL: bool>(
     }
 }
 
+/// Copy the concatenation of `parts` into `buffer`, zero-padded, returning its
+/// length, or `None` if it exceeds [`PAIR_LEN`] bytes or a part is not a whole
+/// number of 32-bit words.
+///
+/// Masked loads assemble each 32-byte half of a block in a register from the
+/// parts that overlap it, and one 32-byte store writes it, so each 16-byte
+/// load of the kernel reads bytes written by a single store.
+///
+/// # Safety
+///
+/// The caller must establish AVX2 availability.
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn gather(parts: &[&[u8]], buffer: &mut [u8; PAIR_LEN]) -> Option<usize> {
+    const HALF: usize = BLOCK_LEN / 2;
+    let mut halves = [_mm256_setzero_si256(); PAIR_LEN / HALF];
+    let lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    let mut len = 0;
+    for part in parts {
+        let end = len + part.len();
+        if end > PAIR_LEN || part.len() % 4 != 0 {
+            return None;
+        }
+        for (index, half) in halves.iter_mut().enumerate() {
+            // Message bytes `low..high` lie in both the part and the half.
+            let start = index * HALF;
+            let (low, high) = (len.max(start), end.min(start + HALF));
+            if low >= high {
+                continue;
+            }
+
+            // Every part so far is whole words, so `low` and `high` fall on
+            // word boundaries. Select words `first..last` of the half.
+            let first = _mm256_set1_epi32(((low - start) / 4) as i32);
+            let last = _mm256_set1_epi32(((high - start) / 4) as i32);
+            let mask = _mm256_andnot_si256(
+                _mm256_cmpgt_epi32(first, lanes),
+                _mm256_cmpgt_epi32(last, lanes),
+            );
+
+            // Word `i` of the load is bytes `start + 4 * i..` of the message.
+            let base = part.as_ptr().wrapping_add(start).wrapping_sub(len);
+
+            // SAFETY: AVX2 is enabled, and the mask selects the words of bytes
+            // `low - len..high - len` of `part`, the only bytes read.
+            let words = unsafe { _mm256_maskload_epi32(base.cast(), mask) };
+            *half = _mm256_or_si256(*half, words);
+        }
+        len = end;
+    }
+    for (chunk, half) in buffer.as_chunks_mut::<HALF>().0.iter_mut().zip(halves) {
+        // SAFETY: AVX2 is enabled, and the store fills one 32-byte chunk.
+        unsafe { _mm256_storeu_si256(chunk.as_mut_ptr().cast(), half) };
+    }
+    Some(len)
+}
+
 /// Hash two `len`-byte messages, each zero-padded to [`PAIR_LEN`] bytes,
 /// rotating with AVX2 shifts.
 ///

@@ -174,6 +174,12 @@ impl Words<LANES> for uint32x4_t {
     }
 
     #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; LANES], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { super::pad(inputs, start, len) }
+    }
+
+    #[inline(always)]
     unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; LANES] {
         // SAFETY: The caller establishes NEON, and each 16-byte store starts
         // at offset 0 or 16 of a 32-byte output.
@@ -290,6 +296,12 @@ impl Words<LANES> for Xar {
     }
 
     #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; LANES], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { super::pad(inputs, start, len) }
+    }
+
+    #[inline(always)]
     unsafe fn store(words: [Self; 8]) -> [[u8; OUT_LEN]; LANES] {
         // SAFETY: The caller establishes NEON.
         unsafe { <uint32x4_t as Words<LANES>>::store(words.map(|word| word.0)) }
@@ -355,6 +367,12 @@ impl Words<LANES> for Hybrid {
     unsafe fn load(blocks: [&[u8; BLOCK_LEN]; LANES]) -> [Self; 16] {
         // SAFETY: The caller establishes NEON.
         unsafe { <uint32x4_t as Words<LANES>>::load(blocks).map(Self) }
+    }
+
+    #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; LANES], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { super::pad(inputs, start, len) }
     }
 
     #[inline(always)]
@@ -427,6 +445,12 @@ impl<W: Words<LANES>> Words<{ 2 * LANES }> for Dual<W> {
             let high = W::load(high.try_into().expect("half of the blocks"));
             core::array::from_fn(|word| Self([low[word], high[word]]))
         }
+    }
+
+    #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; 2 * LANES], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes the target features `W` requires.
+        unsafe { super::pad(inputs, start, len) }
     }
 
     #[inline(always)]
@@ -520,6 +544,12 @@ impl Words<2> for Dup {
             }
             words
         }
+    }
+
+    #[inline(always)]
+    unsafe fn load_partial(inputs: [&[u8]; 2], start: usize, len: usize) -> [Self; 16] {
+        // SAFETY: The caller establishes NEON.
+        unsafe { super::pad(inputs, start, len) }
     }
 
     #[inline(always)]

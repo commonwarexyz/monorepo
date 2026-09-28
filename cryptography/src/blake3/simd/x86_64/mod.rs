@@ -7,6 +7,9 @@ use blake3::{BLOCK_LEN, OUT_LEN};
 mod avx2;
 mod avx512;
 mod pair;
+mod scalar;
+
+pub(super) use scalar::Scalar;
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "std")] {
@@ -16,10 +19,11 @@ cfg_if::cfg_if! {
             std::arch::is_x86_feature_detected!("avx2")
         }
 
-        /// Return whether AVX-512F is available.
+        /// Return whether AVX-512F and AVX-512BW are available.
         #[inline]
         fn supports_avx512() -> bool {
             std::arch::is_x86_feature_detected!("avx512f")
+                && std::arch::is_x86_feature_detected!("avx512bw")
         }
 
         /// Return whether AVX-512F and AVX-512VL are available.
@@ -34,9 +38,9 @@ cfg_if::cfg_if! {
             cfg!(target_feature = "avx2")
         }
 
-        /// Return whether AVX-512F is statically enabled.
+        /// Return whether AVX-512F and AVX-512BW are statically enabled.
         const fn supports_avx512() -> bool {
-            cfg!(target_feature = "avx512f")
+            cfg!(all(target_feature = "avx512f", target_feature = "avx512bw"))
         }
 
         /// Return whether AVX-512F and AVX-512VL are statically enabled.
@@ -46,16 +50,21 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Hash two `len`-byte zero-padded messages with the AVX2 pair kernel.
+/// Hash two messages, each given as parts, with the AVX2 pair kernel.
+///
+/// Returns `None` when AVX2 is unavailable, the messages differ in length, or
+/// either exceeds [`PAIR_LEN`] bytes.
 #[inline]
-pub(super) fn hash_pair(
-    left: &[u8; PAIR_LEN],
-    right: &[u8; PAIR_LEN],
-    len: usize,
-) -> Option<[[u8; OUT_LEN]; 2]> {
+pub(super) fn hash_pair(left: &[&[u8]], right: &[&[u8]]) -> Option<[[u8; OUT_LEN]; 2]> {
     if !supports_avx2() {
         return None;
     }
+    let (mut left_buffer, mut right_buffer) = ([0u8; PAIR_LEN], [0u8; PAIR_LEN]);
+    let len = gather(left, &mut left_buffer)?;
+    if gather(right, &mut right_buffer)? != len {
+        return None;
+    }
+    let (left, right) = (&left_buffer, &right_buffer);
 
     // Two-block pairs are bound by the latency of the chained compressions,
     // which single-instruction AVX-512VL rotates shorten. Consecutive
@@ -71,7 +80,29 @@ pub(super) fn hash_pair(
     Some(unsafe { pair::hash_pair(left, right, len) })
 }
 
-/// AVX-512 kernels. A value exists only once AVX-512F is available.
+/// Copy the concatenation of `parts` into `buffer`, zero-padded, returning its
+/// length, or `None` if it exceeds [`PAIR_LEN`] bytes.
+///
+/// A load that spans several stores cannot forward from them and waits until
+/// they reach the cache. Copying part by part leaves such loads wherever a
+/// part ends inside one of the kernel's 16-byte loads, so parts of whole
+/// 32-bit words are assembled in registers and each half block is written with
+/// one store.
+#[inline]
+fn gather(parts: &[&[u8]], buffer: &mut [u8; PAIR_LEN]) -> Option<usize> {
+    if supports_avx2() {
+        // SAFETY: AVX2 availability was established above.
+        if let Some(len) = unsafe { pair::gather(parts, buffer) } {
+            return Some(len);
+        }
+    }
+    let (gathered, len) = super::gather(parts)?;
+    *buffer = gathered;
+    Some(len)
+}
+
+/// AVX-512 kernels. A value exists only once AVX-512F and AVX-512BW are
+/// available.
 struct Avx512(());
 
 impl Avx512 {
@@ -89,7 +120,8 @@ impl Nodes<16> for Avx512 {
     }
 
     fn tails(&self, inputs: [&[u8]; 16], _: usize) -> [[u8; OUT_LEN]; 16] {
-        // SAFETY: AVX-512F availability was established on construction.
+        // SAFETY: AVX-512F and AVX-512BW availability was established on
+        // construction.
         unsafe { avx512::tails_x16(inputs) }
     }
 
@@ -138,7 +170,8 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
         let pack = |messages: &[&[u8]], digests: &mut _| Avx512(()).pack(messages, digests);
         return Some(batch(messages, avx512::MINIMUM, pack, |inputs, active| {
             pair_batch(inputs, active).unwrap_or_else(|| {
-                // SAFETY: AVX-512F availability was established above.
+                // SAFETY: AVX-512F and AVX-512BW availability was established
+                // above.
                 unsafe { avx512::hash_x16(inputs) }
             })
         }));
@@ -162,15 +195,10 @@ pub(super) fn hash_many<M: AsRef<[u8]>>(messages: &[M]) -> Option<Vec<Digest>> {
 /// while the two-message kernel holds each message's state in one vector and
 /// does a fraction of that work. Spare outputs are zero.
 fn pair_batch<const L: usize>(inputs: [&[u8]; L], active: usize) -> Option<[[u8; OUT_LEN]; L]> {
-    let len = inputs[0].len();
-    if active != 2 || len > PAIR_LEN {
+    if active != 2 {
         return None;
     }
-    let mut left = [0u8; PAIR_LEN];
-    let mut right = [0u8; PAIR_LEN];
-    left[..len].copy_from_slice(inputs[0]);
-    right[..len].copy_from_slice(inputs[1]);
-    let pair = hash_pair(&left, &right, len)?;
+    let pair = hash_pair(&[inputs[0]], &[inputs[1]])?;
     let mut outputs = [[0u8; OUT_LEN]; L];
     outputs[..2].copy_from_slice(&pair);
     Some(outputs)
@@ -200,7 +228,7 @@ mod tests {
             return;
         }
 
-        // SAFETY: AVX-512F availability was checked above.
+        // SAFETY: AVX-512F and AVX-512BW availability was checked above.
         check_lanes::<16>(|inputs| unsafe { avx512::hash_x16(inputs) });
     }
 
@@ -229,11 +257,40 @@ mod tests {
         check_batch(|messages| {
             batch(messages, avx512::MINIMUM, pack, |inputs, active| {
                 pair_batch(inputs, active).unwrap_or_else(|| {
-                    // SAFETY: AVX-512F availability was checked above.
+                    // SAFETY: AVX-512F and AVX-512BW availability was checked
+                    // above.
                     unsafe { avx512::hash_x16(inputs) }
                 })
             })
         });
+    }
+
+    #[test]
+    fn test_masked_gather_matches_gather() {
+        if !supports_avx2() {
+            return;
+        }
+        let data: Vec<u8> = (1..=PAIR_LEN as u8 + 1).collect();
+        for len in 0..=PAIR_LEN + 1 {
+            let message = &data[..len];
+            for split in 0..=len {
+                let parts: [&[u8]; 3] = [&message[..split], &[], &message[split..]];
+                let words = parts.iter().all(|part| part.len() % 4 == 0);
+
+                // The masked gather must write every byte of the buffer.
+                let mut buffer = [0xAA; PAIR_LEN];
+
+                // SAFETY: AVX2 availability was checked above.
+                let masked = unsafe { pair::gather(&parts, &mut buffer) };
+                match gather(&parts) {
+                    Some((expected, expected_len)) if words => {
+                        assert_eq!(masked, Some(expected_len), "len {len} split {split}");
+                        assert_eq!(buffer, expected, "len {len} split {split}");
+                    }
+                    _ => assert_eq!(masked, None, "len {len} split {split}"),
+                }
+            }
+        }
     }
 
     #[test]
