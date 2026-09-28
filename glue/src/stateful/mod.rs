@@ -221,7 +221,7 @@ where
     ///
     /// The merkleized state must match [`sync_targets`](Self::sync_targets) for the returned block:
     /// [`Stateful`] panics otherwise. Applications using
-    /// [`qmdb::current`](commonware_storage::qmdb::current) must also ensure the block commits to
+    /// [`qmdb::current`] must also ensure the block commits to
     /// the merkleized batch's canonical root, because the sync targets cover only the ops root and
     /// operation range.
     ///
@@ -257,7 +257,7 @@ where
     ///
     /// Reject execution results that differ from the block's commitments. [`Stateful`] checks
     /// [`sync_targets`](Self::sync_targets), so implementations need not repeat that check.
-    /// Applications using [`qmdb::current`](commonware_storage::qmdb::current) must reject blocks whose
+    /// Applications using [`qmdb::current`] must reject blocks whose
     /// committed canonical root differs from the merkleized batch root, because the sync targets
     /// cover only the ops root and operation range.
     ///
