@@ -903,9 +903,10 @@ where
 
     /// Applies the next finalized `block` and discards cached state that does not descend from it.
     ///
-    /// Returns the prune that became due, if any, and the [`Publication`] for serving: with a
-    /// barrier covering `block` and every earlier applied block if `start_barrier` is set. The processed anchor advances to `block` after the
-    /// application's `finalized` hook returns.
+    /// Returns the prune that became due, if any, and the [`Publication`] for serving, which
+    /// carries a barrier covering `block` and every earlier applied block if `start_barrier` is
+    /// set. The processed anchor advances to `block` after the application's `finalized` hook
+    /// returns.
     ///
     /// Panics if `block` does not have the next height and the processed anchor as its parent,
     /// or if an uncached block fails to execute or match its commitments.
