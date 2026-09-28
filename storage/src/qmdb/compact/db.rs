@@ -142,8 +142,9 @@ where
     /// compact-sync import is pending.
     ///
     /// The replacement never decodes the previous contents. It resets the journal to position 1,
-    /// so a crash before `tip` is durable reopens as an interrupted import rather than a fresh
-    /// db.
+    /// so a crash before `tip` reaches storage reopens as an interrupted import rather than a
+    /// fresh db. A `tip` that reached storage in full is recovered even if no durability
+    /// operation covering it completed.
     async fn open<O: Operation<F>>(
         self,
         tip: &Witness<F, D, O>,
@@ -277,8 +278,10 @@ where
     /// The imported witness lives only in memory, and the partition `cfg` names is not opened,
     /// until the first [`Self::apply_batch`], [`Self::commit`], [`Self::sync`], or
     /// [`Self::start_sync`] replaces the partition's contents with it. Until one of those
-    /// succeeds, prune is rejected. A crash during the replacement leaves a journal that fails
-    /// to reopen, and re-syncing recovers it.
+    /// succeeds, prune is rejected. A crash after the replacement starts but before a complete
+    /// witness reaches storage leaves an interrupted import, which fails to reopen until a
+    /// re-sync replaces it. A witness that reached storage in full is recovered even if the
+    /// durability operation never completed.
     pub(crate) fn init_from_sync(
         strategy: S,
         context: E,
