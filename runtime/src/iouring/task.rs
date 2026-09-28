@@ -1,43 +1,53 @@
 //! Worker-local tasks, each one allocation.
 //!
 //! A spawned task is one [`Cell`]: a type-erased [`Header`] followed by the
-//! concrete future. The header holds a state word that coalesces wakes into
-//! at most one ready token and counts references, and the mailbox of the
-//! worker that owns the task. A [`Task`] is a thin owning pointer to the
-//! header, and the header is also the waker, so a wake is an atomic
-//! transition on the header, plus a queue push when it publishes a token.
+//! concrete future. The header holds the task's [`State`], a vtable for the
+//! erased future, and the mailbox of the worker that owns the task. A [`Task`]
+//! and a task's [`Waker`] are each a thin pointer to that header holding one
+//! reference, so cloning either counts a reference, and a wake is an atomic
+//! transition on the state, plus a queue push when it publishes a ready token.
 //!
-//! A wake that arrives during a poll is recorded in the state and becomes a
-//! ready token only if that poll returns pending. The token joins the tail of
-//! the ready queue, so a self-waking task cannot skip other ready work.
-//! Completion is terminal, so a late wake of a finished task is a no-op.
+//! # Lifecycle
+//!
+//! A ready token is the reference that entitles its holder to poll the task
+//! once. It waits in the owning worker's ready queue, or travels there through
+//! the worker's mailbox, and a task has at most one. A wake publishes a token
+//! only when the task has none, so duplicate wakes coalesce. A wake that
+//! arrives during a poll is recorded in the state and becomes the next token
+//! only if that poll returns pending. That token joins the tail of the ready
+//! queue, so a self-waking task cannot skip other ready work. Completion is
+//! terminal, so a late wake of a finished task is a no-op.
 //!
 //! ```text
-//! Idle     --notify-------->  Queued     one ready token exists
-//! Queued   --start_poll---->  Running    the poller owns the future
-//! Running  --notify-------->  Notified   the wake waits for the poll to end
-//! Running  --finish_pending-> Idle
-//! Notified --finish_pending-> Queued     the poller publishes the token
-//! Running  --complete------>  Complete   also from Notified, the poller drops the future
-//! Idle     --clear--------->  Complete   also from Queued, the caller drops the future
-//! Running  --clear--------->  Running    also from Notified, sets CANCELLED
-//! ```
+//! Wakers, from any thread (`notify_by_ref`, `notify_by_value`):
+//!   Idle              -> Queued       publishes a ready token
+//!   Running           -> Notified     the poll will end in a requeue
+//!   Queued, Notified  -> unchanged    coalesced, still a releasing exchange
+//!   Complete          -> unchanged    ignored
 //!
-//! A pending poll that finds `CANCELLED` completes the task instead of going
-//! idle.
+//! The poller, holding the token:
+//!   Queued            -> Running      `start_poll`
+//!   Running           -> Idle         `finish_pending`, no wake arrived
+//!   Notified          -> Queued       `finish_pending`, the token is reused
+//!   Running, Notified -> Complete     `complete`, then the future drops
+//!
+//! Teardown, through `clear`:
+//!   Idle, Queued      -> Complete     the caller drops the future
+//!   Running, Notified -> + CANCELLED  the poller completes instead of idling
+//! ```
 //!
 //! # Ownership
 //!
 //! Every ready token, cloned waker, and arena entry holds one reference,
-//! counted in the state word above the lifecycle bits. Transitions that
-//! create or consume a reference change the count in the same exchange: a
-//! wake that publishes a token counts the token's, a wake by value that
-//! publishes nothing releases the waker's, and a poll that ends idle releases
-//! its token's. The waker passed to a poll borrows its token's.
+//! counted in the state word above the lifecycle bits. Transitions that create
+//! or consume a reference change the count in the same exchange: a wake by
+//! reference that publishes counts the token's, a wake by value hands its
+//! reference to the token it publishes or releases it, and a poll that ends
+//! idle releases its token's. The waker passed to a poll borrows its token's.
 //!
-//! The owning worker's arena retains every registered task so teardown can
-//! drop its future. A future is dropped in place when its task completes or
-//! is cleared, and freeing a cell whose future is still present panics, so
+//! The owning worker's arena retains every registered task so teardown can drop
+//! its future. A future is dropped in place when its task completes or is
+//! cleared, and freeing a cell whose future is still present panics, so
 //! releasing a reference runs no user code. A stale waker keeps the cell's
 //! allocation, not its future, alive.
 //!
@@ -70,15 +80,16 @@ cfg_if::cfg_if! {
     }
 }
 
-/// Dormant without a ready token.
+/// Pending without a ready token. The next wake publishes one.
 const IDLE: usize = 0;
-/// Exactly one ready token exists.
+/// One ready token exists, and no poll is running.
 const QUEUED: usize = 1;
-/// A worker is polling the task.
+/// The token's holder is polling the future.
 const RUNNING: usize = 2;
-/// A wake arrived during the current poll.
+/// Polling, and a wake arrived during the poll, so a pending poll requeues
+/// its token.
 const NOTIFIED: usize = 3;
-/// The future completed or teardown cleared it.
+/// Terminal. The future is gone or being dropped, and wakes are ignored.
 const COMPLETE: usize = 4;
 /// Mask of the lifecycle values above.
 const LIFECYCLE: usize = 0b111;
@@ -90,45 +101,52 @@ const REF_ONE: usize = 1 << 8;
 /// Mask of the reference count.
 const REFS: usize = !(REF_ONE - 1);
 
-/// `state` with its lifecycle replaced by `lifecycle`, keeping flags and
-/// references.
-const fn with_lifecycle(state: usize, lifecycle: usize) -> usize {
-    (state & !LIFECYCLE) | lifecycle
-}
-
 /// How a pending poll ends.
 enum Finish {
-    /// No wake arrived. The task is idle, and the token's reference is gone.
+    /// No wake arrived, so the task is idle. The exchange released the polled
+    /// token's reference, and the poller forgets the token.
     Idle,
-    /// A wake arrived. The caller publishes the successor token, which keeps
-    /// the polled token's reference.
+    /// A wake arrived during the poll. The polled token becomes the next one,
+    /// keeping its reference, and the poller queues it again.
     Requeue,
-    /// Teardown cleared the task during the poll. The caller drops the future.
+    /// Teardown cleared the task during the poll. The poller completes it and
+    /// drops the future.
     Cancelled,
 }
 
 /// How a wake that gives up its reference ends.
 enum Notify {
-    /// The caller publishes a ready token, which takes over the reference.
-    Publish,
-    /// The exchange released the reference. The caller frees the cell if it
-    /// was the last.
-    Released {
-        /// Whether no reference remains.
-        last: bool,
-    },
+    /// The task was idle. The waker's reference is now the ready token, which
+    /// the waker schedules.
+    Schedule,
+    /// The task had a token, was running, or was complete. The exchange
+    /// released the waker's reference, and others remain.
+    DoNothing,
+    /// As `DoNothing`, but the released reference was the last, so the waker
+    /// frees the cell.
+    Dealloc,
 }
 
 /// Scheduling state and reference count of one task, in one word.
 ///
+/// The low three bits hold the lifecycle, the next one the `CANCELLED` flag,
+/// and the bits from `REF_ONE` up the reference count. Each lifecycle
+/// transition is a compare-exchange loop over the whole word, retried while
+/// references come and go, so a lifecycle change and the reference change it
+/// implies land together.
+///
 /// A ready token owns the right to poll while the lifecycle is `QUEUED`.
 /// Polling moves to `RUNNING`, a concurrent wake moves to `NOTIFIED` without a
-/// second token, and the poller publishes the successor token only after
-/// observing pending. `COMPLETE` is terminal.
+/// second token, and the poller requeues its token only after observing
+/// pending. `COMPLETE` is terminal.
+///
+/// Transitions exchange with acquire-release ordering, so writes made before a
+/// wake are visible to the poll it causes, and a poll's writes are visible to
+/// the next poll and to teardown.
 struct State(AtomicUsize);
 
 impl State {
-    /// State of a task whose first poll is queued, holding that token's
+    /// State of a new task whose first poll is queued, holding that token's
     /// reference.
     // Loom's atomics have no const constructor.
     #[allow(clippy::missing_const_for_fn)]
@@ -136,45 +154,61 @@ impl State {
         Self(AtomicUsize::new(QUEUED | REF_ONE))
     }
 
-    /// Count one more reference. Like `Arc`, the process aborts before the
-    /// count can wrap, which takes a leak of about `isize::MAX / REF_ONE`
-    /// references.
+    /// `state` with its lifecycle replaced by `lifecycle`, keeping the flags
+    /// and the reference count.
+    #[inline]
+    const fn with_lifecycle(state: usize, lifecycle: usize) -> usize {
+        (state & !LIFECYCLE) | lifecycle
+    }
+
+    /// Count one more reference.
+    ///
+    /// Like `Arc`, the process aborts before the count can wrap, which takes a
+    /// leak of about `isize::MAX / REF_ONE` references.
     #[inline]
     fn retain(&self) {
+        // The new reference is made from one the caller holds, which keeps
+        // the cell alive, so the increment needs no ordering.
         if self.0.fetch_add(REF_ONE, Ordering::Relaxed) > isize::MAX as usize {
             std::process::abort();
         }
     }
 
     /// Release one reference, returning whether it was the last.
+    ///
+    /// The caller that releases the last reference acquires before freeing
+    /// the cell, so every earlier holder's writes happen before the free.
     #[inline]
     fn release(&self) -> bool {
         self.0.fetch_sub(REF_ONE, Ordering::Release) & REFS == REF_ONE
     }
 
-    /// References held.
-    #[cfg(test)]
-    fn refs(&self) -> usize {
-        (self.0.load(Ordering::Acquire) & REFS) / REF_ONE
-    }
-
-    /// Record a wake that keeps its reference. Returns whether the caller
-    /// must publish a ready token, whose reference the exchange counted.
+    /// Record a wake that keeps its reference, as `Waker::wake_by_ref` does.
+    /// Returns whether the caller must schedule a ready token, whose
+    /// reference the exchange counted.
     #[inline]
     fn notify_by_ref(&self) -> bool {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
             let (next, publish) = match state & LIFECYCLE {
+                // No token exists, so this wake publishes one. The waker keeps
+                // its own reference, so the token's is counted here.
                 IDLE => {
+                    // Guarded as in `retain`.
                     if state > isize::MAX as usize {
                         std::process::abort();
                     }
-                    (with_lifecycle(state, QUEUED) + REF_ONE, true)
+                    (Self::with_lifecycle(state, QUEUED) + REF_ONE, true)
                 }
-                // Coalesced wakes still exchange, so writes made before them
-                // are published to the poller's next acquiring transition.
+                // A token already waits to poll the task. Coalesced wakes
+                // still exchange, so writes made before them are published to
+                // the poller's next acquiring transition.
                 QUEUED => (state, false),
-                RUNNING | NOTIFIED => (with_lifecycle(state, NOTIFIED), false),
+                // A poll is running. The wake is recorded so that poll
+                // requeues its token if it returns pending, and wakes during
+                // one poll coalesce into that requeue.
+                RUNNING | NOTIFIED => (Self::with_lifecycle(state, NOTIFIED), false),
+                // Nothing will poll the task again.
                 COMPLETE => return false,
                 other => unreachable!("invalid task state {other}"),
             };
@@ -188,48 +222,63 @@ impl State {
         }
     }
 
-    /// Record a wake that gives up its reference. A published token takes the
-    /// reference over, and otherwise the exchange releases it.
+    /// Record a wake that gives up its reference, as `Waker::wake` does. A
+    /// published token takes the reference over, and otherwise the exchange
+    /// releases it.
+    ///
+    /// The transitions match [`notify_by_ref`](Self::notify_by_ref), except
+    /// for whose reference a published token holds. Folding the release of an
+    /// unused reference into the exchange saves a separate decrement on every
+    /// coalesced wake.
     #[inline]
     fn notify_by_value(&self) -> Notify {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
             let (next, publish) = match state & LIFECYCLE {
-                IDLE => (with_lifecycle(state, QUEUED), true),
-                // Coalesced wakes still exchange, as above.
+                // No token exists, so the waker's reference becomes one, and
+                // the count is unchanged.
+                IDLE => (Self::with_lifecycle(state, QUEUED), true),
+                // A token already waits, or nothing will poll again, so the
+                // waker's reference is released. The exchange still publishes
+                // earlier writes, as in `notify_by_ref`.
                 QUEUED | COMPLETE => (state - REF_ONE, false),
-                RUNNING | NOTIFIED => (with_lifecycle(state, NOTIFIED) - REF_ONE, false),
+                // The wake is recorded for the running poll, as in
+                // `notify_by_ref`, and the waker's reference is released.
+                RUNNING | NOTIFIED => (Self::with_lifecycle(state, NOTIFIED) - REF_ONE, false),
                 other => unreachable!("invalid task state {other}"),
             };
             match self
                 .0
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) if publish => return Notify::Publish,
-                // The acquiring exchange orders every earlier release before
-                // the caller frees the cell.
-                Ok(_) => {
-                    return Notify::Released {
-                        last: next & REFS == 0,
-                    };
-                }
+                Ok(_) if publish => return Notify::Schedule,
+                // Only a completed task can lose its last reference here,
+                // since a token or a poll holds one otherwise. The acquiring
+                // exchange orders every earlier release before the free.
+                Ok(_) if next & REFS == 0 => return Notify::Dealloc,
+                Ok(_) => return Notify::DoNothing,
                 Err(actual) => state = actual,
             }
         }
     }
 
-    /// Claim the ready token for polling, whose reference the poll now holds.
-    /// Fails for a cleared task.
+    /// Claim a poll with the ready token, whose reference the poll then
+    /// holds. Fails for a token of a task teardown cleared while the token
+    /// waited.
     #[inline]
     fn start_poll(&self) -> bool {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
+            // Only a queued task has a token to claim. A token that finds the
+            // task complete is stale.
             if state & LIFECYCLE != QUEUED {
                 return false;
             }
+            // Acquiring makes the writes of the previous poll and of every
+            // wake since then visible to this poll.
             match self.0.compare_exchange_weak(
                 state,
-                with_lifecycle(state, RUNNING),
+                Self::with_lifecycle(state, RUNNING),
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
@@ -239,16 +288,21 @@ impl State {
         }
     }
 
-    /// Finish a pending poll. Going idle releases the polled token's
-    /// reference in the same exchange.
+    /// End a poll that returned pending. Going idle releases the polled
+    /// token's reference in the same exchange.
     #[inline]
     fn finish_pending(&self) -> Finish {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
+            // Teardown cleared the task mid-poll and left the future to this
+            // poller. The lifecycle stays running until `complete`, so wakes
+            // meanwhile publish nothing.
             if state & CANCELLED != 0 {
                 return Finish::Cancelled;
             }
-            let (next, finish) = match state & LIFECYCLE {
+            let (next, result) = match state & LIFECYCLE {
+                // No wake arrived. The next wake publishes a new token, so
+                // this one is released in the same exchange.
                 RUNNING => {
                     // The arena holds a reference to every task that can go
                     // idle, so the token's is never the last.
@@ -256,30 +310,41 @@ impl State {
                         state & REFS > REF_ONE,
                         "idle task would release its last reference"
                     );
-                    (with_lifecycle(state, IDLE) - REF_ONE, Finish::Idle)
+                    (Self::with_lifecycle(state, IDLE) - REF_ONE, Finish::Idle)
                 }
-                NOTIFIED => (with_lifecycle(state, QUEUED), Finish::Requeue),
+                // A wake arrived and published nothing, so the polled token
+                // becomes the next one, keeping its reference.
+                NOTIFIED => (Self::with_lifecycle(state, QUEUED), Finish::Requeue),
                 other => unreachable!("task left poll in invalid state {other}"),
             };
+            // Releasing publishes the poll's writes to the next poll, or to
+            // teardown if the task is cleared while idle.
             match self
                 .0
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => return finish,
+                Ok(_) => return result,
                 Err(actual) => state = actual,
             }
         }
     }
 
     /// Mark the task terminal after its final poll, keeping every reference.
+    ///
+    /// The poller keeps exclusive access to the future afterwards, since no
+    /// transition leaves `COMPLETE`, and drops it next.
     #[inline]
     fn complete(&self) {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
+            // Only the poller completes a task, and only while its poll runs.
             assert!(
                 matches!(state & LIFECYCLE, RUNNING | NOTIFIED),
                 "completed task was not running"
             );
+            // A pending wake and the `CANCELLED` flag mean nothing once the
+            // task is terminal, so only the count survives. Later wakes
+            // publish nothing, and `start_poll` and `clear` do nothing.
             match self.0.compare_exchange_weak(
                 state,
                 (state & REFS) | COMPLETE,
@@ -299,11 +364,20 @@ impl State {
         let mut state = self.0.load(Ordering::Acquire);
         loop {
             let (next, drop_now) = match state & LIFECYCLE {
+                // No poll is running, and once the task is terminal none can
+                // start, so the caller has exclusive access to the future. A
+                // token still queued is found stale when taken.
                 IDLE | QUEUED => ((state & REFS) | COMPLETE, true),
+                // The running poll owns the future. The flag makes the poller
+                // complete the task and drop the future when the poll returns,
+                // instead of idling or requeueing.
                 RUNNING | NOTIFIED => (state | CANCELLED, false),
+                // The future is gone, or its poller is dropping it.
                 COMPLETE => return false,
                 other => unreachable!("invalid task state {other}"),
             };
+            // Acquiring makes the last poll's writes visible before the caller
+            // drops the future.
             match self
                 .0
                 .compare_exchange_weak(state, next, Ordering::AcqRel, Ordering::Acquire)
@@ -317,18 +391,26 @@ impl State {
 
 /// Result of polling a ready token.
 pub enum Outcome {
-    /// Pending, with no wake during the poll.
+    /// Pending, with no wake during the poll. The token is gone, and the next
+    /// wake publishes a new one.
     Idle,
-    /// Pending, and a wake during the poll requires another poll.
+    /// Pending, and a wake during the poll requires another poll. Carries the
+    /// token for the caller to queue again.
     Requeue(Task),
     /// The future returned ready, panicked, or was cleared during the poll,
-    /// and has been dropped. The task's arena entry can be retired.
+    /// and has been dropped. Carries the token for the caller to pass to
+    /// [`Tasks::retire`].
     Complete(Task),
-    /// The token belonged to a task teardown already cleared.
+    /// The token belonged to a task teardown already cleared, and has been
+    /// released.
     Stale,
 }
 
-/// Operations that need the concrete future type behind a header.
+/// Operations that need the concrete future type behind a header, one table
+/// per future type.
+///
+/// Each takes a header pointer that carries the whole allocation's
+/// provenance, as described on [`Header`].
 struct Vtable {
     /// Poll the future in place. The caller holds the running state.
     poll: unsafe fn(NonNull<Header>, &mut Context<'_>) -> Poll<()>,
@@ -339,32 +421,38 @@ struct Vtable {
 }
 
 /// Type-erased front of every task allocation.
+///
+/// Header pointers passed to the vtable, [`Task::from_raw`], or the waker
+/// functions must derive from the pointer `Task::new` leaked, which every
+/// `Task` and task waker carries. A pointer made from a `&Header` covers only
+/// the header, so reaching the future or freeing the cell through it is
+/// undefined behavior, even at the same address.
 #[repr(C)]
 pub struct Header {
-    /// Scheduling state and reference count, changed on any thread by
-    /// wakers and references and by the poller.
+    /// Lifecycle and reference count, changed on any thread by wakers and
+    /// references and by the poller.
     state: State,
     /// Operations on the concrete future behind this header.
     vtable: &'static Vtable,
-    /// Worker that owns the task, without extending its lifetime.
+    /// Worker that owns the task, reached by foreign wakes and spawns, without
+    /// extending its lifetime.
     mailbox: Weak<Mailbox>,
     /// Arena slot on the owning worker, `u32::MAX` until assigned before the
-    /// first poll.
+    /// first poll. Only the owning worker reads or writes it, and it is
+    /// atomic only so the header stays `Sync`.
     slot: AtomicU32,
 }
 
-// Every function below that takes a header pointer requires one derived from
-// the allocation `Task::new` leaked, as a `Task` or a waker carries it. A
-// pointer made from a `&Header` covers only the header, not the future.
-
 /// A task allocation: the erased header followed by the concrete future.
 ///
-/// The whole cell is aligned like [`CachePadded`] (128 bytes on x86_64 and
-/// aarch64, whose prefetchers fetch cache lines in pairs), as tokio aligns
-/// its task cells, so no two tasks share a line. The header and the start of
-/// the future share the first one.
+/// `repr(C)` puts the header at offset zero, so the cell and header pointers
+/// are one address. The whole cell is aligned like [`CachePadded`] (128 bytes
+/// on x86_64 and aarch64, whose prefetchers fetch cache lines in pairs), so no
+/// two tasks share a line. The header and the start of the future share the
+/// first one.
 #[repr(C)]
 struct Cell<F> {
+    /// Type-erased state shared by every reference.
     header: Header,
     /// The future, `None` once completed or cleared.
     future: UnsafeCell<Option<F>>,
@@ -373,7 +461,8 @@ struct Cell<F> {
 }
 
 impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
-    /// Operations on cells holding this future type.
+    /// Operations on cells holding this future type. The table is a constant,
+    /// so it is promoted to a static that every such cell shares.
     fn vtable() -> &'static Vtable {
         &Vtable {
             poll: Self::poll,
@@ -432,7 +521,10 @@ impl<F: Future<Output = ()> + Send + 'static> Cell<F> {
     }
 }
 
-/// An owning reference to a task.
+/// An owning reference to a task, counted in its state.
+///
+/// Ready tokens and arena entries are `Task`s. Dropping the last reference
+/// frees the cell, whose future must already be gone.
 pub struct Task(NonNull<Header>);
 
 // SAFETY: `Task::new` requires `F: Send`, so the future may be polled or
@@ -525,19 +617,21 @@ impl Task {
         }
     }
 
-    /// Wake with this reference. A published token takes it over, and
-    /// otherwise the state exchange releases it.
+    /// Wake with this reference, which a published token takes over and the
+    /// state exchange releases otherwise.
     fn wake(self) {
+        // The exchange decides what happens to this reference, so the
+        // destructor must not release it as well.
         let this = ManuallyDrop::new(self);
         match this.state.notify_by_value() {
-            Notify::Publish => ManuallyDrop::into_inner(this).schedule(),
-            Notify::Released { last: true } => {
+            Notify::Schedule => ManuallyDrop::into_inner(this).schedule(),
+            Notify::DoNothing => {}
+            Notify::Dealloc => {
                 // SAFETY: the exchange released the last reference and
                 // acquired every earlier release, so nothing else reaches the
                 // cell, and the vtable frees the allocation `new` made.
                 unsafe { (this.vtable.dealloc)(this.0) };
             }
-            Notify::Released { last: false } => {}
         }
     }
 
@@ -550,7 +644,8 @@ impl Task {
         }
     }
 
-    /// Drop the future in place, or mark a running task for its poller to drop.
+    /// Drop the future in place, or mark a running task for its poller to
+    /// drop. Does nothing to a completed task.
     ///
     /// The future's destructor may panic. Callers hold no worker borrow and
     /// choose the panic boundary.
@@ -570,13 +665,23 @@ impl Task {
     /// A closing worker, or a closed or dropped mailbox, releases the token.
     /// The task then stays queued until teardown clears it.
     fn schedule(self) {
+        // On the owning thread, the token goes straight to the ready queue.
+        // Polls and destructors run without the local borrow, so a wake from
+        // inside one can take it here.
         if let Some(local) = Local::owner(&self.mailbox) {
             let mut local = local.borrow_mut();
+            // A closing worker polls nothing more, so the token is dropped.
+            // Releasing a reference runs no user code, so dropping it under
+            // the borrow is fine.
             if !local.closing {
                 local.tasks.push(self);
             }
             return;
         }
+        // Any other thread hands the token to the mailbox, and the worker
+        // queues it when it applies its messages. A closed mailbox returns
+        // the token, which is dropped here, as is a token for a worker whose
+        // mailbox is gone.
         if let Some(mailbox) = self.mailbox.upgrade() {
             let _ = mailbox.send(Message::Wake(Target::Task(self)));
         }
@@ -592,11 +697,14 @@ impl Task {
     /// until it returns. A completed task skips it. `finish` must not panic:
     /// the task would stay running, and teardown could never drop its future.
     pub fn poll(self, finish: impl FnOnce(&Header)) -> Outcome {
+        // A token of a task teardown already cleared is released here.
         if !self.state.start_poll() {
             return Outcome::Stale;
         }
 
-        // The poll and the destructors it may run stay behind one boundary.
+        // The poll and the destructors it may run stay behind one boundary,
+        // and a panic completes the task like a ready future does. The waker
+        // borrows this token's reference, so passing it counts nothing.
         let polled = Panics::contain(|| {
             let waker = self.waker();
             let mut cx = Context::from_waker(&waker);
@@ -605,6 +713,8 @@ impl Task {
             unsafe { (self.vtable.poll)(self.0, &mut cx) }
         });
 
+        // A pending poll leaves the task idle or requeues this token, unless
+        // teardown cleared the task meanwhile, which completes it below.
         if matches!(polled, Some(Poll::Pending)) {
             finish(&self);
             match self.state.finish_pending() {
@@ -629,12 +739,6 @@ impl Task {
 }
 
 impl Header {
-    /// References held, including the caller's.
-    #[cfg(test)]
-    fn refs(&self) -> usize {
-        self.state.refs()
-    }
-
     /// Record the arena slot assigned by the owning worker.
     fn set_slot(&self, slot: usize) {
         self.slot.store(
@@ -648,7 +752,9 @@ impl Header {
 /// it lives no longer than the borrow of that task. Cloning it counts a
 /// reference as usual.
 struct WakerRef<'a> {
+    /// Never dropped, since it holds no reference of its own.
     waker: ManuallyDrop<Waker>,
+    /// Ties the waker to the borrowed task.
     _task: PhantomData<&'a Task>,
 }
 
@@ -772,12 +878,14 @@ impl Wake for RootWaker {
     }
 }
 
-/// One worker's registered tasks and ready tokens.
+/// One worker's registered tasks and ready tokens, touched only by that
+/// worker.
 #[derive(Default)]
 pub struct Tasks {
-    /// Every live task by slot, retained so teardown can drop its future.
+    /// Every registered task by slot, holding one reference each so teardown
+    /// can drop every future. Completion frees the slot.
     arena: Vec<Option<Task>>,
-    /// Vacant arena slots.
+    /// Vacant arena slots, reused before the arena grows.
     free: Vec<usize>,
     /// Ready tokens in FIFO order.
     ready: VecDeque<Task>,
@@ -834,6 +942,7 @@ impl Tasks {
             self.arena.push(None);
             self.arena.len() - 1
         });
+        // The task records its slot, so retiring it needs no search.
         task.set_slot(slot);
         self.arena[slot] = Some(task.clone());
         self.ready.push_back(task);
@@ -861,6 +970,8 @@ impl Tasks {
         let Some(entry) = self.arena.get_mut(slot) else {
             return;
         };
+        // Slots are freed only here, each by the completed task it holds, so
+        // the recorded slot still holds this task.
         let retained = entry.take();
         assert!(
             retained.is_some_and(|retained| Task::ptr_eq(&retained, &task)),
@@ -872,12 +983,6 @@ impl Tasks {
     /// Whether at least one ready token is queued.
     pub fn is_ready(&self) -> bool {
         !self.ready.is_empty()
-    }
-
-    /// Registered tasks.
-    #[cfg(test)]
-    pub const fn live(&self) -> usize {
-        self.arena.len() - self.free.len()
     }
 
     /// Release every ready token and detach every registered task. The caller
@@ -892,9 +997,9 @@ impl Tasks {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     //! Tests that start no runner, so they also run under Miri. Runtime-level
-    //! task tests live in `iouring/tests.rs`.
+    //! task tests live in `iouring/tests.rs` and share the helpers here.
 
     use super::*;
     use commonware_utils::sync::Mutex;
@@ -1018,6 +1123,16 @@ mod tests {
         task
     }
 
+    /// References held to `task`, including the caller's.
+    pub fn refs(task: &Task) -> usize {
+        (task.state.0.load(Ordering::Acquire) & REFS) / REF_ONE
+    }
+
+    /// Tasks registered on a worker.
+    pub const fn live(tasks: &Tasks) -> usize {
+        tasks.arena.len() - tasks.free.len()
+    }
+
     /// Take the ready tokens delivered to `mailbox`.
     fn scheduled(mailbox: &Mailbox) -> Vec<Task> {
         let mut messages = Vec::new();
@@ -1051,28 +1166,28 @@ mod tests {
     fn test_wakers_hold_references_until_the_cell_is_freed() {
         let mailbox = mailbox();
         let task = Task::new(pending::<()>(), Arc::downgrade(&mailbox));
-        assert_eq!(task.refs(), 1);
+        assert_eq!(refs(&task), 1);
         assert_eq!(Arc::weak_count(&mailbox), 1);
 
         // Polling borrows the token's reference for the waker it passes in.
         assert!(matches!(task.clone().poll(|_| {}), Outcome::Idle));
-        assert_eq!(task.refs(), 1);
+        assert_eq!(refs(&task), 1);
 
         // Cloned wakers count, and dropped ones release.
         let waker = Waker::clone(&task.waker());
         let other = waker.clone();
-        assert_eq!(task.refs(), 3);
+        assert_eq!(refs(&task), 3);
         drop(other);
-        assert_eq!(task.refs(), 2);
+        assert_eq!(refs(&task), 2);
 
         // Waking by value hands the waker's reference to the published token.
         waker.wake();
-        assert_eq!(task.refs(), 2);
+        assert_eq!(refs(&task), 2);
         let tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
         assert!(Task::ptr_eq(&tokens[0], &task));
         drop(tokens);
-        assert_eq!(task.refs(), 1);
+        assert_eq!(refs(&task), 1);
 
         // The last reference frees the cell, and with it the mailbox reference.
         task.clear();
@@ -1098,7 +1213,7 @@ mod tests {
         })
         .join()
         .unwrap();
-        assert_eq!(task.refs(), 3);
+        assert_eq!(refs(&task), 3);
         let mut tokens = scheduled(&mailbox);
         assert_eq!(tokens.len(), 1);
 
@@ -1139,7 +1254,7 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 1);
         tasks.retire(token);
         assert!(scheduled(&mailbox).is_empty());
-        assert_eq!(task.refs(), 1);
+        assert_eq!(refs(&task), 1);
     }
 
     /// The finalizer sees the task before its poll is published as over: a
@@ -1214,7 +1329,7 @@ mod tests {
         waker.wake_by_ref();
         assert!(scheduled(&mailbox).is_empty());
         drop(waker);
-        assert_eq!(first.refs(), 1);
+        assert_eq!(refs(&first), 1);
         second.clear();
     }
 
@@ -1277,10 +1392,10 @@ mod tests {
         // leaving the arena's reference and the caller's.
         drop(closed.close());
         first.wake_by_ref();
-        assert_eq!(first.refs(), 2);
+        assert_eq!(refs(&first), 2);
         drop(dropped);
         second.wake_by_ref();
-        assert_eq!(second.refs(), 2);
+        assert_eq!(refs(&second), 2);
 
         // Both tasks stay queued without a token until teardown clears them.
         for task in tasks.clear() {
@@ -1313,7 +1428,7 @@ mod tests {
             }
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             assert!(scheduled(&mailbox).is_empty());
-            assert_eq!(task.refs(), if complete { 1 } else { 2 });
+            assert_eq!(refs(&task), if complete { 1 } else { 2 });
         }
     }
 
@@ -1363,7 +1478,7 @@ mod tests {
         tasks.retire(handles[0].clone());
         drop(retired);
         for task in &handles {
-            assert_eq!(task.refs(), 1);
+            assert_eq!(refs(&task), 1);
         }
     }
 
@@ -1433,7 +1548,7 @@ mod tests {
         task.clear();
         tasks.retire(task.clone());
         assert_eq!(drops.load(Ordering::Relaxed), 1);
-        assert_eq!(task.refs(), 2);
+        assert_eq!(refs(&task), 2);
 
         let barrier = Arc::new(Barrier::new(2));
         let releaser = thread::spawn({
@@ -1533,7 +1648,7 @@ mod loom_tests {
     //! Exhaustive weak-memory checks for the notification handoff and the
     //! reference count sharing its word.
 
-    use super::{Finish, Notify, State};
+    use super::{Finish, Notify, REF_ONE, REFS, State};
     use loom::{
         cell::UnsafeCell,
         sync::{
@@ -1542,6 +1657,11 @@ mod loom_tests {
         },
         thread,
     };
+
+    /// References counted in `state`.
+    fn refs(state: &State) -> usize {
+        (state.0.load(Ordering::Acquire) & REFS) / REF_ONE
+    }
 
     /// State of a registered task whose first poll is queued: the token's
     /// reference and the arena's.
@@ -1584,14 +1704,14 @@ mod loom_tests {
 
             let wake = thread::spawn({
                 let state = Arc::clone(&state);
-                move || matches!(state.notify_by_value(), Notify::Publish)
+                move || matches!(state.notify_by_value(), Notify::Schedule)
             });
             let requeued = matches!(state.finish_pending(), Finish::Requeue);
             let published = wake.join().unwrap();
 
             // One token remains, holding one reference beside the arena's.
             assert_ne!(requeued, published);
-            assert_eq!(state.refs(), 2);
+            assert_eq!(refs(&state), 2);
         });
     }
 

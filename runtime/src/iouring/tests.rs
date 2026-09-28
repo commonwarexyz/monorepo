@@ -5,6 +5,7 @@ use super::{
         driver::tests::fail_after_completion,
         operation::Operation,
         request::{RecvRequest, Request},
+        task::tests::live,
     },
     *,
 };
@@ -1643,8 +1644,8 @@ fn test_unpolled_task_disposal_is_contained() {
 
 #[test]
 fn test_self_woken_task_requeues_behind_queued_work() {
-    /// A task that wakes itself during its poll runs again only after the work
-    /// already queued, and completed tasks leave the arena.
+    // A task that wakes itself during its poll runs again only after the work
+    // already queued, and completed tasks leave the arena.
     let order = Runner::new(config()).start(|context| async move {
         let order = Arc::new(Mutex::new(Vec::new()));
         let first = context.child("first").spawn({
@@ -1663,7 +1664,7 @@ fn test_self_woken_task_requeues_behind_queued_work() {
         second.await.unwrap();
 
         // Only the runner's service task is still registered.
-        assert_eq!(Local::current().unwrap().borrow().tasks.live(), 1);
+        assert_eq!(live(&Local::current().unwrap().borrow().tasks), 1);
         order.lock().clone()
     });
     assert_eq!(order, ["first", "second", "first again"]);
