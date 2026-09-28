@@ -1,14 +1,16 @@
 //! Requests to the promoter.
 
 use super::actor::Error;
-use crate::multimmit::{
-    actors::util::ask,
-    marshal::{
-        OutputIndex,
-        actors::delivery::HotOutput,
-        types::{BodyValues, Reply},
+use crate::{
+    multimmit::{
+        actors::util::ask,
+        marshal::{
+            actors::delivery::HotOutput,
+            types::{BodyValues, Reply},
+        },
+        types::{BlockRef, Body, TransactionBlock},
     },
-    types::{BlockRef, Body, TransactionBlock},
+    types::OutputIndex,
 };
 use commonware_actor::{
     Feedback,

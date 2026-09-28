@@ -1,7 +1,7 @@
 //! Floor installation and the delivery resets it drives.
 
 use super::*;
-use crate::multimmit::{marshal::OutputIndex, testing::expect_within};
+use crate::{multimmit::testing::expect_within, types::OutputIndex};
 
 #[test]
 fn delivery_reset_preempts_cold_materialization() {

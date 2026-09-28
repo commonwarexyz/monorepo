@@ -12,7 +12,7 @@ use crate::{
     multimmit::{
         actors::util::gated,
         marshal::{
-            MarshalProgress, OutputIndex,
+            MarshalProgress,
             actors::catalog,
             bodies::{self, Bodies},
             storage::{Error as StorageError, catalog::StoredRef},
@@ -20,9 +20,10 @@ use crate::{
         },
         types::{Body, TransactionBlock},
     },
+    types::OutputIndex,
 };
 use commonware_actor::Feedback;
-use commonware_cryptography::{Hasher, bls12381::primitives::variant::Variant};
+use commonware_cryptography::{Digested, Hasher, bls12381::primitives::variant::Variant};
 use commonware_macros::select_loop;
 use commonware_runtime::{
     Clock, ContextCell, Handle, Metrics as RuntimeMetrics, Spawner, spawn_cell,
@@ -237,12 +238,12 @@ where
     fn fill(&mut self, progress: &MarshalProgress<H::Digest>) -> Result<(), Error> {
         let mut next = self.pending.next(progress.acknowledged);
         while self.pending.has_capacity() && next <= progress.committed {
-            let Some(block) = self.cache.take_hot(next) else {
+            let Some(output) = self.cache.take_hot(next) else {
                 self.start_fetch(progress.floor_generation, next);
                 return Ok(());
             };
             self.metrics.hot_output();
-            self.report(next, block)?;
+            self.report(next, output.stored, output.block)?;
             next = next.next();
         }
         Ok(())
@@ -293,16 +294,18 @@ where
             if output.index != next || block.reference() != output.reference {
                 return Err(Error::Missing(next));
             }
-            self.report(next, block)?;
+            self.report(next, output, block)?;
             next = next.next();
         }
         Ok(())
     }
 
-    /// Reports one output to the application and waits for its acknowledgement in the window.
+    /// Reports one output, the block committed at `stored`, to the application and waits for its
+    /// acknowledgement in the window.
     fn report(
         &mut self,
         index: OutputIndex,
+        stored: StoredRef<H::Digest>,
         block: Arc<TransactionBlock<H, B>>,
     ) -> Result<(), Error> {
         let span = debug_span!(
@@ -316,7 +319,7 @@ where
         self.metrics.attempted();
         if self.application.report(Update {
             index,
-            block,
+            block: Digested::precomputed(block, stored.reference.digest()),
             acknowledgement,
         }) == Feedback::Closed
         {

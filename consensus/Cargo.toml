@@ -29,6 +29,7 @@ commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-utils.workspace = true
 futures.workspace = true
+num-traits.workspace = true
 rand = { workspace = true, features = ["std_rng"] }
 rand_core.workspace = true
 thiserror.workspace = true
