@@ -114,6 +114,7 @@ where
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn run(mut self) {
+        let mut converged = None;
         select_loop! {
             self.context,
             on_start => {
@@ -129,8 +130,8 @@ where
             } => {
                 let handoffs =
                     classify(artifact.anchor, mem::take(&mut self.pending_finalizations));
-                self.transition(artifact, handoffs).await;
-                return;
+                converged = Some((artifact, handoffs));
+                break;
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down syncing loop");
@@ -180,12 +181,17 @@ where
                         .finalized(block, acknowledgement)
                         .instrument(process)
                         .await;
-                    if let Some((artifact, handoffs)) = handoff {
-                        self.transition(artifact, handoffs).await;
-                        return;
+                    if handoff.is_some() {
+                        converged = handoff;
+                        break;
                     }
                 }
             },
+        }
+
+        // Hand off after the loop, so its stop signal is not held for the node's lifetime.
+        if let Some((artifact, handoffs)) = converged {
+            self.transition(artifact, handoffs).await;
         }
     }
 
@@ -272,30 +278,40 @@ where
             provider,
             marshal,
             plan,
-            syncer: _,
+            syncer,
             deferred_verifications,
             mut snapshot_publisher,
-            completion: _,
-            pending_finalizations: _,
+            completion,
+            pending_finalizations,
             pruning,
             metrics,
         } = self;
+        // Nothing retargets or awaits the syncer from here on. Dropping its mailbox lets it exit.
+        drop((syncer, completion, pending_finalizations));
         let Artifact { databases, anchor } = artifact;
         let mut completed_height = anchor.height;
 
         let mut processor =
             Processor::new(application, databases, anchor, metrics.clone(), pruning);
 
-        // Serving must not wait for the next finalization, so the synced state
-        // alone publishes first.
-        processor = processor.publish_snapshot(&mut snapshot_publisher).await;
-
-        let mut pending_prune = None;
-        let mut pending_acknowledgements = Vec::new();
-
         // One signal for the whole handoff. Re-creating it per block would
         // record an extra auditor event on the deterministic runtime each time.
         let mut shutdown = context.stopped();
+
+        // Serving must not wait for the next finalization, so the synced state
+        // alone publishes first.
+        select! {
+            _ = &mut shutdown => {
+                warn!(height = completed_height.get(), "exiting mid-handoff on shutdown");
+                return;
+            },
+            driven = processor.publish_snapshot(&mut snapshot_publisher) => {
+                processor = driven;
+            },
+        }
+
+        let mut pending_prune = None;
+        let mut pending_acknowledgements = Vec::new();
 
         for handoff in handoffs {
             match handoff {
@@ -350,7 +366,14 @@ where
             // The snapshots serve immediately; peers verify what they fetch
             // against a finalized root, so serving safely runs ahead of disk.
             snapshot_publisher.publish(completed_height, snapshots);
-            if !barrier.durable().await {
+            let durable = select! {
+                _ = &mut shutdown => {
+                    warn!(height = completed_height.get(), "exiting mid-handoff on shutdown");
+                    return;
+                },
+                durable = barrier.durable() => durable,
+            };
+            if !durable {
                 return;
             }
             for acknowledgement in pending_acknowledgements {
@@ -363,20 +386,19 @@ where
         }
 
         // Completion is an irreversible startup floor. Persist it only after every handoff through
-        // `completed_height` is durable and before pruning or exposing the databases.
-        let _ = plan.set_completed(completed_height).await;
-        let _ = metrics.sync_done.try_set(1);
-        // Defensive only. The handoff applies at most a full ack window, one short of
-        // what the prune cadence needs, so this fires only in tests that feed
-        // more handoffs than the window holds.
-        if let Some(prune) = pending_prune {
-            processor = processor.prune(prune, &marshal).await;
-            // The published snapshots were captured before this prune. Republish
-            // so serving stops pinning the pruned state. Every handoff barrier
-            // was awaited above, so the republished state is already durable.
-            processor = processor.publish_snapshot(&mut snapshot_publisher).await;
+        // `completed_height` is durable and before processing takes new work.
+        select! {
+            _ = &mut shutdown => {
+                warn!(height = completed_height.get(), "exiting mid-handoff on shutdown");
+                return;
+            },
+            _ = plan.set_completed(completed_height) => {},
         }
+        let _ = metrics.sync_done.try_set(1);
+        drop(shutdown);
 
+        // A prune that became due during the handoff runs from processing, which prunes only
+        // durable state and stops on shutdown.
         Processing {
             context,
             mailbox,
@@ -384,7 +406,7 @@ where
             marshal,
             snapshot_publisher,
         }
-        .run(processor, deferred_verifications)
+        .run(processor, deferred_verifications, pending_prune)
         .await
     }
 }
@@ -793,8 +815,12 @@ mod tests {
                 pending: pending.clone(),
             };
             let marshal = harness_marshal(context.child("marshal")).await;
-            let (mut harness, mut artifact) =
-                TestHarness::new_on(delayed, marshal, anchor(7, 9)).await;
+            let (mut harness, stateful_mailbox, _syncer_receiver, _completion) =
+                TestHarness::new_syncing_on(delayed, marshal).await;
+            let mut artifact = Artifact {
+                databases: test_databases(),
+                anchor: anchor(7, 9),
+            };
             harness.syncing.pruning = Some(Pruning::new(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
@@ -875,12 +901,17 @@ mod tests {
                 .send(Ok(()))
                 .expect("transition must be waiting on the metadata flush");
 
-            transition.await.expect("transition failed");
+            // The prune that became due during the handoff runs once processing takes over.
+            while control.pruned.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(control.pruned.lock().as_slice(), &[8]);
             assert_eq!(sync_done.get(), 1);
+            drop(stateful_mailbox);
+            transition.await.expect("transition failed");
             assert!(reflected_waiter.await.is_ok());
             assert!(first_waiter.await.is_ok());
             assert!(second_waiter.await.is_ok());
-            assert_eq!(control.pruned.lock().as_slice(), &[8]);
             assert_eq!(
                 hooks.load(Ordering::SeqCst),
                 4,
@@ -934,6 +965,44 @@ mod tests {
                 SyncPlan::<_, TestScheme, TestVariant>::init(context.child("plan"), "syncing-test")
                     .await;
             assert_eq!(reopened.completed(), None);
+        });
+    }
+
+    /// A stop while the handoff waits on its flush exits within the stop deadline and leaves the
+    /// block unacknowledged.
+    #[test]
+    fn shutdown_interrupts_parked_handoff_flush() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (harness, mut artifact) =
+                TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            let control = FlushControl::default();
+            artifact.databases = Single::from(TestDb::gated(control.clone()));
+            let (acknowledgement, waiter) = Exact::handle();
+            let sync_done = harness.syncing.metrics.sync_done.clone();
+            let transition = context.child("transition").spawn(move |_| {
+                harness.syncing.transition(
+                    artifact,
+                    [FinalizedHandoff::Apply(
+                        Arc::new(TestBlock::child(&TestBlock::new(7, 9), 10)),
+                        acknowledgement,
+                    )],
+                )
+            });
+            while control.flushes.lock().is_empty() {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the parked handoff flush",
+            );
+            transition.await.expect("transition should exit cleanly");
+            assert!(waiter.await.is_err());
+            assert_eq!(sync_done.get(), 0);
         });
     }
 

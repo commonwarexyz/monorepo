@@ -24,12 +24,14 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::certificate::Scheme;
+use commonware_macros::select;
 use commonware_runtime::{ContextCell, Handle, Spawner, spawn_cell, telemetry::metrics::GaugeExt};
 use commonware_storage::Context;
 use commonware_utils::channel::oneshot;
 use futures::join;
 use rand_core::Rng;
 use std::num::NonZeroUsize;
+use tracing::debug;
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -281,7 +283,13 @@ where
         // The recovered state alone must publish before the loop starts, so
         // serving begins before the next finalization.
         let mut snapshot_publisher = self.snapshot_publisher;
-        let processor = processor.publish_snapshot(&mut snapshot_publisher).await;
+        let processor = select! {
+            _ = self.context.stopped() => {
+                debug!("shutdown signal received before processing started");
+                return;
+            },
+            processor = processor.publish_snapshot(&mut snapshot_publisher) => processor,
+        };
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -289,7 +297,7 @@ where
             marshal,
             snapshot_publisher,
         }
-        .run(processor, Vec::new())
+        .run(processor, Vec::new(), None)
         .await
     }
 }

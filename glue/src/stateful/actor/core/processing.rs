@@ -17,11 +17,12 @@
 use crate::stateful::{
     Application, Input,
     actor::{
+        SyncTargets,
         core::{
             mailbox::Message,
             verifications::{Handler as Verifications, Request as VerificationRequest},
         },
-        processor::{Applied, Processor, Publication},
+        processor::{Applied, Processor, Prune, Publication},
     },
     db::{Barrier, Publisher, SnapshotsOf},
 };
@@ -236,16 +237,17 @@ where
     /// Serves requests with `processor` until the mailbox closes or the actor stops.
     ///
     /// `deferred` holds verification requests that arrived during state sync and have not started
-    /// yet. At most one barrier is active, and blocks finalized while it runs are covered by a
-    /// later barrier. A marshal acknowledgement is released only once its block is durable. If
-    /// shutdown interrupts a barrier, processing stops and every pending acknowledgement is
-    /// cancelled.
+    /// yet, and `pending_prune` a prune that became due during the state-sync handoff. At most one
+    /// barrier is active, and blocks finalized while it runs are covered by a later barrier. A
+    /// marshal acknowledgement is released only once its block is durable. If shutdown
+    /// interrupts a barrier, processing stops and every pending acknowledgement is cancelled.
     pub async fn run(
         mut self,
         mut processor: Processor<E, A>,
         deferred: Vec<VerificationRequest<E, A>>,
+        pending_prune: Option<Prune<SyncTargets<A, E>>>,
     ) {
-        let mut pending_prune = None;
+        let mut pending_prune = pending_prune;
         let mut deferred_message = None;
         let mut verifications = Verifications::new(self.marshal.clone());
         for request in deferred {
@@ -260,6 +262,12 @@ where
         select_loop! {
             self.context,
             on_start => {
+                // Stop before taking up more work, including work this iteration would start
+                // before its select observes the stop.
+                if (&mut shutdown).now_or_never().is_some() {
+                    debug!("shutdown signal received, stopping processing");
+                    return;
+                }
                 if let Some(completion) = durability.completion().now_or_never()
                     && !durability.complete(completion)
                 {
@@ -505,6 +513,10 @@ where
                         // Pruning requires a durable prune target and no active barrier.
                         while durability.barrier.is_some() {
                             select! {
+                                _ = &mut shutdown => {
+                                    debug!("shutdown signal received, stopping processing");
+                                    return;
+                                },
                                 completion = durability.completion() => {
                                     if !durability.complete(completion) {
                                         return;
@@ -1089,7 +1101,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
             let mut mailbox = Mailbox::new(sender);
 
             // Verifying the child reconstructs the parent's state with `apply`.
@@ -1186,7 +1198,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.run(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new(), None));
         (Mailbox::new(sender), reader, marshal.guards, actor)
     }
 
@@ -1261,7 +1273,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.run(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new(), None));
         (Mailbox::new(sender), control, reader, marshal.guards, actor)
     }
 
@@ -1329,7 +1341,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.run(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new(), None));
         (Mailbox::new(sender), control, marshal.guards, actor)
     }
 
@@ -1835,7 +1847,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             // Verifying the child replays its missing parent through apply.
             assert!(
@@ -1911,7 +1923,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.run(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new(), None));
         (Mailbox::new(sender), marshal, actor)
     }
 
@@ -2063,7 +2075,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             // A parent that cannot be executed invalidates the child's ancestry
             // before the application is asked to verify the child.
@@ -2536,7 +2548,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let mut verifier = mailbox.clone();
             let mut verify_child = Box::pin(verifier.verify(
@@ -2622,7 +2634,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let (acknowledgement, waiter) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(genesis), acknowledgement));
@@ -2711,7 +2723,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, vec![request]));
+                .spawn(move |_| processing.run(processor, vec![request], None));
 
             started.await.expect("deferred verification should resume");
             release
@@ -2783,7 +2795,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let consensus_context = first_child.context();
             let mut first_verifier = mailbox.clone();
@@ -2899,7 +2911,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             // The candidate's verification parks inside the shared replay of its
             // unknown parent.
@@ -2986,7 +2998,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             // The candidate's verification parks inside the shared replay of its
             // unknown parent.
@@ -3073,7 +3085,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
@@ -3167,7 +3179,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let mut child_verifier = mailbox.clone();
             let mut verify_child = Box::pin(child_verifier.verify(
@@ -3285,7 +3297,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let mut first_verifier = mailbox.clone();
             let mut first_attempt = Box::pin(first_verifier.verify(
@@ -3415,7 +3427,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let (acknowledgement, waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
@@ -3583,6 +3595,51 @@ mod tests {
             let release = control.flushes.lock().remove(0);
             let _ = release.send(Ok(()));
             waiter2.await.expect("block 2 acknowledgement");
+        });
+    }
+
+    /// A stop while a due prune waits on an older barrier exits within the stop deadline.
+    #[test]
+    fn shutdown_interrupts_prune_waiting_on_barrier() {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let (mut mailbox, control, _subscriber, _marshal, actor) = spawn_processing(
+                &context,
+                "prune-wait-shutdown",
+                Some(PruneConfig {
+                    maintenance_interval: NZUsize!(1),
+                    retained_marshal_blocks: 0,
+                    retained_qmdb_blocks: 0,
+                }),
+            )
+            .await;
+
+            // Block 1's flush stays parked, and block 2 makes a prune due behind it.
+            let genesis = TestBlock::new(0, 0);
+            let block1 = TestBlock::child(&genesis, 1);
+            let block2 = TestBlock::child(&block1, 2);
+            let (acknowledgement, waiter1) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
+            let (acknowledgement, waiter2) = Exact::handle();
+            let _ = mailbox.report(Update::Block(Arc::new(block2), acknowledgement));
+            while control.applied.load(Ordering::Relaxed) < 2 {
+                context.sleep(Duration::from_millis(10)).await;
+            }
+            context.sleep(Duration::from_millis(50)).await;
+            assert_eq!(control.flushes.lock().len(), 1);
+
+            let stopper = context.child("stopper");
+            let stop = context
+                .child("stop")
+                .spawn(|_| async move { stopper.stop(0, Some(Duration::from_millis(100))).await });
+            assert!(
+                stop.await.expect("stop task should finish").is_ok(),
+                "shutdown must interrupt the prune's barrier wait",
+            );
+            actor.await.expect("processing actor should stop cleanly");
+            assert!(control.pruned.lock().is_empty());
+            assert!(waiter1.await.is_err());
+            assert!(waiter2.await.is_err());
+            drop(mailbox);
         });
     }
 
@@ -3793,7 +3850,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let (acknowledgement, mut waiter1) = Exact::handle();
             let _ = mailbox.report(Update::Block(Arc::new(block1), acknowledgement));
@@ -3990,7 +4047,7 @@ mod tests {
             };
             let actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             // Marshal reports genesis on startup. Cases with a processed genesis acknowledge it.
             assert_eq!(marshal.mailbox.get_processed().await, None);
@@ -4176,7 +4233,7 @@ mod tests {
             };
             let _actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             // Genesis is the applied tip, so its startup delivery is acknowledged.
             while marshal.mailbox.get_processed().await != Some(Processed::Block(Height::zero())) {}
@@ -4765,7 +4822,7 @@ mod tests {
             };
             let _actor = context
                 .child("loop")
-                .spawn(move |_| processing.run(processor, Vec::new()));
+                .spawn(move |_| processing.run(processor, Vec::new(), None));
 
             let genesis = TestBlock::new(0, 0);
             let proposal_context = TestBlock::child(&genesis, 1).context();
@@ -4897,7 +4954,7 @@ mod tests {
         };
         let actor = context
             .child("loop")
-            .spawn(move |_| processing.run(processor, Vec::new()));
+            .spawn(move |_| processing.run(processor, Vec::new(), None));
         (Mailbox::new(sender), started, marshal.guards, actor)
     }
 
