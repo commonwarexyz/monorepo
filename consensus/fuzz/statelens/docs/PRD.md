@@ -407,7 +407,7 @@ R-OR-3. Any test failure in step 6 stops the campaign, and any crash stops the f
 
 R-ART-1. Reuse the existing consensus fuzz artifacts unchanged:
 - libFuzzer writes the crashing input to the artifact directory of the target's package: `consensus/fuzz/simplex/artifacts/simplex_statelens/`, or `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant;
-- `just run <target> <crash_file>` replays it;
+- `just run <target> <crash_file>` replays it, with the `STATELENS_BYZANTINE` value of the run that found it: a guard-test crash (`STATELENS_BYZANTINE=panic`) exists only in that mode;
 - for the Simplex target, `CONSENSUS_FUZZ_LOG=1` also prints the decoded `FuzzInput` (`print_fuzz_input`); the marshal harnesses print only their existing logs;
 - the panic message carries the `INV-NNNN` ID.
 
@@ -425,7 +425,7 @@ R-AG-3. Phase 1 agents run restricted in the operator's working tree: file edits
 
 R-NF-1. Correctness first: no probe or ghost update may change protocol behavior (R-INS-1, R-INS-3).
 
-R-NF-2. Determinism: an input that crashes on an instrumented tree crashes the same way when replayed on that tree.
+R-NF-2. Determinism: an input that crashes on an instrumented tree crashes the same way when replayed on that tree with the same `STATELENS_BYZANTINE` value.
 
 R-NF-3. Overhead: measure the exec/s of each StateLens target against its original target (plain edge coverage) in an uninstrumented checkout at the same commit. There is no hard limit, but a slowdown above 2x should be reported as a problem with the instrumentation. R-S-NF-1 and section 9.4 name the original targets.
 
@@ -599,7 +599,7 @@ AC-6. **False-invariant test.** A campaign run with `STATELENS_FALSE_INVARIANTS=
 
 AC-7. **Guard test.** With `STATELENS_BYZANTINE=panic`, a short run of the StateLens target panics with `[statelens][BYZANTINE]` as soon as a compromised replica reaches an instrumented site. With the default (`skip`), no such panic occurs, and the participant index check in the runner never fails.
 
-AC-8. **Determinism test.** Replaying a crashing input with `just run simplex_statelens <crash_file>` on the same instrumented tree reproduces the same panic.
+AC-8. **Determinism test.** Replaying a crashing input with `just run simplex_statelens <crash_file>` on the same instrumented tree, with the `STATELENS_BYZANTINE` value of the run that found it, reproduces the same panic.
 
 ### 8.6 Risks and Open Points
 
@@ -784,8 +784,8 @@ AC-11. **Guard.** With `STATELENS_BYZANTINE=panic`, each Twins variant and the
 wedge-scenario variant panic with `[statelens][BYZANTINE]`. The other variants, and every
 variant in the default mode, never do, and the participant index checks never fail.
 
-AC-12. **Determinism.** Replaying the input of a crashing marshal variant on the same tree
-reproduces the same panic.
+AC-12. **Determinism.** Replaying the input of a crashing marshal variant on the same tree,
+with the `STATELENS_BYZANTINE` value of the run that found it, reproduces the same panic.
 
 AC-13. **Feedback.** On one Twins variant, the `ft:` value after a fixed time is higher
 with StateLens feedback than with `STATELENS_FEEDBACK=0`.

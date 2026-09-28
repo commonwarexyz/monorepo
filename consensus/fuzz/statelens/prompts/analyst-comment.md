@@ -1,6 +1,6 @@
 ## How to read code comments
 
-- The sources are files or directories under `consensus/src/simplex`, optionally with
+- The sources are files or directories under `{{SOURCE_ROOT}}`, optionally with
   `:line` or `:start-end`. Read the doc comments, the inline comments, and the
   conditions of `assert!`, `debug_assert!`, `unreachable!`, `expect("...")` and
   `panic!` in non-test code. Ignore test modules and `mocks/`.

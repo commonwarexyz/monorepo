@@ -36,8 +36,8 @@ The following were built and exercised in a scratch checkout of the commit above
 - The materialization edits (section 7.2), the fuzz target and the Twins runner hook
   (Appendix B): `cargo fuzz build` succeeds and the target runs.
 - The Byzantine guard end to end: with `STATELENS_BYZANTINE=panic` the first input
-  panics with `[statelens][BYZANTINE] replica=2`; replaying the saved artifact
-  reproduces the panic; in the default mode the same input runs cleanly, and a
+  panics with `[statelens][BYZANTINE] replica=2`; replaying the saved artifact in the
+  same mode reproduces the panic; in the default mode the same input runs cleanly, and a
   30-second run produces no such panic. The index-mapping assertion in the hook never
   fired.
 - The test gate (section 7.7) with sample instrumentation: 240 tests passed in 125 s
@@ -219,7 +219,7 @@ id: INV-NNNN
 title: <one line, at most 80 characters>
 source_kind: <human | issue | design | comment | spec | paper>
 source_ref: <URL, path, path:line, document section, or paper page>
-scope: [<one or more of: protocol, replica, voter, batcher, resolver, cross-actor>]
+scope: [<one or more of the registry's scope values, listed in the prompt context>]
 author: <person, or agent/model; optional>
 ---
 
@@ -463,7 +463,7 @@ A campaign runs in place in the checkout (D10); `repo` is its root
 - Base commit: <base>
 - Agent: <agent>
 - Profile: <profile>
-- Invariants: <count> (<ID, ID, ...>), per registry
+- Invariants: <count> (<registry>: <ID, ID, ...>; <registry>: <ID, ID, ...>)
 
 ## Invariants
 
@@ -622,7 +622,8 @@ statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 NIGHTLY_V
 
 The `run` and `replay` lines appear only with `READY`, one pair per target: the `marshal`
 profile prints one pair per StateLens variant (section 8.3). The `replay` line is a
-template: the operator puts in the crash file that libFuzzer wrote.
+template: the operator puts in the crash file that libFuzzer wrote, and adds the
+`STATELENS_BYZANTINE` value of the run that found it (section 7.11).
 
 ### 7.10 Phase 3: running a target
 
@@ -653,9 +654,13 @@ NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
   `consensus/fuzz/simplex/artifacts/simplex_statelens/`, or
   `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant (R-ART-1).
 - The `replay` line of the summary, with the crash file put in, replays the input in the
-  same checkout, and replay reproduces the panic (R-NF-2). For the Simplex target,
-  `CONSENSUS_FUZZ_LOG=1` also prints the decoded input; the marshal harnesses do not
-  read it.
+  same checkout, and replay reproduces the panic (R-NF-2).
+- Replay with the `STATELENS_BYZANTINE` value of the run that found the crash. A
+  guard-test crash exists only with `STATELENS_BYZANTINE=panic`, and `check` changes which
+  replicas are checked; without the same value, the input may run cleanly. For example:
+  `STATELENS_BYZANTINE=panic` followed by the `replay` line.
+- For the Simplex target, `CONSENSUS_FUZZ_LOG=1` also prints the decoded input; the
+  marshal harnesses do not read it.
 
 ### 7.12 Phase 3: investigation
 
@@ -823,7 +828,7 @@ participant, and it is checked without ghost state.
 | AC-9 | With at least one marshal invariant: `just fuzz --profile marshal`, then each printed `run` command. | Materialize (12 variants), instrument, plan, build and the test gate complete, the result is `READY` with one `run` line per variant, and each `run` command starts its variant. |
 | AC-10 | `STATELENS_FALSE_INVARIANTS=1 just fuzz --profile marshal`. | Result `PANIC (tests)`. `SL/campaign/logs/test.log` contains both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
 | AC-11 | In an instrumented checkout, for each variant: `STATELENS_BYZANTINE=panic just run <variant> -- -max_total_time=120`, then the same without the variable. | With the variable, the four Twins variants and the wedge-scenario variant panic with `[statelens][BYZANTINE]`, and no other variant does. Without it, none does. `[statelens] participant index mismatch` never appears. Verified for the Simplex sites of the stock standard Twins target (section 8.1). |
-| AC-12 | `just run <variant> <artifact>` in the checkout of a crashing Phase 3 run. | The same `[statelens][...]` line as in that run. |
+| AC-12 | `just run <variant> <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. |
 | AC-13 | Two 10-minute runs of `marshal_e2e_standard_app_cert_mock_twins_statelens` on empty corpora, one with `STATELENS_FEEDBACK=0` and one without. | `ft:` on the `DONE` line is higher with feedback. |
 | R-NF-3 | With the same duration and flags: each variant in an instrumented checkout, and its original target in an uninstrumented checkout at the same commit. | The exec/s values are reported side by side. A slowdown above 2x is recorded as an instrumentation problem. |
 
@@ -1445,6 +1450,7 @@ Last lines of its output:
 - Kinds of rules in design documents: voting rules, conditions for entering a view,
   timeout and nullification rules, certificate validity and use, parent and ancestry
   rules, persistence and recovery guarantees, and bounds on tracked state.
+- Scope values: `protocol`, `replica`, `voter`, `batcher`, `resolver`, `cross-actor`.
 - In scope: Simplex behavior.
 ~~~
 
@@ -1480,6 +1486,8 @@ Last lines of its output:
   and repair rules, verification and certification rules of the consensus adapters,
   shard validity and reconstruction rules, recovery after a restart, and bounds on
   tracked state.
+- Scope values: `protocol`, `replica`, `core`, `resolver` (marshal's backfill resolver),
+  `standard`, `coding`, `application`, `cross-component`.
 - In scope: marshal behavior, including the consensus adapters and the coding mode.
   Simplex voting, views and the forming of certificates belong to the simplex registry.
 ~~~
@@ -1556,7 +1564,7 @@ Last lines of its output:
 | AC-5 | In an instrumented checkout, two 10-minute runs on empty corpora: `STATELENS_FEEDBACK=0 just run simplex_statelens <empty dir A> -- -max_total_time=600` and the same without the variable on `<empty dir B>`. | The `ft:` value on the `DONE` line is higher with feedback. Compare `ft:`, not `cov:` (section 9.3). |
 | AC-6 | `STATELENS_FALSE_INVARIANTS=1 just fuzz`; if the result is `READY`, a short run of the printed `run` command. | Result `PANIC (tests)` with `[statelens][FALSE-0001]`, or a panic with it in the short run. |
 | AC-7 | In an instrumented checkout: `STATELENS_BYZANTINE=panic just run simplex_statelens -- -max_total_time=120`, then the same without the variable. | The first run panics with `[statelens][BYZANTINE]`; the second does not; `[statelens] participant index mismatch` never appears. Verified at the reference commit (section 1.2). |
-| AC-8 | `just run simplex_statelens <artifact>` in the checkout of a crashing campaign. | The same `[statelens][...]` line as in the campaign. Verified for `BYZANTINE` (section 1.2). |
+| AC-8 | `just run simplex_statelens <artifact>` in the checkout of a crashing Phase 3 run, with that run's `STATELENS_BYZANTINE` value. | The same `[statelens][...]` line as in that run. Verified for `BYZANTINE` (section 1.2). |
 | R-NF-3 | Same duration and flags: `simplex_statelens` in an instrumented checkout, and `simplex_cert_mock_twins_mutator` in an uninstrumented checkout at the same commit. | exec/s from `-print_final_stats=1` are reported side by side; a slowdown above 2x is recorded as an instrumentation problem. |
 
 Section 8.6 gives the procedures for AC-9 to AC-13, and for R-NF-3 on the marshal

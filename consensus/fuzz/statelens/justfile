@@ -6,7 +6,7 @@ set positional-arguments := true
 extract *args:
     python3 scripts/statelens.py extract "$@"
 
-# Run a campaign (instrument this checkout, test, fuzz): just fuzz [--agent A] [-- <libFuzzer args>]
+# Run a campaign (instrument, build the StateLens targets, test): just fuzz [--agent A] [--profile P]
 fuzz *args:
     python3 scripts/statelens.py campaign "$@"
 

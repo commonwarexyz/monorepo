@@ -1,113 +1,235 @@
 # StateLens for Simplex
 
-StateLens turns informal (in English) or semi-formal invariants about the Simplex consensus protocol
-into runtime assertions and state probes, then fuzzes the instrumented code with the
-libfuzzer until an invariant breaks. An LLM agent (Claude Code or Codex)
-writes the invariants from issues, documents, code comments, specifications and papers
-(Phase 1), and binds them to the current code in a campaign (Phase 2). See
-[PRD.md](docs/PRD.md) for the goals and [SPEC.md](docs/SPEC.md) for the details.
+StateLens turns invariants written in English into runtime assertions and state probes in
+the Simplex implementation, so that fuzzing the instrumented code with libFuzzer panics
+when an invariant breaks. It covers two subsystems, each with its own invariant registry
+and campaign profile: Simplex consensus (`consensus/src/simplex`: the voter, batcher and
+resolver actors) and marshal (`consensus/src/marshal`: the core, standard and coding
+components). It works in three phases: an LLM agent (Claude Code or Codex) discovers
+invariants in issues, design documents, code comments, formal specifications and papers
+(Phase 1); a campaign lets the agent instrument the code and generates the StateLens fuzz
+targets (Phase 2); and you run those targets (Phase 3). See [PRD.md](docs/PRD.md) for the
+goals and [SPEC.md](docs/SPEC.md) for the details.
 
 ## Run campaigns safely
 
 A campaign gives the agent full control of the machine and instruments the checkout in
 place. Clone the repository fresh on a dedicated machine or container, run the campaign
-in that clone, and discard the clone afterwards. Never commit an instrumented checkout.
+and the fuzz targets in that clone, and discard the clone afterwards. Never commit an
+instrumented checkout, and never reuse it for another campaign.
+
+Phase 1 agents run restricted in your working tree: Claude may only read, edit and write
+files, fetch web pages and run `gh` and `curl`; Codex runs in its workspace-write sandbox
+with network access.
 
 ## Prerequisites
 
-- `git`, `python3` (3.9 or later), `just`, `cargo-nextest` and `cargo-fuzz`.
-- The `stable` toolchain and the nightly pinned in `.github/workflows/slow.yml`.
+- `git`, `python3` (3.9 or later) and `just`.
+- `cargo` with the `stable` toolchain and the nightly pinned in
+  `.github/workflows/slow.yml`, `cargo-nextest` and `cargo-fuzz`.
 - The `claude` or `codex` CLI, logged in.
 - For issues: `gh` (logged in) or network access for `curl`. For PDF papers: `pdftotext`
-  or the Python `pypdf` module.
+  or the Python `pypdf` module; without either, the agent gets the PDF as is.
 
-Defaults live in [config.env](config.env): the agent (`claude`), the models, and the
-toolchains. An environment variable with the same name overrides a value there.
+Defaults live in [config.env](config.env): the agent (`claude`), the model of each agent
+CLI (empty means the CLI default), the test toolchain (`stable`) and the fuzz toolchain
+(empty means the pinned nightly). An environment variable with the same name overrides a
+value there, and `--agent` overrides `STATELENS_AGENT`. `CARGO_TARGET_DIR` is passed
+through; by default builds use the checkout's `target/`.
 
-All commands below run in `consensus/fuzz/statelens/`. Local source paths are relative
-to the repository root.
+Commands run in `consensus/fuzz/statelens/`, except the fuzz targets, which run in
+`consensus/fuzz/`. Local source paths are relative to the repository root. Generated
+outputs go to `campaign/` and `extract/`, which git ignores.
 
-## Phase 1: build invariants
+## Phase 1: discover invariants
 
 ```
 just extract issue https://github.com/commonwarexyz/monorepo/issues/2070
-just extract design docs/simplex-design.md#voting
+just extract design docs/blogs/pipelining-simplex.md#how-optimism-stays-safe
 just extract comment consensus/src/simplex/actors/voter/round.rs
-just extract spec consensus/quint/replica.qnt:34
-just extract paper papers/simplex.pdf#page=7
-STATELENS_AGENT=codex just extract issue https://github.com/commonwarexyz/monorepo/issues/2070
+just extract spec <spec>.qnt:34
+just extract paper https://eprint.iacr.org/2023/463.pdf#page=7
+just extract --registry marshal comment consensus/src/marshal/mod.rs
+just extract --registry marshal issue commonwarexyz/monorepo#<N>
+just extract --agent codex issue https://github.com/commonwarexyz/monorepo/issues/2070
 ```
 
-The agent writes new files to `invariants/` in the format of
-[templates/invariant.md](templates/invariant.md). **Every file in `invariants/` is used
-by the next campaign**, so review the new files first: edit them, delete the ones you do
-not want, and run `just check-invariants`. Logs and rendered prompts go to `extract/`.
+| Kind | Source |
+|---|---|
+| `issue` | GitHub URL of an issue or pull request, or `owner/repo#N` |
+| `design` | Local path or URL, optionally `#section` |
+| `comment` | File or directory under `consensus/src/<registry>`, optionally `:line` or `:start-end` |
+| `spec` | Quint, TLA+ or Lean file, optionally `:line` |
+| `paper` | Local PDF or text file, or URL, optionally `#page=N` |
 
-## Phase 2: run a campaign
+`--registry` is `simplex` (the default) or `marshal`. Several sources of one kind may be
+passed at once. The agent writes new files to `invariants/<registry>/` in the format of
+[templates/invariant.md](templates/invariant.md), numbered from the next free ID; IDs are
+unique across registries. The script lints the new files, and reports an existing
+invariant that the agent changed and a new file outside `invariants/<registry>/`. Logs,
+rendered prompts and paper text go to `extract/`.
+
+**Every file in a registry is used by the next campaign that binds it** (the `simplex`
+profile binds the simplex registry, the `marshal` profile both), so review the new files
+first: edit them, delete the ones you do not want, and run `just check-invariants`.
+
+## Phase 2: instrument the code and generate fuzz targets
 
 ```
 git clone <repository> && cd <repository>/consensus/fuzz/statelens
-just fuzz                          # agent from config.env
+just fuzz                          # simplex profile, agent from config.env
+just fuzz --profile marshal        # marshal profile
 just fuzz --agent codex            # another agent (or STATELENS_AGENT=codex just fuzz)
-just fuzz -- -fork=8               # extra libFuzzer arguments
-just fuzz --stop-after build       # stop after a step, for development
+just fuzz --stop-after build       # stop after materialize, instrument or build
 ```
 
 In this directory `just fuzz` runs a StateLens campaign. In `consensus/fuzz/` and at the
 repository root, `just fuzz` is the existing recipe that runs a package's fuzz targets.
 
-A campaign copies the runtime module and the fuzz target into the tree, lets the agent
-bind every invariant and add beacon probes, builds, runs the engine-level Simplex tests,
-and then fuzzes `simplex_statelens` until a panic or Ctrl-C. The target runs at about 13
-inputs per second per process, so use `-fork=<N>` on a many-core machine.
+A campaign adds the runtime module, the fuzz targets and the harness and runtime hooks to
+the tree, lets the agent bind every invariant of the profile's registries and add beacon
+probes, checks that only the profile's subsystems were edited, builds (with up to 3 agent
+repair attempts), and runs the test gate. It then ends with the result `READY` and prints
+the command that runs each target. **The campaign builds the fuzz targets and runs no
+fuzzer**, and passes no arguments to libFuzzer: that is Phase 3. `--stop-after` is for
+development and ends the campaign with `STOPPED after <step>`.
 
-The campaign refuses to start when tracked files outside `consensus/fuzz/statelens/`
-have uncommitted changes, or when an earlier campaign already instrumented the checkout.
+| | `simplex` (default) | `marshal` |
+|---|---|---|
+| Registries | `simplex` | `simplex`, then `marshal` |
+| Beacon probes | voter, batcher, resolver | the same, and marshal core, standard, coding |
+| Fuzz targets | `simplex_statelens` | `<target>_statelens` for each of the 12 marshal targets |
+| Test gate | `simplex::tests` without Twins, `simplex::statelens` | the same, and `marshal::` |
+
+The simplex test gate is about 240 tests and 2 minutes on 16 cores; marshal adds 421
+tests and about 70 seconds.
+
+The campaign refuses to start when a required tool is missing, when tracked files outside
+`consensus/fuzz/statelens/` have uncommitted changes, or when an earlier campaign already
+instrumented the checkout. Uncommitted registry edits are used.
+
+## Phase 3: run fuzz targets
+
+StateLens has no command for this phase. In the instrumented checkout, run the `run`
+commands of a `READY` summary for the targets you choose, and add libFuzzer arguments as
+needed, such as `-fork=<N>` to use N cores or `-max_total_time=<s>` to bound the run:
+
+```
+cd <repo>/consensus/fuzz
+NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
+  -rss_limit_mb=4000 -print_final_stats=1 -fork=8
+NIGHTLY_VERSION=<fuzz toolchain> just run \
+  marshal_e2e_standard_app_cert_mock_twins_statelens -- \
+  -rss_limit_mb=4000 -print_final_stats=1 -fork=8
+```
+
+A run ends when the target panics or you stop it; libFuzzer, fork mode included, stops at
+the first crash. `simplex_statelens` runs at about 13 inputs per second per process, so
+use `-fork` on a many-core machine. For marshal only the stock standard Twins target was
+measured, at about 15 inputs per second and 0.6 GB per process; size the other runs
+yourself.
+
+Do not pass `-artifact_prefix` or `-exact_artifact_path`, which move the crash file
+elsewhere, or any `-handle_*` switch, which can stop libFuzzer from reporting a crash and
+saving its input. Crashes land in `consensus/fuzz/simplex/artifacts/simplex_statelens/`,
+or in `consensus/fuzz/marshal/artifacts/<variant>/` for a marshal variant.
+
+A `marshal` campaign builds 12 variants, one per target in
+`consensus/fuzz/marshal/fuzz_targets/`, each named `<target>_statelens`. Only five have an
+adversary that runs Simplex or marshal code, and only they exercise the Byzantine guard:
+
+- the four Twins variants: `marshal_e2e_standard_app_cert_mock_twins_statelens`,
+  `marshal_e2e_coding_app_cert_mock_twins_statelens`,
+  `marshal_e2e_standard_deferred_cert_mock_twins_split_header_statelens` and
+  `marshal_e2e_standard_inline_cert_mock_twins_split_header_statelens`;
+- the wedge-scenario variant:
+  `marshal_e2e_standard_deferred_cert_mock_scenarios_statelens`.
+
+In the other seven (Disrupter, poisoned backfill, block dissemination, scenario prefix
+and store), no adversary runs Simplex or marshal code, so every engine is checked.
 
 ## Results
 
-The campaign ends with lines like these, also saved to `campaign/summary.txt`:
+The campaign ends with these lines, leaving out those that do not apply:
 
 ```
-statelens: result     PANIC (fuzz)
-statelens: panic      [statelens][INV-0001] replica=1 ...
-statelens: artifact   consensus/fuzz/simplex/artifacts/simplex_statelens/crash-...
-statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 just run ...
+statelens: checkout   <repo>
+statelens: base       <base commit>
+statelens: agent      <agent>
+statelens: profile    simplex | marshal
+statelens: invariants <n> (bound <b>, partial <p>, unbound <u>)
+statelens: sites      <k> assertion sites, <m> probe sites, <d> deleted lines
+statelens: result     READY | STOPPED after <step> | PANIC (tests) | BUILD FAILED | SETUP FAILED
+statelens: reason     <why the campaign stopped, for PANIC (tests), BUILD FAILED or SETUP FAILED>
+statelens: panic      <first [statelens][...] line, or the first panic message>
+statelens: run        cd <repo>/consensus/fuzz && NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- -rss_limit_mb=4000 -print_final_stats=1
+statelens: replay     cd <repo>/consensus/fuzz && CONSENSUS_FUZZ_LOG=1 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens simplex/artifacts/simplex_statelens/<crash file>
 ```
+
+The `run` and `replay` lines appear only with `READY`, one pair per target; the `marshal`
+profile prints a pair for each variant. The `replay` line is a template: put in the crash
+file that libFuzzer wrote, and set the `STATELENS_BYZANTINE` value of the run that found
+it. A campaign that passed its preconditions also saves the lines
+to `campaign/summary.txt`. A run refused by the preconditions prints them only, so the
+summary of the campaign that instrumented the checkout is kept.
 
 | Exit code | Result |
 |---|---|
-| 0 | `NO PANIC` (the fuzzer finished or you pressed Ctrl-C), or a `--stop-after` step finished |
-| 1 | usage or configuration error |
-| 2 | `SETUP FAILED`: checkout not fresh, agent failure, moved anchor, scope violation |
+| 0 | `READY`: the targets are built and the test gate passed; or `STOPPED after <step>` |
+| 1 | usage error |
+| 2 | `SETUP FAILED`: missing tool, checkout not fresh or already instrumented, agent failure, moved anchor, a target without the `cert_mock` scheme, scope violation |
 | 3 | `BUILD FAILED` after 3 repair attempts |
 | 4 | `PANIC (tests)`: the test gate failed |
-| 5 | `PANIC (fuzz)`: the fuzzer found a crash |
-| 6 | `FUZZER FAILED`: the fuzz command failed without a crash, for example a failed launch |
-
-`-artifact_prefix`, `-exact_artifact_path` and the `-handle_*` flags are rejected: the
-campaign relies on libFuzzer's default crash handling and reads crashes from
-`consensus/fuzz/simplex/artifacts/simplex_statelens/`. A run refused because the checkout is
-not fresh prints its summary without touching the earlier campaign's `campaign/summary.txt`.
 
 `campaign/` holds the instrumentation plan (`plan.md`), every change the campaign made
-(`instrumentation.diff`), the logs and the rendered prompts.
+(`instrumentation.diff`), the agent and test logs (`logs/`), the rendered prompts
+(`prompts/`), `meta.json` and `summary.txt`. A campaign that passes its preconditions
+recreates it.
 
 ## Investigating a panic
 
-1. Read the panic message: `[statelens][<ID>]` names the violated invariant; any other
-   panic comes from the existing harness oracles or the code itself.
-2. Find how the invariant was bound: its section in `campaign/plan.md`, and its sites
-   with `rg '\[statelens\] <ID>' consensus/src`.
-3. Replay the crash with the `replay` line; `CONSENSUS_FUZZ_LOG=1` prints the decoded
-   input.
-4. Decide whether it is an implementation bug, a wrong invariant or a wrong binding. Fix
-   wrong invariants in `invariants/` in your development checkout.
+1. Read the panic message: `[statelens][<ID>] replica=<index|none>` names the violated
+   invariant. `[statelens][BYZANTINE]` appears only with `STATELENS_BYZANTINE=panic`, and
+   `[statelens] participant index mismatch` comes from a runner hook. Any other panic
+   comes from the existing harness oracles or the code itself.
+2. For `PANIC (tests)`, the console shows the `FAIL` lines and every `[statelens][` line;
+   the full output is in `campaign/logs/test.log`.
+3. Find how the invariant was bound: its section in `campaign/plan.md`, its sites with
+   `rg '\[statelens\] <ID>' consensus/src`, and every change in
+   `campaign/instrumentation.diff` (or `git diff`). The agents' logs and prompts are in
+   `campaign/logs/` and `campaign/prompts/`.
+4. Replay a fuzz crash in the same checkout with the `replay` line; it reproduces the
+   panic. Keep the `STATELENS_BYZANTINE` value of the run that found it: a guard-test
+   crash exists only with `STATELENS_BYZANTINE=panic`, so replay it as
+   `STATELENS_BYZANTINE=panic` followed by the `replay` line; without it, the input runs
+   cleanly. For the Simplex target, `CONSENSUS_FUZZ_LOG=1` also prints the decoded input;
+   the marshal harnesses do not read it.
+5. Decide whether it is an implementation bug, a wrong invariant or a wrong binding. Fix
+   wrong invariants in the registry in your development checkout, and discard the
+   instrumented one: the next campaign starts from a fresh clone.
 
 ## Testing the workflow itself
 
 | Variable | Use |
 |---|---|
-| `STATELENS_FALSE_INVARIANTS=1` | Also binds the deliberately false invariants in `false-invariants/`; the campaign must panic with `[statelens][FALSE-0001]`. |
-| `STATELENS_BYZANTINE=panic` | Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired (`skip` is the default, `check` checks compromised replicas too). |
-| `STATELENS_FEEDBACK=0` | Leaves the StateLens counters unregistered, to compare libFuzzer's `ft:` with and without state feedback. |
+| `STATELENS_FALSE_INVARIANTS=1` | Set on `just fuzz`. Also binds the deliberately false invariants in `false-invariants/<subsystem>/`: FALSE-0001 with the `simplex` profile, FALSE-0001 and FALSE-0002 with the `marshal` profile. A `simplex` campaign must end with `PANIC (tests)` and `[statelens][FALSE-0001]`, or, if it reports `READY`, a short run of its `run` command must panic with it. A `marshal` campaign must end with `PANIC (tests)`, and `campaign/logs/test.log` must contain both `[statelens][FALSE-0001]` and `[statelens][FALSE-0002]`. |
+| `STATELENS_BYZANTINE=panic` | Set on a `run` command. Panics when a compromised replica reaches an instrumented site, which shows the Byzantine guard is needed and wired: `simplex_statelens`, the four marshal Twins variants and the wedge-scenario variant must panic with `[statelens][BYZANTINE]`, and no other variant may; `[statelens] participant index mismatch` must never appear. `skip` is the default, `check` checks compromised replicas too. |
+| `STATELENS_FEEDBACK=0` | Set on a `run` command. Leaves the StateLens counters unregistered. Run a target for the same time on two empty corpora, with and without it: `ft:` on the `DONE` line should be higher with feedback. Compare `ft:`, not `cov:`, which libFuzzer stops printing once the counters are registered. |
+
+Each false-invariant campaign in a fresh clone of its own:
+
+```
+STATELENS_FALSE_INVARIANTS=1 just fuzz
+STATELENS_FALSE_INVARIANTS=1 just fuzz --profile marshal
+```
+
+In the checkout of a `READY` simplex campaign (for a `READY` marshal campaign, use a Twins
+variant such as `marshal_e2e_standard_app_cert_mock_twins_statelens`):
+
+```
+cd <repo>/consensus/fuzz
+STATELENS_BYZANTINE=panic NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens -- \
+  -max_total_time=120
+STATELENS_FEEDBACK=0 NIGHTLY_VERSION=<fuzz toolchain> just run simplex_statelens \
+  <empty dir> -- -max_total_time=600
+```

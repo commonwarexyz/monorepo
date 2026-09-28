@@ -2,7 +2,7 @@
 id: FALSE-0001
 title: Deliberately false, never accept a nullification
 source_kind: human
-source_ref: consensus/fuzz/statelens/SPEC.md (acceptance procedure AC-5)
+source_ref: consensus/fuzz/statelens/docs/SPEC.md (acceptance procedure AC-6)
 scope: [replica, voter]
 author: statelens
 ---
@@ -16,4 +16,4 @@ leader is slow or offline. A campaign that includes this invariant must panic wi
 [statelens][FALSE-0001], which shows that invariants are bound, checked and reported.
 
 ## Evidence
-Workflow test, see SPEC.md section 13.
+Workflow test, see SPEC.md section 14.

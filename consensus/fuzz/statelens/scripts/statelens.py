@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""StateLens for Simplex: lint invariants, extract them with an agent, run campaigns.
+"""StateLens for Simplex and marshal: lint invariants, extract them with an agent, run campaigns.
 
-See consensus/fuzz/statelens/SPEC.md. Standard library only; Python 3.9 or later.
+Invariants live in one registry per subsystem (invariants/simplex/, invariants/marshal/).
+A campaign profile (simplex or marshal) selects the registries it binds, the code it
+instruments, the StateLens fuzz targets it builds and the tests it runs; the operator runs
+the targets afterwards. See consensus/fuzz/statelens/docs/SPEC.md. Standard library only;
+Python 3.9 or later.
 """
 
 import argparse
@@ -13,7 +17,6 @@ import os
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -22,9 +25,25 @@ from pathlib import Path
 # Subproject root, relative to the repository root.
 SL = Path("consensus/fuzz/statelens")
 
+AGENTS = ("claude", "codex")
 KINDS = ("issue", "design", "comment", "spec", "paper")
 SOURCE_KINDS = ("human",) + KINDS
-SCOPES = ("protocol", "replica", "voter", "batcher", "resolver", "cross-actor")
+# SPEC section 4.2: the registries and the scope values each of them allows.
+SUBSYSTEMS = ("simplex", "marshal")
+SCOPES = {
+    "simplex": ("protocol", "replica", "voter", "batcher", "resolver", "cross-actor"),
+    "marshal": (
+        "protocol",
+        "replica",
+        "core",
+        "resolver",
+        "standard",
+        "coding",
+        "application",
+        "cross-component",
+    ),
+}
+ALL_SCOPES = tuple(dict.fromkeys(scope for name in SUBSYSTEMS for scope in SCOPES[name]))
 REQUIRED_KEYS = ("id", "title", "source_kind", "source_ref", "scope")
 OPTIONAL_KEYS = ("author",)
 REQUIRED_SECTIONS = ("Statement", "Rationale", "Evidence")
@@ -41,23 +60,65 @@ CONFIG_KEYS = (
     "STATELENS_FUZZ_TOOLCHAIN",
 )
 
-ACTORS = ("voter", "batcher", "resolver")
-STEPS = ("materialize", "instrument", "build", "test")
+STOP_STEPS = ("materialize", "instrument", "build")
 BATCH_SIZE = 8
 REPAIR_ATTEMPTS = 3
 ERROR_LINES = 150
 
 TARGET = "simplex_statelens"
-SIMPLEX = "consensus/src/simplex/"
 STATELENS_RS = "consensus/src/simplex/statelens.rs"
 TARGET_RS = "consensus/fuzz/simplex/fuzz_targets/simplex_statelens.rs"
 FUZZ_MANIFEST = "consensus/fuzz/simplex/Cargo.toml"
 CORE_SIMPLEX = "consensus/fuzz/core/src/simplex.rs"
-ARTIFACTS = "consensus/fuzz/simplex/artifacts/" + TARGET
+MARSHAL_TARGETS = "consensus/fuzz/marshal/fuzz_targets"
+MARSHAL_MANIFEST = "consensus/fuzz/marshal/Cargo.toml"
+MARSHAL_SRC = "consensus/fuzz/marshal/src"
 PLAN = "consensus/fuzz/statelens/campaign/plan.md"
-TEST_FILTER = (
+SIMPLEX_TEST_FILTER = (
     "(test(/^simplex::tests::/) & not test(/::test_twins/)) | test(/^simplex::statelens::/)"
 )
+
+# SPEC section 5.5. Beacon components are (ACTOR, ACTOR_DIR, subsystem). `target` is the
+# StateLens target made from SL/runtime/target.rs, or None when the campaign builds one
+# variant of every target of the package (SPEC section 8.3, edit M1). `replay_env` goes
+# before NIGHTLY_VERSION in the replay command.
+PROFILES = {
+    "simplex": {
+        "registries": ("simplex",),
+        "roots": ("consensus/src/simplex/",),
+        "warn": ("consensus/src/simplex/mocks/", "consensus/src/simplex/scheme/"),
+        "components": (
+            ("voter", "consensus/src/simplex/actors/voter", "simplex"),
+            ("batcher", "consensus/src/simplex/actors/batcher", "simplex"),
+            ("resolver", "consensus/src/simplex/actors/resolver", "simplex"),
+        ),
+        "package": "consensus/fuzz/simplex",
+        "target": TARGET,
+        "test_filter": SIMPLEX_TEST_FILTER,
+        "replay_env": "CONSENSUS_FUZZ_LOG=1",
+    },
+    "marshal": {
+        "registries": ("simplex", "marshal"),
+        "roots": ("consensus/src/simplex/", "consensus/src/marshal/"),
+        "warn": (
+            "consensus/src/simplex/mocks/",
+            "consensus/src/simplex/scheme/",
+            "consensus/src/marshal/mocks/",
+        ),
+        "components": (
+            ("voter", "consensus/src/simplex/actors/voter", "simplex"),
+            ("batcher", "consensus/src/simplex/actors/batcher", "simplex"),
+            ("resolver", "consensus/src/simplex/actors/resolver", "simplex"),
+            ("marshal.core", "consensus/src/marshal/core", "marshal"),
+            ("marshal.standard", "consensus/src/marshal/standard", "marshal"),
+            ("marshal.coding", "consensus/src/marshal/coding", "marshal"),
+        ),
+        "package": "consensus/fuzz/marshal",
+        "target": None,
+        "test_filter": SIMPLEX_TEST_FILTER + " | test(/^marshal::/)",
+        "replay_env": "",
+    },
+}
 
 # SPEC Appendix B.3: inserted into the Twins runner after the `compromised` anchor.
 HOOK = """\
@@ -97,7 +158,22 @@ FRESH_RUN_CALL = """\
             hook();
         }"""
 
-# SPEC section 7.2: (file, the only line equal to the anchor, "after" or "before", text).
+# SPEC Appendix F: inserted into the wedge scenario after the `router` anchor (edit M3).
+WEDGE_HOOK = """\
+        // [statelens] The Byzantine role runs a real engine and marshal behind the wedge:
+        // publish it as compromised before any engine starts, and check that every
+        // scheme's own index matches its position in `participants`.
+        commonware_consensus::simplex::statelens::set_compromised([Role::Byzantine.index()]);
+        for (idx, scheme) in schemes.iter().enumerate() {
+            assert_eq!(
+                commonware_cryptography::certificate::Scheme::me(scheme),
+                Some(commonware_utils::Participant::from_usize(idx)),
+                "[statelens] participant index mismatch"
+            );
+        }"""
+
+# SPEC section 7.2, edits 2, 3 and 6 to 8, made by both profiles: (file, the only line
+# equal to the anchor, "after" or "before", text).
 ANCHORS = (
     ("consensus/src/simplex/mod.rs", "pub mod types;", "after", "pub mod statelens;"),
     ("consensus/Cargo.toml", "thiserror.workspace = true", "after", "sancov.workspace = true"),
@@ -111,11 +187,27 @@ ANCHORS = (
     ("runtime/src/deterministic.rs", "    pub fn new(cfg: Config) -> Self {", "after", FRESH_RUN_CALL),
 )
 
+# SPEC section 8.3, edit M1: the two insertions that turn a marshal target into its variant.
+VARIANT_START = re.compile(r"^    fuzz_target!\(\|input: [A-Za-z0-9_]+\| \{$")
+VARIANT_END = "    });"
+VARIANT_RESET = "        commonware_consensus::simplex::statelens::reset();"
+VARIANT_CLEAR = "        commonware_consensus::simplex::statelens::clear_compromised();"
+# Edit M2: the keys of the original [[bin]] block that a variant's block copies, in order.
+BIN_KEYS = ("test", "doc", "bench", "required-features")
+# Edit M3.
+WEDGE_ANCHOR = (
+    "consensus/fuzz/marshal/src/marshal/end_to_end/scenario.rs",
+    "        let router = Router::new([participants[Role::Byzantine.index()].clone()]);",
+    "after",
+    WEDGE_HOOK,
+)
+
 PLAN_TEMPLATE = """\
 # StateLens instrumentation plan
 
 - Base commit: {base}
 - Agent: {agent}
+- Profile: {profile}
 - Invariants: {count} ({ids})
 
 ## Invariants
@@ -126,26 +218,14 @@ PLAN_TEMPLATE = """\
 |---|---|---|---|---|
 """
 
-# The first line of the fuzzer's own output: cargo fuzz's `Running` line, or libFuzzer's
-# banner. Crash evidence only counts after it, so build output (for example a panicking
-# build script) is never taken for a crash of the target.
-FUZZ_STARTED = re.compile(r"^\s*Running `|^INFO: (Running with|Seed:)")
-# Target output that shows a crash, and the line naming the saved input.
-FUZZ_CRASH = re.compile(
-    r"ERROR: libFuzzer:|SUMMARY: libFuzzer:|Test unit written to|\[statelens\]\[|panicked at"
-)
-FUZZ_ARTIFACT = re.compile(r"Test unit written to (\S+)")
-FUZZ_INTERRUPTED = re.compile(r"libFuzzer: run interrupted")
-# libFuzzer flags the campaign rejects: artifact paths move crashes out of ARTIFACTS, where
-# results are read, and `-handle_*` switches stop libFuzzer from reporting a crash and
-# saving the input that caused it.
-REJECTED_FLAG = re.compile(r"^-(artifact_prefix|exact_artifact_path|handle_[a-z0-9]+)(=|$)")
 # The tools a campaign runs besides the agent CLI (SPEC section 5.2).
 CAMPAIGN_TOOLS = ("cargo", "cargo-nextest", "cargo-fuzz", "just")
 
 PLACEHOLDER = re.compile(r"\{\{([A-Z_]+)\}\}")
 PLAN_HEADING = re.compile(r"^###\s+((?:INV|FALSE)-\d+)\b")
 PLAN_STATUS = re.compile(r"^-\s*\**Status\**\s*:\s*\**\s*`?(bound|partial|unbound)\b")
+
+Materialization = collections.namedtuple("Materialization", "create modify targets anchors")
 
 
 class Abort(Exception):
@@ -199,6 +279,10 @@ def id_number(path):
     return int(match.group(1)) if match else 0
 
 
+def by_id(path):
+    return (id_number(path), path.name)
+
+
 def porcelain_paths(output):
     """Returns the paths of `git status --porcelain -z` output, including rename sources."""
     entries = output.split("\0")
@@ -249,12 +333,21 @@ def cargo(toolchain):
     return ["cargo"] + ([f"+{toolchain}"] if toolchain else [])
 
 
-def resolve_agent(config, flag):
+def agent_name(config, flag):
     agent = flag or config["STATELENS_AGENT"]
-    if agent not in ("claude", "codex"):
+    if agent not in AGENTS:
         raise Abort(1, f"unknown agent {agent!r}; use claude or codex")
+    return agent
+
+
+def check_agent_cli(agent):
     if shutil.which(agent) is None:
         raise Abort(2, f"the {agent} CLI is not on PATH")
+
+
+def resolve_agent(config, flag):
+    agent = agent_name(config, flag)
+    check_agent_cli(agent)
     return agent
 
 
@@ -264,7 +357,7 @@ def agent_model(config, agent):
 
 
 def agent_command(config, agent, phase, repo):
-    """Non-interactive agent invocation (SPEC section 11); the prompt goes to stdin."""
+    """Non-interactive agent invocation (SPEC section 12); the prompt goes to stdin."""
     model = agent_model(config, agent)
     if agent == "claude":
         command = ["claude", "-p", "--output-format", "text"]
@@ -297,12 +390,10 @@ def agent_command(config, agent, phase, repo):
     return command + ["-"]
 
 
-def run_logged(command, log_path, cwd, stdin_text=None, env=None, own_sigint=False):
+def run_logged(command, log_path, cwd, stdin_text=None):
     """Runs a command, copying its output to the console and to `log_path`.
 
-    Returns the exit code and the last `ERROR_LINES` lines of output. With
-    `own_sigint`, the child handles Ctrl-C with the default action even when this
-    process ignores it.
+    Returns the exit code and the last `ERROR_LINES` lines of output.
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     tail = collections.deque(maxlen=ERROR_LINES)
@@ -312,16 +403,12 @@ def run_logged(command, log_path, cwd, stdin_text=None, env=None, own_sigint=Fal
         process = subprocess.Popen(
             command,
             cwd=cwd,
-            env=env,
             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
-            preexec_fn=(lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
-            if own_sigint
-            else None,
         )
         if stdin_text is not None:
 
@@ -363,6 +450,12 @@ def compose(sl_dir, first, second, values):
     return render(text, values)
 
 
+def subsystem_prompt(sl_dir, subsystem, part):
+    """The `part` (analyst or instrument) of a subsystem's prompt (SPEC section 13)."""
+    path = sl_dir / "prompts" / "subsystems" / f"{subsystem}-{part}.md"
+    return path.read_text().rstrip("\n")
+
+
 def front_matter(text):
     """Returns (front matter dict, index of the closing --- line) or (None, None)."""
     lines = text.split("\n")
@@ -384,14 +477,41 @@ def title_of(path):
     return (values or {}).get("title", "")
 
 
+def id_of(path):
+    """The front matter id, or the file stem when there is none (lint rule 9)."""
+    values, _ = front_matter(path.read_text(errors="replace"))
+    return (values or {}).get("id") or path.stem
+
+
+def registry_files(sl_dir):
+    """Every file lint checks by default (SPEC section 4.6), including misplaced ones."""
+    paths = []
+    for top in FILE_NAMES:
+        root = sl_dir / top
+        paths += sorted(root.glob("*.md"), key=by_id)
+        for registry in sorted(path for path in root.glob("*") if path.is_dir()):
+            paths += sorted(registry.glob("*.md"), key=by_id)
+    return paths
+
+
 def lint_file(path):
-    """Checks one invariant file against SPEC section 4.6."""
+    """Checks one invariant file against SPEC section 4.6, rules 1 to 8."""
     problems = []
-    pattern = FILE_NAMES.get(path.parent.name)
-    if pattern is None or not pattern.match(path.name):
+    parent = path.resolve().parent
+    registry = parent.name if parent.name in SUBSYSTEMS else None
+    if parent.name in FILE_NAMES:
         problems.append(
-            "file name must be INV-NNNN.md in invariants/ or FALSE-NNNN.md in false-invariants/"
+            f"lies directly in {parent.name}/; move it to {parent.name}/<subsystem>/, "
+            f"where <subsystem> is one of: {', '.join(SUBSYSTEMS)}"
         )
+    else:
+        pattern = FILE_NAMES.get(parent.parent.name)
+        if registry is None or pattern is None or not pattern.match(path.name):
+            problems.append(
+                "file name must be INV-NNNN.md in invariants/<subsystem>/ or FALSE-NNNN.md in "
+                "false-invariants/<subsystem>/, where <subsystem> is one of: "
+                + ", ".join(SUBSYSTEMS)
+            )
     data = path.read_bytes()
     try:
         text = data.decode("ascii")
@@ -426,10 +546,12 @@ def lint_file(path):
         problems.append(f"source_kind must be one of: {', '.join(SOURCE_KINDS)}")
     scope = front.get("scope")
     if scope:
+        allowed = SCOPES[registry] if registry else ALL_SCOPES
         match = re.fullmatch(r"\[(.*)\]", scope)
         items = [item.strip() for item in match.group(1).split(",")] if match else []
-        if not match or not items or any(item not in SCOPES for item in items):
-            problems.append(f"scope must be a list of: {', '.join(SCOPES)}")
+        if not match or not items or any(item not in allowed for item in items):
+            owner = f" the {registry} registry's values" if registry else ""
+            problems.append(f"scope must be a list of{owner}: {', '.join(allowed)}")
     sections = {}
     order = []
     current = None
@@ -453,29 +575,48 @@ def lint_file(path):
     return problems
 
 
-def lint_paths(paths):
+def lint_paths(paths, others=()):
+    """Lints `paths`; their IDs must not repeat among `paths` and `others` (rule 9)."""
+    ids = {}
+    for path in list(paths) + list(others):
+        key = path.resolve()
+        if key not in ids and path.is_file():
+            ids[key] = (id_of(path), path)
+    owners = collections.defaultdict(list)
+    for file_id, path in ids.values():
+        owners[file_id].append(path)
     count = 0
     for path in paths:
-        for problem in lint_file(path):
+        if not path.is_file():
+            problems = ["not a file"]
+        else:
+            problems = lint_file(path)
+            file_id = ids[path.resolve()][0]
+            same = [other for other in owners[file_id] if other.resolve() != path.resolve()]
+            if same:
+                problems.append(
+                    f"id {file_id} is also used by {', '.join(str(other) for other in same)}"
+                )
+        for problem in problems:
             print(f"{path}: {problem}", flush=True)
             count += 1
     return count
 
 
 def cmd_lint(args):
-    if args.paths:
-        paths = [Path(path) for path in args.paths]
-    else:
-        sl_dir = repo_root() / SL
-        paths = sorted((sl_dir / "invariants").glob("*.md"), key=id_number)
-        paths += sorted((sl_dir / "false-invariants").glob("*.md"), key=id_number)
-    count = lint_paths(paths)
+    sl_dir = repo_root() / SL
+    registries = registry_files(sl_dir)
+    paths = [Path(path) for path in args.paths] if args.paths else registries
+    count = lint_paths(paths, registries)
     say(f"lint: {len(paths)} file(s), {count} problem(s)")
     return 3 if count else 0
 
 
-def next_invariant_id(registry):
-    numbers = [id_number(path) for path in registry.glob("INV-*.md")]
+def next_invariant_id(sl_dir):
+    """1 + the highest INV number over all registries (SPEC section 4.1)."""
+    root = sl_dir / "invariants"
+    paths = list(root.glob("INV-*.md")) + list(root.glob("*/INV-*.md"))
+    numbers = [id_number(path) for path in paths]
     return f"INV-{max(numbers, default=0) + 1:04d}"
 
 
@@ -501,83 +642,366 @@ def paper_text(repo, sl_dir, source):
     return output
 
 
+def extract_values(repo, sl_dir, config, agent, kind, registry, sources):
+    """Placeholder values of the Phase 1 prompt (SPEC section 6.2, step 5)."""
+    lines = []
+    for source in sources:
+        text = paper_text(repo, sl_dir, source) if kind == "paper" else None
+        suffix = f" (text: {text.relative_to(repo)})" if text else ""
+        lines.append(f"- {source}{suffix}")
+    model = agent_model(config, agent)
+    return {
+        "KIND": kind,
+        "NEXT_ID": next_invariant_id(sl_dir),
+        "AUTHOR": f"{agent}/{model}" if model else agent,
+        "TEMPLATE": (sl_dir / "templates" / "invariant.md").read_text().rstrip("\n"),
+        "SOURCES": "\n".join(lines),
+        "REGISTRY": registry,
+        "CONTEXT": subsystem_prompt(sl_dir, registry, "analyst"),
+        "SOURCE_ROOT": f"consensus/src/{registry}",
+    }
+
+
+def files_under(root):
+    return {path: sha256(path) for path in root.rglob("*") if path.is_file()}
+
+
 def cmd_extract(args):
     """Phase 1 (SPEC section 6.2)."""
     repo = repo_root()
     sl_dir = repo / SL
     config = load_config(sl_dir)
     agent = resolve_agent(config, args.agent)
-    registry = sl_dir / "invariants"
-    registry.mkdir(exist_ok=True)
-    before = {path.name: sha256(path) for path in registry.glob("*.md")}
-    next_id = next_invariant_id(registry)
-
-    lines = []
-    for source in args.sources:
-        text = paper_text(repo, sl_dir, source) if args.kind == "paper" else None
-        suffix = f" (text: {text.relative_to(repo)})" if text else ""
-        lines.append(f"- {source}{suffix}")
-    model = agent_model(config, agent)
-    values = {
-        "KIND": args.kind,
-        "NEXT_ID": next_id,
-        "AUTHOR": f"{agent}/{model}" if model else agent,
-        "TEMPLATE": (sl_dir / "templates" / "invariant.md").read_text().rstrip("\n"),
-        "SOURCES": "\n".join(lines),
-    }
+    invariants = sl_dir / "invariants"
+    registry = invariants / args.registry
+    registry.mkdir(parents=True, exist_ok=True)
+    before = files_under(invariants)
+    values = extract_values(repo, sl_dir, config, agent, args.kind, args.registry, args.sources)
     prompt = compose(sl_dir, "analyst.md", f"analyst-{args.kind}.md", values)
 
     stamp = utc_now().strftime("%Y%m%dT%H%M%SZ")
     log = sl_dir / "extract" / f"{stamp}-{args.kind}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     (sl_dir / "extract" / f"{stamp}-{args.kind}.prompt.md").write_text(prompt)
-    say(f"extract: {agent} reads {len(args.sources)} {args.kind} source(s); log {log.relative_to(repo)}")
+    say(
+        f"extract: {agent} reads {len(args.sources)} {args.kind} source(s) for the "
+        f"{args.registry} registry, from {values['NEXT_ID']}; log {log.relative_to(repo)}"
+    )
     code, _ = run_logged(agent_command(config, agent, 1, repo), log, repo, stdin_text=prompt)
     if code != 0:
         raise Abort(2, f"the agent exited with code {code}; see {log.relative_to(repo)}")
 
-    after = {path.name: sha256(path) for path in registry.glob("*.md")}
-    new = sorted((name for name in after if name not in before), key=lambda name: id_number(Path(name)))
+    after = files_under(invariants)
+    new = sorted((path for path in after if path not in before), key=by_id)
     problems = 0
-    for name, digest in sorted(before.items()):
-        if after.get(name) != digest:
-            print(f"{registry / name}: the agent modified or deleted an existing invariant")
+    for path, digest in sorted(before.items()):
+        if after.get(path) != digest:
+            print(f"{path}: the agent modified or deleted an existing invariant")
             problems += 1
-    problems += lint_paths([registry / name for name in new])
-    for name in new:
-        say(f"new: invariants/{name}: {title_of(registry / name)}")
-    if not new:
+    for path in new:
+        if path.parent != registry:
+            print(f"{path}: the agent wrote outside the registry invariants/{args.registry}/")
+            problems += 1
+    problems += lint_paths(new, registry_files(sl_dir))
+    for path in new:
+        say(f"new: {path.relative_to(sl_dir)}: {title_of(path)}")
+    if new:
+        say(
+            "Every file in a registry is used by the next campaign that binds it. "
+            "Review, edit or delete these files first."
+        )
+    else:
         say("extract: the agent wrote no invariants")
-    say(
-        "every file in invariants/ is used by the next campaign; "
-        "review, edit or delete these files first"
-    )
     return 3 if problems else 0
 
 
-class Campaign:
-    """Phase 2 (SPEC section 7), run in place in the checkout."""
+def read_edit_file(repo, relative, hint="update the paths and anchors in scripts/statelens.py"):
+    """Text of a file the materialize step reads; a missing file aborts with exit code 2."""
+    try:
+        return (repo / relative).read_text()
+    except FileNotFoundError:
+        raise Abort(2, f"materialize: {relative} does not exist; {hint}") from None
 
-    def __init__(self, args, libfuzzer_args):
+
+def read_sl_file(repo, relative):
+    """Text of a StateLens file that materialize copies (SL/runtime/)."""
+    return read_edit_file(repo, relative, "restore it from HEAD")
+
+
+def marshal_sources(repo):
+    """Stems of the marshal fuzz targets, in file name order (StateLens variants excluded)."""
+    names = sorted(
+        path.name
+        for path in (repo / MARSHAL_TARGETS).glob("*.rs")
+        if not path.name.endswith("_statelens.rs")
+    )
+    return [name[: -len(".rs")] for name in names]
+
+
+def profile_targets(repo, profile):
+    """The StateLens targets a campaign of `profile` builds (SPEC section 5.5)."""
+    target = PROFILES[profile]["target"]
+    if target:
+        return [target]
+    return [f"{stem}_statelens" for stem in marshal_sources(repo)]
+
+
+def simplex_types(repo):
+    """Maps each `impl Simplex for P` of the fuzz core to whether it uses cert_mock (D15)."""
+    core = read_edit_file(repo, CORE_SIMPLEX)
+    types = {}
+    for match in re.finditer(r"impl Simplex for (\w+) \{", core):
+        rest = core[match.end() :]
+        following = re.search(r"\nimpl ", rest)
+        block = rest[: following.start()] if following else rest
+        types[match.group(1)] = "type Scheme = cert_mock::Scheme<" in block
+    return types
+
+
+def check_cert_mock(repo, sl_dir):
+    """D15 for the target templates in SL/runtime/ (SPEC section 7.2)."""
+    types = simplex_types(repo)
+    for template in sorted((sl_dir / "runtime").glob("*.rs")):
+        if template.name == "statelens.rs":
+            continue
+        names = re.findall(r"\bfuzz(?:_audit)?::<\s*(\w+)", template.read_text())
+        if not names:
+            raise Abort(2, f"{template.name}: no fuzz::<P, ...> call to check (D15)")
+        for name in names:
+            if not types.get(name):
+                raise Abort(
+                    2,
+                    f"{template.name}: {name} does not use the cert_mock certificate "
+                    "scheme; StateLens fuzz targets may only use cert_mock (D15)",
+                )
+
+
+def turbofish_arguments(text):
+    """The type arguments of every `::<...>` in `text`, split at top-level commas."""
+    arguments = []
+    for match in re.finditer(r"::<", text):
+        depth = 1
+        start = index = match.end()
+        while index < len(text) and depth:
+            char = text[index]
+            if char == "<":
+                depth += 1
+            elif char == ">":
+                depth -= 1
+                if not depth:
+                    arguments.append(text[start:index])
+            elif char == "," and depth == 1:
+                arguments.append(text[start:index])
+                start = index + 1
+            index += 1
+    return [argument.strip() for argument in arguments if argument.strip()]
+
+
+def check_marshal_cert_mock(repo, stems):
+    """The cryptography check of the marshal profile (SPEC section 8.4)."""
+    types = simplex_types(repo)
+    others = sorted(name for name, cert_mock in types.items() if not cert_mock)
+    shared = {
+        str(path.relative_to(repo)): path.read_text()
+        for path in sorted((repo / MARSHAL_SRC).rglob("*.rs"))
+    }
+    for stem in stems:
+        text = (repo / MARSHAL_TARGETS / f"{stem}.rs").read_text()
+        for argument in turbofish_arguments(text):
+            if not types.get(argument):
+                raise Abort(
+                    2,
+                    f"{stem}: type argument {argument} is not a Simplex type with the "
+                    "cert_mock certificate scheme; StateLens fuzz targets may only use "
+                    "cert_mock (SPEC section 8.4)",
+                )
+        for name in others:
+            word = re.compile(r"\b" + re.escape(name) + r"\b")
+            if word.search(text):
+                raise Abort(
+                    2,
+                    f"{stem}: names {name}, whose Simplex impl does not use the cert_mock "
+                    "certificate scheme (SPEC section 8.4)",
+                )
+            for relative, source in shared.items():
+                if word.search(source):
+                    raise Abort(
+                        2,
+                        f"{stem}: {relative} names {name}, whose Simplex impl does not use "
+                        "the cert_mock certificate scheme (SPEC section 8.4)",
+                    )
+
+
+def find_anchor(relative, lines, anchor):
+    """Index of the only line equal to `anchor`, or matching it when it is a pattern."""
+    if isinstance(anchor, str):
+        found = [index for index, line in enumerate(lines) if line == anchor]
+        shown = repr(anchor)
+    else:
+        found = [index for index, line in enumerate(lines) if anchor.match(line)]
+        shown = f"matching {anchor.pattern!r}"
+    if len(found) != 1:
+        raise Abort(
+            2,
+            f"materialize: expected one line {shown} in {relative}, found {len(found)}; "
+            "update the anchors in scripts/statelens.py",
+        )
+    return found[0]
+
+
+def insert_lines(lines, insertions):
+    """Applies (index, text) insertions from the bottom up, so no index moves.
+
+    Insertions at the same index end up in the order given.
+    """
+    lines = list(lines)
+    order = sorted(enumerate(insertions), key=lambda item: (item[1][0], item[0]), reverse=True)
+    for _, (at, text) in order:
+        lines[at:at] = text.split("\n")
+    return lines
+
+
+def bin_blocks(text):
+    """The [[bin]] tables of a manifest, as lists of their lines."""
+    blocks = []
+    current = None
+    for line in text.split("\n"):
+        if line.strip().startswith("["):
+            current = [] if line.strip() == "[[bin]]" else None
+            if current is not None:
+                blocks.append(current)
+        elif current is not None:
+            current.append(line)
+    return blocks
+
+
+def bin_entries(block):
+    """Maps each key of a [[bin]] block to (unquoted value, line), first occurrence only."""
+    entries = {}
+    for line in block:
+        key, sep, value = line.partition("=")
+        if sep and key.strip() not in entries:
+            entries[key.strip()] = (value.strip().strip('"'), line)
+    return entries
+
+
+def variant_bin_block(blocks, stem):
+    """The [[bin]] block of a StateLens variant (SPEC section 8.3, edit M2)."""
+    owners = []
+    for block in blocks:
+        entries = bin_entries(block)
+        name = entries.get("name", ("", ""))[0]
+        path = entries.get("path", ("", ""))[0]
+        if name == stem or path == f"fuzz_targets/{stem}.rs":
+            owners.append(entries)
+    if len(owners) != 1:
+        raise Abort(
+            2,
+            f"materialize: expected one [[bin]] block for {stem} in {MARSHAL_MANIFEST}, "
+            f"found {len(owners)}",
+        )
+    variant = f"{stem}_statelens"
+    lines = ["", "[[bin]]", f'name = "{variant}"', f'path = "fuzz_targets/{variant}.rs"']
+    for key in BIN_KEYS:
+        if key in owners[0]:
+            line = owners[0][key][1]
+            if line.count("[") > line.count("]"):
+                raise Abort(
+                    2,
+                    f"materialize: the {key} value of {stem} in {MARSHAL_MANIFEST} spans "
+                    "several lines, which the variant block cannot copy",
+                )
+            lines.append(line)
+    return "\n".join(lines) + "\n"
+
+
+def materialize_edits(repo, sl_dir, profile):
+    """Computes the materialize step of `profile` without writing (SPEC sections 7.2, 8.3).
+
+    Runs the profile's cryptography check and finds every anchor first. Returns the files
+    to create and the new content of the files to modify (text by path relative to the
+    repository root), the StateLens targets, and every anchor as (file, anchor, line).
+    """
+    texts = {}
+    create = {}
+    appends = {}
+    insertions = collections.defaultdict(list)
+    anchors = []
+
+    def lines_of(relative):
+        if relative not in texts:
+            texts[relative] = read_edit_file(repo, relative).split("\n")
+        return texts[relative]
+
+    def locate(relative, anchor, position):
+        index = find_anchor(relative, lines_of(relative), anchor)
+        anchors.append((relative, anchor if isinstance(anchor, str) else anchor.pattern, index + 1))
+        return index + 1 if position == "after" else index
+
+    if profile == "simplex":
+        check_cert_mock(repo, sl_dir)
+    else:
+        stems = marshal_sources(repo)
+        if not stems:
+            raise Abort(2, f"materialize: no fuzz targets in {MARSHAL_TARGETS}")
+        check_marshal_cert_mock(repo, stems)
+
+    edits = ANCHORS + ((WEDGE_ANCHOR,) if profile == "marshal" else ())
+    for relative, anchor, position, text in edits:
+        insertions[relative].append((locate(relative, anchor, position), text))
+    create[STATELENS_RS] = read_sl_file(repo, SL / "runtime" / "statelens.rs")
+    if profile == "simplex":
+        create[TARGET_RS] = read_sl_file(repo, SL / "runtime" / "target.rs")
+        appends[FUZZ_MANIFEST] = BIN_BLOCK
+    else:
+        blocks = bin_blocks(read_edit_file(repo, MARSHAL_MANIFEST))
+        manifest = []
+        for stem in stems:
+            relative = f"{MARSHAL_TARGETS}/{stem}.rs"
+            start = locate(relative, VARIANT_START, "after")
+            end = locate(relative, VARIANT_END, "before")
+            lines = insert_lines(lines_of(relative), [(start, VARIANT_RESET), (end, VARIANT_CLEAR)])
+            create[f"{MARSHAL_TARGETS}/{stem}_statelens.rs"] = "\n".join(lines)
+            manifest.append(variant_bin_block(blocks, stem))
+        appends[MARSHAL_MANIFEST] = "".join(manifest)
+
+    modify = {
+        relative: "\n".join(insert_lines(lines_of(relative), items))
+        for relative, items in insertions.items()
+    }
+    for relative, text in appends.items():
+        base = modify[relative] if relative in modify else read_edit_file(repo, relative)
+        modify[relative] = (base if base.endswith("\n") else base + "\n") + text
+    return Materialization(create, modify, profile_targets(repo, profile), anchors)
+
+
+class Campaign:
+    """Phase 2 (SPEC sections 7 and 8), run in place in the checkout."""
+
+    def __init__(self, args):
         self.repo = repo_root()
         self.sl_dir = self.repo / SL
         self.config = load_config(self.sl_dir)
-        self.agent = resolve_agent(self.config, args.agent)
+        # The CLI itself is checked with the preconditions, so a missing one is reported
+        # in the summary.
+        self.agent = agent_name(self.config, args.agent)
+        self.profile_name = args.profile
+        self.profile = PROFILES[args.profile]
         self.stop_after = args.stop_after
-        self.libfuzzer_args = libfuzzer_args
         self.test_toolchain = self.config["STATELENS_TEST_TOOLCHAIN"]
         self.fuzz_toolchain = self.config["STATELENS_FUZZ_TOOLCHAIN"] or pinned_nightly(self.repo)
         self.dir = self.sl_dir / "campaign"
         # Set once this run has created its own campaign directory.
         self.initialized = False
         self.base = None
+        # (registry, path) pairs, in binding order.
         self.invariants = []
+        self.targets = []
         self.baseline = {}
         self.statuses = None
         self.sites = None
         self.reason = None
         self.panic = None
-        self.artifact = None
 
     # Commands.
 
@@ -590,13 +1014,15 @@ class Campaign:
             "--tests",
         ]
 
-    def fuzz_build_command(self):
-        return cargo(self.fuzz_toolchain) + [
-            "fuzz",
-            "build",
-            "--fuzz-dir",
-            "consensus/fuzz/simplex",
-            TARGET,
+    def fuzz_build_commands(self):
+        """One `cargo fuzz build` per StateLens target, as (target, command)."""
+        return [
+            (
+                target,
+                cargo(self.fuzz_toolchain)
+                + ["fuzz", "build", "--fuzz-dir", self.profile["package"], target],
+            )
+            for target in self.targets
         ]
 
     def test_command(self):
@@ -609,7 +1035,7 @@ class Campaign:
             "--no-fail-fast",
             "--ignore-default-filter",
             "-E",
-            TEST_FILTER,
+            self.profile["test_filter"],
         ]
 
     def common_values(self):
@@ -631,51 +1057,50 @@ class Campaign:
                 step()
                 if self.stop_after == name:
                     return self.finish(0, f"STOPPED after {name}")
-            return self.fuzz()
+            return self.finish(0, "READY")
         except Abort as error:
             self.reason = str(error)
             result = {
                 2: "SETUP FAILED",
                 3: "BUILD FAILED",
                 4: "PANIC (tests)",
-                5: "PANIC (fuzz)",
             }.get(error.code, "SETUP FAILED")
             return self.finish(error.code, result)
         except OSError as error:
-            # A command could not be started (the fuzz step handles its own).
             self.reason = f"could not start a command: {error}"
             return self.finish(2, "SETUP FAILED")
 
     def finish(self, code, result):
-        lines = [f"checkout   {self.repo}"]
+        rows = [("checkout", self.repo)]
         if self.base:
-            lines.append(f"base       {self.base}")
-        lines.append(f"agent      {self.agent}")
+            rows.append(("base", self.base))
+        rows.append(("agent", self.agent))
+        rows.append(("profile", self.profile_name))
         if self.statuses is not None:
             counts = collections.Counter(self.statuses.values())
-            lines.append(
-                f"invariants {len(self.statuses)} (bound {counts['bound']}, "
-                f"partial {counts['partial']}, unbound {counts['unbound']})"
+            rows.append(
+                (
+                    "invariants",
+                    f"{len(self.statuses)} (bound {counts['bound']}, "
+                    f"partial {counts['partial']}, unbound {counts['unbound']})",
+                )
             )
         if self.sites is not None:
             assertions, probes, deleted = self.sites
-            lines.append(
-                f"sites      {assertions} assertion sites, {probes} probe sites, "
-                f"{deleted} deleted lines"
+            rows.append(
+                (
+                    "sites",
+                    f"{assertions} assertion sites, {probes} probe sites, {deleted} deleted lines",
+                )
             )
-        lines.append(f"result     {result}")
+        rows.append(("result", result))
         if self.reason:
-            lines.append(f"reason     {self.reason}")
+            rows.append(("reason", self.reason))
         if self.panic:
-            lines.append(f"panic      {self.panic}")
-        if self.artifact:
-            relative = Path(self.artifact).relative_to("consensus/fuzz")
-            lines.append(f"artifact   {self.artifact}")
-            lines.append(
-                f"replay     cd {self.repo}/consensus/fuzz && "
-                f"CONSENSUS_FUZZ_LOG=1 just run {TARGET} {relative}"
-            )
-        text = "\n".join(f"statelens: {line}" for line in lines)
+            rows.append(("panic", self.panic))
+        if result == "READY":
+            rows += self.handover()
+        text = "\n".join(f"statelens: {key:<10} {value}" for key, value in rows)
         print(text, flush=True)
         # A run refused by the preconditions must not overwrite the summary of the
         # campaign that instrumented this checkout.
@@ -683,14 +1108,42 @@ class Campaign:
             (self.dir / "summary.txt").write_text(text + "\n")
         return code
 
+    def handover(self):
+        """The `run` and `replay` lines of every StateLens target (SPEC sections 7.9, 8.3)."""
+        fuzz_dir = f"cd {self.repo}/consensus/fuzz && "
+        nightly = f"NIGHTLY_VERSION={self.fuzz_toolchain}"
+        replay_env = " ".join(filter(None, (self.profile["replay_env"], nightly)))
+        package = Path(self.profile["package"]).relative_to("consensus/fuzz")
+        rows = []
+        for target in self.targets:
+            rows.append(
+                (
+                    "run",
+                    f"{fuzz_dir}{nightly} just run {target} -- "
+                    "-rss_limit_mb=4000 -print_final_stats=1",
+                )
+            )
+            rows.append(
+                (
+                    "replay",
+                    f"{fuzz_dir}{replay_env} just run {target} "
+                    f"{package}/artifacts/{target}/<crash file>",
+                )
+            )
+        return rows
+
     # Section 7.1.
 
     def check_preconditions(self):
         # Checked first, so a missing tool fails before any agent time is spent.
+        check_agent_cli(self.agent)
         for tool in CAMPAIGN_TOOLS:
             if shutil.which(tool) is None:
                 raise Abort(2, f"{tool} is not on PATH; see the prerequisites in README.md")
-        for path in (STATELENS_RS, TARGET_RS):
+        variants = sorted((self.repo / MARSHAL_TARGETS).glob("*_statelens.rs"))
+        created = [STATELENS_RS, TARGET_RS]
+        created += [str(path.relative_to(self.repo)) for path in variants]
+        for path in created:
             if (self.repo / path).exists():
                 raise Abort(
                     2,
@@ -713,87 +1166,71 @@ class Campaign:
         (self.dir / "logs").mkdir(parents=True)
         (self.dir / "prompts").mkdir()
         self.initialized = True
-        self.invariants = sorted((self.sl_dir / "invariants").glob("INV-*.md"), key=id_number)
-        if os.environ.get("STATELENS_FALSE_INVARIANTS") == "1":
-            self.invariants += sorted(
-                (self.sl_dir / "false-invariants").glob("FALSE-*.md"), key=id_number
-            )
-        if lint_paths(self.invariants):
+        with_false = os.environ.get("STATELENS_FALSE_INVARIANTS") == "1"
+        self.invariants = []
+        checked = []
+        for registry in self.profile["registries"]:
+            roots = [(self.sl_dir / "invariants" / registry, "INV-*.md")]
+            if with_false:
+                roots.append((self.sl_dir / "false-invariants" / registry, "FALSE-*.md"))
+            for root, pattern in roots:
+                bound = sorted(root.glob(pattern), key=by_id)
+                self.invariants += [(registry, path) for path in bound]
+                # Every *.md is linted, so lint rule 1 reports a misnamed file.
+                checked += sorted(root.glob("*.md"), key=by_id)
+        paths = [path for _, path in self.invariants]
+        if lint_paths(checked, registry_files(self.sl_dir)):
             say("warning: some invariant files have format problems (see above)")
-        ids = [path.stem for path in self.invariants]
+        self.targets = profile_targets(self.repo, self.profile_name)
+        ids = [path.stem for path in paths]
         meta = {
             "base": self.base,
             "agent": self.agent,
             "model": agent_model(self.config, self.agent),
+            "profile": self.profile_name,
             "test_toolchain": self.test_toolchain,
             "fuzz_toolchain": self.fuzz_toolchain,
             "started": utc_now().isoformat(timespec="seconds"),
             "invariants": ids,
+            "targets": self.targets,
         }
         (self.dir / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
+        groups = []
+        for registry in self.profile["registries"]:
+            names = [path.stem for owner, path in self.invariants if owner == registry]
+            groups.append(f"{registry}: {', '.join(names) if names else 'none'}")
         (self.dir / "plan.md").write_text(
             PLAN_TEMPLATE.format(
-                base=self.base, agent=self.agent, count=len(ids), ids=", ".join(ids)
+                base=self.base,
+                agent=self.agent,
+                profile=self.profile_name,
+                count=len(ids),
+                ids="; ".join(groups),
             )
         )
-        say(f"campaign: {len(ids)} invariant(s) at {self.base[:10]} with {self.agent}")
+        say(
+            f"campaign: profile {self.profile_name}, {len(ids)} invariant(s), "
+            f"{len(self.targets)} target(s) at {self.base[:10]} with {self.agent}"
+        )
 
-    # Section 7.2.
-
-    def check_cert_mock(self):
-        core = (self.repo / CORE_SIMPLEX).read_text()
-        for template in sorted((self.sl_dir / "runtime").glob("*.rs")):
-            if template.name == "statelens.rs":
-                continue
-            names = re.findall(r"\bfuzz(?:_audit)?::<\s*(\w+)", template.read_text())
-            if not names:
-                raise Abort(2, f"{template.name}: no fuzz::<P, ...> call to check (D15)")
-            for name in names:
-                match = re.search(r"impl Simplex for " + re.escape(name) + r" \{", core)
-                block = ""
-                if match:
-                    rest = core[match.end() :]
-                    following = re.search(r"\nimpl ", rest)
-                    block = rest[: following.start()] if following else rest
-                if "type Scheme = cert_mock::Scheme<" not in block:
-                    raise Abort(
-                        2,
-                        f"{template.name}: {name} does not use the cert_mock certificate "
-                        "scheme; StateLens fuzz targets may only use cert_mock (D15)",
-                    )
+    # Section 7.2 and section 8.3, edits M1 to M3.
 
     def materialize(self):
-        self.check_cert_mock()
-        # Check every anchor before the first edit, so a moved anchor leaves the tree untouched.
-        files = {}
-        edits = collections.defaultdict(list)
-        for relative, anchor, position, text in ANCHORS:
-            if relative not in files:
-                files[relative] = (self.repo / relative).read_text().split("\n")
-            found = [index for index, line in enumerate(files[relative]) if line == anchor]
-            if len(found) != 1:
-                raise Abort(
-                    2,
-                    f"materialize: expected one line {anchor.strip()!r} in {relative}, "
-                    f"found {len(found)}; update ANCHORS in scripts/statelens.py",
-                )
-            at = found[0] + 1 if position == "after" else found[0]
-            edits[relative].append((at, text))
-        shutil.copyfile(self.sl_dir / "runtime" / "statelens.rs", self.repo / STATELENS_RS)
-        for relative, lines in files.items():
-            # Insert from the bottom up so earlier insertions do not shift later anchors.
-            for at, text in sorted(edits[relative], key=lambda edit: edit[0], reverse=True):
-                lines[at:at] = text.split("\n")
-            (self.repo / relative).write_text("\n".join(lines))
-        shutil.copyfile(self.sl_dir / "runtime" / "target.rs", self.repo / TARGET_RS)
-        with open(self.repo / FUZZ_MANIFEST, "a") as manifest:
-            manifest.write(BIN_BLOCK)
-        git(self.repo, "add", "--intent-to-add", STATELENS_RS, TARGET_RS)
+        edits = materialize_edits(self.repo, self.sl_dir, self.profile_name)
+        for relative, text in list(edits.create.items()) + list(edits.modify.items()):
+            (self.repo / relative).write_text(text)
+        git(self.repo, "add", "--intent-to-add", "--", *edits.create)
         self.baseline = self.snapshot()
-        say(
-            "materialize: runtime module, fuzz target, Twins runner hook and fresh-run hook "
-            "are in place"
-        )
+        if self.profile["target"]:
+            say(
+                "materialize: runtime module, fuzz target, Twins runner hook and fresh-run "
+                "hook are in place"
+            )
+        else:
+            say(
+                f"materialize: runtime module, {len(edits.targets)} StateLens variants, Twins "
+                "runner hook, wedge-scenario hook and fresh-run hook are in place"
+            )
 
     def snapshot(self):
         """Hashes every path that `git status` reports (SPEC section 7.2)."""
@@ -817,30 +1254,49 @@ class Campaign:
                 2, f"{name}: the agent exited with code {code}; see {log.relative_to(self.repo)}"
             )
 
-    def instrument(self):
-        if not self.invariants:
-            say("warning: no invariants to bind; adding beacon probes only")
-        for number, start in enumerate(range(0, len(self.invariants), BATCH_SIZE), 1):
-            batch = self.invariants[start : start + BATCH_SIZE]
-            body = "\n\n".join(
-                f"===== {path.relative_to(self.repo)} =====\n{path.read_text().rstrip()}"
-                for path in batch
-            )
-            values = dict(
-                self.common_values(),
-                INVARIANT_IDS=", ".join(path.stem for path in batch),
-                INVARIANTS=body,
-            )
-            prompt = compose(self.sl_dir, "instrument.md", "instrument-invariants.md", values)
-            self.agent_step(f"invariants-{number}", prompt)
-        for actor in ACTORS:
+    def invariant_prompts(self):
+        """(step name, prompt) of every invariant batch, registry by registry (SPEC 7.3)."""
+        prompts = []
+        for registry in self.profile["registries"]:
+            paths = [path for owner, path in self.invariants if owner == registry]
+            for number, start in enumerate(range(0, len(paths), BATCH_SIZE), 1):
+                batch = paths[start : start + BATCH_SIZE]
+                body = "\n\n".join(
+                    f"===== {path.relative_to(self.repo)} =====\n{path.read_text().rstrip()}"
+                    for path in batch
+                )
+                values = dict(
+                    self.common_values(),
+                    INVARIANT_IDS=", ".join(path.stem for path in batch),
+                    INVARIANTS=body,
+                    REGISTRY=registry,
+                    SUBSYSTEM_RULES=subsystem_prompt(self.sl_dir, registry, "instrument"),
+                )
+                prompt = compose(self.sl_dir, "instrument.md", "instrument-invariants.md", values)
+                prompts.append((f"invariants-{registry}-{number}", prompt))
+        return prompts
+
+    def beacon_prompts(self):
+        """(step name, prompt) of every beacon component of the profile (SPEC 7.4)."""
+        prompts = []
+        for actor, actor_dir, subsystem in self.profile["components"]:
             values = dict(
                 self.common_values(),
                 ACTOR=actor,
-                ACTOR_DIR=f"consensus/src/simplex/actors/{actor}",
+                ACTOR_DIR=actor_dir,
+                SUBSYSTEM_RULES=subsystem_prompt(self.sl_dir, subsystem, "instrument"),
             )
             prompt = compose(self.sl_dir, "instrument.md", "instrument-beacons.md", values)
-            self.agent_step(f"beacons-{actor}", prompt)
+            prompts.append((f"beacons-{actor}", prompt))
+        return prompts
+
+    def instrument(self):
+        if not self.invariants:
+            say("warning: no invariants to bind; adding beacon probes only")
+        for name, prompt in self.invariant_prompts():
+            self.agent_step(name, prompt)
+        for name, prompt in self.beacon_prompts():
+            self.agent_step(name, prompt)
         self.complete_plan()
         self.check_scope()
         self.record()
@@ -850,7 +1306,7 @@ class Campaign:
         plan = self.dir / "plan.md"
         text = plan.read_text()
         statuses = self.parse_statuses(text)
-        missing = [path for path in self.invariants if path.stem not in statuses]
+        missing = [path for _, path in self.invariants if path.stem not in statuses]
         if not missing:
             return
         entries = "".join(
@@ -885,7 +1341,7 @@ class Campaign:
         return statuses
 
     def check_scope(self):
-        """Every change since materialize must be under consensus/src/simplex/ (SPEC 7.5)."""
+        """Every change since materialize must be under an editable root (SPEC 7.5)."""
         current = self.snapshot()
         changed = sorted(
             path
@@ -895,9 +1351,9 @@ class Campaign:
         for path in changed:
             if path == "Cargo.lock":
                 continue
-            if not path.startswith(SIMPLEX):
+            if not path.startswith(self.profile["roots"]):
                 raise Abort(2, f"instrumentation edited {path}")
-            if path.startswith(SIMPLEX + "mocks/") or path.startswith(SIMPLEX + "scheme/"):
+            if path.startswith(self.profile["warn"]):
                 say(f"warning: instrumentation edited {path}")
 
     def record(self):
@@ -905,22 +1361,25 @@ class Campaign:
         plan = self.dir / "plan.md"
         text = plan.read_text()
         parsed = self.parse_statuses(text)
-        statuses = {path.stem: parsed.get(path.stem) or "unbound" for path in self.invariants}
+        statuses = {path.stem: parsed.get(path.stem) or "unbound" for _, path in self.invariants}
         self.statuses = statuses
+        roots = list(self.profile["roots"])
         # Files the agents created are untracked: mark them intent-to-add (no content is
         # staged) so the diff and the site counts below include them.
-        created = git(
-            self.repo, "ls-files", "--others", "--exclude-standard", "-z", "--", SIMPLEX
-        ).split("\0")
-        created = [path for path in created if path]
+        created = git(self.repo, "ls-files", "--others", "--exclude-standard", "-z", "--", *roots)
+        created = [path for path in created.split("\0") if path]
         if created:
             git(self.repo, "add", "--intent-to-add", "--", *created)
-        diff = git(self.repo, "diff", "--", "consensus/src/simplex", f":(exclude){STATELENS_RS}")
-        added = [line for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")]
+        diff = git(self.repo, "diff", "--", *roots, f":(exclude){STATELENS_RS}")
+        added = [
+            line
+            for line in diff.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        ]
         assertions = sum(len(re.findall(r"\bsl_(?:assert|implies)!", line)) for line in added)
         probes = sum(len(re.findall(r"\bsl_probe!", line)) for line in added)
         deleted = 0
-        for line in git(self.repo, "diff", "--numstat", "--", "consensus/src/simplex").splitlines():
+        for line in git(self.repo, "diff", "--numstat", "--", *roots).splitlines():
             parts = line.split("\t")
             if len(parts) == 3 and parts[1].isdigit():
                 deleted += int(parts[1])
@@ -938,7 +1397,7 @@ class Campaign:
             f"- Assertion call sites: {assertions}\n"
             f"- Probe call sites: {probes}\n"
             f"- Beacon table rows: {beacon_rows}\n"
-            f"- Deleted lines under consensus/src/simplex: {deleted}"
+            f"- Deleted lines under {', '.join(roots)}: {deleted}"
             + (" (must match the 'Edited lines' entries)" if deleted else "")
             + "\n"
         )
@@ -953,6 +1412,20 @@ class Campaign:
 
     # Section 7.6.
 
+    def repair_prompt(self, attempt, command, tail):
+        rules = "\n\n".join(
+            subsystem_prompt(self.sl_dir, registry, "instrument")
+            for registry in self.profile["registries"]
+        )
+        values = dict(
+            self.common_values(),
+            ATTEMPT=str(attempt),
+            COMMAND=command,
+            ERRORS="\n".join("    " + line for line in tail),
+            SUBSYSTEM_RULES=rules,
+        )
+        return compose(self.sl_dir, "instrument.md", "repair.md", values)
+
     def build(self):
         for attempt in range(REPAIR_ATTEMPTS + 1):
             failure = self.build_once(attempt)
@@ -964,21 +1437,16 @@ class Campaign:
             if attempt == REPAIR_ATTEMPTS:
                 raise Abort(3, f"the build still fails after {REPAIR_ATTEMPTS} repair attempts")
             command, tail = failure
-            values = dict(
-                self.common_values(),
-                ATTEMPT=str(attempt + 1),
-                COMMAND=command,
-                ERRORS="\n".join("    " + line for line in tail),
-            )
-            prompt = compose(self.sl_dir, "instrument.md", "repair.md", values)
-            self.agent_step(f"repair-{attempt + 1}", prompt)
+            self.agent_step(f"repair-{attempt + 1}", self.repair_prompt(attempt + 1, command, tail))
             self.check_scope()
 
     def build_once(self, attempt):
-        for name, command in (
-            ("check", self.check_command()),
-            ("fuzz-build", self.fuzz_build_command()),
-        ):
+        """Runs CHECK, then FUZZBUILD target by target; returns the first failure."""
+        commands = [("check", self.check_command())]
+        for target, command in self.fuzz_build_commands():
+            name = "fuzz-build" if len(self.targets) == 1 else f"fuzz-build-{target}"
+            commands.append((name, command))
+        for name, command in commands:
             log = self.dir / "logs" / f"{name}-{attempt}.log"
             say(f"build: {shlex.join(command)}")
             code, tail = run_logged(command, log, self.repo)
@@ -990,7 +1458,10 @@ class Campaign:
 
     def test_gate(self):
         log = self.dir / "logs" / "test.log"
-        say("test: engine-level Simplex tests and StateLens self-tests")
+        say(
+            f"test: engine-level tests of {', '.join(self.profile['registries'])} and the "
+            "StateLens self-tests"
+        )
         code, _ = run_logged(self.test_command(), log, self.repo)
         if code == 0:
             say("test: the test gate passed")
@@ -999,72 +1470,10 @@ class Campaign:
         for line in lines:
             if re.match(r"^\s+FAIL \[", line):
                 say(line.strip())
+            elif "[statelens][" in line:
+                say(line.strip())
         self.panic = first_panic(lines)
         raise Abort(4, f"the test gate failed; see {log.relative_to(self.repo)}")
-
-    # Section 7.8.
-
-    def artifact_times(self):
-        """Modification time of every file in ARTIFACTS, so rewritten files count."""
-        artifacts = self.repo / ARTIFACTS
-        if not artifacts.is_dir():
-            return {}
-        return {path.name: path.stat().st_mtime_ns for path in artifacts.iterdir()}
-
-    def fuzz(self):
-        before = self.artifact_times()
-        log = self.dir / "logs" / "fuzz.log"
-        command = [
-            "just",
-            "run",
-            TARGET,
-            "--",
-            "-rss_limit_mb=4000",
-            "-print_final_stats=1",
-        ] + self.libfuzzer_args
-        env = dict(os.environ, NIGHTLY_VERSION=self.fuzz_toolchain)
-        say("fuzz: running until a panic or Ctrl-C")
-        previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        try:
-            code, _ = run_logged(
-                command, log, self.repo / "consensus/fuzz", env=env, own_sigint=True
-            )
-        except OSError as error:
-            self.reason = f"could not start `{shlex.join(command)}`: {error}"
-            return self.finish(6, "FUZZER FAILED")
-        finally:
-            signal.signal(signal.SIGINT, previous)
-        lines = log.read_text(errors="replace").splitlines()
-        start = next((i for i, line in enumerate(lines) if FUZZ_STARTED.search(line)), None)
-        target = lines[start:] if start is not None else []
-
-        # A crash is any new or rewritten artifact, or crash output from the running
-        # target; the exit code alone cannot tell a crash from a failed build or launch.
-        after = self.artifact_times()
-        changed = sorted(name for name, stamp in after.items() if before.get(name) != stamp)
-        written = [match.group(1) for line in target if (match := FUZZ_ARTIFACT.search(line))]
-        if changed or written or any(FUZZ_CRASH.search(line) for line in target):
-            if written:
-                path = Path(written[0])
-                path = path if path.is_absolute() else self.repo / "consensus/fuzz" / path
-                self.artifact = os.path.relpath(path.resolve(), self.repo.resolve())
-            elif changed:
-                self.artifact = f"{ARTIFACTS}/{changed[0]}"
-            self.panic = first_panic(target) or next(
-                (line.strip() for line in target if "ERROR: libFuzzer:" in line), None
-            )
-            return self.finish(5, "PANIC (fuzz)")
-        if code == 0:
-            return self.finish(0, "NO PANIC")
-        interrupted_codes = (-signal.SIGINT, 128 + signal.SIGINT)
-        if code in interrupted_codes or any(FUZZ_INTERRUPTED.search(line) for line in target):
-            self.reason = "stopped by the operator"
-            return self.finish(0, "NO PANIC")
-        self.reason = (
-            f"the fuzz command exited with code {code} and no crash; "
-            f"see {log.relative_to(self.repo)}"
-        )
-        return self.finish(6, "FUZZER FAILED")
 
 
 def first_panic(lines):
@@ -1080,39 +1489,67 @@ def first_panic(lines):
 
 
 def main(argv):
-    libfuzzer_args = []
-    if "--" in argv:
-        split = argv.index("--")
-        argv, libfuzzer_args = argv[:split], argv[split + 1 :]
-
-    parser = Parser(prog="statelens.py", description="StateLens for Simplex (see SPEC.md)")
+    parser = Parser(
+        prog="statelens.py",
+        description=(
+            "StateLens for Simplex and marshal: check the invariant registries, extract "
+            "invariants with an agent, and run instrumentation campaigns "
+            "(see consensus/fuzz/statelens/docs/SPEC.md)."
+        ),
+    )
     commands = parser.add_subparsers(dest="command", required=True)
-    lint = commands.add_parser("lint", help="check invariant files")
-    lint.add_argument("paths", nargs="*")
-    extract = commands.add_parser("extract", help="turn sources into invariants (Phase 1)")
-    extract.add_argument("--agent", choices=("claude", "codex"))
-    extract.add_argument("kind", choices=KINDS)
-    extract.add_argument("sources", nargs="+")
-    campaign = commands.add_parser("campaign", help="instrument this checkout, test and fuzz")
-    campaign.add_argument("--agent", choices=("claude", "codex"))
-    campaign.add_argument("--stop-after", choices=STEPS)
+    lint = commands.add_parser(
+        "lint",
+        help="check invariant files",
+        description=(
+            "Check invariant files (SPEC section 4.6). Without PATH, checks every file in "
+            "invariants/ and false-invariants/. Exit code 0 when clean, 3 on problems."
+        ),
+    )
+    lint.add_argument("paths", nargs="*", metavar="PATH", help="an invariant file")
+    extract = commands.add_parser(
+        "extract",
+        help="turn sources into invariants of a registry (Phase 1)",
+        description=(
+            "Run the agent on sources of one kind and write new invariants to "
+            "invariants/<registry>/ (SPEC section 6)."
+        ),
+    )
+    extract.add_argument("--agent", choices=AGENTS, help="agent CLI (default: STATELENS_AGENT)")
+    extract.add_argument(
+        "--registry",
+        choices=SUBSYSTEMS,
+        default="simplex",
+        help="registry of the new invariants (default: simplex)",
+    )
+    extract.add_argument("kind", choices=KINDS, help="source kind")
+    extract.add_argument("sources", nargs="+", metavar="SOURCE", help="a source (SPEC section 6.1)")
+    campaign = commands.add_parser(
+        "campaign",
+        help="instrument this checkout, build the StateLens targets, run the test gate (Phase 2)",
+        description=(
+            "Instrument this checkout in place for the profile's registries, build its "
+            "StateLens fuzz targets and run the test gate (SPEC sections 7 and 8). A READY "
+            "campaign prints the command that runs each target and the command that "
+            "replays a crash."
+        ),
+    )
+    campaign.add_argument("--agent", choices=AGENTS, help="agent CLI (default: STATELENS_AGENT)")
+    campaign.add_argument(
+        "--profile",
+        choices=tuple(PROFILES),
+        default="simplex",
+        help="what the campaign binds, instruments, builds and tests (default: simplex)",
+    )
+    campaign.add_argument("--stop-after", choices=STOP_STEPS, help="stop after this step")
     args = parser.parse_args(argv)
 
-    if libfuzzer_args and args.command != "campaign":
-        parser.error("arguments after -- are only accepted by campaign")
-    for argument in libfuzzer_args:
-        if REJECTED_FLAG.match(argument):
-            parser.error(
-                f"{argument.split('=', 1)[0]} is not allowed: the campaign relies on "
-                f"libFuzzer's default crash handling and reads crash artifacts from "
-                f"{ARTIFACTS}/"
-            )
     try:
         if args.command == "lint":
             return cmd_lint(args)
         if args.command == "extract":
             return cmd_extract(args)
-        return Campaign(args, libfuzzer_args).run()
+        return Campaign(args).run()
     except Abort as error:
         say(f"error: {error}")
         return error.code

@@ -1,14 +1,15 @@
-## Task: bind invariants {{INVARIANT_IDS}}
+## Task: bind invariants {{INVARIANT_IDS}} of the {{REGISTRY}} registry
 
-For each invariant below:
+Bind each invariant only in the code that the subsystem rules allow. For each invariant
+below:
 
 1. Read the Statement (EARS). Identify the trigger or state (`pre`) and the required
    response (`post`), or the single condition of a ubiquitous statement. Treat
    "Preconditions / assumptions" as part of `pre`. Treat "Observation hints" as leads,
    not as facts.
 2. Find where the implementation establishes and uses the concepts. Trace with search,
-   references and call hierarchy across the voter, batcher and resolver, including the
-   mailbox messages between them and the journal replay path on restart.
+   references and call hierarchy across the components the subsystem rules name,
+   including the mailbox messages between them and the recovery path on restart.
 3. Choose assertion sites where a violation first becomes observable: just before the
    replica acts (signs, broadcasts, persists, accepts a certificate, enters a view) or
    just after it changes the relevant state. Cover every code path that performs the

@@ -23,5 +23,6 @@
   its finalized tip"). Do not write open-ended "eventually" properties.
 - In Evidence, describe the violating scenario in two to five sentences and cite the
   issue, the pull request and the fixing commit.
-- Write nothing for issues that are not about Simplex behavior (documentation, CI,
-  build, performance tuning, other crates).
+- Write nothing for issues that are not about the behavior in scope for this registry
+  (see Context), or that are about documentation, CI, builds, performance tuning or
+  other crates.

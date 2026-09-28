@@ -1,6 +1,6 @@
 # StateLens instrumenter
 
-You are instrumenting the Simplex consensus implementation for a StateLens fuzzing
+You are instrumenting consensus code in this repository for a StateLens fuzzing
 campaign. Your changes turn English invariants into runtime assertions, and add state
 probes that tell the fuzzer when an execution reached a new internal state.
 
@@ -10,7 +10,7 @@ probes that tell the fuzzer when an execution reached a new internal state.
   fuzzing campaign. Nobody will review, merge or reuse your changes. The repository conventions in AGENTS.md and CLAUDE.md about public API
   stability, documentation, benchmarks, dependencies, commits and pull requests do not
   apply here. The rules in this prompt take precedence.
-- Do not commit. Do not run the tests or the fuzzer; the campaign runs them after you.
+- Do not commit. Do not run the tests or the fuzzer; the campaign runs the tests after you.
   Do run the check command at the end of this prompt until it passes.
 - Read `consensus/src/simplex/statelens.rs` first. It is the runtime support module.
 - A fuzzer will run honest replicas next to Byzantine ones. Any panic you cause is
@@ -19,14 +19,18 @@ probes that tell the fuzzer when an execution reached a new internal state.
 
 ## Scope
 
-- You may edit non-test code in `consensus/src/simplex/`, except `mocks/` and
-  `scheme/`. Non-test code is code outside `#[cfg(test)]` items and `tests` modules.
+- You may edit the non-test code that the subsystem rules below allow. Non-test code is
+  code outside `#[cfg(test)]` items and `tests` modules.
   You may add initializers for new fields to struct literals anywhere, including tests,
   when the compiler requires them.
 - In `statelens.rs` you may only add fields to `Ghost` and `Global`, and private helper
   functions.
 - Do not edit anything else: no `Cargo.toml`, nothing under `consensus/fuzz/`, no
   other crate.
+
+## Subsystem rules
+
+{{SUBSYSTEM_RULES}}
 
 ## Rules
 
@@ -40,11 +44,11 @@ probes that tell the fuzzer when an execution reached a new internal state.
    fields and their updates, `beacon:<label>` for beacon probes, and `me` for code added
    only to make the replica index available.
 3. Observe only honest replicas. The macros, `with_ghost` and `with_global` apply the
-   Byzantine guard themselves. Always pass the replica's own index as `me`:
-   `self.scheme.me()` wherever a scheme is in scope (the voter, batcher and resolver
-   all hold one). Where it is not, add a `// [statelens] me` field of type
-   `Option<crate::simplex::statelens::Participant>`, set where the struct is created.
-   Never hard-code or guess an index.
+   Byzantine guard themselves. Always pass the replica's own index as `me`, obtained as
+   the subsystem rules say. Never hard-code or guess an index, and never pass `None` for
+   an index you could not obtain: `None` means the replica is not a participant and
+   turns the guard off. Leave such a site without instrumentation and say so in the
+   plan.
 4. No side effects on the protocol. Instrumentation must not `await`, spawn tasks, take
    locks, or use the runtime context, RNG, clock, network, storage, metrics or logging.
    It must not send or reorder messages, and must not move or consume values the
@@ -60,9 +64,9 @@ probes that tell the fuzzer when an execution reached a new internal state.
 8. Byzantine peers are adversarial: a message an honest replica receives can contain
    anything. Assert what the honest replica itself does, keeps or accepts, not what
    peers send, unless the invariant is about how the replica handles bad input.
-9. Actors run concurrently and exchange messages through mailboxes. A check that
-   compares the voter, batcher and resolver of one replica must hold for every delivery
-   delay the implementation allows, not only when the actors are in step.
+9. Actors and components run concurrently and exchange messages through mailboxes. A
+   check that compares components of one replica must hold for every delivery delay the
+   implementation allows, not only when they are in step.
 
 ## Runtime API (`crate::simplex::statelens`)
 
@@ -80,7 +84,7 @@ probes that tell the fuzzer when an execution reached a new internal state.
   `pack(high: u32, low: u32) -> u32` (two values below 2^16), `disc(&value) -> u32`
   (enum variant code, payload ignored). Views convert with `view.get()`.
 - Ghost state: `with_ghost(me, |g: &mut Ghost| ...)` gives one `Ghost` per replica,
-  shared by its voter, batcher and resolver. `with_global(me, |g: &mut Global| ...)`
+  shared by all its actors and components. `with_global(me, |g: &mut Global| ...)`
   gives one `Global` shared by all honest replicas, for `protocol` invariants. Both
   return `None` without running the closure for a skipped replica. Never nest them. Add
   the fields you need to `Ghost` or `Global`, with `Default` types. Ghost state lives
