@@ -2282,64 +2282,6 @@ mod compact_variable_mmr {
             reopened.destroy().await.unwrap();
         });
     }
-
-    /// Compact sync replaces a destination holding witnesses in the format that stored the
-    /// commit as length-prefixed bytes, which the current format cannot decode.
-    #[test_traced("WARN")]
-    fn test_compact_sync_replaces_legacy_witnesses() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-keyless-legacy-{}", context.next_u64());
-            let client_cfg = client_config(&suffix, &context);
-
-            // A legacy witness is (encoded commit, size, pinned nodes).
-            type LegacyWitness = (bytes::Bytes, Location<mmr::Family>, Vec<sha256::Digest>);
-            let witness_cfg = &client_cfg.witness;
-            let legacy_cfg = crate::journal::contiguous::variable::Config {
-                partition: witness_cfg.partition.clone(),
-                items_per_section: witness_cfg.items_per_section,
-                compression: witness_cfg.compression,
-                codec_config: ((..).into(), (), ((..=64).into(), ())),
-                page_cache: witness_cfg.page_cache.clone(),
-                write_buffer: witness_cfg.write_buffer,
-                replay_buffer: witness_cfg.replay_buffer,
-            };
-            let legacy = crate::journal::contiguous::variable::Journal::<_, LegacyWitness>::init(
-                context.child("legacy"),
-                legacy_cfg,
-            )
-            .await
-            .unwrap();
-            let genesis =
-                variable::Operation::<mmr::Family, Vec<u8>>::Commit(None, Location::new(0));
-            let (legacy, _) = legacy
-                .append(&(genesis.encode(), Location::new(1), Vec::new()))
-                .await
-                .unwrap();
-            drop(legacy.sync().await.unwrap());
-            assert!(matches!(
-                ClientDb::init(context.child("reject"), client_cfg.clone(), None).await,
-                Err(qmdb::Error::Journal(_))
-            ));
-
-            let (source, target) = committed_source(context.child("source"), &suffix).await;
-            let synced: ClientDb = sync::sync(compact_engine_config(
-                context.child("client"),
-                Arc::new(source),
-                target.clone(),
-                client_cfg.clone(),
-            ))
-            .await
-            .unwrap();
-            assert_eq!(synced.target(), target);
-            drop(synced);
-
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg, None)
-                .await
-                .unwrap();
-            assert_eq!(reopened.target(), target);
-            reopened.destroy().await.unwrap();
-        });
-    }
 }
 
 mod compact_variable_mmb {

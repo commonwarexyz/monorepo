@@ -39,15 +39,14 @@ enum TipState {
 }
 
 /// An open witness journal whose last entry is the tip.
-struct OpenJournal<E, F, D, O>
+struct OpenJournal<E, F, D>
 where
     E: Context,
     F: Family,
     D: Digest,
-    O: Operation<F>,
 {
     /// The journal of witnesses, one per applied state.
-    journal: witness::Journal<E, F, D, O>,
+    journal: witness::Journal<E, F, D>,
 
     /// Whether a durability operation covers the tip.
     tip_state: TipState,
@@ -56,16 +55,18 @@ where
     pending_sync: Option<SyncCompletion>,
 }
 
-impl<E, F, D, O> OpenJournal<E, F, D, O>
+impl<E, F, D> OpenJournal<E, F, D>
 where
     E: Context,
     F: Family,
     D: Digest,
-    O: Operation<F>,
 {
     /// Append `witness` as the new tip, leaving it outside the durable prefix.
-    async fn append(mut self, witness: &Witness<F, D, O>) -> Result<Self, Error<F>> {
-        (self.journal, _) = self.journal.append(witness).await?;
+    async fn append<O: Operation<F>>(
+        mut self,
+        witness: &Witness<F, D, O>,
+    ) -> Result<Self, Error<F>> {
+        (self.journal, _) = self.journal.append(&witness.stored()).await?;
         self.tip_state = TipState::Uncommitted;
         Ok(self)
     }
@@ -109,35 +110,33 @@ where
 }
 
 /// The partition a pending compact-sync import will replace.
-struct Destination<E, C> {
+struct Destination<E> {
     context: E,
-    cfg: variable::Config<C>,
+    cfg: variable::Config<()>,
 }
 
 /// Where a compact db's witnesses live.
-enum Storage<E, F, D, O>
+enum Storage<E, F, D>
 where
     E: Context,
     F: Family,
     D: Digest,
-    O: Operation<F>,
 {
     /// The open witness journal.
-    Open(OpenJournal<E, F, D, O>),
+    Open(OpenJournal<E, F, D>),
 
     /// A compact-sync import not yet journaled. The partition keeps its previous contents,
     /// unopened, until the first apply or durability operation replaces them with the tip.
     ///
     /// Boxed so the variant does not enlarge every db, and every future that moves one.
-    Replacing(Box<Destination<E, O::Cfg>>),
+    Replacing(Box<Destination<E>>),
 }
 
-impl<E, F, D, O> Storage<E, F, D, O>
+impl<E, F, D> Storage<E, F, D>
 where
     E: Context,
     F: Family,
     D: Digest,
-    O: Operation<F>,
 {
     /// Return the open journal, first replacing the partition's contents with `tip` if a
     /// compact-sync import is pending.
@@ -145,7 +144,10 @@ where
     /// The replacement never decodes the previous contents. It resets the journal to position 1,
     /// so a crash before `tip` is durable reopens as an interrupted import rather than a fresh
     /// db.
-    async fn open(self, tip: &Witness<F, D, O>) -> Result<OpenJournal<E, F, D, O>, Error<F>> {
+    async fn open<O: Operation<F>>(
+        self,
+        tip: &Witness<F, D, O>,
+    ) -> Result<OpenJournal<E, F, D>, Error<F>> {
         match self {
             Self::Open(open) => Ok(open),
             Self::Replacing(destination) => {
@@ -175,7 +177,7 @@ where
     merkle: compact_merkle::Merkle<F, H::Digest, S>,
 
     /// Where the witnesses live.
-    storage: Storage<E, F, H::Digest, O>,
+    storage: Storage<E, F, H::Digest>,
 
     /// The verified tip witness.
     tip: VerifiedWitness<F, H::Digest, O>,
@@ -213,9 +215,10 @@ where
         max_size: Option<Location<F>>,
     ) -> Result<Self, Error<F>> {
         qmdb::validate_initialization_bound(max_size)?;
+        let (journal_cfg, codec_cfg) = witness::split_config(cfg.witness);
         // Keep recovery unpublished until the target witness has been selected and verified.
         let pending =
-            witness::recover::<E, F, H::Digest, O>(context.child("witness"), cfg.witness, max_size)
+            witness::recover::<E, F, H::Digest>(context.child("witness"), journal_cfg, max_size)
                 .await?;
         let bounds = pending.bounds();
         let fresh = bounds.is_empty();
@@ -223,14 +226,12 @@ where
             if bounds.start != 0 {
                 return Err(Error::DataCorrupted("witness journal has no tip"));
             }
-            (
-                Witness {
-                    commit: O::commit(None, Location::new(0)),
-                    size: Location::new(1),
-                    pinned_nodes: Vec::new(),
-                },
-                0,
-            )
+            let genesis = Witness {
+                commit: O::commit(None, Location::new(0)),
+                size: Location::new(1),
+                pinned_nodes: Vec::new(),
+            };
+            (genesis.stored(), 0)
         } else {
             // Journal positions count witnesses; the cap counts database operations.
             let mut end = bounds.end;
@@ -250,11 +251,13 @@ where
             }
             (pending.read(end - 1).await?, end)
         };
-        // Validate the selected witness before discarding newer history or publishing a writer.
-        let Rebuilt { merkle, tip } = witness::rebuild::<F, O, H, S>(cfg.strategy, entry)?;
+        // Decode and validate only the selected witness, before discarding newer history or
+        // publishing a writer.
+        let Rebuilt { merkle, tip } =
+            witness::rebuild::<F, O, H, S>(cfg.strategy, entry, &codec_cfg)?;
         let mut journal = pending.finish(end).await?;
         if fresh {
-            (journal, _) = journal.append(&tip.witness).await?;
+            (journal, _) = journal.append(&tip.witness.stored()).await?;
             journal = journal.sync().await?;
         }
         Ok(Self {
@@ -290,6 +293,7 @@ where
             pinned_nodes,
         };
         let Rebuilt { merkle, tip } = witness::restore::<F, O, H, S>(strategy, imported)?;
+        let (cfg, _) = witness::split_config(cfg);
         Ok(Self {
             merkle,
             storage: Storage::Replacing(Box::new(Destination { context, cfg })),
@@ -963,8 +967,8 @@ pub(crate) mod tests {
     async fn open_witness_journal<O: TestOperation>(
         context: deterministic::Context,
         partition: &str,
-    ) -> witness::Journal<deterministic::Context, O::Family, Digest, O> {
-        let cfg = witness_config::<O>(partition, &context);
+    ) -> witness::Journal<deterministic::Context, O::Family, Digest> {
+        let (cfg, _) = witness::split_config(witness_config::<O>(partition, &context));
         witness::Journal::init(context, cfg).await.unwrap()
     }
 
@@ -2374,9 +2378,9 @@ pub(crate) mod tests {
 
             // Corrupt the entry structurally. An extra pinned node cannot rebuild the Merkle.
             let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
-            let (commit, size, mut pinned_nodes) = witness::tests::tip(&journal).await;
-            pinned_nodes.push(Sha256::fill(0xff));
-            witness::tests::overwrite_tip(journal, commit, size, pinned_nodes).await;
+            let mut entry = witness::tests::tip(&journal).await;
+            entry.pinned_nodes.push(Sha256::fill(0xff));
+            witness::tests::overwrite_tip(journal, entry).await;
 
             let cfg = Config {
                 strategy: Sequential,
@@ -2475,9 +2479,9 @@ pub(crate) mod tests {
 
             // Overwrite the persisted commit op with a floor beyond its own commit location.
             let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
-            let (_, size, pinned_nodes) = witness::tests::tip(&journal).await;
-            let bad_op = O::commit(Some(O::value(11)), oversized_floor);
-            witness::tests::overwrite_tip(journal, bad_op, size, pinned_nodes).await;
+            let mut entry = witness::tests::tip(&journal).await;
+            entry.commit = O::commit(Some(O::value(11)), oversized_floor).encode();
+            witness::tests::overwrite_tip(journal, entry).await;
 
             let cfg = Config {
                 strategy: Sequential,
@@ -2506,8 +2510,9 @@ pub(crate) mod tests {
 
             // Overwrite the persisted commit op with a mutation.
             let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
-            let (_, size, pinned_nodes) = witness::tests::tip(&journal).await;
-            witness::tests::overwrite_tip(journal, O::op(7), size, pinned_nodes).await;
+            let mut entry = witness::tests::tip(&journal).await;
+            entry.commit = O::op(7).encode();
+            witness::tests::overwrite_tip(journal, entry).await;
 
             let cfg = Config {
                 strategy: Sequential,
@@ -2540,9 +2545,9 @@ pub(crate) mod tests {
             // rebuild succeeds and yields a different root, the same way a bit-flipped replay
             // journal reopens with a different root.
             let journal = open_witness_journal::<O>(context.child("tamper"), partition).await;
-            let (commit, size, mut pinned_nodes) = witness::tests::tip(&journal).await;
-            pinned_nodes[0] = Sha256::fill(0xff);
-            witness::tests::overwrite_tip(journal, commit, size, pinned_nodes).await;
+            let mut entry = witness::tests::tip(&journal).await;
+            entry.pinned_nodes[0] = Sha256::fill(0xff);
+            witness::tests::overwrite_tip(journal, entry).await;
 
             let cfg = Config {
                 strategy: Sequential,
@@ -2957,9 +2962,9 @@ pub(crate) mod tests {
 
             // Committing replaces the destination with the imported witness at position 1.
             drop(imported.commit().await.unwrap());
-            let journal = witness::Journal::<_, O::Family, Digest, O>::init(
+            let journal = witness::Journal::<_, O::Family, Digest>::init(
                 context.child("placed"),
-                dst_cfg.clone(),
+                witness::split_config(dst_cfg.clone()).0,
             )
             .await
             .unwrap();
@@ -3196,9 +3201,9 @@ pub(crate) mod tests {
             // Simulate the crash window: append an entry ahead of the tip without syncing it,
             // then drop the journal. The unsynced tail must not survive reopen.
             let journal = open_witness_journal::<O>(context.child("crash"), partition).await;
-            let (commit, mut size, pinned_nodes) = witness::tests::tip(&journal).await;
-            size += 2;
-            witness::tests::append_unsynced(journal, commit, size, pinned_nodes).await;
+            let mut entry = witness::tests::tip(&journal).await;
+            entry.size += 2;
+            witness::tests::append_unsynced(journal, entry).await;
 
             // Reopen must drop the unsynced entry and recover state A.
             let reopened = open_db::<O>(context.child("reopen"), partition).await;

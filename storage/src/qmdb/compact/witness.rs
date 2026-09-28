@@ -1,43 +1,84 @@
 //! The persisted witness of a compact-db state and its verification.
 //!
 //! A [`Witness`] records one applied state: the commit operation, the committed size, and the
-//! pinned nodes one operation below it. The commit's inclusion proof is not stored. [`restore`]
-//! rebuilds the Merkle by appending the commit operation to the pinned nodes and derives the root
-//! and proof from it. [`rebuild`] maps invalid persisted entries to [`Error::DataCorrupted`].
+//! pinned nodes one operation below it. The journal stores it as a [`StoredWitness`], whose commit
+//! stays encoded, so selecting a witness by size never decodes a commit. The commit's inclusion
+//! proof is not stored. [`restore`] rebuilds the Merkle by appending the commit operation to the
+//! pinned nodes and derives the root and proof from it. [`rebuild`] decodes a journaled witness's
+//! commit and maps an entry that cannot be restored to [`Error::DataCorrupted`].
 
 use super::operation::Operation;
 use crate::{
     Context,
     journal::{
+        self,
         authenticated::{Backing as _, BackingRecovery as _},
         contiguous::variable,
     },
     merkle::{Family, Location, MAX_PINNED_NODES, Proof, compact},
     qmdb::{self, Error, sync::CompactTarget},
 };
+use bytes::Bytes;
 use commonware_codec::{Buf, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 
-/// An applied state persisted by the witness journal.
+/// An applied state: the last commit operation, the committed size, and the pinned nodes.
 #[derive(Clone)]
 pub(crate) struct Witness<F: Family, D: Digest, O: Operation<F>> {
     /// The last commit operation, at `size - 1`.
     pub(crate) commit: O,
     /// The committed database size.
     pub(crate) size: Location<F>,
-    /// Pinned nodes at the commit operation, in the order returned by
+    /// Pinned nodes one operation below the commit, in the order returned by
     /// [`Family::nodes_to_pin`].
     pub(crate) pinned_nodes: Vec<D>,
 }
 
-impl<F: Family, D: Digest, O: Operation<F>> EncodeSize for Witness<F, D, O> {
+impl<F: Family, D: Digest, O: Operation<F>> Witness<F, D, O> {
+    /// The journal form of this witness.
+    pub(crate) fn stored(&self) -> StoredWitness<F, D> {
+        StoredWitness {
+            commit: self.commit.encode(),
+            size: self.size,
+            pinned_nodes: self.pinned_nodes.clone(),
+        }
+    }
+}
+
+/// A [`Witness`] as the witness journal stores it, with its commit still encoded.
+#[derive(Clone)]
+pub(crate) struct StoredWitness<F: Family, D: Digest> {
+    /// The encoded last commit operation, at `size - 1`.
+    pub(crate) commit: Bytes,
+    /// The committed database size.
+    pub(crate) size: Location<F>,
+    /// Pinned nodes one operation below the commit, in the order returned by
+    /// [`Family::nodes_to_pin`].
+    pub(crate) pinned_nodes: Vec<D>,
+}
+
+impl<F: Family, D: Digest> StoredWitness<F, D> {
+    /// Decode the commit with `cfg`.
+    pub(crate) fn decode<O: Operation<F>>(
+        self,
+        cfg: &O::Cfg,
+    ) -> Result<Witness<F, D, O>, commonware_codec::Error> {
+        Ok(Witness {
+            commit: O::decode_cfg(self.commit, cfg)?,
+            size: self.size,
+            pinned_nodes: self.pinned_nodes,
+        })
+    }
+}
+
+impl<F: Family, D: Digest> EncodeSize for StoredWitness<F, D> {
     fn encode_size(&self) -> usize {
         self.commit.encode_size() + self.size.encode_size() + self.pinned_nodes.encode_size()
     }
 }
 
-impl<F: Family, D: Digest, O: Operation<F>> Write for Witness<F, D, O> {
+impl<F: Family, D: Digest> Write for StoredWitness<F, D> {
     fn write(&self, buf: &mut impl bytes::BufMut) {
         self.commit.write(buf);
         self.size.write(buf);
@@ -45,11 +86,11 @@ impl<F: Family, D: Digest, O: Operation<F>> Write for Witness<F, D, O> {
     }
 }
 
-impl<F: Family, D: Digest, O: Operation<F>> Read for Witness<F, D, O> {
-    type Cfg = O::Cfg;
+impl<F: Family, D: Digest> Read for StoredWitness<F, D> {
+    type Cfg = ();
 
-    fn read_cfg(buf: &mut impl Buf, cfg: &O::Cfg) -> Result<Self, commonware_codec::Error> {
-        let commit = O::read_cfg(buf, cfg)?;
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let commit = Bytes::read_cfg(buf, &(..).into())?;
         let size = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
         Ok(Self {
@@ -61,14 +102,13 @@ impl<F: Family, D: Digest, O: Operation<F>> Read for Witness<F, D, O> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<F: Family, D: Digest, O> arbitrary::Arbitrary<'_> for Witness<F, D, O>
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for StoredWitness<F, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
-    O: Operation<F> + for<'a> arbitrary::Arbitrary<'a>,
 {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         Ok(Self {
-            commit: u.arbitrary()?,
+            commit: u.arbitrary::<Vec<u8>>()?.into(),
             size: Location::new(u.int_in_range(1..=*F::MAX_LEAVES)?),
             pinned_nodes: u.arbitrary()?,
         })
@@ -109,7 +149,31 @@ impl<F: Family, D: Digest, O: Operation<F>> VerifiedWitness<F, D, O> {
 }
 
 /// The contiguous variable journal of a compact db's witnesses.
-pub(crate) type Journal<E, F, D, O> = variable::Journal<E, Witness<F, D, O>>;
+pub(crate) type Journal<E, F, D> = variable::Journal<E, StoredWitness<F, D>>;
+
+/// Split a witness journal config into the journal's own config and the codec config that
+/// decodes its commits.
+pub(super) fn split_config<C>(cfg: variable::Config<C>) -> (variable::Config<()>, C) {
+    let variable::Config {
+        partition,
+        items_per_section,
+        compression,
+        codec_config,
+        page_cache,
+        write_buffer,
+        replay_buffer,
+    } = cfg;
+    let journal = variable::Config {
+        partition,
+        items_per_section,
+        compression,
+        codec_config: (),
+        page_cache,
+        write_buffer,
+        replay_buffer,
+    };
+    (journal, codec_config)
+}
 
 /// Recover the witness journal bounded at `max_size` when that view can settle selection, and
 /// unbounded otherwise.
@@ -119,28 +183,27 @@ pub(crate) type Journal<E, F, D, O> = variable::Journal<E, Witness<F, D, O>>;
 /// position 1, so an imported state of size 1 leaves position `p` with size `p`. A retained start
 /// at or above the cap therefore opens unbounded, and a bounded view that ends at the cap with a
 /// tip size below the cap widens.
-pub(super) async fn recover<E, F, D, O>(
+pub(super) async fn recover<E, F, D>(
     context: E,
-    config: variable::Config<O::Cfg>,
+    config: variable::Config<()>,
     max_size: Option<Location<F>>,
-) -> Result<variable::Recovery<E, Witness<F, D, O>>, Error<F>>
+) -> Result<variable::Recovery<E, StoredWitness<F, D>>, Error<F>>
 where
     E: Context,
     F: Family,
     D: Digest,
-    O: Operation<F>,
 {
     let Some(cap) = max_size else {
-        return Ok(Journal::<E, F, D, O>::recover(context, config, None).await?);
+        return Ok(Journal::<E, F, D>::recover(context, config, None).await?);
     };
-    if variable::Recovery::<E, Witness<F, D, O>>::span(context.child("span"), &config)
+    if variable::Recovery::<E, StoredWitness<F, D>>::span(context.child("span"), &config)
         .await?
         .start
         >= *cap
     {
-        return Ok(Journal::<E, F, D, O>::recover(context, config, None).await?);
+        return Ok(Journal::<E, F, D>::recover(context, config, None).await?);
     }
-    let bounded = Journal::<E, F, D, O>::recover(context, config, Some(*cap)).await?;
+    let bounded = Journal::<E, F, D>::recover(context, config, Some(*cap)).await?;
     let bounds = bounded.bounds();
 
     // The bounded view starts at the span start, below the cap, so a view that ends at the cap
@@ -231,11 +294,14 @@ where
     Ok(Rebuilt { merkle, tip })
 }
 
-/// Restore a journaled witness, reporting any failure as [`Error::DataCorrupted`] since the
-/// entry came from this db's own journal.
+/// Decode a journaled witness's commit with `cfg`, then restore it.
+///
+/// A commit that fails to decode returns [`Error::Journal`], like any undecodable journal entry.
+/// Any restore failure is [`Error::DataCorrupted`]: the entry came from this db's own journal.
 pub(super) fn rebuild<F, O, H, S>(
     strategy: S,
-    witness: Witness<F, H::Digest, O>,
+    stored: StoredWitness<F, H::Digest>,
+    cfg: &O::Cfg,
 ) -> Result<Rebuilt<F, H::Digest, O, S>, Error<F>>
 where
     F: Family,
@@ -243,6 +309,9 @@ where
     H: Hasher,
     S: Strategy,
 {
+    let witness = stored
+        .decode::<O>(cfg)
+        .map_err(|err| Error::Journal(journal::Error::Codec(err)))?;
     restore::<F, O, H, S>(strategy, witness).map_err(|err| match err {
         Error::UnexpectedData(_) => Error::DataCorrupted("last operation was not a commit"),
         _ => Error::DataCorrupted("invalid compact witness"),
@@ -253,7 +322,6 @@ where
 pub(crate) mod tests {
     use super::*;
     use crate::{
-        Context,
         journal::contiguous::Contiguous,
         merkle::{mmb, mmr},
         qmdb::{
@@ -262,13 +330,15 @@ pub(crate) mod tests {
             keyless::fixed::Operation as TestOp,
         },
     };
-    use commonware_codec::{Decode, Encode, Error as CodecError};
+    use commonware_codec::Error as CodecError;
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
     };
     use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+
+    type Sha256Digest = <Sha256 as Hasher>::Digest;
 
     fn journal_config<C>(
         context: &deterministic::Context,
@@ -286,53 +356,54 @@ pub(crate) mod tests {
         }
     }
 
+    /// Write `entries` to a fresh witness journal in `partition`.
+    async fn write_entries<F: Family>(
+        context: deterministic::Context,
+        partition: &str,
+        entries: &[StoredWitness<F, Sha256Digest>],
+    ) {
+        let cfg = journal_config(&context, partition, ());
+        let mut journal = Journal::<_, F, Sha256Digest>::init(context, cfg)
+            .await
+            .unwrap();
+        for entry in entries {
+            (journal, _) = journal.append(entry).await.unwrap();
+        }
+        drop(journal.sync().await.unwrap());
+    }
+
     fn assert_decode_errors<F, O>(valid_cfg: O::Cfg, restrictive_cfg: O::Cfg)
     where
         F: Family,
         O: Operation<F, Metadata = Vec<u8>>,
     {
         deterministic::Runner::default().start(|context| async move {
-            let witness = Witness::<F, <Sha256 as Hasher>::Digest, O> {
+            let witness = Witness::<F, Sha256Digest, O> {
                 commit: O::commit(Some(vec![1, 2, 3]), Location::new(0)),
                 size: Location::new(1),
                 pinned_nodes: Vec::new(),
             };
-            let encoded = witness.encode();
-            let decoded = Witness::<F, <Sha256 as Hasher>::Digest, O>::decode_cfg(
-                encoded.clone(),
-                &valid_cfg,
-            )
-            .unwrap();
+            let stored = witness.stored();
+            let decoded = stored.clone().decode::<O>(&valid_cfg).unwrap();
             assert_eq!(decoded.commit.metadata(), Some(&vec![1, 2, 3]));
             assert!(matches!(
-                Witness::<F, <Sha256 as Hasher>::Digest, O>::decode_cfg(
-                    encoded.clone(),
-                    &restrictive_cfg,
-                ),
+                stored.clone().decode::<O>(&restrictive_cfg),
                 Err(CodecError::InvalidLength(3))
             ));
-            let mut invalid_tag = encoded.to_vec();
-            invalid_tag[0] = 0xff;
+            let mut invalid_tag = stored.clone();
+            invalid_tag.commit = vec![0xff].into();
             assert!(matches!(
-                Witness::<F, <Sha256 as Hasher>::Digest, O>::decode_cfg(invalid_tag, &valid_cfg),
+                invalid_tag.clone().decode::<O>(&valid_cfg),
                 Err(CodecError::InvalidEnum(0xff))
             ));
 
             // The metadata is valid at the configured limit, then rejected on reopen with a
             // smaller limit. The failed open must preserve the persisted witness.
+            write_entries(context.child("write"), "witness-metadata-limit", &[stored]).await;
             let cfg = Config {
                 strategy: Sequential,
                 witness: journal_config(&context, "witness-metadata-limit", valid_cfg.clone()),
             };
-            let journal = Journal::<_, F, <Sha256 as Hasher>::Digest, O>::init(
-                context.child("write"),
-                cfg.witness.clone(),
-            )
-            .await
-            .unwrap();
-            let (journal, _) = journal.append(&witness).await.unwrap();
-            drop(journal.sync().await.unwrap());
-
             let mut restrictive = cfg.clone();
             restrictive.witness.codec_config = restrictive_cfg;
             assert!(matches!(
@@ -348,15 +419,13 @@ pub(crate) mod tests {
             assert_eq!(db.get_metadata(), Some(vec![1, 2, 3]));
             db.destroy().await.unwrap();
 
-            // A one-byte array writes the invalid operation tag inside a valid journal frame.
-            let journal = variable::Journal::<_, [u8; 1]>::init(
+            // The invalid operation tag sits inside a valid journal frame.
+            write_entries(
                 context.child("write_invalid_tag"),
-                journal_config(&context, "witness-invalid-tag", ()),
+                "witness-invalid-tag",
+                &[invalid_tag],
             )
-            .await
-            .unwrap();
-            let (journal, _) = journal.append(&[0xff]).await.unwrap();
-            drop(journal.sync().await.unwrap());
+            .await;
             assert!(matches!(
                 Db::<F, _, O, Sha256, _>::init(
                     context.child("reject_tag"),
@@ -401,6 +470,128 @@ pub(crate) mod tests {
     #[test]
     fn test_decode_errors_immutable_mmb() {
         assert_decode_errors::<
+            mmb::Family,
+            immutable::variable::Operation<mmb::Family, U64, Vec<u8>>,
+        >(((), ((..=3).into(), ())), ((), ((..=2).into(), ())));
+    }
+
+    /// Bounded initialization selects by size without decoding the commits it discards, so a
+    /// newer witness whose commit no longer decodes does not hide an older state that does.
+    ///
+    /// Each case builds the selected state from `imported` genesis or fresh storage, commits
+    /// once more, then appends a witness of `discarded_size` whose metadata the restrictive
+    /// config rejects, and reopens bounded below it.
+    fn assert_bounded_selection_ignores_discarded_commits<F, O>(
+        valid_cfg: O::Cfg,
+        restrictive_cfg: O::Cfg,
+    ) where
+        F: Family,
+        O: Operation<F, Metadata = Vec<u8>>,
+    {
+        for (index, (imported, discarded_size)) in
+            [(false, 5), (true, 3), (true, 5)].into_iter().enumerate()
+        {
+            let valid_cfg = valid_cfg.clone();
+            let restrictive_cfg = restrictive_cfg.clone();
+            deterministic::Runner::default().start(|context| async move {
+                let partition = format!("witness-bounded-selection-{index}");
+                let cfg = Config {
+                    strategy: Sequential,
+                    witness: journal_config(&context, &partition, valid_cfg),
+                };
+                let db = if imported {
+                    // Seed an older history for the genesis import to replace.
+                    let seeded =
+                        Db::<F, _, O, Sha256, _>::init(context.child("seed"), cfg.clone(), None)
+                            .await
+                            .unwrap();
+                    let floor = seeded.inactivity_floor_loc();
+                    let batch = seeded
+                        .new_batch()
+                        .merkleize(&seeded, None, floor)
+                        .await
+                        .unwrap();
+                    let (seeded, _) = seeded.apply_batch(batch).await.unwrap();
+                    drop(seeded.sync().await.unwrap());
+                    let db = Db::<F, _, O, Sha256, _>::init_from_sync(
+                        Sequential,
+                        context.child("import"),
+                        cfg.witness.clone(),
+                        Location::new(0),
+                        Vec::new(),
+                        O::commit(None, Location::new(0)),
+                    )
+                    .unwrap();
+                    db.commit().await.unwrap()
+                } else {
+                    Db::<F, _, O, Sha256, _>::init(context.child("fresh"), cfg.clone(), None)
+                        .await
+                        .unwrap()
+                };
+                let floor = db.inactivity_floor_loc();
+                let batch = db.new_batch().merkleize(&db, None, floor).await.unwrap();
+                let (db, _) = db.apply_batch(batch).await.unwrap();
+                let db = db.sync().await.unwrap();
+                let selected = db.target();
+                assert_eq!(selected.size, Location::new(2));
+                drop(db);
+
+                // Append a newer witness whose commit only the valid config decodes.
+                let (journal_cfg, _) = split_config(cfg.witness.clone());
+                let journal =
+                    Journal::<_, F, Sha256Digest>::init(context.child("append"), journal_cfg)
+                        .await
+                        .unwrap();
+                let discarded = Witness::<F, Sha256Digest, O> {
+                    commit: O::commit(Some(vec![1, 2, 3]), Location::new(0)),
+                    size: Location::new(discarded_size),
+                    pinned_nodes: Vec::new(),
+                };
+                let (journal, _) = journal.append(&discarded.stored()).await.unwrap();
+                drop(journal.sync().await.unwrap());
+
+                let mut restrictive = cfg;
+                restrictive.witness.codec_config = restrictive_cfg;
+                let db = Db::<F, _, O, Sha256, _>::init(
+                    context.child("bounded"),
+                    restrictive,
+                    Some(Location::new(discarded_size - 1)),
+                )
+                .await
+                .unwrap();
+                assert_eq!(db.target(), selected);
+                db.destroy().await.unwrap();
+            });
+        }
+    }
+
+    #[test]
+    fn test_bounded_selection_ignores_discarded_commits_keyless_mmr() {
+        assert_bounded_selection_ignores_discarded_commits::<
+            mmr::Family,
+            keyless::variable::Operation<mmr::Family, Vec<u8>>,
+        >(((..=3).into(), ()), ((..=2).into(), ()));
+    }
+
+    #[test]
+    fn test_bounded_selection_ignores_discarded_commits_keyless_mmb() {
+        assert_bounded_selection_ignores_discarded_commits::<
+            mmb::Family,
+            keyless::variable::Operation<mmb::Family, Vec<u8>>,
+        >(((..=3).into(), ()), ((..=2).into(), ()));
+    }
+
+    #[test]
+    fn test_bounded_selection_ignores_discarded_commits_immutable_mmr() {
+        assert_bounded_selection_ignores_discarded_commits::<
+            mmr::Family,
+            immutable::variable::Operation<mmr::Family, U64, Vec<u8>>,
+        >(((), ((..=3).into(), ())), ((), ((..=2).into(), ())));
+    }
+
+    #[test]
+    fn test_bounded_selection_ignores_discarded_commits_immutable_mmb() {
+        assert_bounded_selection_ignores_discarded_commits::<
             mmb::Family,
             immutable::variable::Operation<mmb::Family, U64, Vec<u8>>,
         >(((), ((..=3).into(), ())), ((), ((..=2).into(), ())));
@@ -455,41 +646,29 @@ pub(crate) mod tests {
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::*;
-        use crate::{
-            merkle::{mmb, mmr},
-            qmdb::{
-                any::value::{FixedEncoding, VariableEncoding},
-                keyless::Operation,
-            },
-        };
         use commonware_codec::conformance::CodecConformance;
         use commonware_cryptography::sha256;
-        use commonware_utils::sequence::U64;
 
         commonware_conformance::conformance_tests! {
-            CodecConformance<Witness<mmr::Family, sha256::Digest, Operation<mmr::Family, FixedEncoding<U64>>>>,
-            CodecConformance<Witness<mmb::Family, sha256::Digest, Operation<mmb::Family, FixedEncoding<U64>>>>,
-            CodecConformance<Witness<mmr::Family, sha256::Digest, Operation<mmr::Family, VariableEncoding<U64>>>>,
+            CodecConformance<StoredWitness<mmr::Family, sha256::Digest>>,
+            CodecConformance<StoredWitness<mmb::Family, sha256::Digest>>,
         }
     }
 
     /// Corrupt the entry at `pos` with `f`, preserving the entries above it.
-    pub(crate) async fn corrupt_entry<E, F, D, O>(
-        journal: Journal<E, F, D, O>,
+    pub(crate) async fn corrupt_entry<E, F, D>(
+        journal: Journal<E, F, D>,
         pos: u64,
-        f: impl FnOnce(&mut Witness<F, D, O>),
-    ) -> Journal<E, F, D, O>
+        f: impl FnOnce(&mut StoredWitness<F, D>),
+    ) -> Journal<E, F, D>
     where
         E: Context,
         F: Family,
         D: Digest,
-        O: Operation<F>,
     {
         let mut entries = Vec::new();
-        {
-            for p in pos..journal.bounds().end {
-                entries.push(journal.read(p).await.unwrap());
-            }
+        for p in pos..journal.bounds().end {
+            entries.push(journal.read(p).await.unwrap());
         }
         f(&mut entries[0]);
         let mut journal = journal.test_truncate(pos).await.unwrap();
@@ -499,66 +678,44 @@ pub(crate) mod tests {
         journal.sync().await.unwrap()
     }
 
-    /// Read the tip witness entry's components.
-    pub(crate) async fn tip<E, F, D, O>(journal: &Journal<E, F, D, O>) -> (O, Location<F>, Vec<D>)
+    /// Read the tip witness entry.
+    pub(crate) async fn tip<E, F, D>(journal: &Journal<E, F, D>) -> StoredWitness<F, D>
     where
         E: Context,
         F: Family,
         D: Digest,
-        O: Operation<F>,
     {
         let size = journal.size();
-        let entry = journal.read(size - 1).await.unwrap();
-        (entry.commit, entry.size, entry.pinned_nodes)
+        journal.read(size - 1).await.unwrap()
     }
 
     /// Append a witness entry without syncing it.
-    pub(crate) async fn append_unsynced<E, F, D, O>(
-        journal: Journal<E, F, D, O>,
-        commit: O,
-        size: Location<F>,
-        pinned_nodes: Vec<D>,
-    ) -> Journal<E, F, D, O>
+    pub(crate) async fn append_unsynced<E, F, D>(
+        journal: Journal<E, F, D>,
+        entry: StoredWitness<F, D>,
+    ) -> Journal<E, F, D>
     where
         E: Context,
         F: Family,
         D: Digest,
-        O: Operation<F>,
     {
-        let (journal, _) = journal
-            .append(&Witness {
-                commit,
-                size,
-                pinned_nodes,
-            })
-            .await
-            .unwrap();
+        let (journal, _) = journal.append(&entry).await.unwrap();
         journal
     }
 
     /// Replace the tip witness entry.
-    pub(crate) async fn overwrite_tip<E, F, D, O>(
-        journal: Journal<E, F, D, O>,
-        commit: O,
-        size: Location<F>,
-        pinned_nodes: Vec<D>,
-    ) -> Journal<E, F, D, O>
+    pub(crate) async fn overwrite_tip<E, F, D>(
+        journal: Journal<E, F, D>,
+        entry: StoredWitness<F, D>,
+    ) -> Journal<E, F, D>
     where
         E: Context,
         F: Family,
         D: Digest,
-        O: Operation<F>,
     {
         let entries = journal.size();
         let journal = journal.test_truncate(entries - 1).await.unwrap();
-        let (journal, _) = journal
-            .append(&Witness {
-                commit,
-                size,
-                pinned_nodes,
-            })
-            .await
-            .unwrap();
+        let (journal, _) = journal.append(&entry).await.unwrap();
         journal.sync().await.unwrap()
     }
 }

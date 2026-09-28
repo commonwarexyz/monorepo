@@ -16,10 +16,12 @@
 //!
 //! The witness journal is the single durable source of truth. Each entry is a complete witness
 //! of one applied state, so bounded [`Db::init`] can restore a retained applied state
-//! (history is bounded by [`Db::prune`]). Initialization rebuilds the in-memory Merkle
-//! from an entry's pinned nodes and commit operation. An entry whose commit or pinned nodes fail
-//! to decode fails the open with [`Error::Journal`](crate::qmdb::Error::Journal); one that
-//! decodes but cannot rebuild surfaces as
+//! (history is bounded by [`Db::prune`]). Initialization selects an entry by size, then decodes
+//! its commit operation with the witness journal's codec config and rebuilds the in-memory Merkle
+//! from the entry's pinned nodes and commit. The commits of entries it does not select are never
+//! decoded. An entry the journal cannot decode, or a selected entry whose commit fails to decode,
+//! fails the open with [`Error::Journal`](crate::qmdb::Error::Journal). A selected entry that
+//! decodes but cannot rebuild fails it with
 //! [`Error::DataCorrupted`](crate::qmdb::Error::DataCorrupted). The witness is also what lets
 //! compact nodes serve compact sync without retaining historical operations. A compact-sync
 //! import is journaled by its first apply or durability operation, which replaces the
@@ -54,6 +56,7 @@ pub struct Config<C, S: Strategy> {
     /// Strategy used to parallelize merkleization.
     pub strategy: S,
 
-    /// Configuration for the journal that persists the witness.
+    /// Configuration for the witness journal. Its codec config decodes the commit operations the
+    /// witnesses hold.
     pub witness: variable::Config<C>,
 }
