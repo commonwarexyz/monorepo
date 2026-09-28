@@ -5,11 +5,9 @@
 
 use crate::{
     Block, Heightable,
+    ancestry::BlockProvider,
     simplex::{
-        marshal::{
-            ancestry::BlockProvider,
-            core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
-        },
+        marshal::core::{Buffer, CommitmentFallback, ExpectedCommitment, Mailbox, Variant},
         scheme::Scheme as SimplexScheme,
     },
     types::Round,

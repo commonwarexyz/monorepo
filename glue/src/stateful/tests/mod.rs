@@ -26,10 +26,10 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_consensus::{
     Application as _, CertifiableAutomaton as _, Reporter,
+    ancestry::{self, Ancestry},
     simplex::{
         marshal::{
             self,
-            ancestry::{self, Ancestry},
             core::Actor as MarshalActor,
             resolver::handler,
             standard::{Deferred, Standard},
