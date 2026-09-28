@@ -86,6 +86,9 @@ where
     }
 }
 
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, V, S> = Result<Arc<MerkleizedBatch<F, D, V, S>>, Error<F>>;
+
 /// A speculative batch for a compact keyless db.
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, V, S: Strategy>
@@ -214,6 +217,9 @@ where
     }
 
     /// Create a new speculative batch with this one as its parent.
+    ///
+    /// All unapplied ancestors in the chain must be kept alive until the child (or any
+    /// descendant) is merkleized. Otherwise, `merkleize` returns [`Error::StaleBatch`].
     pub fn new_batch<H>(self: &Arc<Self>) -> UnmerkleizedBatch<F, H, V, S>
     where
         H: Hasher<Digest = D>,
@@ -284,13 +290,18 @@ where
         self
     }
 
-    /// Resolve appends into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    /// Resolve appends into operations, merkleize, and return the batch.
     ///
     /// `inactivity_floor` is threaded through the commit operation for wire-format parity with
     /// [`crate::qmdb::keyless::Keyless`]. It must be >= the database's current floor
     /// (monotonically non-decreasing) and at most the batch's commit location
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::StaleBatch`] if `db` does not match this batch's database boundary or a
+    /// live ancestor commitment (both size and root).
     #[tracing::instrument(
         name = "qmdb.keyless.compact.batch.merkleize",
         level = "info",
@@ -302,14 +313,14 @@ where
         db: &Db<F, E, V, H, C, S>,
         metadata: Option<V::Value>,
         inactivity_floor: Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, V, S>>, Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, V, S>
     where
         F: Family,
         E: Context,
         C: Clone + Send + Sync + 'static,
         Operation<F, V>: Read<Cfg = C>,
     {
-        let db = self.on_chain(db)?;
+        let db = self.on_chain(db).map_err(|_| Error::StaleBatch)?;
         let live_ancestors: Vec<_> =
             chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors())
                 .collect();
@@ -317,6 +328,17 @@ where
             self.db(),
             live_ancestors.last().map(|oldest| oldest.bounds.base),
         );
+
+        let ancestors = chain::collect_ancestor_bounds(
+            live_ancestors.iter().cloned(),
+            |batch| batch.bounds.inactivity_floor,
+            |batch| batch.commitment(),
+        );
+        chain::validate_batch_applicable(
+            db.commitment(),
+            boundary,
+            ancestors.iter().map(|ancestor| ancestor.state),
+        )?;
 
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
@@ -336,11 +358,8 @@ where
         .await
         .expect("inactive_peaks computed from batch size");
 
-        let ancestors = chain::collect_ancestor_bounds(
-            live_ancestors,
-            |batch| batch.bounds.inactivity_floor,
-            |batch| batch.commitment(),
-        );
+        // Keep ancestor batches alive until their operations and nodes have been captured.
+        drop(live_ancestors);
 
         Ok(Arc::new(MerkleizedBatch {
             merkle_batch: merkle,
@@ -745,6 +764,175 @@ mod tests {
         Db::init(context, cfg, None).await.unwrap()
     }
 
+    async fn compact_merkleize_foreign_db_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "keyless-merkleize-foreign-db").await;
+        let foreign = open_db::<F>(
+            context.child("foreign"),
+            "keyless-merkleize-foreign-db-foreign",
+        )
+        .await;
+
+        let batch = db
+            .new_batch()
+            .append(U64::new(11))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let batch = foreign
+            .new_batch()
+            .append(U64::new(99))
+            .merkleize(&foreign, None, Location::new(0))
+            .await
+            .unwrap();
+        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        assert_eq!(db.size(), foreign.size());
+        assert_ne!(db.root(), foreign.root());
+
+        let batch = db.new_batch().append(U64::new(22));
+        assert!(matches!(
+            batch.merkleize(&foreign, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+
+        let parent = db
+            .new_batch()
+            .append(U64::new(33))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = parent.new_batch::<Sha256>().append(U64::new(44));
+        assert!(matches!(
+            child.merkleize(&foreign, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+        db.destroy().await.unwrap();
+        foreign.destroy().await.unwrap();
+    }
+
+    async fn compact_merkleize_stale_sibling_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "keyless-merkleize-stale-sibling").await;
+
+        let direct = db.new_batch().append(U64::new(11));
+        let sibling = db
+            .new_batch()
+            .append(U64::new(22))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        assert!(matches!(
+            direct.merkleize(&db, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+
+        let parent = db
+            .new_batch()
+            .append(U64::new(33))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = parent.new_batch::<Sha256>().append(U64::new(44));
+        let sibling = db
+            .new_batch()
+            .append(U64::new(55))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        assert!(matches!(
+            child.merkleize(&db, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+
+        db.destroy().await.unwrap();
+    }
+
+    async fn compact_merkleize_ancestor_states_inner<F: Family>(context: deterministic::Context) {
+        let db = open_db::<F>(context.child("db"), "keyless-merkleize-ancestor-states").await;
+
+        let grandparent = db
+            .new_batch()
+            .append(U64::new(1))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let parent = grandparent
+            .new_batch::<Sha256>()
+            .append(U64::new(2))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let pending = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+
+        let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+        let applied = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert_eq!(pending.root(), applied.root());
+
+        drop(grandparent);
+        let retired = parent
+            .new_batch::<Sha256>()
+            .append(U64::new(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert_eq!(retired.bounds().db, db.commitment());
+        assert_eq!(pending.root(), retired.root());
+
+        let child = parent.new_batch::<Sha256>().append(U64::new(3));
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let child = child.merkleize(&db, None, Location::new(0)).await.unwrap();
+        assert_eq!(pending.root(), child.root());
+        let expected_root = child.root();
+        let (db, _) = db.apply_batch(child).await.unwrap();
+        assert_eq!(db.root(), expected_root);
+        db.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_foreign_db_mmr() {
+        deterministic::Runner::default().start(compact_merkleize_foreign_db_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_foreign_db_mmb() {
+        deterministic::Runner::default().start(compact_merkleize_foreign_db_inner::<mmb::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_stale_sibling_mmr() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_stale_sibling_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_stale_sibling_mmb() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_stale_sibling_inner::<mmb::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_ancestor_states_mmr() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_ancestor_states_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_compact_merkleize_ancestor_states_mmb() {
+        deterministic::Runner::default()
+            .start(compact_merkleize_ancestor_states_inner::<mmb::Family>);
+    }
+
     /// Batch artifacts (operations, range proof, pinned frontier) verify against the batch root,
     /// survive applying and dropping ancestors, and are refused once the batch itself is applied
     /// and the compact store is pruned past them.
@@ -1035,19 +1223,18 @@ mod tests {
     /// Init durably persists the bootstrap witness, so while syncs park the returned future
     /// must be driven with [drive_pending_syncs] (or the mock unblocked first).
     fn open_delayed_db(
-        context: &deterministic::Context,
-        label: &'static str,
+        context: deterministic::Context,
         partition: &str,
         pending: &PendingSyncs,
     ) -> impl Future<Output = Result<DelayedDb, Error<mmr::Family>>> {
-        let witness_cfg = witness_config(partition, context);
+        let witness_cfg = witness_config(partition, &context);
         let cfg = Config {
             strategy: Sequential,
             witness: witness_cfg,
             commit_codec_config: (),
         };
         let context = DelayedSyncContext {
-            inner: context.child(label),
+            inner: context,
             pending: pending.clone(),
         };
         DelayedDb::init(context, cfg, None)
@@ -1091,7 +1278,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-overlap";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1130,7 +1317,7 @@ mod tests {
             handle.await.unwrap();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.target(), second_target);
@@ -1146,7 +1333,7 @@ mod tests {
             let partition = "keyless-start-sync-recovery";
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", partition, &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), partition, &pending)
                 .await
                 .unwrap();
             db = apply_append(db, 1).await;
@@ -1157,7 +1344,7 @@ mod tests {
             let root = db.root();
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1174,7 +1361,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-fail", &pending)
+            let mut db = open_delayed_db(ctx.child("delayed"), "keyless-start-sync-fail", &pending)
                 .await
                 .unwrap();
             db = apply_append(db, 1).await;
@@ -1211,7 +1398,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-noop-drain";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1236,7 +1423,7 @@ mod tests {
             assert!(pending.completions() > completions_before);
             drop(db);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1250,8 +1437,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(
-                &ctx,
-                "delayed",
+                ctx.child("delayed"),
                 "keyless-start-sync-noop-sync-fail",
                 &pending,
             );
@@ -1279,7 +1465,11 @@ mod tests {
     fn test_compact_start_sync_then_noop_commit_waits() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-noop-commit", &pending);
+            let open = open_delayed_db(
+                ctx.child("delayed"),
+                "keyless-start-sync-noop-commit",
+                &pending,
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1313,7 +1503,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let partition = "keyless-start-sync-noop-second";
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", partition, &pending);
+            let open = open_delayed_db(ctx.child("delayed"), partition, &pending);
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1335,7 +1525,7 @@ mod tests {
             assert_eq!(journal.size(), 2);
             drop(journal);
 
-            let db = open_delayed_db(&ctx, "reopen", partition, &pending)
+            let db = open_delayed_db(ctx.child("reopen"), partition, &pending)
                 .await
                 .unwrap();
             assert_eq!(db.root(), root);
@@ -1349,7 +1539,11 @@ mod tests {
     fn test_compact_start_sync_metadata_failure_resurfaces_on_commit() {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
-            let open = open_delayed_db(&ctx, "delayed", "keyless-start-sync-meta-fail", &pending);
+            let open = open_delayed_db(
+                ctx.child("delayed"),
+                "keyless-start-sync-meta-fail",
+                &pending,
+            );
             let mut db = drive_pending_syncs(&pending, open).await.unwrap();
             db = apply_append(db, 1).await;
 
@@ -1399,8 +1593,7 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             let open = open_delayed_db(
-                &ctx,
-                "delayed",
+                ctx.child("delayed"),
                 "keyless-start-sync-dropped-meta-fail",
                 &pending,
             );
@@ -1428,9 +1621,10 @@ mod tests {
         deterministic::Runner::default().start(|ctx| async move {
             let pending = PendingSyncs::default();
             pending.unblock();
-            let mut db = open_delayed_db(&ctx, "delayed", "keyless-start-sync-proven", &pending)
-                .await
-                .unwrap();
+            let mut db =
+                open_delayed_db(ctx.child("delayed"), "keyless-start-sync-proven", &pending)
+                    .await
+                    .unwrap();
             db = apply_append(db, 1).await;
 
             let handle;
@@ -1472,7 +1666,7 @@ mod tests {
                 source.target()
             };
             let (_, size_b, pinned_b) = {
-                let journal = open_witness_journal(context.child("src_tip"), src).await;
+                let journal = open_witness_journal(context.child("tip"), src).await;
                 witness::tests::tip(&journal).await
             };
             assert_eq!(size_b, target_b.size);
@@ -1544,7 +1738,7 @@ mod tests {
             // merkleized sibling can no longer apply.
             assert!(matches!(
                 stale.merkleize(&db, Some(U64::new(33)), floor).await,
-                Err(Error::StaleRead)
+                Err(Error::StaleBatch)
             ));
             assert!(matches!(
                 db.apply_batch(batch_b).await,

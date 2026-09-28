@@ -7,7 +7,7 @@
 //! ```ignore
 //! // Simple mode: apply a batch, then durably commit it.
 //! let batch = db.new_batch().append(value);
-//! let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await.unwrap();
+//! let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc()).await?;
 //! let (db, _) = db.apply_batch(merkleized).await?;
 //! let db = db.commit().await?;
 //! ```
@@ -16,15 +16,15 @@
 //! // Batches can still fork before you apply them.
 //! let floor = db.inactivity_floor_loc();
 //! let parent = db.new_batch().append(value_a);
-//! let parent = parent.merkleize(&db, None, floor).await.unwrap();
+//! let parent = parent.merkleize(&db, None, floor).await?;
 //!
 //! let child_a = parent.new_batch();
 //! let child_a = child_a.append(value_b);
-//! let child_a = child_a.merkleize(&db, None, floor).await.unwrap();
+//! let child_a = child_a.merkleize(&db, None, floor).await?;
 //!
 //! let child_b = parent.new_batch();
 //! let child_b = child_b.append(value_c);
-//! let child_b = child_b.merkleize(&db, None, floor).await.unwrap();
+//! let child_b = child_b.merkleize(&db, None, floor).await?;
 //!
 //! let (db, _) = db.apply_batch(child_a).await?;
 //! let db = db.commit().await?;
@@ -34,9 +34,9 @@
 //! // Sequential commit: apply parent then child.
 //! let floor = db.inactivity_floor_loc();
 //! let parent = db.new_batch().append(value_a);
-//! let parent_m = parent.merkleize(&db, None, floor).await.unwrap();
+//! let parent_m = parent.merkleize(&db, None, floor).await?;
 //! let child = parent_m.new_batch().append(value_b);
-//! let child_m = child.merkleize(&db, None, floor).await.unwrap();
+//! let child_m = child.merkleize(&db, None, floor).await?;
 //!
 //! let (db, _) = db.apply_batch(parent_m).await?;
 //! let (db, _) = db.apply_batch(child_m).await?;
@@ -213,8 +213,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfBounds`] if `loc` >=
-    /// `self.bounds().end`.
+    /// - Returns [`Error::LocationOutOfBounds`] if `loc` >= `self.bounds().end`.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `loc` <
+    ///   `self.bounds().start`.
     pub async fn get(&self, loc: Location<F>) -> Result<Option<V::Value>, Error<F>> {
         let _timer = self.metrics.get_timer();
         self.metrics.get_calls.inc();
@@ -236,7 +237,9 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`Error::LocationOutOfBounds`] if any location >= `bounds().end`.
+    /// - Returns [`Error::LocationOutOfBounds`] if any location >= `self.bounds().end`.
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if any location <
+    ///   `self.bounds().start`.
     pub async fn get_many(&self, locs: &[Location<F>]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         if locs.is_empty() {
             return Ok(Vec::new());
@@ -266,8 +269,9 @@ where
         self.inactivity_floor_loc
     }
 
-    /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
-    /// retained operations respectively.
+    /// Return the retained operation range `[start, end)`.
+    ///
+    /// Proof generation also requires the necessary Merkle nodes to be retained.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
         let bounds = self.journal.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
@@ -284,9 +288,10 @@ where
         );
     }
 
-    /// Return the most recent location from which this database can safely be synced, and the
-    /// upper bound on [`Self::prune`]'s `loc`. For keyless databases, this equals the
-    /// inactivity floor declared by the last committed batch.
+    /// Return the inactivity floor declared by the last committed batch, which is the upper bound
+    /// on [`Self::prune`]'s `loc`.
+    ///
+    /// This logical boundary may precede the retained start in [`Self::bounds`].
     pub const fn sync_boundary(&self) -> Location<F> {
         self.inactivity_floor_loc
     }
@@ -323,7 +328,8 @@ where
     ///
     /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
     ///   >= the number of operations.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+    ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
     pub async fn proof(
         &self,
@@ -343,7 +349,8 @@ where
     ///
     /// - Returns [`Error::Merkle`] with [`crate::merkle::Error::RangeOutOfBounds`] if `start_loc`
     ///   >= `op_count` or `op_count` > number of operations.
-    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] if `start_loc` has
+    /// - Returns [`Error::Journal`] with [`crate::journal::Error::ItemPruned`] or [`Error::Merkle`]
+    ///   with [`crate::merkle::Error::ElementPruned`] if a required operation or Merkle node has
     ///   been pruned.
     /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
     ///   op.
@@ -387,6 +394,8 @@ where
     }
 
     /// Prune historical operations prior to `loc`. This does not affect the db's root.
+    ///
+    /// The retained start in [`Self::bounds`] can remain below `loc`.
     ///
     /// `prune` requires no prior commit. After a crash, the database remains recoverable;
     /// uncommitted operations are not guaranteed to survive.
@@ -635,6 +644,11 @@ pub(crate) mod tests {
             let db = open_db::<$family::Family>($ctx.child("db")).await;
             tests::$scenario(db).await;
         };
+        (@fixture pair, $scenario:ident, $family:ident, $ctx:ident) => {
+            let db = open_db::<$family::Family>($ctx.child("db")).await;
+            let foreign = open_db_with_suffix::<$family::Family>("foreign", $ctx.child("foreign")).await;
+            tests::$scenario(db, foreign).await;
+        };
         (@fixture reopen, $scenario:ident, $family:ident, $ctx:ident) => {
             let db = open_db::<$family::Family>($ctx.child("db")).await;
             tests::$scenario($ctx, db, reopen::<$family::Family>()).await;
@@ -776,8 +790,8 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
-    /// Once a sibling batch is applied, reads and merkleization through the losing fork
-    /// refuse with [`Error::StaleRead`], while applying it is separately rejected.
+    /// Once a sibling batch is applied, losing-fork reads return `StaleRead`, while
+    /// merkleization and application return `StaleBatch`.
     #[boxed]
     pub(crate) async fn run_stale_fork_refuses<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
@@ -830,9 +844,160 @@ pub(crate) mod tests {
         ));
         assert!(matches!(
             child.merkleize(&db, None, floor).await,
-            Err(Error::StaleRead)
+            Err(Error::StaleBatch)
         ));
         assert!(matches!(db.validate_batch(&loser), Err(Error::StaleBatch)));
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleize_foreign_db<F: Family, V, C, S: Strategy>(
+        db: TestKeyless<F, V, C, Sha256, S>,
+        foreign: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared,
+    {
+        let batch = db
+            .new_batch()
+            .append(V::Value::make(11))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(batch).await.unwrap();
+        let batch = foreign
+            .new_batch()
+            .append(V::Value::make(99))
+            .merkleize(&foreign, None, Location::new(0))
+            .await
+            .unwrap();
+        let (foreign, _) = foreign.apply_batch(batch).await.unwrap();
+        assert_eq!(db.bounds().end, foreign.bounds().end);
+        assert_ne!(db.root(), foreign.root());
+
+        let batch = db.new_batch().append(V::Value::make(22));
+        assert!(matches!(
+            batch.merkleize(&foreign, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+
+        // A child must also reject a database outside its ancestor chain.
+        let parent = db
+            .new_batch()
+            .append(V::Value::make(33))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = parent.new_batch::<Sha256>().append(V::Value::make(44));
+        assert!(matches!(
+            child.merkleize(&foreign, None, Location::new(0)).await,
+            Err(Error::StaleBatch)
+        ));
+        db.destroy().await.unwrap();
+        foreign.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleize_stale_sibling<F: Family, V, C, S: Strategy>(
+        db: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared,
+    {
+        let direct = db.new_batch().append(V::Value::make(11));
+        let sibling = db
+            .new_batch()
+            .append(V::Value::make(22))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        let direct_result = direct.merkleize(&db, None, Location::new(0)).await;
+
+        let parent = db
+            .new_batch()
+            .append(V::Value::make(33))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let child = parent.new_batch::<Sha256>().append(V::Value::make(44));
+        let sibling = db
+            .new_batch()
+            .append(V::Value::make(55))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let (db, _) = db.apply_batch(sibling).await.unwrap();
+        let child_result = child.merkleize(&db, None, Location::new(0)).await;
+
+        db.destroy().await.unwrap();
+        assert!(matches!(direct_result, Err(Error::StaleBatch)));
+        assert!(matches!(child_result, Err(Error::StaleBatch)));
+    }
+
+    #[boxed]
+    pub(crate) async fn run_merkleize_ancestor_states<F: Family, V, C, S: Strategy>(
+        db: TestKeyless<F, V, C, Sha256, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        Operation<F, V>: EncodeShared,
+    {
+        let grandparent = db
+            .new_batch()
+            .append(V::Value::make(1))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let parent = grandparent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(2))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        let pending = parent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+
+        // The database may advance to a live intermediate ancestor.
+        let (db, _) = db.apply_batch(Arc::clone(&grandparent)).await.unwrap();
+        let applied = parent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert_eq!(pending.root(), applied.root());
+
+        // Once that ancestor is freed, its commitment becomes the effective DB boundary.
+        drop(grandparent);
+        let retired = parent
+            .new_batch::<Sha256>()
+            .append(V::Value::make(3))
+            .merkleize(&db, None, Location::new(0))
+            .await
+            .unwrap();
+        assert_eq!(retired.bounds().db, db.commitment());
+        assert_eq!(pending.root(), retired.root());
+
+        // A child created before applying its immediate parent remains valid afterward.
+        let child = parent.new_batch::<Sha256>().append(V::Value::make(3));
+        let (db, _) = db.apply_batch(parent).await.unwrap();
+        let child = child.merkleize(&db, None, Location::new(0)).await.unwrap();
+        assert_eq!(pending.root(), child.root());
+        let (db, _) = db.apply_batch(child).await.unwrap();
+        let (proof, ops) = db.proof(Location::new(0), NZU64!(100)).await.unwrap();
+        assert!(verify_proof::<Sha256, _, _>(
+            &proof,
+            Location::new(0),
+            &ops,
+            &db.root()
+        ));
         db.destroy().await.unwrap();
     }
 
@@ -2060,6 +2225,41 @@ pub(crate) mod tests {
             Err(Error::LocationOutOfBounds(loc, size))
                 if loc == Location::new(4) && size == Location::new(4)
         ));
+
+        db.destroy().await.unwrap();
+    }
+
+    #[boxed]
+    pub(crate) async fn run_get_pruned<F: Family, V, C, H, S: Strategy>(
+        mut db: TestKeyless<F, V, C, H, S>,
+    ) where
+        V: ValueEncoding<Value: TestValue>,
+        C: Mutable<Item = Operation<F, V>>,
+        H: Hasher,
+        Operation<F, V>: EncodeShared,
+    {
+        let mut round = 0u64;
+        while db.bounds().start == Location::new(0) {
+            round += 1;
+            assert!(round <= 64, "failed to prune any history");
+            (db, _) =
+                commit_appends(db, (0..16).map(|i| V::Value::make(round * 100 + i)), None).await;
+            let last_commit = db.bounds().end - 1;
+            db = db.prune(last_commit).await.unwrap();
+        }
+
+        let start = db.bounds().start;
+        let pruned = start - 1;
+        assert!(matches!(
+            db.get(pruned).await,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *pruned
+        ));
+        assert!(matches!(
+            db.get_many(&[pruned, start]).await,
+            Err(Error::Journal(crate::journal::Error::ItemPruned(loc))) if loc == *pruned
+        ));
+        db.get(start).await.unwrap();
+        db.get_many(&[start]).await.unwrap();
 
         db.destroy().await.unwrap();
     }

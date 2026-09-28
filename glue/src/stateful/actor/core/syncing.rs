@@ -35,6 +35,7 @@ use tracing::{Instrument as _, debug, error, info_span};
 enum FinalizedHandoff<B> {
     Covered(B, Exact),
     Reflected(B, Exact),
+    /// A report above the artifact, including duplicates, awaiting handoff durability.
     Apply(B, Exact),
 }
 
@@ -263,20 +264,22 @@ where
 
     /// Classify finalized messages relative to the completed sync artifact.
     ///
-    /// Marshal dispatches heights strictly ascending within one actor lifetime (redelivery
-    /// happens only after a restart), and the artifact anchors at the newest recorded target,
-    /// so handoff blocks reflect the anchor or extend it consecutively.
+    /// Live floor changes can redeliver a suffix. Order those receipts by height so each
+    /// unique block extends the artifact consecutively. Duplicate receipts wait for the
+    /// same durability barrier as their applied block.
     fn prepare_handoffs(
         &self,
-        finalized: impl IntoIterator<Item = PendingFinalization<Arc<A::Block>>>,
+        mut finalized: VecDeque<PendingFinalization<Arc<A::Block>>>,
     ) -> VecDeque<FinalizedHandoff<Arc<A::Block>>> {
         let artifact = self
             .artifact
             .as_ref()
             .expect("sync artifact must exist after sync handoff");
-        let finalized = finalized.into_iter();
-        let mut previous_height = artifact.anchor.height;
-        let mut handoffs = VecDeque::with_capacity(finalized.size_hint().0);
+        finalized
+            .make_contiguous()
+            .sort_unstable_by_key(|pending| pending.block.height());
+        let mut previous = artifact.anchor;
+        let mut handoffs = VecDeque::with_capacity(finalized.len());
 
         for PendingFinalization {
             block,
@@ -297,12 +300,20 @@ where
                 continue;
             }
 
-            assert_eq!(
-                block.height(),
-                previous_height.next(),
-                "finalized blocks must ascend consecutively from the sync anchor",
-            );
-            previous_height = block.height();
+            if block.height() == previous.height {
+                assert_eq!(
+                    block.digest(),
+                    previous.digest,
+                    "duplicate finalized block must match its original digest"
+                );
+            } else {
+                assert_eq!(
+                    block.height(),
+                    previous.height.next(),
+                    "finalized blocks must ascend consecutively from the sync anchor",
+                );
+                previous = Anchor::from(block.as_ref());
+            }
             handoffs.push_back(FinalizedHandoff::Apply(block, acknowledgement));
         }
         handoffs
@@ -336,13 +347,14 @@ where
                     acknowledgement.acknowledge();
                 }
                 FinalizedHandoff::Apply(block, acknowledgement) => {
-                    let Applied { prune, .. } = processor
+                    if let Some(Applied { prune, .. }) = processor
                         .finalize(self.context.as_present(), block.as_ref(), false)
                         .await
-                        .expect("sync handoff block cannot be a duplicate");
+                    {
+                        pending_prune = prune.or(pending_prune);
+                        completed_height = block.height();
+                    }
                     pending_acknowledgements.push(acknowledgement);
-                    pending_prune = prune.or(pending_prune);
-                    completed_height = block.height();
                 }
             }
         }
@@ -389,7 +401,6 @@ where
             marshal: self.marshal,
             processor,
             deferred_verifications: self.deferred_verifications,
-            skip_finalized_until: Some(completed_height),
         }
         .start()
         .await
@@ -399,7 +410,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        super::Mailbox as StatefulMailbox, FinalizedHandoff, PendingFinalization, Syncing,
+        super::Mailbox as StatefulMailbox, FinalizedHandoff, Message, PendingFinalization, Syncing,
     };
     use crate::stateful::{
         PruneConfig,
@@ -420,15 +431,22 @@ mod tests {
     use commonware_actor::{Feedback, mailbox as actor_mailbox};
     use commonware_consensus::{
         Application as _, CertifiableBlock as _, Heightable, Reporter as _,
-        marshal::{self, Update, ancestry, core::Mailbox as MarshalMailbox},
-        simplex::mocks::scheme as scheme_mocks,
+        marshal::{
+            self, Update, ancestry,
+            core::{Mailbox as MarshalMailbox, Processed},
+        },
+        simplex::{mocks::scheme as scheme_mocks, types::Activity},
         types::Height,
     };
-    use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
+    use commonware_cryptography::{
+        Digestible as _,
+        sha256::{Digest as Sha256Digest, Sha256},
+    };
     use commonware_runtime::{
         Clock as _, ContextCell, Error as RuntimeError, Handle, Runner as _, Spawner as _,
         Supervisor as _, deterministic,
         mocks::{DelayedSyncContext, PendingSyncs, next_pending_sync},
+        reschedule,
     };
     use commonware_utils::{Acknowledgement, NZUsize, acknowledgement::Exact, channel::oneshot};
     use futures::poll;
@@ -462,7 +480,8 @@ mod tests {
 
     impl TestHarness<deterministic::Context> {
         async fn new(context: deterministic::Context, anchor: Anchor<Sha256Digest>) -> Self {
-            Self::new_on(context.child("fixture"), context, anchor).await
+            let marshal = harness_marshal(context.child("marshal")).await;
+            Self::new_on(context.child("harness"), marshal, anchor).await
         }
 
         /// Build the harness mid-sync: no artifact yet, the provided marshal mailbox, and a
@@ -476,8 +495,7 @@ mod tests {
             actor_mailbox::Receiver<syncer::mailbox::Message<deterministic::Context, TestApp>>,
             oneshot::Sender<SyncResult<deterministic::Context, TestApp>>,
         ) {
-            let syncing_context = context.child("syncing_context");
-            Self::new_syncing_on(context, syncing_context, marshal).await
+            Self::new_syncing_on(context.child("harness"), marshal).await
         }
 
         async fn advance_full_ack_window(
@@ -545,8 +563,7 @@ mod tests {
         E: rand_core::Rng + commonware_runtime::Spawner + commonware_storage::Context,
     {
         async fn new_syncing_on(
-            context: deterministic::Context,
-            syncing_context: E,
+            context: E,
             marshal: MarshalMailbox<TestScheme, TestVariant>,
         ) -> (
             Self,
@@ -555,19 +572,23 @@ mod tests {
             oneshot::Sender<SyncResult<E, TestApp>>,
         ) {
             let (mailbox_sender, mailbox) =
-                actor_mailbox::new(syncing_context.child("mailbox"), NZUsize!(1));
+                actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
             let (syncer_sender, syncer_receiver) =
-                actor_mailbox::new(syncing_context.child("syncer_mailbox"), NZUsize!(1));
+                actor_mailbox::new(context.child("syncer"), NZUsize!(1));
             let (sync_complete, sync_completed) = oneshot::channel();
 
             let harness = Self {
                 syncing: Syncing {
-                    context: ContextCell::new(syncing_context.child("syncing")),
+                    context: ContextCell::new(context.child("syncing")),
                     mailbox,
                     application: TestApp::default(),
                     provider: (),
                     marshal,
-                    sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
+                    sync_metadata: StateSyncMetadata::init(
+                        context.child("metadata"),
+                        "syncing-test",
+                    )
+                    .await,
                     syncer: syncer::Mailbox::new(syncer_sender),
                     deferred_verifications: Vec::new(),
                     database_subscribers: Vec::new(),
@@ -587,56 +608,31 @@ mod tests {
             )
         }
 
-        /// Build the harness with `syncing_context` owning the syncing actor and its
-        /// state-sync metadata, while the marshal fixture runs on the plain `context`.
+        /// Build the harness with `context` owning the syncing actor and its state-sync
+        /// metadata, holding a completed sync artifact at `anchor`.
         async fn new_on(
-            context: deterministic::Context,
-            syncing_context: E,
+            context: E,
+            marshal: MarshalMailbox<TestScheme, TestVariant>,
             anchor: Anchor<Sha256Digest>,
         ) -> Self {
-            let mut marshal_context = context.child("marshal");
-            let scheme = scheme_mocks::fixture(&mut marshal_context, b"syncing-harness", 1).schemes
-                [0]
-            .clone();
-            let marshal = fixtures::marshal_fixture(
-                marshal_context,
-                "syncing-harness",
-                scheme,
-                None,
-                NZUsize!(1),
-                false,
-            )
-            .await
-            .mailbox;
-            let (_mailbox_sender, mailbox) =
-                actor_mailbox::new(context.child("mailbox"), NZUsize!(1));
-            let (syncer_sender, _syncer_receiver) =
-                actor_mailbox::new(context.child("syncer_mailbox"), NZUsize!(1));
-            let (_sync_complete, sync_completed) = oneshot::channel();
-
-            Self {
-                syncing: Syncing {
-                    context: ContextCell::new(syncing_context.child("syncing")),
-                    mailbox,
-                    application: TestApp::default(),
-                    provider: (),
-                    marshal,
-                    sync_metadata: StateSyncMetadata::init(&syncing_context, "syncing-test").await,
-                    syncer: syncer::Mailbox::new(syncer_sender),
-                    deferred_verifications: Vec::new(),
-                    database_subscribers: Vec::new(),
-                    artifact: Some(SyncResult {
-                        databases: test_databases(),
-                        anchor,
-                    }),
-                    resolvers: NoopResolver,
-                    sync_completed,
-                    pending_finalizations: VecDeque::new(),
-                    pruning: None,
-                    metrics: StatefulMetrics::new(&context),
-                },
-            }
+            let (mut harness, _mailbox, _syncer_receiver, _sync_complete) =
+                Self::new_syncing_on(context, marshal).await;
+            harness.syncing.artifact = Some(SyncResult {
+                databases: test_databases(),
+                anchor,
+            });
+            harness
         }
+    }
+
+    /// Start a stopped marshal fixture for the harness and return its mailbox.
+    async fn harness_marshal(
+        mut context: deterministic::Context,
+    ) -> MarshalMailbox<TestScheme, TestVariant> {
+        let scheme = scheme_mocks::fixture(&mut context, b"syncing-harness", 1).schemes[0].clone();
+        fixtures::marshal_fixture(context, "syncing-harness", scheme, None, NZUsize!(1), false)
+            .await
+            .mailbox
     }
 
     #[test]
@@ -649,6 +645,8 @@ mod tests {
             for (height, digest) in [
                 (u64::MAX - 3, 8),
                 (u64::MAX - 2, 9),
+                (u64::MAX - 1, 10),
+                (u64::MAX, 11),
                 (u64::MAX - 1, 10),
                 (u64::MAX, 11),
             ] {
@@ -665,7 +663,7 @@ mod tests {
                 Some(FinalizedHandoff::Reflected(block, _))
                     if block.height() == Height::new(u64::MAX - 2)
             ));
-            for height in [u64::MAX - 1, u64::MAX] {
+            for height in [u64::MAX - 1, u64::MAX - 1, u64::MAX, u64::MAX] {
                 assert!(matches!(
                     handoffs.pop_front(),
                     Some(FinalizedHandoff::Apply(block, _))
@@ -683,7 +681,19 @@ mod tests {
             let harness = TestHarness::new(context, anchor(7, 9)).await;
             let _ = harness
                 .syncing
-                .prepare_handoffs([pending(TestBlock::new(7, 10))]);
+                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(7, 10))]));
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate finalized block must match its original digest")]
+    fn duplicate_handoff_with_conflicting_digest_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = TestHarness::new(context, anchor(7, 9)).await;
+            let _ = harness.syncing.prepare_handoffs(VecDeque::from([
+                pending(TestBlock::new(8, 10)),
+                pending(TestBlock::new(8, 11)),
+            ]));
         });
     }
 
@@ -694,7 +704,7 @@ mod tests {
             let harness = TestHarness::new(context, anchor(7, 9)).await;
             let _ = harness
                 .syncing
-                .prepare_handoffs([pending(TestBlock::new(9, 10))]);
+                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(9, 10))]));
         });
     }
 
@@ -704,7 +714,7 @@ mod tests {
             let harness = TestHarness::new(context, anchor(7, 9)).await;
             let handoffs = harness
                 .syncing
-                .prepare_handoffs([pending(TestBlock::new(6, 8))]);
+                .prepare_handoffs(VecDeque::from([pending(TestBlock::new(6, 8))]));
             assert!(matches!(
                 handoffs.front(),
                 Some(FinalizedHandoff::Covered(block, _)) if block.height() == Height::new(6)
@@ -750,8 +760,8 @@ mod tests {
                 inner: context.child("delayed"),
                 pending: pending.clone(),
             };
-            let mut harness =
-                TestHarness::new_on(context.child("harness"), delayed, anchor(7, 9)).await;
+            let marshal = harness_marshal(context.child("marshal")).await;
+            let mut harness = TestHarness::new_on(delayed, marshal, anchor(7, 9)).await;
             harness.syncing.pruning = Some(Pruning::build(
                 PruneConfig {
                     maintenance_interval: NZUsize!(1),
@@ -835,9 +845,11 @@ mod tests {
             );
 
             // The completed height is durable: reopen the metadata partition.
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(9)));
         });
     }
@@ -870,10 +882,228 @@ mod tests {
                 waiter.await.is_err(),
                 "an aborted handoff must cancel marshal's acknowledgement",
             );
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), None);
+        });
+    }
+
+    /// A live floor during state sync redelivers receipts. The handoff applies each block once
+    /// and releases every receipt only after its flush.
+    #[rstest::rstest]
+    #[case::success(true)]
+    #[case::failure(false)]
+    fn live_floor_reports_handoff_once_after_durability(#[case] succeeds: bool) {
+        deterministic::Runner::timed(Duration::from_secs(10)).start(|context| async move {
+            let mut signing = context.child("signing");
+            let fixture =
+                scheme_mocks::fixture(&mut signing, b"_COMMONWARE_GLUE_SYNCING_LIVE_FLOOR", 1);
+            let (sender, mut reports) = actor_mailbox::new(context.child("reports"), NZUsize!(8));
+            let reporter = StatefulMailbox::<_, TestApp>::new(sender);
+            let marshal = fixtures::marshal_fixture_with_reporter(
+                context.child("marshal"),
+                "syncing-live-floor",
+                fixture.schemes[0].clone(),
+                NZUsize!(4),
+                reporter.clone(),
+            )
+            .await;
+
+            // Blocks 1 through 3 extend genesis, and block 2 becomes the live floor.
+            let mut ingress = marshal.mailbox.clone();
+            let genesis = TestBlock::new(0, 0);
+            let first = TestBlock::child(&genesis, 1);
+            let second = TestBlock::child(&first, 2);
+            let third = TestBlock::child(&second, 3);
+            let first_finalization = fixtures::finalization(&fixture, 1, first.digest());
+            let floor_finalization = fixtures::finalization(&fixture, 2, second.digest());
+
+            // Acknowledge genesis and block 1 so marshal's processed height is 1.
+            let Some(Message::Finalized {
+                block,
+                acknowledgement,
+                ..
+            }) = reports.recv().await
+            else {
+                panic!("marshal must report genesis");
+            };
+            assert_eq!(block.height(), Height::zero());
+            acknowledgement.acknowledge();
+            assert!(
+                ingress
+                    .verified(first.context().round, Arc::new(first.clone()))
+                    .await
+            );
+            ingress.report(Activity::Finalization(first_finalization.clone()));
+            let Some(Message::Finalized {
+                block,
+                acknowledgement,
+                ..
+            }) = reports.recv().await
+            else {
+                panic!("marshal must report the recoverable anchor");
+            };
+            assert_eq!(block.height(), Height::new(1));
+            acknowledgement.acknowledge();
+            assert_eq!(
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(1)))
+            );
+
+            // Start syncing from block 1.
+            let (mut harness, _mailbox, mut coordinator, _complete) =
+                TestHarness::new_syncing(context.child("harness"), marshal.mailbox.clone()).await;
+            harness.syncing.sync_metadata = harness
+                .syncing
+                .sync_metadata
+                .begin_sync(first_finalization)
+                .await;
+            assert!(harness.syncing.sync_metadata.in_progress());
+
+            // The interrupted sync has a recoverable artifact at 1, but has not recorded Complete.
+            // Its coordinator can finish before a later target update is recorded.
+            let control = FlushControl::default();
+            let artifact = SyncResult {
+                databases: Shared::new("test", TestDb::gated(control.clone())),
+                anchor: anchor(1, 1),
+            };
+
+            // Report blocks 2 and 3. Glue retains both receipts because the window is not full.
+            for block in [&second, &third] {
+                assert!(
+                    ingress
+                        .verified(block.context().round, Arc::new(block.clone()))
+                        .await
+                );
+                ingress.report(Activity::Finalization(fixtures::finalization(
+                    &fixture,
+                    block.height().get(),
+                    block.digest(),
+                )));
+                let Some(Message::Finalized {
+                    block: reported,
+                    acknowledgement,
+                    ..
+                }) = reports.recv().await
+                else {
+                    panic!("marshal must report the original suffix");
+                };
+                assert_eq!(reported.height(), block.height());
+                let (syncing, handoff) = harness
+                    .syncing
+                    .process_finalized(reported, acknowledgement)
+                    .await;
+                assert!(handoff.is_none());
+                harness.syncing = syncing;
+            }
+
+            // Installing block 2 keeps processed height 1 and redelivers blocks 2 and 3 with
+            // fresh receipts.
+            marshal.mailbox.set_floor(floor_finalization);
+            assert_eq!(
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(1)))
+            );
+            let Some(Message::Finalized {
+                block,
+                acknowledgement,
+                ..
+            }) = reports.recv().await
+            else {
+                panic!("floor installation must report its anchor again");
+            };
+            assert_eq!(block.height(), Height::new(2));
+            let (syncing, handoff) = harness
+                .syncing
+                .process_finalized(block, acknowledgement)
+                .await;
+            assert!(handoff.is_none());
+            harness.syncing = syncing;
+            assert!(coordinator.try_recv().is_err());
+
+            // The redelivered block 3 is the fourth retained receipt. It fills the window, and the
+            // coordinator answers the retarget with the completed artifact.
+            let Some(Message::Finalized {
+                block,
+                acknowledgement,
+                ..
+            }) = reports.recv().await
+            else {
+                panic!("floor installation must report the suffix again");
+            };
+            assert_eq!(block.height(), Height::new(3));
+            harness.syncing.mailbox = reports;
+            let process = context
+                .child("full_window")
+                .spawn(move |_| harness.syncing.process_finalized(block, acknowledgement));
+            let Some(syncer::mailbox::Message::UpdateTargets { update, response }) =
+                coordinator.recv().await
+            else {
+                panic!("four actual receipts must fill the acknowledgement window");
+            };
+            assert!(response.send(Some(artifact)).is_ok());
+            drop(update);
+            let (syncing, handoffs) = process.await.unwrap();
+
+            // The handoff applies blocks 2 and 3 once and holds all four receipts behind one
+            // flush.
+            let transition = context.child("transition").spawn(move |_| {
+                syncing.transition(handoffs.expect("completed artifact must hand off reports"))
+            });
+            while control.flushes.lock().is_empty() {
+                reschedule().await;
+            }
+            assert_eq!(control.applied.load(Ordering::Relaxed), 2);
+            assert_eq!(control.flushes.lock().len(), 1);
+            assert_eq!(
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(1)))
+            );
+            let release = control.flushes.lock().remove(0);
+            if !succeeds {
+                // A failed flush stops the handoff. After restart, marshal is still at block 1
+                // and state sync is still in progress.
+                drop(release);
+                transition.await.expect("failed durability stops handoff");
+                marshal.abort().await;
+                let restarted = fixtures::marshal_fixture_with_reporter(
+                    context.child("restart"),
+                    "syncing-live-floor",
+                    fixture.schemes[0].clone(),
+                    NZUsize!(4),
+                    fixtures::FixtureReporter::new(false),
+                )
+                .await;
+                assert_eq!(
+                    restarted.floor.processed(),
+                    Some(Processed::Block(Height::new(1)))
+                );
+                let metadata = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                    context.child("metadata"),
+                    "syncing-test",
+                )
+                .await;
+                assert!(metadata.in_progress());
+                assert_eq!(metadata.sync_height(), None);
+                restarted.abort().await;
+                return;
+            }
+
+            // The flush releases every receipt, advancing marshal to block 3.
+            release.send(Ok(())).unwrap();
+            drop(reporter.subscribe_databases().await);
+            assert_eq!(
+                marshal.mailbox.get_processed().await,
+                Some(Processed::Block(Height::new(3)))
+            );
+            assert_eq!(control.applied.load(Ordering::Relaxed), 2);
+            assert!(control.flushes.lock().is_empty());
+            transition.abort();
+            let _ = transition.await;
+            marshal.abort().await;
         });
     }
 
@@ -1003,9 +1233,11 @@ mod tests {
                 assert!(waiter.await.is_ok());
             }
 
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(9)));
         });
     }
@@ -1041,8 +1273,7 @@ mod tests {
                 pending: pending.clone(),
             };
             let (mut harness, mut mailbox, _syncer_receiver, sync_complete) =
-                TestHarness::new_syncing_on(context.child("harness"), syncing_context, marshal)
-                    .await;
+                TestHarness::new_syncing_on(syncing_context, marshal).await;
             harness.syncing.sync_metadata = harness
                 .syncing
                 .sync_metadata
@@ -1105,9 +1336,11 @@ mod tests {
             drop(mailbox);
             actor.await.expect("syncing actor failed");
 
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(9)));
         });
     }
@@ -1150,9 +1383,11 @@ mod tests {
             drop(mailbox);
             actor.await.expect("syncing actor failed");
 
-            let reopened =
-                StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(&context, "syncing-test")
-                    .await;
+            let reopened = StateSyncMetadata::<_, TestScheme, Sha256Digest>::init(
+                context.child("metadata"),
+                "syncing-test",
+            )
+            .await;
             assert_eq!(reopened.sync_height(), Some(Height::new(10)));
         });
     }
@@ -1195,9 +1430,11 @@ mod tests {
             // Drop all volatile retarget state after marshal has acknowledged the window.
             drop(harness);
 
-            let plan =
-                syncer::SyncPlan::<_, TestScheme, TestVariant>::init(&context, "syncing-test")
-                    .await;
+            let plan = syncer::SyncPlan::<_, TestScheme, TestVariant>::init(
+                context.child("plan"),
+                "syncing-test",
+            )
+            .await;
             assert!(
                 plan.should_state_sync(false),
                 "an interrupted sync must restart peer state sync",

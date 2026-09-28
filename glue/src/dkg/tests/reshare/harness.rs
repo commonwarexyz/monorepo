@@ -901,7 +901,11 @@ impl EngineDefinition for ReshareEngine {
         let probe_handle = probe_actor.start(probe_boundary_network);
 
         let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
+        let mut plan = SyncPlan::init(
+            stateful_startup_context.child("plan"),
+            partition_prefix.clone(),
+        )
+        .await;
         let should_state_sync = plan.should_state_sync(delayed);
         if should_state_sync {
             *self

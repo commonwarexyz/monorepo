@@ -128,8 +128,8 @@ where
         + sync::SourceFor<DbOf<H>>,
 {
     fn config_for<H: SyncTestHarness, S>(
-        context: &deterministic::Context,
-        suffix: &'static str,
+        context: deterministic::Context,
+        suffix: &str,
         source: S,
         fetch_batch_size: NonZeroU64,
         target: &Target<H::Family, sha256::Digest>,
@@ -138,14 +138,15 @@ where
         S: sync::SourceFor<DbOf<H>>,
         OpOf<H>: Encode,
     {
+        let db_config = H::config(suffix, &context);
         Config {
-            context: context.child(suffix),
+            context,
             target: target.clone(),
             source,
             apply_batch_size: NZU64!(2),
             max_outstanding_requests: 1,
             fetch_batch_size,
-            db_config: H::config(suffix, context),
+            db_config,
             update_rx: None,
             finish_rx: None,
             reached_target_tx: None,
@@ -187,7 +188,7 @@ where
         proof.digests.push(sha256::Digest::from([0xee; 32]));
         let source = SequenceSource::new(vec![bad.clone()]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
-            &context,
+            context.child("terminal"),
             "verify_term",
             source,
             max_ops,
@@ -202,7 +203,7 @@ where
         // A valid candidate lets the same source call complete after rejection.
         let source = SequenceSource::new(vec![bad, good.clone()]);
         let synced: DbOf<H> = sync::sync(config_for::<H, _>(
-            &context,
+            context.child("retry"),
             "verify_retry",
             source.clone(),
             max_ops,
@@ -228,7 +229,11 @@ where
         };
         let source = SequenceSource::new(vec![empty]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
-            &context, "empty", source, max_ops, &target,
+            context.child("empty"),
+            "empty",
+            source,
+            max_ops,
+            &target,
         ))
         .await;
         assert!(matches!(
@@ -239,7 +244,7 @@ where
         // A batch larger than the request's max_ops is invalid.
         let source = SequenceSource::new(vec![good.clone()]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
-            &context,
+            context.child("overflow"),
             "overflow",
             source,
             NZU64!(2),
@@ -260,7 +265,11 @@ where
         };
         let source = SequenceSource::new(vec![boundary]);
         let result: Result<DbOf<H>, _> = sync::sync(config_for::<H, _>(
-            &context, "mismatch", source, max_ops, &target,
+            context.child("mismatch"),
+            "mismatch",
+            source,
+            max_ops,
+            &target,
         ))
         .await;
         assert!(matches!(
