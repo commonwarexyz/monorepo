@@ -211,11 +211,155 @@ pub(crate) mod tests {
         Context,
         journal::contiguous::Contiguous,
         merkle::{mmb, mmr},
-        qmdb::keyless::fixed::Operation as TestOp,
+        qmdb::{
+            compact::{Config, Db},
+            immutable, keyless,
+            keyless::fixed::Operation as TestOp,
+        },
     };
+    use commonware_codec::{Decode, Encode, Error as CodecError};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
-    use commonware_utils::sequence::U64;
+    use commonware_runtime::{
+        Runner as _, Supervisor as _, buffer::paged::CacheRef, deterministic,
+    };
+    use commonware_utils::{NZU16, NZU64, NZUsize, sequence::U64};
+
+    fn journal_config<C>(
+        context: &deterministic::Context,
+        partition: &str,
+        codec_config: C,
+    ) -> variable::Config<C> {
+        variable::Config {
+            partition: partition.into(),
+            items_per_section: NZU64!(4),
+            compression: None,
+            codec_config,
+            page_cache: CacheRef::from_pooler(context, NZU16!(77), NZUsize!(9)),
+            write_buffer: NZUsize!(1024),
+            replay_buffer: NZUsize!(1024),
+        }
+    }
+
+    fn assert_decode_errors<F, O>(valid_cfg: O::Cfg, restrictive_cfg: O::Cfg)
+    where
+        F: Family,
+        O: Operation<F, Metadata = Vec<u8>>,
+    {
+        deterministic::Runner::default().start(|context| async move {
+            let witness = Witness::<F, <Sha256 as Hasher>::Digest, O> {
+                commit: O::commit(Some(vec![1, 2, 3]), Location::new(0)),
+                size: Location::new(1),
+                pinned_nodes: Vec::new(),
+            };
+            let encoded = witness.encode();
+            let decoded = Witness::<F, <Sha256 as Hasher>::Digest, O>::decode_cfg(
+                encoded.clone(),
+                &valid_cfg,
+            )
+            .unwrap();
+            assert_eq!(decoded.commit.metadata(), Some(&vec![1, 2, 3]));
+            assert!(matches!(
+                Witness::<F, <Sha256 as Hasher>::Digest, O>::decode_cfg(
+                    encoded.clone(),
+                    &restrictive_cfg,
+                ),
+                Err(CodecError::InvalidLength(3))
+            ));
+            let mut invalid_tag = encoded.to_vec();
+            invalid_tag[0] = 0xff;
+            assert!(matches!(
+                Witness::<F, <Sha256 as Hasher>::Digest, O>::decode_cfg(invalid_tag, &valid_cfg),
+                Err(CodecError::InvalidEnum(0xff))
+            ));
+
+            // The metadata is valid at the configured limit, then rejected on reopen with a
+            // smaller limit. The failed open must preserve the persisted witness.
+            let cfg = Config {
+                strategy: Sequential,
+                witness: journal_config(&context, "witness-metadata-limit", valid_cfg.clone()),
+            };
+            let journal = Journal::<_, F, <Sha256 as Hasher>::Digest, O>::init(
+                context.child("write"),
+                cfg.witness.clone(),
+            )
+            .await
+            .unwrap();
+            let (journal, _) = journal.append(&witness).await.unwrap();
+            drop(journal.sync().await.unwrap());
+
+            let mut restrictive = cfg.clone();
+            restrictive.witness.codec_config = restrictive_cfg;
+            assert!(matches!(
+                Db::<F, _, O, Sha256, _>::init(context.child("reject_metadata"), restrictive, None)
+                    .await,
+                Err(Error::Journal(crate::journal::Error::Codec(
+                    CodecError::InvalidLength(3)
+                )))
+            ));
+            let db = Db::<F, _, O, Sha256, _>::init(context.child("reopen"), cfg, None)
+                .await
+                .unwrap();
+            assert_eq!(db.get_metadata(), Some(vec![1, 2, 3]));
+            db.destroy().await.unwrap();
+
+            // A one-byte array writes the invalid operation tag inside a valid journal frame.
+            let journal = variable::Journal::<_, [u8; 1]>::init(
+                context.child("write_invalid_tag"),
+                journal_config(&context, "witness-invalid-tag", ()),
+            )
+            .await
+            .unwrap();
+            let (journal, _) = journal.append(&[0xff]).await.unwrap();
+            drop(journal.sync().await.unwrap());
+            assert!(matches!(
+                Db::<F, _, O, Sha256, _>::init(
+                    context.child("reject_tag"),
+                    Config {
+                        strategy: Sequential,
+                        witness: journal_config(&context, "witness-invalid-tag", valid_cfg),
+                    },
+                    None,
+                )
+                .await,
+                Err(Error::Journal(crate::journal::Error::Codec(
+                    CodecError::InvalidEnum(0xff)
+                )))
+            ));
+        });
+    }
+
+    #[test]
+    fn test_decode_errors_keyless_mmr() {
+        assert_decode_errors::<mmr::Family, keyless::variable::Operation<mmr::Family, Vec<u8>>>(
+            ((..=3).into(), ()),
+            ((..=2).into(), ()),
+        );
+    }
+
+    #[test]
+    fn test_decode_errors_keyless_mmb() {
+        assert_decode_errors::<mmb::Family, keyless::variable::Operation<mmb::Family, Vec<u8>>>(
+            ((..=3).into(), ()),
+            ((..=2).into(), ()),
+        );
+    }
+
+    #[test]
+    fn test_decode_errors_immutable_mmr() {
+        assert_decode_errors::<
+            mmr::Family,
+            immutable::variable::Operation<mmr::Family, U64, Vec<u8>>,
+        >(((), ((..=3).into(), ())), ((), ((..=2).into(), ())));
+    }
+
+    #[test]
+    fn test_decode_errors_immutable_mmb() {
+        assert_decode_errors::<
+            mmb::Family,
+            immutable::variable::Operation<mmb::Family, U64, Vec<u8>>,
+        >(((), ((..=3).into(), ())), ((), ((..=2).into(), ())));
+    }
 
     fn assert_restore_rejects_invalid_witness<F: Family>() {
         let genesis = Witness {

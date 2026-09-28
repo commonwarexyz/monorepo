@@ -396,7 +396,6 @@ where
     pub async fn commit(mut self) -> Result<Self, Error<F>> {
         self.wait_for_sync().await?;
         self = self.flush_import().await?;
-        // A commit leaves `pending_sync` set so the next full sync still persists all metadata.
         if self.tip_state == TipState::Uncommitted {
             self.journal = self.journal.commit().await?;
             self.tip_state = TipState::Committed;
