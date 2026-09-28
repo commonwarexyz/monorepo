@@ -122,9 +122,7 @@ impl<T: Read> Lazy<T> {
             }
         }
     }
-}
 
-impl<T: Read> Lazy<T> {
     /// Force decoding of the underlying value.
     ///
     /// This will return `None` only if decoding the value fails.

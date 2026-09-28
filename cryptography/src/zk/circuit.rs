@@ -320,9 +320,7 @@ impl<'ctx, F> Context<'ctx, F> {
     fn witness(self, init: impl for<'a> FnOnce(Values<'a, F>) -> F) -> CircuitIdx {
         self.allocate(|values| Some(init(values)), Circuit::next_witness)
     }
-}
 
-impl<'ctx, F> Context<'ctx, F> {
     fn constant(self, x: F) -> CircuitIdx {
         self.allocate(|_| None, |circuit| circuit.next_constant(x))
     }
@@ -729,6 +727,15 @@ impl<'ctx, F: Ring> BoolVar<'ctx, F> {
     pub fn assert_eq(&self, other: &Self) {
         self.var.assert_eq(other.var());
     }
+
+    /// Select between two vars based on this bit.
+    ///
+    /// Returns `on_true` when the bit is `1` and `on_false` when it is `0`,
+    /// computed as `on_false + b * (on_true - on_false)` with a single
+    /// multiplication.
+    pub fn select(&self, on_true: &Var<'ctx, F>, on_false: &Var<'ctx, F>) -> Var<'ctx, F> {
+        on_false.clone() + &(self.var.clone() * &(on_true.clone() - on_false))
+    }
 }
 
 impl<'ctx, F: Ring + PartialEq> BoolVar<'ctx, F> {
@@ -768,17 +775,6 @@ impl<'ctx, F: Ring + PartialEq> BoolVar<'ctx, F> {
     /// `var * (1 - var) == 0`).
     fn enforce(var: &Var<'ctx, F>) {
         (var.clone() * var).assert_eq(var);
-    }
-}
-
-impl<'ctx, F: Ring> BoolVar<'ctx, F> {
-    /// Select between two vars based on this bit.
-    ///
-    /// Returns `on_true` when the bit is `1` and `on_false` when it is `0`,
-    /// computed as `on_false + b * (on_true - on_false)` with a single
-    /// multiplication.
-    pub fn select(&self, on_true: &Var<'ctx, F>, on_false: &Var<'ctx, F>) -> Var<'ctx, F> {
-        on_false.clone() + &(self.var.clone() * &(on_true.clone() - on_false))
     }
 }
 

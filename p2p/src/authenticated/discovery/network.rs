@@ -1,6 +1,7 @@
 //! Implementation of an `authenticated` network.
 
 use super::{
+    Handshake,
     actors::{dialer, listener, spawner, tracker},
     config::Config,
 };
@@ -9,46 +10,49 @@ use crate::{
     authenticated::{
         MAX_PAYLOAD_OVERHEAD,
         channels::{self, Channels},
-        discovery::types::InfoVerifier,
-        router,
+        discovery::types::{Info, InfoVerifier},
+        max_size, router,
     },
     sizing::max_retained_peers,
 };
-use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network as RNetwork, Quota, Resolver,
     Spawner, spawn_cell,
 };
-use commonware_stream::encrypted::Config as StreamConfig;
-use commonware_utils::{ordered::Set, union};
+use commonware_stream::{Config as StreamConfig, utils::Timeout};
+use commonware_utils::{SystemTimeExt, ordered::Set, union};
 use rand_core::CryptoRng;
+use std::sync::Arc;
 use tracing::{debug, info};
 
-/// Unique suffix for all messages signed by the tracker.
+/// Unique suffix for discovery tracker messages.
 const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 
-/// Unique suffix for all messages signed in a stream.
+/// Unique suffix for stream authentication.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
+
+/// Unique suffix for signed discovery address records.
+const IP_SUFFIX: &[u8] = b"_IP";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
     E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics,
-    C: Signer,
+    H: Handshake,
 > {
     context: ContextCell<E>,
-    cfg: Config<C>,
+    cfg: Config<H>,
     max_frame_size: u32,
     max_peer_set_size: u64,
 
-    channels: Channels<C::PublicKey>,
-    tracker: tracker::Actor<E, C>,
-    tracker_mailbox: tracker::Mailbox<C::PublicKey>,
-    info_verifier: InfoVerifier<C::PublicKey>,
+    channels: Channels<H::PublicKey>,
+    tracker: tracker::Actor<E, H::PublicKey>,
+    tracker_mailbox: tracker::Mailbox<H::PublicKey>,
+    info_verifier: InfoVerifier<H::PublicKey>,
 }
 
-impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, C: Signer>
-    Network<E, C>
+impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metrics, H: Handshake>
+    Network<E, H>
 {
     /// Create a new instance of an `authenticated` network.
     ///
@@ -63,8 +67,14 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
     ///
     /// # Panics
     ///
-    /// Panics if configured frame, bit-vector, or retained-peer capacity arithmetic overflows.
-    pub fn new(context: E, cfg: Config<C>) -> (Self, tracker::Oracle<C::PublicKey>) {
+    /// Panics if the configured frame size exceeds the stream limit or capacity arithmetic overflows.
+    pub fn new(context: E, cfg: Config<H>) -> (Self, tracker::Oracle<H::PublicKey>) {
+        // `max_size` subtracts framing overhead from `H::MAX_SIZE`, so this bound guarantees
+        // that adding the overhead back cannot overflow.
+        assert!(
+            cfg.max_message_size <= max_size::<H>(),
+            "maximum message size exceeds stream limit"
+        );
         let max_frame_size = cfg
             .max_message_size
             .checked_add(MAX_PAYLOAD_OVERHEAD)
@@ -74,7 +84,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
 
         // Bootstrappers persist outside the tracked peer-set window. Reserve capacity for each
         // distinct remote identity without folding them into the per-set limit.
-        let local = cfg.crypto.public_key();
+        let local = cfg.handshake.public_key();
         let persistent_peers = Set::from_iter_dedup(
             cfg.bootstrappers
                 .iter()
@@ -87,16 +97,27 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
             cfg.tracked_peer_sets,
             persistent_peers,
         );
-        let (tracker, tracker_mailbox, oracle, info_verifier) = tracker::Actor::new(
+        let ip_namespace = union(&union(&cfg.namespace, TRACKER_SUFFIX), IP_SUFFIX);
+        let myself = Info::sign(
+            local.clone(),
+            &ip_namespace,
+            cfg.dialable.clone(),
+            context.current().epoch_millis(),
+            |namespace, message| cfg.handshake.sign(namespace, message),
+        );
+        let info_verifier = Info::verifier(
+            local,
+            cfg.peer_gossip_max_count,
+            cfg.synchrony_bound,
+            ip_namespace,
+        );
+        let (tracker, tracker_mailbox, oracle) = tracker::Actor::new(
             context.child("tracker"),
             tracker::Config {
-                crypto: cfg.crypto.clone(),
-                namespace: union(&cfg.namespace, TRACKER_SUFFIX),
-                address: cfg.dialable.clone(),
+                myself,
                 bootstrappers: cfg.bootstrappers.clone(),
                 allow_private_ips: cfg.allow_private_ips,
                 allow_dns: cfg.allow_dns,
-                synchrony_bound: cfg.synchrony_bound,
                 mailbox_size: cfg.mailbox_size,
                 max_peers_per_set: cfg.max_peers_per_set.get(),
                 tracked_peer_sets: cfg.tracked_peer_sets,
@@ -171,8 +192,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         channel: Channel,
         rate: Quota,
     ) -> (
-        channels::Sender<C::PublicKey, E>,
-        channels::Receiver<C::PublicKey>,
+        channels::Sender<H::PublicKey, E>,
+        channels::Receiver<H::PublicKey>,
     ) {
         let context = self
             .context
@@ -204,8 +225,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
 
     async fn run(
         self,
-        router: router::Actor<E, C::PublicKey>,
-        router_mailbox: router::Mailbox<C::PublicKey>,
+        router: router::Actor<E, H::PublicKey>,
+        router_mailbox: router::Mailbox<H::PublicKey>,
     ) {
         // Start tracker
         let mut tracker_task = self.tracker.start();
@@ -227,20 +248,19 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         );
         let mut spawner_task = spawner.start(self.tracker_mailbox.clone(), router_mailbox);
 
+        // Inbound and outbound connections share the same handshake policy.
+        let stream = Arc::new(StreamConfig::new(
+            Timeout::new(self.cfg.handshake, self.cfg.handshake_timeout),
+            union(&self.cfg.namespace, STREAM_SUFFIX),
+            self.max_frame_size,
+        ));
+
         // Start listener
-        let stream_cfg = StreamConfig {
-            signing_key: self.cfg.crypto,
-            namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
-            max_message_size: self.max_frame_size,
-            synchrony_bound: self.cfg.synchrony_bound,
-            max_handshake_age: self.cfg.max_handshake_age,
-            handshake_timeout: self.cfg.handshake_timeout,
-        };
         let listener = listener::Actor::new(
             self.context.child("listener"),
             listener::Config {
                 address: self.cfg.listen,
-                stream_cfg: stream_cfg.clone(),
+                stream: stream.clone(),
                 allow_private_ips: self.cfg.allow_private_ips,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
@@ -254,7 +274,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
         let dialer = dialer::Actor::new(
             self.context.child("dialer"),
             dialer::Config {
-                stream_cfg,
+                stream,
                 dial_timeout: self.cfg.dial_timeout,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,
@@ -287,5 +307,72 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRng + RNetwork + Resolver + Metri
                 debug!(?dialer, "dialer stopped, shutting down network");
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Ingress, Manager, authenticated::discovery::actors::peer};
+    use commonware_codec::Encode;
+    use commonware_cryptography::{Signer, ed25519::PrivateKey};
+    use commonware_runtime::{Runner, Supervisor as _, deterministic};
+    use commonware_stream::encrypted::Handshake as StreamHandshake;
+    use commonware_utils::NZUsize;
+    use std::{net::SocketAddr, time::Duration};
+
+    #[test]
+    fn greeting_and_verifier_use_the_authenticated_identity_and_gossip_namespace() {
+        deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
+            // Configure distinct local and remote identities.
+            let signer = PrivateKey::from_seed(0);
+            let peer_signer = PrivateKey::from_seed(1);
+            let local = signer.public_key();
+            let peer = peer_signer.public_key();
+            let address = SocketAddr::from(([127, 0, 0, 1], 7000));
+            let cfg = Config::local(
+                StreamHandshake::new(signer.clone()),
+                b"discovery-test",
+                address,
+                address,
+                Vec::new(),
+                NZUsize!(2),
+                1024,
+            );
+            let timestamp = context.current().epoch_millis();
+            let (network, mut oracle) = Network::new(context.child("network"), cfg);
+
+            // Accept a peer record signed in the gossip namespace.
+            let ingress = Ingress::from(address);
+            let message = (ingress, timestamp).encode();
+            let namespace = b"discovery-test_TRACKER_IP";
+            let peer_info = Info {
+                ingress: address.into(),
+                timestamp,
+                public_key: peer.clone(),
+                signature: peer_signer.sign(namespace, &message),
+            };
+            assert!(
+                network
+                    .info_verifier
+                    .validate(&context, &[peer_info])
+                    .is_ok()
+            );
+
+            // Check that the greeting uses the handshake's identity and the gossip namespace.
+            network.tracker.start();
+            oracle.track(0, Set::try_from([local.clone(), peer.clone()]).unwrap());
+            let _reservation = network.tracker_mailbox.listen(peer.clone()).await.unwrap();
+            let (mailbox, _receiver) = peer::Mailbox::new(context.child("peer"), NZUsize!(1));
+            let greeting = network
+                .tracker_mailbox
+                .connect(peer, mailbox, false)
+                .await
+                .unwrap();
+            assert_eq!(greeting.public_key, local);
+            assert_eq!(greeting.ingress, address.into());
+            assert_eq!(greeting.timestamp, timestamp);
+            assert_eq!(greeting.signature, signer.sign(namespace, &message));
+        });
     }
 }

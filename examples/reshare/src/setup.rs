@@ -108,7 +108,7 @@ fn run_inner(args: Setup) -> anyhow::Result<()> {
         let node_dir = args.node_dir.join(format!("validator-{i}"));
         fs::create_dir_all(&node_dir)?;
         let node = NodeConfig {
-            signing_key: signer,
+            signer,
             listen: SocketAddr::new(args.host, port(&args, i)?),
             dial: SocketAddr::new(args.host, port(&args, i)?),
         };

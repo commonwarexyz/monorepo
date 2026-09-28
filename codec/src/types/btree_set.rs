@@ -56,7 +56,7 @@ impl<K: Ord + Eq + EncodeSize> EncodeSize for BTreeSet<K> {
     }
 }
 
-impl<K: Read + Clone + Ord + Eq> Read for BTreeSet<K> {
+impl<K: Read + Ord + Eq> Read for BTreeSet<K> {
     type Cfg = (RangeCfg<usize>, K::Cfg);
 
     fn read_cfg(buf: &mut impl Buf, (range, cfg): &Self::Cfg) -> Result<Self, Error> {
@@ -84,7 +84,7 @@ mod tests {
     // Generic round trip test function for BTreeSet
     fn round_trip_btree<K>(set: &BTreeSet<K>, range_cfg: RangeCfg<usize>, item_cfg: K::Cfg)
     where
-        K: Write + EncodeSize + Read + Clone + Ord + Eq + Debug + PartialEq,
+        K: Write + EncodeSize + Read + Ord + Eq + Debug + PartialEq,
         BTreeSet<K>: Read<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Decode<Cfg = (RangeCfg<usize>, K::Cfg)>
             + Debug

@@ -329,8 +329,11 @@
 //! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
 //! arrive since there is no batching benefit.
 //!
-//! If an invalid signature is detected, the `Batcher` will perform repeated bisections over collected
-//! messages to find the offending message (and block the peer(s) that sent it via [commonware_p2p::Blocker]).
+//! When buffered votes of one kind reach quorum, the `Batcher` asks the scheme to construct an
+//! authenticated certificate using
+//! [`Scheme::optimistic_assemble`](commonware_cryptography::certificate::Scheme::optimistic_assemble).
+//! Successful construction does not guarantee individual vote validity. Failed attempts retain valid
+//! votes and block identified invalid senders via [commonware_p2p::Blocker].
 //!
 //! _If using a p2p implementation that is not authenticated, it is not safe to employ this optimization
 //! as any attacking peer could simply reconnect from a different address. We recommend [commonware_p2p::authenticated]._
@@ -431,8 +434,11 @@
 //! ## Persistence
 //!
 //! The `Voter` caches all data required to participate in consensus to avoid any disk reads on
-//! on the critical path. To enable recovery, the `Voter` writes valid messages it receives from
-//! consensus and messages it generates to a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
+//! the critical path. To enable recovery, it records its own votes, verified certificates, and
+//! application certification results in a write-ahead log (WAL) implemented by [commonware_storage::journal::segmented::variable::Journal].
+//! Raw votes from peers are neither journaled nor rebroadcast, though they may be reported as
+//! unverified [`types::Activity`].
+//!
 //! Before sending a message, any pending `Journal` appends are synced to prevent inadvertent Byzantine
 //! behavior on restart (especially in the case of unclean shutdown). All appends made in the same event
 //! loop iteration are coalesced into a single sync that runs after messages are constructed and before

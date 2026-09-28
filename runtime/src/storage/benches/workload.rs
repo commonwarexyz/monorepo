@@ -10,7 +10,8 @@ use crate::{
         warm_read_loop,
     },
 };
-use commonware_runtime::{Blob as _, Storage as _, tokio::Context};
+use cfg_if::cfg_if;
+use commonware_runtime::{Blob as _, Storage as _};
 use commonware_utils::TestRng;
 use futures::{TryStreamExt, stream::FuturesUnordered};
 use rand::{RngExt as _, SeedableRng, rngs::SmallRng};
@@ -21,6 +22,14 @@ use std::{
     },
     time::Instant,
 };
+
+cfg_if! {
+    if #[cfg(all(target_os = "linux", feature = "iouring"))] {
+        use commonware_runtime::iouring::Context;
+    } else {
+        use commonware_runtime::tokio::Context;
+    }
+}
 
 /// Storage partition used for all benchmark blobs.
 const PARTITION: &str = "storage-bench";
@@ -55,6 +64,7 @@ async fn run_read(cfg: &Config, context: &Context) -> Result<Report> {
         &mut rng, context, &cfg.root, PARTITION, BLOB_NAME, file_size,
     )
     .await?;
+    let blob = Arc::new(blob);
 
     // Warm or cold the page cache before the timed phase.
     prepare_cache(cfg, &blob, total_blocks).await?;
@@ -103,6 +113,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
 
     // Preallocate the blob so we measure steady-state write cost.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, file_size).await?;
+    let blob = Arc::new(blob);
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
 
@@ -158,6 +169,7 @@ async fn run_overwrite(cfg: &Config, context: &Context) -> Result<Report> {
 async fn run_write_append(cfg: &Config, context: &Context) -> Result<Report> {
     // Start from an empty blob.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, 0).await?;
+    let blob = Arc::new(blob);
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
 
@@ -199,6 +211,7 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
 
     // Preallocate the blob so we measure steady-state write cost.
     let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, file_size).await?;
+    let blob = Arc::new(blob);
     let mut rng = TestRng::new(cfg.seed);
     let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
 
@@ -250,6 +263,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
         initial_size,
     )
     .await?;
+    let blob = Arc::new(blob);
     prepare_cache(cfg, &blob, total_blocks).await?;
 
     let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
@@ -318,7 +332,7 @@ async fn run_read_write_append(cfg: &Config, context: &Context) -> Result<Report
 ///
 /// In `Warm` mode, workers read through the file to pull pages into cache.
 /// In `Cold` mode, `posix_fadvise(DONTNEED)` evicts cached pages.
-async fn prepare_cache(cfg: &Config, blob: &RuntimeBlob, total_blocks: u64) -> Result<()> {
+async fn prepare_cache(cfg: &Config, blob: &Arc<RuntimeBlob>, total_blocks: u64) -> Result<()> {
     let cache = cfg.cache.expect("validated");
 
     // Evict cached pages so the timed phase starts from disk.

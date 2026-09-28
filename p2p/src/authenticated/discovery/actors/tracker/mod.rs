@@ -1,7 +1,7 @@
 //! Tracker
 
-use crate::{Ingress, authenticated::discovery::config::Bootstrapper};
-use commonware_cryptography::Signer;
+use crate::authenticated::discovery::{config::Bootstrapper, types::Info};
+use commonware_cryptography::PublicKey;
 use std::{num::NonZeroUsize, time::Duration};
 
 mod actor;
@@ -21,14 +21,11 @@ pub use metadata::Metadata;
 pub use reservation::Reservation;
 
 #[derive(Clone, Debug)]
-pub struct Config<C: Signer> {
-    pub crypto: C,
-    pub namespace: Vec<u8>,
-    pub address: Ingress,
-    pub bootstrappers: Vec<Bootstrapper<C::PublicKey>>,
+pub struct Config<C: PublicKey> {
+    pub myself: Info<C>,
+    pub bootstrappers: Vec<Bootstrapper<C>>,
     pub allow_private_ips: bool,
     pub allow_dns: bool,
-    pub synchrony_bound: Duration,
     pub mailbox_size: NonZeroUsize,
     pub max_peers_per_set: usize,
     pub tracked_peer_sets: NonZeroUsize,

@@ -167,81 +167,113 @@ impl<N: crate::Network> crate::Network for Network<N> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Listener as _, Network as _, Sink as _, Stream as _,
+        Clock, Listener as _, Network as _, Runner, Sink as _, Spawner, Stream as _,
+        Supervisor as _,
         network::{
             deterministic::Network as DeterministicNetwork, metered::Network as MeteredNetwork,
             tests,
         },
     };
     use commonware_macros::test_group;
+    use rstest::rstest;
     use std::net::SocketAddr;
 
-    #[tokio::test]
-    async fn test_trait() {
-        tests::test_network_trait(|| {
-            let mut registry = crate::telemetry::metrics::Registry::default();
-            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
-        })
-        .await;
-    }
-
-    #[test_group("slow")]
-    #[tokio::test]
-    async fn test_stress_trait() {
-        tests::stress_test_network_trait(|| {
-            let mut registry = crate::telemetry::metrics::Registry::default();
-            MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
-        })
-        .await;
-    }
-
-    #[tokio::test]
-    async fn test_metrics() {
-        const MSG_SIZE: usize = 100;
-
-        // Create a registry and network
-        let mut registry = crate::telemetry::metrics::Registry::default();
-        let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut registry);
-
-        // Set up server.
-        // Note this is a deterministic network, so we can use any address
-        // since we're not actually binding to a real socket.
-        let addr = SocketAddr::from(([127, 0, 0, 1], 1234));
-        let mut listener = network.bind(addr).await.unwrap();
-
-        // Create a server task that accepts one connection and echoes data
-        let server = tokio::spawn(async move {
-            let (_, mut sink, mut stream) = listener.accept().await.unwrap();
-            let received = stream.recv(MSG_SIZE).await.unwrap();
-            sink.send(received).await.unwrap();
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_trait<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            tests::test_network_trait(context, || {
+                let mut registry = crate::telemetry::metrics::Registry::default();
+                MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
+            })
+            .await;
         });
+    }
 
-        // Send and receive data as client
-        let (mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    #[test_group("slow")]
+    fn test_stress_trait<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner + Clock,
+    {
+        runner.start(|context| async move {
+            tests::stress_test_network_trait(context, || {
+                let mut registry = crate::telemetry::metrics::Registry::default();
+                MeteredNetwork::new(DeterministicNetwork::default(), &mut registry)
+            })
+            .await;
+        });
+    }
 
-        // Send fixed-size data and receive response
-        let msg = vec![42u8; MSG_SIZE];
-        client_sink.send(msg.clone()).await.unwrap();
+    #[rstest]
+    #[case::tokio(crate::tokio::Runner::default())]
+    #[cfg_attr(
+        all(target_os = "linux", feature = "iouring"),
+        case::iouring(crate::iouring::Runner::default())
+    )]
+    fn test_metrics<R: Runner>(#[case] runner: R)
+    where
+        R::Context: Spawner,
+    {
+        runner.start(|context| async move {
+            const MSG_SIZE: usize = 100;
 
-        let response = client_stream.recv(MSG_SIZE).await.unwrap().coalesce();
-        assert_eq!(response.len(), MSG_SIZE);
-        assert_eq!(response, msg.as_slice());
+            // Create a registry and network
+            let mut registry = crate::telemetry::metrics::Registry::default();
+            let network = MeteredNetwork::new(DeterministicNetwork::default(), &mut registry);
 
-        // Wait for server to complete
-        server.await.unwrap();
+            // Set up server.
+            // Note this is a deterministic network, so we can use any address
+            // since we're not actually binding to a real socket.
+            let addr = SocketAddr::from(([127, 0, 0, 1], 1234));
+            let mut listener = network.bind(addr).await.unwrap();
 
-        // Verify metrics were incremented correctly
-        assert_eq!(network.metrics.inbound_connections.get(), 1,);
-        assert_eq!(network.metrics.outbound_connections.get(), 1,);
-        assert_eq!(
-            network.metrics.inbound_bandwidth.get(),
-            2 * MSG_SIZE as u64,
-            "client and server should both have received MSG_SIZE"
-        );
-        assert_eq!(
-            network.metrics.outbound_bandwidth.get(),
-            2 * MSG_SIZE as u64,
-            "client and server should both have sent MSG_SIZE"
-        );
+            // Create a server task that accepts one connection and echoes data
+            let server = context.child("server").spawn(|_| async move {
+                let (_, mut sink, mut stream) = listener.accept().await.unwrap();
+                let received = stream.recv(MSG_SIZE).await.unwrap();
+                sink.send(received).await.unwrap();
+            });
+
+            // Send and receive data as client
+            let (mut client_sink, mut client_stream) = network.dial(addr).await.unwrap();
+
+            // Send fixed-size data and receive response
+            let msg = vec![42u8; MSG_SIZE];
+            client_sink.send(msg.clone()).await.unwrap();
+
+            let response = client_stream.recv(MSG_SIZE).await.unwrap().coalesce();
+            assert_eq!(response.len(), MSG_SIZE);
+            assert_eq!(response, msg.as_slice());
+
+            // Wait for server to complete
+            server.await.unwrap();
+
+            // Verify metrics were incremented correctly
+            assert_eq!(network.metrics.inbound_connections.get(), 1,);
+            assert_eq!(network.metrics.outbound_connections.get(), 1,);
+            assert_eq!(
+                network.metrics.inbound_bandwidth.get(),
+                2 * MSG_SIZE as u64,
+                "client and server should both have received MSG_SIZE"
+            );
+            assert_eq!(
+                network.metrics.outbound_bandwidth.get(),
+                2 * MSG_SIZE as u64,
+                "client and server should both have sent MSG_SIZE"
+            );
+        });
     }
 }

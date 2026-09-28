@@ -108,7 +108,7 @@ fn test_config(
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         },
         translator: TwoCap,
-        init_cache_size: Some(NZUsize!(3)),
+        init_cache: Some(NZUsize!(3)),
         init_buffer: NZUsize!(1 << 21),
     }
 }
@@ -118,7 +118,7 @@ fn fuzz(input: FuzzInput) {
 
     runner.start(|context| async move {
         let cfg = test_config("store-fuzz-test", &context);
-        let mut db = StoreDb::init(context.child("storage"), cfg)
+        let mut db = StoreDb::init(context.child("storage"), cfg, None)
             .await
             .expect("Failed to init db");
         let mut restarts = 0usize;
@@ -192,6 +192,7 @@ fn fuzz(input: FuzzInput) {
                     let db = StoreDb::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,
+                        None,
                     )
                     .await
                     .expect("Failed to init db");

@@ -28,9 +28,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-storage"
-          - os: ubuntu-latest
-            flags: "--features commonware-runtime/iouring-network"
+            flags: "--features commonware-runtime/iouring"
           - os: ubuntu-latest
             flags: ""
           - os: macos-latest
@@ -38,6 +36,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -76,6 +76,12 @@ jobs:
     needs: [Lint, lint-toml, zepter]
     if: always()
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Check lint results
         run: |
           if [ "${{ needs.Lint.result }}" != "success" ]; then
@@ -101,22 +107,17 @@ jobs:
         os: [ubuntu-latest, macos-latest]
         partition: [1, 2]
         flags:
-          - "--features commonware-runtime/iouring-storage"
-          - "--features commonware-runtime/iouring-network"
-          - "--no-default-features"
+          - "--features commonware-runtime/iouring"
           - ""
         exclude:
           # Only run io_uring features on Ubuntu
           - os: macos-latest
-            flags: "--features commonware-runtime/iouring-storage"
-          - os: macos-latest
-            flags: "--features commonware-runtime/iouring-network"
-          # Only run --no-default-features on Ubuntu
-          - os: macos-latest
-            flags: "--no-default-features"
+            flags: "--features commonware-runtime/iouring"
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
     - name: Run setup
@@ -136,7 +137,7 @@ jobs:
       run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/2 --verbose
 
   Tests-Subset:
-    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\")"
+    name: "Tests-Subset (os: ${{ matrix.os }}, package: ${{ matrix.package }}, flags: \"${{ matrix.flags }}\", sde: \"${{ matrix.sde }}${{ matrix.cpu-features && format(' [{0}]', matrix.cpu-features) }}\")"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -148,9 +149,28 @@ jobs:
           - os: macos-latest
             package: commonware-runtime
             flags: "--features commonware-runtime/external"
+          # Run the crates with AVX-512 paths on an emulated Ice Lake server, which has every feature they use.
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            sde: icx
+            cpu-features: "avx512f avx512bw avx512vl avx512ifma gfni vpclmulqdq"
+          # Skylake servers have AVX-512 without IFMA, GFNI, or VPCLMULQDQ, so paths that need those fall back.
+          - os: ubuntu-latest
+            package: commonware-cryptography
+            flags: "--cargo-profile release -p commonware-coding -p commonware-cryptography-curve25519"
+            sde: skx
+            cpu-features: "avx512f avx512bw avx512vl !avx512ifma !gfni !vpclmulqdq"
+          # Test each package with a std feature without std, one package at a time.
+          - os: ubuntu-latest
+            package: all
+            flags: "--no-default-features"
+            no-std: true
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -163,9 +183,30 @@ jobs:
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
+    - name: Install Intel SDE
+      if: ${{ matrix.sde }}
+      env:
+        SDE_URL: https://downloadmirror.intel.com/924984/sde-external-10.13.1-2026-07-28-lin.tar.xz
+        SDE_SHA256: 94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50
+      run: |
+        curl -sSfL "$SDE_URL" -o "$RUNNER_TEMP/sde.tar.xz"
+        echo "$SDE_SHA256  $RUNNER_TEMP/sde.tar.xz" | sha256sum -c -
+        mkdir -p "$RUNNER_TEMP/sde"
+        tar -xJf "$RUNNER_TEMP/sde.tar.xz" -C "$RUNNER_TEMP/sde" --strip-components=1
+        echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=$RUNNER_TEMP/sde/sde64 -${{ matrix.sde }} --" >> "$GITHUB_ENV"
+    - name: Check emulated CPU features
+      if: ${{ matrix.sde }}
+      run: |
+        rustc --edition 2024 -O -o "$RUNNER_TEMP/check_cpu_features" .github/scripts/check_cpu_features.rs
+        $CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER "$RUNNER_TEMP/check_cpu_features" ${{ matrix.cpu-features }}
+    - name: Run no-std tests
+      if: ${{ matrix.no-std }}
+      run: just test-no-std --verbose
     - name: Run subset tests
+      if: ${{ !matrix.no-std }}
       run: just test ${{ matrix.flags }} -p ${{ matrix.package }} --verbose
     - name: Run subset doc tests
+      if: ${{ !matrix.sde && !matrix.no-std }}
       run: just test-docs ${{ matrix.flags }} -p ${{ matrix.package }}
 
   Stability:
@@ -178,6 +219,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
     - name: Run setup
@@ -202,6 +245,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
     - name: Run setup
@@ -225,6 +270,12 @@ jobs:
     needs: [Tests, Tests-Subset, Stability, Unstable-Public]
     if: always()
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Check test results
         run: |
           if [ "${{ needs.Tests.result }}" != "success" ]; then
@@ -251,6 +302,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -276,6 +329,8 @@ jobs:
       with:
         ref: ${{ github.event.pull_request.head.sha }}
         fetch-depth: 0
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -295,6 +350,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Clear disk space
       uses: ./.github/actions/disk
     - name: Run setup
@@ -322,6 +379,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Install pandoc
       run: |
         wget -q https://github.com/jgm/pandoc/releases/download/${{ env.PANDOC_VERSION }}/pandoc-${{ env.PANDOC_VERSION }}-1-amd64.deb
@@ -345,6 +404,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -376,6 +437,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -390,6 +453,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Install just
       uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
       with:
@@ -406,6 +471,8 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+    - name: Configure swap
+      uses: ./.github/actions/swap
     - name: Run setup
       uses: ./.github/actions/setup
       with:
@@ -420,6 +487,8 @@ jobs:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
         with:
           submodules: true
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Install zepter
         uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
@@ -460,6 +529,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Clear disk space
         uses: ./.github/actions/disk
       - name: Determine toolchain version
@@ -494,6 +565,12 @@ jobs:
     needs: build
     if: always()
     steps:
+      - name: Checkout swap action
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+        with:
+          sparse-checkout: .github/actions/swap
+      - name: Configure swap
+        uses: ./.github/actions/swap
       - name: Check build results
         run: |
           if [ "${{ needs.build.result }}" != "success" ]; then

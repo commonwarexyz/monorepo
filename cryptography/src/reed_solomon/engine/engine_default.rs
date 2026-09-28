@@ -1,33 +1,35 @@
 #[cfg(target_arch = "aarch64")]
 use crate::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-use crate::reed_solomon::engine::{Avx2, Ssse3};
+use crate::reed_solomon::engine::{Avx2, Avx512, Ssse3};
 use crate::reed_solomon::engine::{
-    Engine, GF_ORDER, GfElement, NoSimd, SHARD_CHUNK_BYTES, ShardsRefMut,
+    Engine, GF_ORDER, GfElement, SHARD_CHUNK_BYTES, Scalar, ShardsRefMut,
 };
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 
-// ======================================================================
-// DefaultEngine - PUBLIC
-
-/// [`Engine`] that at runtime selects the best Engine.
+/// [`Engine`] that selects the best available engine at runtime.
 pub struct DefaultEngine(Box<dyn Engine + Send + Sync>);
 
 impl DefaultEngine {
-    /// Creates new [`DefaultEngine`] by chosing and initializing the underlying engine.
+    /// Creates new [`DefaultEngine`] by choosing and initializing the underlying engine.
     ///
     /// On x86(-64) the engine is chosen in the following order of preference:
-    /// 1. `Avx2`
-    /// 2. `Ssse3`
-    /// 3. [`NoSimd`]
+    /// 1. `Avx512` (requires GFNI)
+    /// 2. `Avx2`
+    /// 3. `Ssse3`
+    /// 4. [`Scalar`]
     ///
     /// On `AArch64` the engine is chosen in the following order of preference:
     /// 1. `Neon`
-    /// 2. [`NoSimd`]
+    /// 2. [`Scalar`]
     pub fn new() -> Self {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
+            if super::cpu_features::avx512() {
+                return Self(Box::new(Avx512::new()));
+            }
+
             if super::cpu_features::avx2() {
                 return Self(Box::new(Avx2::new()));
             }
@@ -44,21 +46,15 @@ impl DefaultEngine {
             }
         }
 
-        Self(Box::new(NoSimd::new()))
+        Self(Box::new(Scalar::new()))
     }
 }
-
-// ======================================================================
-// DefaultEngine - IMPL Default
 
 impl Default for DefaultEngine {
     fn default() -> Self {
         Self::new()
     }
 }
-
-// ======================================================================
-// DefaultEngine - IMPL Engine
 
 impl Engine for DefaultEngine {
     fn fft(
@@ -90,6 +86,10 @@ impl Engine for DefaultEngine {
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
+            if super::cpu_features::avx512() {
+                return Avx512::eval_poly(erasures, truncated_size);
+            }
+
             if super::cpu_features::avx2() {
                 return Avx2::eval_poly(erasures, truncated_size);
             }
@@ -106,6 +106,6 @@ impl Engine for DefaultEngine {
             }
         }
 
-        NoSimd::eval_poly(erasures, truncated_size);
+        Scalar::eval_poly(erasures, truncated_size);
     }
 }

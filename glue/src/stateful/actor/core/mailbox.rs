@@ -228,13 +228,7 @@ where
             retry_mailbox,
         }
     }
-}
 
-impl<E, A> Mailbox<E, A>
-where
-    E: Rng + Spawner + Metrics + Clock,
-    A: Application<E>,
-{
     /// Wait for the attached database set.
     ///
     /// This resolves once startup handoff has attached the database set to the
@@ -245,7 +239,7 @@ where
     ///
     /// Holders must never manually prune these databases. Stateful uses
     /// [`Config::prune_config`](crate::stateful::Config::prune_config) to
-    /// schedule safe pruning without pruning past the rewind window needed for
+    /// schedule safe pruning without pruning past the recovery window needed for
     /// crash reconciliation. With pruning enabled, glue keeps a
     /// `max_pending_acks + 1` finalized-target window plus the configured
     /// extra block windows before pruning.

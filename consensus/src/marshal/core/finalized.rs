@@ -2,7 +2,9 @@
 //!
 //! Answering a peer's backfill request means two storage reads. Doing that on the actor's loop
 //! stalls consensus behind a peer that is querying old data. Instead, marshal mutates and reads
-//! the storage through [Storage], while a backfill task answers peer requests through the reader.
+//! the storage through [Storage], while a backfill server answers peer requests through the reader.
+//! The server and actor loop are polled concurrently in one task, so cancellation drops both
+//! futures and releases the stores before the actor's handle completes.
 //!
 //! The submission channel is bounded. A request that overflows is dropped. Peers can retry.
 
@@ -16,7 +18,7 @@ use bytes::Bytes;
 use commonware_codec::Encode;
 use commonware_cryptography::Digestible;
 use commonware_runtime::{
-    Handle, Metrics as RuntimeMetrics, Spawner,
+    Handle, Metrics as RuntimeMetrics,
     telemetry::{
         metrics::{Counter, MetricsExt as _},
         traces::TracedExt as _,
@@ -47,13 +49,22 @@ struct Request {
 pub(super) struct Storage<C, B> {
     // The underlying block and certificate stores.
     inner: Arc<TracedAsyncRwLock<Option<(C, B)>>>,
-    /// Requests to the backfill task.
+    /// Requests to the backfill server.
     submission_tx: mpsc::Sender<Request>,
     /// Requests dropped because the submission channel was full.
     dropped: Counter,
+    /// Server transferred to the actor's task when it starts.
+    server: Option<Server<C, B>>,
 }
 
 impl<C, B> Storage<C, B> {
+    /// Take the server to poll alongside the actor loop.
+    pub const fn take_server(&mut self) -> Server<C, B> {
+        self.server
+            .take()
+            .expect("finalized server already started")
+    }
+
     /// Read guard over the certificate store.
     async fn finalizations(&self) -> AsyncRwLockReadGuard<'_, C> {
         AsyncRwLockReadGuard::map(self.inner.read().await, |slot| {
@@ -259,7 +270,7 @@ impl<C: Certificates, B: Blocks> Storage<C, B> {
     }
 }
 
-/// Reader over the stores, held by the backfill task.
+/// Reader over the stores, held by the backfill server.
 struct Reader<C, B>(Arc<TracedAsyncRwLock<Option<(C, B)>>>);
 
 impl<C, B> Reader<C, B> {
@@ -277,9 +288,7 @@ struct Metrics {
     abandoned: Counter,
 }
 
-/// Wrap the stores and spawn the backfill task. `capacity` bounds the submission channel.
-///
-/// The task exits when the returned [Storage] drops.
+/// Wrap the stores and prepare the backfill server. `capacity` bounds the submission channel.
 pub(super) fn new<E, V, C, B>(
     context: E,
     finalizations: C,
@@ -287,23 +296,20 @@ pub(super) fn new<E, V, C, B>(
     capacity: NonZeroUsize,
 ) -> Storage<C, B>
 where
-    E: Spawner + RuntimeMetrics,
+    E: RuntimeMetrics,
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
     B: Blocks<Block = V::StoredBlock>,
 {
     let (submission_tx, submission_rx) = mpsc::channel(capacity.get());
-    let storage = Storage {
-        inner: Arc::new(TracedAsyncRwLock::new(
-            "marshal.finalized",
-            Some((finalizations, blocks)),
-        )),
-        submission_tx,
-        dropped: context.counter(
-            "dropped",
-            "Backfill requests dropped because the submission channel was full",
-        ),
-    };
+    let inner = Arc::new(TracedAsyncRwLock::new(
+        "marshal.finalized",
+        Some((finalizations, blocks)),
+    ));
+    let dropped = context.counter(
+        "dropped",
+        "Backfill requests dropped because the submission channel was full",
+    );
     let metrics = Metrics {
         served: context.counter("served", "Backfill requests answered"),
         missing: context.counter(
@@ -316,21 +322,38 @@ where
             "Backfill requests whose requester left before the response",
         ),
     };
-    let reader = Reader(storage.inner.clone());
-    context.spawn(move |_| run::<V, _, _>(reader, submission_rx, metrics));
-    storage
+    let server = Server {
+        reader: Reader(Arc::clone(&inner)),
+        submission_rx,
+        metrics,
+    };
+    Storage {
+        inner,
+        submission_tx,
+        dropped,
+        server: Some(server),
+    }
 }
 
-/// Serve backfill requests until every sender of `submission_rx` is dropped.
-async fn run<V, C, B>(
+/// Queued backfill work polled independently from the actor loop.
+pub(super) struct Server<C, B> {
     reader: Reader<C, B>,
-    mut submission_rx: mpsc::Receiver<Request>,
+    submission_rx: mpsc::Receiver<Request>,
     metrics: Metrics,
-) where
+}
+
+/// Serve requests until the actor drops its storage or cancels this future.
+pub(super) async fn run<V, C, B>(server: Server<C, B>)
+where
     V: Variant,
     C: Certificates<BlockDigest = <V::Block as Digestible>::Digest, Commitment = V::Commitment>,
     B: Blocks<Block = V::StoredBlock>,
 {
+    let Server {
+        reader,
+        mut submission_rx,
+        metrics,
+    } = server;
     while let Some(request) = submission_rx.recv().await {
         serve::<V, _, _>(&reader, request, &metrics).await;
     }
@@ -417,6 +440,7 @@ mod tests {
             inner: Arc::new(TracedAsyncRwLock::new("test", None)),
             submission_tx,
             dropped: context.counter("dropped", "dropped"),
+            server: None,
         };
         (storage, submission_rx)
     }
@@ -447,7 +471,7 @@ mod tests {
         executor.start(|context| async move {
             let (storage, submission_rx) = storage(&context, 1);
 
-            // Dropping the receiver stands in for the backfill task exiting:
+            // Dropping the receiver stands in for the backfill server exiting:
             // requests are dropped and counted, not lost silently.
             drop(submission_rx);
             let (response_tx, response_rx) = oneshot::channel();

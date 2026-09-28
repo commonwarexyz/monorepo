@@ -4,3 +4,7 @@
 [![Docs.rs](https://docs.rs/commonware-stream/badge.svg)](https://docs.rs/commonware-stream)
 
 Exchange messages over arbitrary transport.
+
+## Status
+
+Stability varies by primitive. See [README](https://github.com/commonwarexyz/monorepo#stability) for details.

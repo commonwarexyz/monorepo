@@ -31,12 +31,6 @@ type Regs = [uint64x2_t; 5];
 #[derive(Clone, Copy)]
 pub(super) struct Backend;
 
-impl Backend {
-    pub(super) const fn new() -> Self {
-        Self
-    }
-}
-
 /// Loads one two-lane tile from each of the five limb rows.
 #[inline(always)]
 fn load(limbs: &[[u64; LANES]; 5], tile: usize) -> Regs {
@@ -717,6 +711,10 @@ fn g_add_mixed_pair(p: [G; 2], q: [GAffine; 2], negative: [bool; 2]) -> [G; 2] {
 }
 
 impl Backend {
+    pub(super) const fn new() -> Self {
+        Self
+    }
+
     /// Returns lanes whose sum is the weighted sum of all bucket stripes.
     ///
     /// Let `B[k, lane]` sum the stripes at bucket index `k*LANES + lane`. The descending pass

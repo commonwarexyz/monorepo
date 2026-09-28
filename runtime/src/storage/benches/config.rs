@@ -134,8 +134,8 @@ impl fmt::Display for SyncMode {
 #[command(
     name = "storage_bench",
     about = "Benchmark the runtime storage backend",
-    after_help = "The storage backend is selected at build time.\n\
-                  Build normally for Tokio storage, or with `--features iouring-storage` for io_uring storage.",
+    after_help = "The runtime is selected at build time.\n\
+                  Build normally for Tokio, or with `--features iouring` on Linux for the io_uring runtime.",
     styles = Styles::styled(),
 )]
 pub struct Config {
@@ -151,17 +151,21 @@ pub struct Config {
     #[arg(long, default_value = "4096", value_parser = parse_byte_size_usize)]
     pub io_size: usize,
 
-    /// Parallel worker count for steady-state workloads.
+    /// Concurrent I/O operation count.
     #[arg(long, default_value_t = 1, value_parser = value_parser!(usize))]
     pub inflight: usize,
 
-    /// Tokio worker thread count for the benchmark runtime.
+    /// Worker thread count for the benchmark runtime.
     #[arg(
         long,
         default_value_t = default_worker_threads(),
         value_parser = value_parser!(usize)
     )]
     pub worker_threads: usize,
+
+    /// io_uring ring capacity, rounded up to a power of two. Defaults to 1024.
+    #[arg(long, value_parser = value_parser!(u32).range(1..=32768))]
+    pub ring_size: Option<u32>,
 
     /// Tokio scheduler ticks between global queue polls.
     #[arg(long, value_parser = value_parser!(u32))]
@@ -229,12 +233,28 @@ impl Config {
             .expect("validated configuration must include --file-size")
     }
 
+    /// Ring capacity after applying the default and rounding, absent for Tokio.
+    pub fn effective_ring_size(&self) -> Option<u32> {
+        cfg!(all(target_os = "linux", feature = "iouring"))
+            .then(|| self.ring_size.unwrap_or(1024).next_power_of_two())
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.inflight == 0 {
             return Err("--inflight must be greater than zero".into());
         }
         if self.worker_threads == 0 {
             return Err("--worker-threads must be greater than zero".into());
+        }
+        if cfg!(all(target_os = "linux", feature = "iouring")) {
+            if self.worker_threads != 1 {
+                return Err("the io_uring runtime requires --worker-threads 1".into());
+            }
+            if self.global_queue_interval.is_some() {
+                return Err("--global-queue-interval is only supported by Tokio".into());
+            }
+        } else if self.ring_size.is_some() {
+            return Err("--ring-size requires the io_uring runtime".into());
         }
         if self.global_queue_interval == Some(0) {
             return Err("--global-queue-interval must be greater than zero".into());
@@ -320,7 +340,11 @@ impl Config {
 }
 
 fn default_worker_threads() -> usize {
-    commonware_runtime::tokio::Config::default().worker_threads()
+    if cfg!(all(target_os = "linux", feature = "iouring")) {
+        1
+    } else {
+        commonware_runtime::tokio::Config::default().worker_threads()
+    }
 }
 
 fn default_root() -> PathBuf {

@@ -16,6 +16,7 @@ use commonware_runtime::{
     telemetry::metrics::{HistogramExt as _, MetricsExt as _},
     tokio,
 };
+use commonware_stream::encrypted::Handshake;
 use commonware_utils::{TryCollect, ordered::Set, probability, union};
 use rand::{Rng, SeedableRng, rngs::SmallRng};
 use std::{
@@ -65,8 +66,8 @@ fn main() {
     // Parse config
     info!(peers = peers.len(), "loaded peers");
     let key = from_hex(&config.private_key).expect("Could not parse private key");
-    let key = PrivateKey::decode(key).expect("Private key is invalid");
-    let public_key = key.public_key();
+    let signer = PrivateKey::decode(key).expect("Private key is invalid");
+    let public_key = signer.public_key();
 
     // Initialize runtime
     let cfg = tokio::Config::new().with_worker_threads(config.worker_threads);
@@ -130,7 +131,7 @@ fn main() {
         // Configure network
         let max_peers_per_set = authenticated::peer_set_limit(&peer_keys, &public_key);
         let mut p2p_cfg = discovery::Config::local(
-            key.clone(),
+            Handshake::new(signer.clone()),
             &union(FLOOD_NAMESPACE, b"_P2P"),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
             SocketAddr::new(*ip, config.port),

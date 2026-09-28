@@ -13,10 +13,10 @@ use crate::{
             ValueEncoding,
             db::Db,
             operation::{Operation, update},
-            ordered::{find_next_key, find_next_key_ascending, find_prev_key},
+            ordered::{find_next_key, find_next_key_ascending, find_prev_key_mut},
         },
-        batch_chain::{self, Bounds, Commitment},
         bitmap::Shared,
+        chain::{self, Bounds, Commitment},
         delete_known_loc,
         operation::{Key, Operation as OperationTrait},
         update_known_loc,
@@ -26,9 +26,16 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap, iter::zip_eq};
-use core::{cmp::Ordering, ops::Range};
+use commonware_utils::{bitmap, iter::zip_eq, range::contains_cyclic};
+use core::{
+    cmp::Ordering,
+    ops::{
+        Bound::{Excluded, Included},
+        Range,
+    },
+};
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, hash_map},
     iter, mem,
     sync::{Arc, Weak},
@@ -59,10 +66,9 @@ where
     next_scan: Location<F>,
 }
 
-/// Sorted `(key, (value, loc))` vec consulted by `find_prev_key` to find the predecessor
-/// of a given key during ordered merkleization. The value is `None` for staged-resolved
-/// keys: the predecessor-rewrite loop only reads a value for keys outside this batch's
-/// mutations, and staged-resolved keys are always in `updated`.
+/// Sorted `(key, (value, loc))` vec consulted by `find_prev_key_mut` during ordered merkleization.
+/// Values are `None` for staged-resolved keys (skipped as updates) and for predecessors whose
+/// values have already been consumed by a rewrite. Candidate keys remain unchanged.
 type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
 /// Where a staged read resolved: in the committed snapshot, or in an uncommitted
@@ -329,7 +335,7 @@ where
 /// not an immutable snapshot. Reads through the chain, constructing child batches, and applying
 /// the batch later are only valid while every batch applied to the DB since this batch was
 /// merkleized is an ancestor of this batch. Applying a batch from a different fork is rejected
-/// with [`crate::qmdb::Error::StaleBatch`] (see [`crate::qmdb::batch_chain`] for more details).
+/// with [`crate::qmdb::Error::StaleBatch`] (see [`crate::qmdb::chain`] for more details).
 #[allow(clippy::type_complexity)]
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy> {
@@ -357,11 +363,39 @@ pub struct MerkleizedBatch<F: Family, D: Digest, U: update::Update, S: Strategy>
     ancestor_base_locs: AncestorBaseLocs<U::Key, F>,
 
     /// Position and floor bounds for this batch chain.
-    pub(crate) bounds: batch_chain::Bounds<F, D>,
+    pub(crate) bounds: chain::Bounds<F, D>,
 }
 
 /// Strong ref to an ancestor [`MerkleizedBatch`] collected during merkleize.
-type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
+pub(crate) type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
+
+/// Ancestors retained while a batch is merkleized, immediate parent first.
+pub(crate) type RetainedAncestors<F, D, U, S> = Vec<AncestorBatch<F, D, U, S>>;
+
+/// Result of merkleizing a batch.
+type MerkleizeResult<F, D, U, S> = Result<Arc<MerkleizedBatch<F, D, U, S>>, crate::qmdb::Error<F>>;
+
+/// Result of a prepared merkleization: the batch and the ancestors retained while building it.
+pub(crate) type RetainedMerkleizeResult<F, D, U, S> = Result<
+    (
+        Arc<MerkleizedBatch<F, D, U, S>>,
+        RetainedAncestors<F, D, U, S>,
+    ),
+    crate::qmdb::Error<F>,
+>;
+
+/// Validate `current` against an effective database boundary and retained ancestor chain.
+fn validate_ancestor_chain<F: Family, D: Digest, U: update::Update, S: Strategy>(
+    current: Commitment<F, D>,
+    db_state: Commitment<F, D>,
+    ancestors: &[AncestorBatch<F, D, U, S>],
+) -> Result<(), crate::qmdb::Error<F>> {
+    chain::validate_batch_applicable(
+        current,
+        db_state,
+        ancestors.iter().map(|ancestor| ancestor.commitment()),
+    )
+}
 
 /// Batch-infrastructure state used during merkleization.
 ///
@@ -382,6 +416,31 @@ where
     base_inactivity_floor_loc: Location<F>,
     base_active_keys: usize,
 }
+
+/// A batch whose live chain was validated against the database it will read.
+///
+/// Keeping the database borrow and retained ancestors together prevents later phases from
+/// substituting a different database after validation.
+#[allow(clippy::type_complexity)]
+pub(crate) struct Prepared<'a, F, E, C, I, H, U, const N: usize, S>
+where
+    F: Family,
+    E: Context,
+    C: Contiguous<Item = Operation<F, U>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    U: update::Update,
+    S: Strategy,
+    Operation<F, U>: Codec,
+{
+    db: &'a Db<F, E, C, I, H, U, N, S>,
+    mutations: BTreeMap<U::Key, Option<U::Value>>,
+    merkleizer: Merkleizer<F, H, U, S>,
+}
+
+/// Result of validating a batch and binding it to the database it will read.
+type PrepareResult<'a, F, E, C, I, H, U, const N: usize, S> =
+    Result<Prepared<'a, F, E, C, I, H, U, N, S>, crate::qmdb::Error<F>>;
 
 /// Look up a key in the ancestor chain (immediate parent first).
 fn resolve_in_ancestors<'a, F: Family, D: Digest, U: update::Update, S: Strategy>(
@@ -730,6 +789,14 @@ where
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Validate `current` against the boundary and ancestor chain retained by this merkleizer.
+    fn validate_commitment(
+        &self,
+        current: Commitment<F, H::Digest>,
+    ) -> Result<(), crate::qmdb::Error<F>> {
+        validate_ancestor_chain(current, self.db_state, &self.ancestors)
+    }
+
     /// Returns `Some(op)` if `loc` falls in the batch or ancestor regions, and `None` when `loc` is
     /// in the committed region (`loc < db_size`).
     fn try_read_op_from_uncommitted(
@@ -810,13 +877,19 @@ where
         let read = reader.read_many(&positions).await?;
 
         // Merge read results back in order.
-        for (idx, loc) in committed {
-            // `positions` is sorted and deduped, and `loc` came from it before deduping, so
-            // binary search must find the matching read_many result.
-            let result_idx = positions
-                .binary_search(&loc)
-                .expect("read result missing for requested location");
-            results[idx] = Some(read[result_idx].clone());
+        if presorted {
+            for ((idx, _), op) in zip_eq(committed, read) {
+                results[idx] = Some(op);
+            }
+        } else {
+            for (idx, loc) in committed {
+                // `positions` is sorted and deduped, and `loc` came from it before deduping, so
+                // binary search must find the matching read_many result.
+                let result_idx = positions
+                    .binary_search(&loc)
+                    .expect("read result missing for requested location");
+                results[idx] = Some(read[result_idx].clone());
+            }
         }
         Ok(results
             .into_iter()
@@ -880,7 +953,7 @@ where
             for key in mutations.keys() {
                 match ancestors.resolve(key) {
                     Some(DiffEntry::Deleted { .. }) => {
-                        // Stale; handled via extract_parent_deleted_creates.
+                        // No live operation remains. resolve_creates handles any recreation.
                     }
                     Some(DiffEntry::Active {
                         loc, base_old_loc, ..
@@ -906,29 +979,23 @@ where
         locations
     }
 
-    /// Extract keys that were deleted by a parent batch but are being
-    /// re-created by this child batch. Removes those keys from `mutations`
-    /// and returns `(key, value, base_old_loc)` entries.
+    /// Resolve remaining mutations into creates in key order. Re-created keys inherit
+    /// the base location of the nearest ancestor deletion. Existing keys must already
+    /// be resolved and removed from `mutations`. Deletes of absent keys are ignored.
     #[allow(clippy::type_complexity)]
-    fn extract_parent_deleted_creates(
+    fn resolve_creates(
         &self,
-        mutations: &mut BTreeMap<U::Key, Option<U::Value>>,
-    ) -> Vec<(U::Key, U::Value, Option<Location<F>>)> {
-        if self.ancestors.is_empty() {
-            return Vec::new();
-        }
+        mutations: BTreeMap<U::Key, Option<U::Value>>,
+    ) -> impl Iterator<Item = (U::Key, U::Value, Option<Location<F>>)> {
         let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
-        let mut creates = Vec::new();
-        mutations.retain(|key, value| {
-            if let Some(DiffEntry::Deleted { base_old_loc }) = ancestors.resolve(key)
-                && let Some(v) = value.take()
-            {
-                creates.push((key.clone(), v, *base_old_loc));
-                return false;
-            }
-            true
-        });
-        creates
+        mutations.into_iter().filter_map(move |(key, value)| {
+            let value = value?;
+            let base_old_loc = match ancestors.resolve(&key) {
+                Some(DiffEntry::Deleted { base_old_loc }) => *base_old_loc,
+                _ => None,
+            };
+            Some((key, value, base_old_loc))
+        })
     }
 
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
@@ -951,7 +1018,7 @@ where
         mut prefetched: Option<PrefetchedCandidates<F, U>>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
+    ) -> RetainedMerkleizeResult<F, H::Digest, U, S>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
@@ -1247,66 +1314,29 @@ where
         let ancestors: Vec<_> = self
             .ancestors
             .iter()
-            .map(|a| batch_chain::AncestorBounds {
+            .map(|a| chain::AncestorBounds {
                 floor: a.bounds.inactivity_floor,
                 state: a.commitment(),
             })
             .collect();
 
         assert!(total_active_keys >= 0, "active_keys underflow");
-        Ok(Arc::new(MerkleizedBatch {
+        let batch = Arc::new(MerkleizedBatch {
             journal_batch: journal,
             diff: Arc::new(diff),
             parent: self.ancestors.first().map(Arc::downgrade),
             total_active_keys: total_active_keys as usize,
             ancestor_diffs,
             ancestor_base_locs,
-            bounds: batch_chain::Bounds {
+            bounds: chain::Bounds {
                 base: self.base_state,
                 db: self.db_state,
                 tip: Commitment::new(commit_loc + 1, root),
                 ancestors,
                 inactivity_floor: floor,
             },
-        }))
-    }
-}
-
-impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
-where
-    U: update::Update,
-    H: Hasher,
-    Operation<F, U>: Codec,
-{
-    /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
-    ///
-    /// If the same key is written multiple times within a batch, the last value wins.
-    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
-        self.mutations.insert(key, value);
-        self
-    }
-
-    /// Split into pending mutations and the merkleization machinery.
-    #[allow(clippy::type_complexity)]
-    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
-        let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
-            let mut v = vec![Arc::clone(parent)];
-            v.extend(parent.ancestors());
-            v
         });
-        let db_state = batch_chain::effective_boundary(
-            self.base.db(),
-            ancestors.last().map(|oldest| oldest.bounds.base),
-        );
-        let m = Merkleizer {
-            journal_batch: self.journal_batch,
-            ancestors,
-            base_state: self.base.base_state(),
-            db_state,
-            base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
-            base_active_keys: self.base.active_keys(),
-        };
-        (self.mutations, m)
+        Ok((batch, self.ancestors))
     }
 }
 
@@ -1330,6 +1360,10 @@ where
     /// Values the caller has computed for earlier staged slots are not visible until they are passed
     /// to [`merkleize`](Staged::merkleize). Callers that need speculative read-your-writes behavior
     /// should maintain their own overlay while deciding which staged slots to update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.batch.expand",
@@ -1358,13 +1392,13 @@ where
     }
 
     fn apply_upserts(
-        mut batch: UnmerkleizedBatch<F, H, U, S>,
+        mut mutations: BTreeMap<U::Key, Option<U::Value>>,
         upserts: Vec<(U::Key, Option<U::Value>)>,
-    ) -> UnmerkleizedBatch<F, H, U, S> {
+    ) -> BTreeMap<U::Key, Option<U::Value>> {
         for (key, value) in upserts {
-            batch = batch.write(key, value);
+            mutations.insert(key, value);
         }
-        batch
+        mutations
     }
 
     /// Resolve the caller's updates and upserts against the staged read set, returning the
@@ -1398,11 +1432,29 @@ where
         let Self {
             mut batch,
             keys,
-            mut resolutions,
+            resolutions,
         } = self;
+        let mutations = mem::take(&mut batch.mutations);
+        let (mutations, staged_updates) =
+            Self::resolve_update_parts(mutations, keys, resolutions, updates, upserts, strategy);
+        batch.mutations = mutations;
+        (batch, staged_updates)
+    }
+
+    /// Resolve staged updates using only owned data, allowing the work to run on a detached
+    /// strategy job while the prepared batch retains its database borrow and ancestor chain.
+    #[allow(clippy::type_complexity)]
+    fn resolve_update_parts(
+        mut mutations: BTreeMap<U::Key, Option<U::Value>>,
+        keys: Vec<U::Key>,
+        mut resolutions: Vec<StagedResolution<F, U>>,
+        updates: Vec<(usize, Option<U::Value>)>,
+        upserts: Vec<(U::Key, Option<U::Value>)>,
+        strategy: &S,
+    ) -> (BTreeMap<U::Key, Option<U::Value>>, StagedUpdates<F, U>) {
         let mut staged_updates = StagedUpdates::<F, U>::new();
         if updates.is_empty() {
-            return (Self::apply_upserts(batch, upserts), staged_updates);
+            return (Self::apply_upserts(mutations, upserts), staged_updates);
         }
 
         // Resolve last-write-wins per distinct key: a forward walk keyed on the staged key leaves
@@ -1441,7 +1493,7 @@ where
         // probe is skipped when the batch had no mutations before this call: each distinct
         // key is visited at most once (winners are per key), so a staged winner can never
         // chase a fallback inserted by this same loop.
-        let had_mutations = !batch.mutations.is_empty();
+        let had_mutations = !mutations.is_empty();
         let mut order: Vec<(Location<F>, usize)> = Vec::with_capacity(winners.len());
         for (entry, winner) in winners.iter_mut().enumerate() {
             let Some((slot, value)) = winner else {
@@ -1451,13 +1503,13 @@ where
             match &resolutions[*slot] {
                 Some((sloc, _)) if value.is_some() || U::STAGES_DELETES => {
                     if had_mutations {
-                        batch.mutations.remove(key);
+                        mutations.remove(key);
                     }
                     order.push((sloc.loc(), entry));
                 }
                 _ => {
                     let (_, value) = winner.take().expect("winner checked above");
-                    batch.mutations.insert(key.clone(), value);
+                    mutations.insert(key.clone(), value);
                 }
             }
         }
@@ -1478,7 +1530,7 @@ where
                 (keys[slot].clone(), sloc, payload, value)
             })
             .collect();
-        (Self::apply_upserts(batch, upserts), staged_updates)
+        (Self::apply_upserts(mutations, upserts), staged_updates)
     }
 }
 
@@ -1498,10 +1550,13 @@ where
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
+    ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize.staged",
         level = "info",
@@ -1514,32 +1569,32 @@ where
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (batch, staged_updates, prefetched) = self
+        let (prepared, staged_updates, prefetched) = self
             .resolve_updates_prefetched(updates, upserts, db, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
             })
             .await?;
-        batch
+        let (batch, _retained_ancestors) = prepared
             .merkleize_with_floor_scan(
-                db,
                 metadata,
                 staged_updates,
                 Some(prefetched),
                 |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
             )
-            .await
+            .await?;
+        Ok(batch)
     }
 
     /// Resolve the caller's updates on the strategy pool while gathering and reading the
     /// committed prefix of the floor-raise candidates, overlapping the two. Returns the
-    /// resolved batch, the staged updates, and the prefetched candidates to seed
-    /// [`merkleize_with_floor_scan`](UnmerkleizedBatch::merkleize_with_floor_scan) with.
+    /// prepared batch, the staged updates, and the prefetched candidates to seed its floor scan
+    /// with. Preparation validates and retains the live chain before any supplied-database read.
     ///
     /// `fill_candidates` must be the same candidate source the subsequent floor raise
     /// scans, so the prefetched prefix continues seamlessly into the live scan (see
@@ -1553,15 +1608,15 @@ where
     /// are correct: the skipped span holds no set bits, and the source cannot change during
     /// the call (commits and prunes take `&mut` on the database).
     #[allow(clippy::type_complexity)]
-    pub(crate) async fn resolve_updates_prefetched<E, C, I, const N: usize>(
+    pub(crate) async fn resolve_updates_prefetched<'a, E, C, I, const N: usize>(
         self,
         updates: Vec<(usize, Option<V::Value>)>,
         upserts: Vec<(K, Option<V::Value>)>,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        db: &'a Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<
         (
-            UnmerkleizedBatch<F, H, update::Unordered<K, V>, S>,
+            Prepared<'a, F, E, C, I, H, update::Unordered<K, V>, N, S>,
             StagedUpdates<F, update::Unordered<K, V>>,
             PrefetchedCandidates<F, update::Unordered<K, V>>,
         ),
@@ -1572,6 +1627,13 @@ where
         C: Contiguous<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let Self {
+            batch,
+            keys,
+            resolutions,
+        } = self;
+        let mut prepared = batch.prepare(db)?;
+
         // Bound the steps the floor raise can take: only emitted ops consume steps, and an
         // op is emitted per location-resolved update plus per upsert or prior mutation on a
         // key alive in the committed snapshot. Fresh-key creates never consume a step, so
@@ -1583,25 +1645,26 @@ where
         // the prefetched prefix runs out.
         let resolved_updates = updates
             .iter()
-            .filter(|(slot, _)| self.resolutions.get(*slot).is_some_and(Option::is_some))
+            .filter(|(slot, _)| resolutions.get(*slot).is_some_and(Option::is_some))
             .count()
-            .min(self.keys.len());
+            .min(keys.len());
         let existing_writes = upserts
             .iter()
             .map(|(key, _)| key)
-            .chain(self.batch.mutations.keys())
+            .chain(prepared.mutations.keys())
             .filter(|&key| db.snapshot.get(key).next().is_some())
             .count();
         let steps_bound = resolved_updates + existing_writes + 1;
 
         // Overlap the serial update resolution with the candidate prefetch: the
         // committed-prefix candidate set depends only on the base floor, the candidate
-        // source, and the step bound, none of which depend on the resolution. The batch
-        // moves into the job, so its floor is captured first.
-        let scan_from = self.batch.base.inactivity_floor_loc();
+        // source, and the step bound, none of which depend on the resolution. Only owned
+        // update data moves into the job; the prepared batch retains the live ancestor chain.
+        let scan_from = prepared.merkleizer.base_inactivity_floor_loc;
         let resolve_len = updates.len() + upserts.len();
+        let mutations = mem::take(&mut prepared.mutations);
         let resolve = db.strategy().spawn(resolve_len, move |strategy| {
-            self.resolve_updates(updates, upserts, &strategy)
+            Self::resolve_update_parts(mutations, keys, resolutions, updates, upserts, &strategy)
         });
 
         // Gather the committed-prefix candidates and read their operations, sharded, while
@@ -1613,13 +1676,14 @@ where
         let read = db.log.read_many_sharded(&raw).await;
 
         // Join the resolution and surface any read failure.
-        let (batch, staged_updates) = resolve.await;
+        let (mutations, staged_updates) = resolve.await;
+        prepared.mutations = mutations;
         let prefetched = PrefetchedCandidates {
             locs,
             shards: read?,
             next_scan,
         };
-        Ok((batch, staged_updates, prefetched))
+        Ok((prepared, staged_updates, prefetched))
     }
 }
 
@@ -1639,10 +1703,13 @@ where
     /// set: the initial [`stage`](UnmerkleizedBatch::stage) input followed by any
     /// [`expand`](Staged::expand) ranges. `metadata` is committed with the returned batch.
     ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
+    ///
     /// # Panics
     ///
     /// Panics if any update's `read_index` is out of the staged read range.
-    #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize.staged",
         level = "info",
@@ -1655,28 +1722,100 @@ where
         upserts: Vec<(K, Option<V::Value>)>,
         metadata: Option<V::Value>,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
         let (batch, staged_updates) = self.resolve_updates(updates, upserts, db.strategy());
-        batch
-            .merkleize_with_floor_scan(db, metadata, staged_updates, |floor, tip, limit, out| {
+        let prepared = batch.prepare(db)?;
+        let (batch, _retained_ancestors) = prepared
+            .merkleize_with_floor_scan(metadata, staged_updates, |floor, tip, limit, out| {
                 fill_candidates(&db.bitmap, floor, tip, limit, out)
             })
-            .await
+            .await?;
+        Ok(batch)
     }
 }
 
-// Generic get() for both ordered and unordered UnmerkleizedBatch.
 impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
     U: update::Update,
     H: Hasher,
     Operation<F, U>: Codec,
 {
+    /// Record a mutation. Use `Some(value)` for update/create, `None` for delete.
+    ///
+    /// If the same key is written multiple times within a batch, the last value wins.
+    pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
+        self.mutations.insert(key, value);
+        self
+    }
+
+    /// Validate that `current` is a state on this batch's live chain, returning strong ancestor
+    /// references that keep the validated chain stable through subsequent asynchronous work.
+    pub(crate) fn validate_commitment(
+        &self,
+        current: Commitment<F, H::Digest>,
+    ) -> Result<RetainedAncestors<F, H::Digest, U, S>, crate::qmdb::Error<F>> {
+        let ancestors = self.retain_ancestors();
+        let db_state = chain::effective_boundary(
+            self.base.db(),
+            ancestors.last().map(|oldest| oldest.bounds.base),
+        );
+        validate_ancestor_chain(current, db_state, &ancestors)?;
+        Ok(ancestors)
+    }
+
+    /// Collect the currently-live ancestor chain, immediate parent first.
+    fn retain_ancestors(&self) -> Vec<AncestorBatch<F, H::Digest, U, S>> {
+        self.base.parent().map_or_else(Vec::new, |parent| {
+            let mut ancestors = vec![Arc::clone(parent)];
+            ancestors.extend(parent.ancestors());
+            ancestors
+        })
+    }
+
+    /// Split into pending mutations and the merkleization machinery.
+    #[allow(clippy::type_complexity)]
+    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
+        let ancestors = self.retain_ancestors();
+        let db_state = chain::effective_boundary(
+            self.base.db(),
+            ancestors.last().map(|oldest| oldest.bounds.base),
+        );
+        let m = Merkleizer {
+            journal_batch: self.journal_batch,
+            ancestors,
+            base_state: self.base.base_state(),
+            db_state,
+            base_inactivity_floor_loc: self.base.inactivity_floor_loc(),
+            base_active_keys: self.base.active_keys(),
+        };
+        (self.mutations, m)
+    }
+
+    /// Validate this batch and bind its retained chain to the exact database used by all
+    /// subsequent merkleization reads.
+    pub(crate) fn prepare<'a, E, C, I, const N: usize>(
+        self,
+        db: &'a Db<F, E, C, I, H, U, N, S>,
+    ) -> PrepareResult<'a, F, E, C, I, H, U, N, S>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let (mutations, merkleizer) = self.into_parts();
+        merkleizer.validate_commitment(db.commitment())?;
+        Ok(Prepared {
+            db,
+            mutations,
+            merkleizer,
+        })
+    }
+
     /// Return true when reads can bypass uncommitted overlay resolution and go directly to the DB.
     fn reads_committed_only(&self) -> bool {
         self.mutations.is_empty() && self.base.parent().is_none()
@@ -1697,14 +1836,23 @@ where
     where
         U::Value: Send + Sync,
     {
-        let ancestors = self.base.parent().map(|parent| {
-            let mut ancestors = vec![Arc::clone(parent)];
-            ancestors.extend(parent.ancestors());
-            ancestors
-        });
+        let ancestors = self.retain_ancestors();
+        self.resolve_uncommitted_reads_with_ancestors(keys, &ancestors, strategy, on_diff_hit)
+    }
+
+    /// Resolve uncommitted reads through an already-retained ancestor chain.
+    fn resolve_uncommitted_reads_with_ancestors<'a>(
+        &self,
+        keys: &[&'a U::Key],
+        ancestors: &[AncestorBatch<F, H::Digest, U, S>],
+        strategy: &S,
+        on_diff_hit: impl FnMut(usize, &DiffEntry<F, U::Value>),
+    ) -> UncommittedReadResolution<'a, U::Key, U::Value>
+    where
+        U::Value: Send + Sync,
+    {
         let diffs: Vec<_> = ancestors
             .iter()
-            .flatten()
             .map(|batch| batch.diff.as_slice())
             .collect();
         resolve_reads(
@@ -1802,6 +1950,10 @@ where
     /// [`expand`](Staged::expand) appends another index range. Unlike
     /// [`get_many`](Self::get_many), the resolved locations are reused at merkleize, so keys
     /// that are read and then written skip the index re-probe and journal re-read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb.any.batch.stage",
@@ -1851,6 +2003,7 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
+        let validated_ancestors = self.validate_commitment(db.commitment())?;
         let mut resolutions: Vec<StagedResolution<F, U>> =
             iter::repeat_with(|| None).take(keys.len()).collect();
 
@@ -1858,8 +2011,11 @@ where
         // write then reuses the resolved location at merkleize instead of falling back to a
         // normal mutation (whose cost -- location gathering, a journal re-read, and
         // per-key ancestor re-resolution -- otherwise grows with ancestor overlap).
-        let (mut results, unresolved) =
-            self.resolve_uncommitted_reads(keys, db.strategy(), |slot, entry| {
+        let (mut results, unresolved) = self.resolve_uncommitted_reads_with_ancestors(
+            keys,
+            &validated_ancestors,
+            db.strategy(),
+            |slot, entry| {
                 let Some(cached) = U::STAGES_ANCESTORS else {
                     return;
                 };
@@ -1875,7 +2031,8 @@ where
                         cached,
                     ));
                 }
-            });
+            },
+        );
         Self::fill_committed_reads(
             unresolved,
             db,
@@ -1890,6 +2047,7 @@ where
             },
         )
         .await?;
+        drop(validated_ancestors);
         Ok((
             results,
             keys.iter().map(|key| (*key).to_owned()).collect(),
@@ -1907,7 +2065,10 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[tracing::instrument(
         name = "qmdb.any.unordered.batch.merkleize",
         level = "info",
@@ -1918,25 +2079,41 @@ where
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Unordered<K, V>, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(
-            db,
-            metadata,
-            StagedUpdates::<F, update::Unordered<K, V>>::new(),
-            None,
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-        )
-        .await
+        let prepared = self.prepare(db)?;
+        let (batch, _retained_ancestors) = prepared
+            .merkleize_with_floor_scan(
+                metadata,
+                StagedUpdates::<F, update::Unordered<K, V>>::new(),
+                None,
+                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            )
+            .await?;
+        Ok(batch)
     }
+}
 
-    /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
+impl<'a, F, K, V, E, C, I, H, const N: usize, S>
+    Prepared<'a, F, E, C, I, H, update::Unordered<K, V>, N, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    E: Context,
+    C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+    I: UnorderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, update::Unordered<K, V>>: Codec,
+{
+    /// Complete a prepared merkleization, consuming staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the journal re-read their resolution would
-    /// otherwise require) and accepts the floor-raise candidate source, optionally seeded
+    /// otherwise require) and accepting the floor-raise candidate source, optionally seeded
     /// with prefetched committed-prefix candidates that must come from the same floor and
     /// the same candidate source the callback scans (see [`PrefetchedCandidates`]).
     ///
@@ -1946,20 +2123,18 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
-    pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
+    pub(crate) async fn merkleize_with_floor_scan(
         self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Unordered<K, V>>,
         prefetched: Option<PrefetchedCandidates<F, update::Unordered<K, V>>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        let (mut mutations, m) = self.into_parts();
+    ) -> RetainedMerkleizeResult<F, H::Digest, update::Unordered<K, V>, S> {
+        let Self {
+            db,
+            mut mutations,
+            merkleizer: m,
+        } = self;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
@@ -2027,7 +2202,7 @@ where
             StagedLoc::Ancestor { base_old_loc, .. } => base_old_loc,
         };
         let mut cached = staged_updates.into_iter().peekable();
-        for (op, &old_loc) in results.iter().zip(&locations) {
+        for (op, &old_loc) in zip_eq(results, &locations) {
             while cached
                 .peek()
                 .is_some_and(|&(_, sloc, (), _)| sloc.loc() < old_loc)
@@ -2036,7 +2211,7 @@ where
                 emit(key, staged_base_old_loc(sloc), mutation);
             }
 
-            let key = op.key().expect("updates should have a key");
+            let key = op.into_key().expect("updates should have a key");
 
             // A key resolved via the ancestor diff must only match at its ancestor-diff
             // location. Without this guard, a stale snapshot collision (the pre-parent DB
@@ -2044,7 +2219,7 @@ where
             // wrong sort position, changing the operation order relative to the committed-state
             // path. When the ancestor diff entry does match, use it to trace `base_old_loc`
             // back to the key's location in the committed DB snapshot.
-            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
+            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key) {
                 if entry.loc() != Some(old_loc) {
                     continue;
                 }
@@ -2053,36 +2228,21 @@ where
                 Some(old_loc)
             };
 
-            let Some(mutation) = mutations.remove(key) else {
+            let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
                 // any mutation key. The mutation will be handled as a create below.
                 continue;
             };
 
-            emit(key.clone(), base_old_loc, mutation);
+            emit(key, base_old_loc, mutation);
         }
         for (key, sloc, (), mutation) in cached {
             emit(key, staged_base_old_loc(sloc), mutation);
         }
 
-        // Handle parent-deleted keys that the child wants to re-create.
-        let parent_deleted_creates = m.extract_parent_deleted_creates(&mut mutations);
-
-        // Process creates: remaining mutations (fresh keys) plus parent-deleted
-        // keys being re-created. Both get an Update op and active_keys_delta += 1.
-        // Merge into a single sorted Vec so iteration order is deterministic
-        // regardless of whether the parent is pending or committed.
-        let mut creates: Vec<(K, V::Value, Option<Location<F>>)> =
-            Vec::with_capacity(mutations.len() + parent_deleted_creates.len());
-        for (key, value) in mutations {
-            if let Some(value) = value {
-                creates.push((key, value, None));
-            }
-        }
-        creates.extend(parent_deleted_creates);
-        db.strategy()
-            .sort_by(&mut creates, |(a, _, _), (b, _, _)| a.cmp(b));
-        for (key, value, base_old_loc) in creates {
+        // Process all creates in key order, including parent-deleted keys being
+        // re-created, so operation order is independent of ancestor commit state.
+        for (key, value, base_old_loc) in m.resolve_creates(mutations) {
             let new_loc = m.base_state.size + ops.len() as u64;
             superseded_locs.extend(base_old_loc);
             ops.push(Operation::Update(update::Unordered(
@@ -2125,7 +2285,10 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
-    #[allow(clippy::type_complexity)]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::qmdb::Error::StaleBatch`] if `db` is not on the batch's live chain.
     #[tracing::instrument(
         name = "qmdb.any.ordered.batch.merkleize",
         level = "info",
@@ -2136,25 +2299,41 @@ where
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
+    ) -> MerkleizeResult<F, H::Digest, update::Ordered<K, V>, S>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(
-            db,
-            metadata,
-            StagedUpdates::<F, update::Ordered<K, V>>::new(),
-            |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
-        )
-        .await
+        let prepared = self.prepare(db)?;
+        let (batch, _retained_ancestors) = prepared
+            .merkleize_with_floor_scan(
+                metadata,
+                StagedUpdates::<F, update::Ordered<K, V>>::new(),
+                |floor, tip, limit, out| fill_candidates(&db.bitmap, floor, tip, limit, out),
+            )
+            .await?;
+        Ok(batch)
     }
+}
 
-    /// Like [`merkleize`](Self::merkleize), but consumes staged updates recorded by
+impl<'a, F, K, V, E, C, I, H, const N: usize, S>
+    Prepared<'a, F, E, C, I, H, update::Ordered<K, V>, N, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    E: Context,
+    C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+    I: OrderedIndex<Value = Location<F>>,
+    H: Hasher,
+    S: Strategy,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Complete a prepared merkleization, consuming staged updates recorded by
     /// [`Staged::merkleize`] (loaded keys skip the index probe and journal re-read their
     /// resolution would otherwise require: the caller's new value and the cached next key feed
-    /// op generation directly) and accepts the floor-raise candidate source.
+    /// op generation directly) and accepting the floor-raise candidate source.
     ///
     /// The callback must yield candidates in ascending location order, both within one call
     /// and across successive calls (the floor raise asserts this). It may skip locations only
@@ -2162,37 +2341,30 @@ where
     /// candidate against the batch diff, ancestor diffs, and snapshot because the bitmap
     /// reflects committed state only -- uncommitted ancestor ops aren't tracked, and bits can
     /// be set for locations superseded by an overlay in this chain.
-    pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
+    pub(crate) async fn merkleize_with_floor_scan(
         self,
-        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         staged_updates: StagedUpdates<F, update::Ordered<K, V>>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
-        I: OrderedIndex<Value = Location<F>>,
-    {
-        let (mut mutations, m) = self.into_parts();
+    ) -> RetainedMerkleizeResult<F, H::Digest, update::Ordered<K, V>, S> {
+        let Self {
+            db,
+            mut mutations,
+            merkleizer: m,
+        } = self;
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
 
         // Classify mutations into deleted, created, updated. `next_candidates` and
         // `prev_candidates` are built as unsorted `Vec`s here and sorted+deduped once below,
-        // before `find_next_key` / `find_prev_key` binary-search them.
+        // before `find_next_key` / `find_prev_key_mut` binary-search them.
         let mut next_candidates: Vec<K> = Vec::new();
-        let mut prev_candidates: PrevCandidates<K, F, V::Value> = Vec::new();
+        let mut prev_candidates: PrevCandidates<K, F, Cow<'_, V::Value>> = Vec::new();
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
-        for (op, &old_loc) in m
-            .read_ops(&locations, &[], &db.log)
-            .await?
-            .into_iter()
-            .zip(&locations)
-        {
+        for (op, &old_loc) in zip_eq(m.read_ops(&locations, &[], &db.log).await?, &locations) {
             let update::Ordered {
                 key,
                 value,
@@ -2206,10 +2378,10 @@ where
             // location. A stale snapshot collision (the pre-parent DB snapshot still
             // containing the key's old location) must contribute nothing: consuming its
             // mutation would misclassify a parent-deleted key's re-creation as an update
-            // (or its redundant delete as a live delete) before extract_parent_deleted_creates
-            // runs, and feeding its next_key or (key, old_loc) into the candidate sets would
-            // steer the predecessor rewrites only on the pending-ancestor path (the
-            // applied-ancestor path never reads the superseded op).
+            // (or its redundant delete as a live delete), and feeding its next_key or
+            // (key, old_loc) into the candidate sets would steer predecessor rewrites
+            // only on the pending-ancestor path (the applied-ancestor path never reads
+            // the superseded op).
             if let Some(entry) = resolve_in_ancestors(&m.ancestors, &key)
                 && entry.loc() != Some(old_loc)
             {
@@ -2217,7 +2389,7 @@ where
             }
 
             next_candidates.push(next_key);
-            prev_candidates.push((key.clone(), (Some(value), old_loc)));
+            prev_candidates.push((key.clone(), (Some(Cow::Owned(value)), old_loc)));
 
             let Some(mutation) = mutations.remove(&key) else {
                 // Snapshot index collision: this operation's key does not match
@@ -2252,28 +2424,14 @@ where
         db.strategy().sort_by(&mut deleted, |a, b| a.0.cmp(&b.0));
         db.strategy().sort_by(&mut updated, |a, b| a.0.cmp(&b.0));
 
-        // Handle parent-deleted keys that the child wants to re-create.
-        let parent_deleted_creates = m.extract_parent_deleted_creates(&mut mutations);
-
-        // Remaining mutations are creates. Each entry carries the value and
-        // base_old_loc (None for fresh creates, Some for parent-deleted recreates).
-        // Merge into a single sorted Vec so iteration order is deterministic
-        // regardless of whether the parent is pending or committed.
+        // Keep creates in key order for candidate lookups and operation emission,
+        // including keys re-created after an ancestor deleted them.
         let mut created: Vec<(K, V::Value, Option<Location<F>>)> =
-            Vec::with_capacity(mutations.len() + parent_deleted_creates.len());
-        for (key, value) in mutations {
-            let Some(value) = value else {
-                continue; // delete of non-existent key
-            };
-            next_candidates.push(key.clone());
-            created.push((key, value, None));
-        }
-        for (key, value, base_old_loc) in parent_deleted_creates {
+            Vec::with_capacity(mutations.len());
+        for (key, value, base_old_loc) in m.resolve_creates(mutations) {
             next_candidates.push(key.clone());
             created.push((key, value, base_old_loc));
         }
-        db.strategy()
-            .sort_by(&mut created, |(a, _, _), (b, _, _)| a.cmp(b));
 
         // Look up prev_translated_key for created/deleted keys.
         let mut prev_locations = Vec::new();
@@ -2292,7 +2450,7 @@ where
 
         let prev_results = m.read_ops(&prev_locations, &[], &db.log).await?;
 
-        for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
+        for (op, &old_loc) in zip_eq(prev_results, &prev_locations) {
             let data = match op {
                 Operation::Update(data) => data,
                 _ => unreachable!("expected update operation"),
@@ -2308,7 +2466,7 @@ where
                 continue;
             }
             next_candidates.push(data.next_key);
-            prev_candidates.push((data.key, (Some(data.value), old_loc)));
+            prev_candidates.push((data.key, (Some(Cow::Owned(data.value)), old_loc)));
         }
 
         // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
@@ -2325,18 +2483,25 @@ where
         //
         // Each diff is key-sorted, as are `updated`/`created`/`deleted`, so the handled check
         // advances three cursors in a sorted merge instead of three binary searches per key.
-        // Active entries are collected and read in one batch below instead of one awaited
-        // read per key.
-        let track_shadow = m.ancestors.len() > 1;
+        // Each diff records only its owning batch's changes, so active operations can be read
+        // directly from that batch's journal suffix.
+        //
+        // Existing-key updates preserve membership, so their resolved successors suffice and
+        // no predecessor is rewritten.
+        let changes_membership = !created.is_empty() || !deleted.is_empty();
+        let candidate_ancestors = if changes_membership {
+            m.ancestors.as_slice()
+        } else {
+            &[][..]
+        };
+        let track_shadow = candidate_ancestors.len() > 1;
         let seen_cap = if track_shadow {
-            m.ancestors.iter().map(|a| a.diff.len()).sum()
+            candidate_ancestors.iter().map(|a| a.diff.len()).sum()
         } else {
             0
         };
         let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
-        let mut ancestor_deleted: Vec<K> = Vec::new();
-        let mut ancestor_active: Vec<(&K, &V::Value, Location<F>)> = Vec::new();
-        for batch in m.ancestors.iter() {
+        for batch in candidate_ancestors.iter() {
             let (mut ui, mut ci, mut di) = (0, 0, 0);
             for (key, entry) in batch.diff.iter() {
                 if track_shadow && !seen.insert(key) {
@@ -2358,65 +2523,47 @@ where
                 {
                     continue;
                 }
-                match entry {
-                    DiffEntry::Active { value, loc, .. } => {
-                        ancestor_active.push((key, value, *loc));
-                    }
-                    DiffEntry::Deleted { .. } => {
-                        ancestor_deleted.push(key.clone());
-                    }
-                }
+                let DiffEntry::Active { loc, .. } = entry else {
+                    continue;
+                };
+                let index = (**loc - *batch.bounds.base.size) as usize;
+                let data = match &batch.journal_batch.items()[index] {
+                    Operation::Update(data) => data,
+                    _ => unreachable!("ancestor diff Active should reference Update op"),
+                };
+                next_candidates.push(data.key.clone());
+                next_candidates.push(data.next_key.clone());
+                prev_candidates.push((data.key.clone(), (Some(Cow::Borrowed(&data.value)), *loc)));
             }
         }
-        ancestor_deleted.sort();
-        ancestor_deleted.dedup();
 
-        // Batch-read the collected active entries' ops and emit their candidates.
-        let ancestor_locs: Vec<Location<F>> =
-            ancestor_active.iter().map(|&(_, _, loc)| loc).collect();
-        for (op, (key, value, loc)) in m
-            .read_ops(&ancestor_locs, &[], &db.log)
-            .await?
-            .into_iter()
-            .zip(ancestor_active)
-        {
-            let data = match op {
-                Operation::Update(data) => data,
-                _ => unreachable!("ancestor diff Active should reference Update op"),
-            };
-            next_candidates.push(key.clone());
-            next_candidates.push(data.next_key);
-            prev_candidates.push((key.clone(), (Some(value.clone()), loc)));
-        }
-
-        // Sort + dedup candidate sets now so find_next_key/find_prev_key can binary-search.
+        // Sort and deduplicate successor candidates for binary search.
         db.strategy().sort_by(&mut next_candidates, |a, b| a.cmp(b));
         next_candidates.dedup();
-        // For `prev_candidates`, duplicates can occur when the same key is pushed from multiple
-        // sources (main scan, prev_results, ancestor walk). Later pushes carry the freshest state
-        // (ancestor walk runs last), so dedup keeps the LAST push per key. `dedup_by` retains the
-        // first of each consecutive run; swap so the retained slot holds the later push.
-        prev_candidates.sort_by(|a, b| a.0.cmp(&b.0));
-        prev_candidates.dedup_by(|a, b| {
-            if a.0 == b.0 {
-                std::mem::swap(a, b);
-                true
-            } else {
-                false
-            }
-        });
 
-        // Remove all known-deleted keys from possible_* sets. The prev_translated_key lookup
-        // already did this for this batch's deletes, but the ancestor diff incorporation may
-        // have re-added them via next_key references. Also remove parent-deleted keys that the
-        // base DB lookup may have added.
-        let is_deleted = |k: &K| -> bool {
-            deleted.binary_search_by(|(dk, _)| dk.cmp(k)).is_ok()
-                || (ancestor_deleted.binary_search(k).is_ok()
-                    && created.binary_search_by(|(ck, _, _)| ck.cmp(k)).is_err())
-        };
-        next_candidates.retain(|k| !is_deleted(k));
-        prev_candidates.retain(|(k, _)| !is_deleted(k));
+        // Only membership changes require filtering deleted successors and preparing
+        // predecessor candidates for rewrites.
+        if changes_membership {
+            // Resolved operations can still reference keys deleted by this batch.
+            let is_deleted = |k: &K| deleted.binary_search_by(|(dk, _)| dk.cmp(k)).is_ok();
+            next_candidates.retain(|k| !is_deleted(k));
+
+            // `prev_candidates` is consulted only by the predecessor rewrites below. Duplicates
+            // can occur when the same key is pushed from multiple sources (main scan,
+            // prev_results, ancestor walk). Later pushes carry the freshest state (ancestor
+            // walk runs last), so dedup keeps the LAST push per key. `dedup_by` retains the
+            // first of each consecutive run; swap so the retained slot holds the later push.
+            prev_candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            prev_candidates.dedup_by(|a, b| {
+                if a.0 == b.0 {
+                    std::mem::swap(a, b);
+                    true
+                } else {
+                    false
+                }
+            });
+            prev_candidates.retain(|(k, _)| !is_deleted(k));
+        }
 
         // Generate operations.
         let mut ops: Vec<Operation<F, update::Ordered<K, V>>> =
@@ -2428,24 +2575,26 @@ where
 
         // Process deletes.
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
-        for (key, old_loc) in &deleted {
+        for (key, old_loc) in deleted {
             ops.push(Operation::Delete(key.clone()));
 
             let base_old_loc = ancestors
-                .resolve(key)
-                .map_or(Some(*old_loc), DiffEntry::base_old_loc);
+                .resolve(&key)
+                .map_or(Some(old_loc), DiffEntry::base_old_loc);
 
-            diff.push((key.clone(), DiffEntry::Deleted { base_old_loc }));
+            diff.push((key, DiffEntry::Deleted { base_old_loc }));
             active_keys_delta -= 1;
             user_steps += 1;
         }
+        let deleted_range = 0..diff.len();
 
         // Process updates of existing keys.
+        let updated_range = diff.len()..diff.len() + updated.len();
         let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut next_idx = 0;
-        for (key, value, old_loc) in &updated {
+        for (key, value, old_loc) in updated {
             let new_loc = m.base_state.size + ops.len() as u64;
-            let next_key = find_next_key_ascending(key, &next_candidates, &mut next_idx);
+            let next_key = find_next_key_ascending(&key, &next_candidates, &mut next_idx);
             ops.push(Operation::Update(update::Ordered {
                 key: key.clone(),
                 value: value.clone(),
@@ -2453,13 +2602,13 @@ where
             }));
 
             let base_old_loc = ancestors
-                .resolve(key)
-                .map_or(Some(*old_loc), DiffEntry::base_old_loc);
+                .resolve(&key)
+                .map_or(Some(old_loc), DiffEntry::base_old_loc);
 
             diff.push((
-                key.clone(),
+                key,
                 DiffEntry::Active {
-                    value: value.clone(),
+                    value,
                     loc: new_loc,
                     base_old_loc,
                 },
@@ -2468,21 +2617,22 @@ where
         }
 
         // Process creates.
+        let created_range = diff.len()..diff.len() + created.len();
         let mut next_idx = 0;
-        for (key, value, base_old_loc) in &created {
+        for (key, value, base_old_loc) in created {
             let new_loc = m.base_state.size + ops.len() as u64;
-            let next_key = find_next_key_ascending(key, &next_candidates, &mut next_idx);
+            let next_key = find_next_key_ascending(&key, &next_candidates, &mut next_idx);
             ops.push(Operation::Update(update::Ordered {
                 key: key.clone(),
                 value: value.clone(),
                 next_key,
             }));
             diff.push((
-                key.clone(),
+                key,
                 DiffEntry::Active {
-                    value: value.clone(),
+                    value,
                     loc: new_loc,
-                    base_old_loc: *base_old_loc,
+                    base_old_loc,
                 },
             ));
             active_keys_delta += 1;
@@ -2490,33 +2640,26 @@ where
 
         // Update predecessors of created and deleted keys.
         if !prev_candidates.is_empty() {
-            // Safe to use a HashSet here since we don't rely on iteration order.
-            let mut rewritten_predecessors = AHashSet::with_capacity(created.len() + deleted.len());
-            for key in created
-                .iter()
-                .map(|(k, _, _)| k)
-                .chain(deleted.iter().map(|(k, _)| k))
-            {
-                let (prev_key, (prev_value, prev_loc)) = find_prev_key(key, &prev_candidates);
+            // The create/delete ranges stay fixed as predecessor rewrites are appended.
+            for idx in created_range.chain(deleted_range) {
+                let key = &diff[idx].0;
+                let (prev_key, (prev_value, prev_loc)) =
+                    find_prev_key_mut(key, &mut prev_candidates);
 
-                if deleted.binary_search_by(|(k, _)| k.cmp(prev_key)).is_ok()
-                    || updated
-                        .binary_search_by(|(k, _, _)| k.cmp(prev_key))
-                        .is_ok()
-                    || created
-                        .binary_search_by(|(k, _, _)| k.cmp(prev_key))
-                        .is_ok()
-                {
+                // Only updated mutation keys can be candidates: creates have no live
+                // operation before this batch, and deletes are excluded from candidates.
+                if lookup_sorted(&diff[updated_range.clone()], prev_key).is_some() {
                     continue;
                 }
 
-                if !rewritten_predecessors.insert(prev_key.clone()) {
+                // Taking the value ensures a shared predecessor is rewritten only once.
+                let Some(prev_value) = prev_value.take() else {
                     continue;
-                }
+                };
+                let prev_value = prev_value.into_owned();
 
-                let prev_value = prev_value
-                    .as_ref()
-                    .expect("staged-resolved keys are skipped as updated");
+                // Preserve the ordered links across creates and deletes by rewriting the
+                // predecessor with its existing value and its successor in the final key set.
                 let prev_new_loc = m.base_state.size + ops.len() as u64;
                 let prev_next_key = find_next_key(prev_key, &next_candidates);
                 ops.push(Operation::Update(update::Ordered {
@@ -2531,7 +2674,7 @@ where
                 diff.push((
                     prev_key.clone(),
                     DiffEntry::Active {
-                        value: prev_value.clone(),
+                        value: prev_value,
                         loc: prev_new_loc,
                         base_old_loc: prev_base_old_loc,
                     },
@@ -2539,6 +2682,9 @@ where
                 user_steps += 1;
             }
         }
+
+        // Release the candidate keys and values before the remaining phases run.
+        drop(prev_candidates);
 
         // Committed locations superseded by this batch, for the floor raise (`finish` sorts
         // the diff itself).
@@ -2560,6 +2706,111 @@ where
             db,
         )
         .await
+    }
+}
+
+impl<F, K, V, D, S> MerkleizedBatch<F, D, update::Ordered<K, V>, S>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    S: Strategy,
+    Operation<F, update::Ordered<K, V>>: Codec,
+{
+    /// Returns the smallest active key strictly greater than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no greater key, without wrapping.
+    pub async fn get_next_key<E, C, I, H, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        if self.total_active_keys == 0 {
+            return Ok(None);
+        }
+        if let Some(next) = self.find_cyclic_neighbor::<true>(key) {
+            return Ok((next > *key).then_some(next));
+        }
+        db.get_next_key(key).await
+    }
+
+    /// Returns the largest active key strictly less than `key` in this batch's view.
+    ///
+    /// Includes this batch's changes and its ancestors' changes. The query key need not be
+    /// active. Returns `None` if there is no smaller key, without wrapping.
+    pub async fn get_prev_key<E, C, I, H, const N: usize>(
+        &self,
+        key: &K,
+        db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
+    ) -> Result<Option<K>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Ordered<K, V>>>,
+        I: OrderedIndex<Value = Location<F>>,
+        H: Hasher<Digest = D>,
+    {
+        if self.total_active_keys == 0 {
+            return Ok(None);
+        }
+        if let Some(prev) = self.find_cyclic_neighbor::<false>(key) {
+            return Ok((prev < *key).then_some(prev));
+        }
+        db.get_prev_key(key).await
+    }
+
+    /// Find a cyclic neighbor from the live batch chain, if it owns the query's span.
+    fn find_cyclic_neighbor<const NEXT: bool>(&self, key: &K) -> Option<K> {
+        let find = |batch: &Self| {
+            let diff = batch.diff.as_slice();
+            let end = diff.partition_point(|(candidate, _)| {
+                if NEXT {
+                    candidate <= key
+                } else {
+                    candidate < key
+                }
+            });
+
+            // Search below the query first, wrapping only when that side has no active entry.
+            // An earlier key cannot own the span past a later active key in this layer.
+            let loc = diff[..end]
+                .iter()
+                .rev()
+                .chain(diff[end..].iter().rev())
+                .find_map(|(_, entry)| entry.loc())?;
+
+            // Active entries reference operations in their owning batch's journal suffix.
+            let index = (*loc - *batch.bounds.base.size) as usize;
+            let Operation::Update(data) = &batch.journal_batch.items()[index] else {
+                unreachable!("active diff entry must reference an update");
+            };
+
+            // Successor queries use [start, end). Predecessor queries use (start, end].
+            // Match the cyclic owner before the public methods suppress linear wraparound.
+            let bounds = if NEXT {
+                (Included(&data.key), Excluded(&data.next_key))
+            } else {
+                (Excluded(&data.key), Included(&data.next_key))
+            };
+            contains_cyclic(bounds, key).then(|| {
+                if NEXT {
+                    data.next_key.clone()
+                } else {
+                    data.key.clone()
+                }
+            })
+        };
+
+        // Membership changes emit affected predecessors and created keys, so the newest
+        // matching layer owns the query's span in the final batch view.
+        find(self).or_else(|| self.ancestors().find_map(|batch| find(&batch)))
     }
 }
 
@@ -2587,7 +2838,7 @@ impl<F: Family, D: Digest, U: update::Update, S: Strategy> MerkleizedBatch<F, D,
     /// Iterate over ancestor batches (parent first, then grandparent, etc.). Stops when a
     /// Weak ref fails to upgrade (ancestor was freed).
     pub(crate) fn ancestors(&self) -> impl Iterator<Item = Arc<Self>> + use<F, D, U, S> {
-        batch_chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
+        chain::ancestors(self.parent.clone(), |batch| batch.parent.as_ref())
     }
 
     /// The [`Commitment`] this batch commits to.
@@ -2602,9 +2853,9 @@ where
 {
     /// Create a new speculative batch of operations with this batch as its parent.
     ///
-    /// All uncommitted ancestors in the chain must be kept alive until the child (or any
-    /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
-    /// loss detected at `apply_batch` time.
+    /// All unapplied ancestors in the chain must be kept alive until the child (or any
+    /// descendant) is merkleized. Otherwise, `merkleize` returns
+    /// [`crate::qmdb::Error::StaleBatch`].
     #[tracing::instrument(
         name = "qmdb.any.batch.new.from_batch",
         level = "debug",
@@ -2787,6 +3038,31 @@ where
             },
         }
     }
+
+    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
+    ///
+    /// This is the starting point for building owned batch chains.
+    #[tracing::instrument(
+        name = "qmdb.any.db.to_batch",
+        level = "info",
+        skip_all,
+        fields(
+            db_size = *self.log.size(),
+            inactivity_floor = *self.inactivity_floor_loc,
+            active_keys = self.active_keys as u64,
+        ),
+    )]
+    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, S>> {
+        Arc::new(MerkleizedBatch {
+            journal_batch: self.log.to_merkleized_batch(),
+            diff: Arc::new(Vec::new()),
+            parent: None,
+            total_active_keys: self.active_keys,
+            ancestor_diffs: Vec::new(),
+            ancestor_base_locs: Vec::new(),
+            bounds: chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
+        })
+    }
 }
 
 impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
@@ -2819,7 +3095,7 @@ where
     /// A batch is valid only if every batch applied to the database since this batch's
     /// ancestor chain was created is an ancestor of this batch. Applying a batch from a
     /// different fork returns [`crate::qmdb::Error::StaleBatch`] (see
-    /// [`crate::qmdb::batch_chain`] for more details).
+    /// [`crate::qmdb::chain`] for more details).
     ///
     /// This publishes the batch to the in-memory database state and appends it to the journal.
     /// Call [`Db::commit`] or [`Db::sync`], or await the handle returned by [`Db::start_sync`], to
@@ -2937,43 +3213,6 @@ where
             .operations_applied
             .inc_by(*range.end - *range.start);
         Ok((self, range))
-    }
-}
-
-impl<F, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
-where
-    F: Family,
-    E: Context,
-    C: Contiguous<Item = Operation<F, U>>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    U: update::Update,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    /// Create an initial [`MerkleizedBatch`] from the committed DB state.
-    ///
-    /// This is the starting point for building owned batch chains.
-    #[tracing::instrument(
-        name = "qmdb.any.db.to_batch",
-        level = "info",
-        skip_all,
-        fields(
-            db_size = *self.log.size(),
-            inactivity_floor = *self.inactivity_floor_loc,
-            active_keys = self.active_keys as u64,
-        ),
-    )]
-    pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, U, S>> {
-        Arc::new(MerkleizedBatch {
-            journal_batch: self.log.to_merkleized_batch(),
-            diff: Arc::new(Vec::new()),
-            parent: None,
-            total_active_keys: self.active_keys,
-            ancestor_diffs: Vec::new(),
-            ancestor_base_locs: Vec::new(),
-            bounds: batch_chain::Bounds::from_db(self.commitment(), self.inactivity_floor_loc),
-        })
     }
 }
 
@@ -3590,89 +3829,115 @@ mod tests {
         }
     }
 
-    /// Test helper: same logic as `Merkleizer::extract_parent_deleted_creates`
-    /// but without requiring a full Merkleizer instance.
-    fn extract_parent_deleted_creates<K: Ord + Clone, V: Clone>(
-        mutations: &mut BTreeMap<K, Option<V>>,
-        base_diff: &[(K, DiffEntry<mmr::Family, V>)],
-    ) -> Vec<(K, V, Option<crate::mmr::Location>)> {
-        let creates: Vec<_> = mutations
-            .iter()
-            .filter_map(|(key, value)| {
-                if let Some(DiffEntry::Deleted { base_old_loc }) = lookup_sorted(base_diff, key)
-                    && let Some(value) = value
-                {
-                    return Some((key.clone(), value.clone(), *base_old_loc));
-                }
-                None
-            })
-            .collect();
-        for (key, _, _) in &creates {
-            mutations.remove(key);
-        }
-        creates
+    // Recreated keys replace their committed locations when a pending chain is applied.
+    // Fresh and recreated keys share key order. Absent deletes do not change the batch.
+    macro_rules! recreated_keys_apply_pending_chain_test {
+        ($name:ident, $db:ident) => {
+            #[test]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    type TestDb = $db<
+                        mmr::Family,
+                        deterministic::Context,
+                        sha256::Digest,
+                        sha256::Digest,
+                        Sha256,
+                        OneCap,
+                        Sequential,
+                    >;
+
+                    for existed in [false, true] {
+                        let context = context.child("db").with_attribute("existed", existed);
+                        let config = fixed_db_config::<OneCap>(stringify!($name), &context);
+                        let db = TestDb::init(context, config, None).await.unwrap();
+                        let key = |i| colliding_digest(0xA0, i);
+                        let value = |i| colliding_digest(0xB0, i);
+
+                        let mut seed = db
+                            .new_batch()
+                            .write(key(6), Some(value(6)))
+                            .write(key(8), Some(value(8)));
+                        if existed {
+                            seed = seed.write(key(2), Some(value(2)));
+                        }
+                        let seed = seed.merkleize(&db, None).await.unwrap();
+                        let base_loc = lookup_sorted(&seed.diff, &key(2)).and_then(DiffEntry::loc);
+                        assert_eq!(base_loc.is_some(), existed);
+                        let (db, _) = db.apply_batch(seed).await.unwrap();
+
+                        // The nearest ancestor deletes a key that an older ancestor updated
+                        // or created. Its recreation must retain the original committed base.
+                        let grandparent = db
+                            .new_batch()
+                            .write(key(2), Some(value(20)))
+                            .merkleize(&db, None)
+                            .await
+                            .unwrap();
+                        let parent = grandparent
+                            .new_batch::<Sha256>()
+                            .write(key(2), None)
+                            .write(key(6), None)
+                            .merkleize(&db, None)
+                            .await
+                            .unwrap();
+                        let creates = || {
+                            parent
+                                .new_batch::<Sha256>()
+                                .write(key(4), Some(value(34)))
+                                .write(key(2), Some(value(32)))
+                                .write(key(0), Some(value(30)))
+                        };
+                        let without_deletes = creates().merkleize(&db, None).await.unwrap();
+                        let child = creates()
+                            .write(key(3), None)
+                            .write(key(6), None)
+                            .merkleize(&db, None)
+                            .await
+                            .unwrap();
+
+                        let (_, ops) = child.operations();
+                        assert_eq!(child.root(), without_deletes.root());
+                        assert_eq!(*ops, *without_deletes.operations().1);
+                        assert_eq!(
+                            ops[..3].iter().map(OperationTrait::key).collect::<Vec<_>>(),
+                            vec![Some(&key(0)), Some(&key(2)), Some(&key(4))]
+                        );
+                        assert!(!ops.iter().any(OperationTrait::is_delete));
+
+                        // Apply the entire pending chain at once: applying the deletion first
+                        // would remove the committed location and mask a lost base location.
+                        let (db, _) = db.apply_batch(Arc::clone(&child)).await.unwrap();
+                        for i in [0, 2, 4] {
+                            assert_eq!(db.get(&key(i)).await.unwrap(), Some(value(30 + i)));
+                        }
+                        assert_eq!(db.get(&key(8)).await.unwrap(), Some(value(8)));
+                        for i in [3, 6] {
+                            assert_eq!(db.get(&key(i)).await.unwrap(), None);
+                        }
+                        assert_eq!(db.active_keys, 4);
+                        assert_eq!(db.snapshot.items(), 4);
+                        if let Some(base_loc) = base_loc {
+                            assert!(!db.bitmap.get_bit(*base_loc));
+                        }
+                        for (i, expected_base) in [(0, None), (2, base_loc), (4, None)] {
+                            let entry = lookup_sorted(&child.diff, &key(i)).unwrap();
+                            assert_eq!(entry.base_old_loc(), expected_base);
+                        }
+                        db.destroy().await.unwrap();
+                    }
+                });
+            }
+        };
     }
 
-    #[test]
-    fn extract_parent_deleted_creates_basic() {
-        let mut mutations: BTreeMap<u64, Option<u64>> = BTreeMap::new();
-        mutations.insert(1, Some(100)); // update over parent-deleted key
-        mutations.insert(2, None); // delete (not a create)
-        mutations.insert(3, Some(300)); // update, but not in base diff
-
-        let mut base_diff: Vec<(u64, DiffEntry<mmr::Family, u64>)> = vec![
-            (
-                1,
-                DiffEntry::Deleted {
-                    base_old_loc: Some(crate::mmr::Location::new(5)),
-                },
-            ),
-            (
-                4,
-                DiffEntry::Active {
-                    value: 400,
-                    loc: crate::mmr::Location::new(10),
-                    base_old_loc: None,
-                },
-            ),
-        ];
-        base_diff.sort_by_key(|a| a.0);
-
-        let creates = extract_parent_deleted_creates(&mut mutations, &base_diff);
-
-        // key1 extracted: value=100, base_old_loc=Some(5)
-        assert_eq!(creates.len(), 1);
-        let (key, value, base_old_loc) = creates.first().unwrap();
-        assert_eq!(*key, 1);
-        assert_eq!(*value, 100);
-        assert_eq!(*base_old_loc, Some(crate::mmr::Location::new(5)));
-
-        // key1 removed from mutations, key2 and key3 remain.
-        assert_eq!(mutations.len(), 2);
-        assert!(mutations.contains_key(&2));
-        assert!(mutations.contains_key(&3));
-    }
-
-    #[test]
-    fn extract_parent_deleted_creates_delete_not_extracted() {
-        let mut mutations: BTreeMap<u64, Option<u64>> = BTreeMap::new();
-        mutations.insert(1, None); // deleting a parent-deleted key
-
-        let base_diff: Vec<(u64, DiffEntry<mmr::Family, u64>)> = vec![(
-            1,
-            DiffEntry::Deleted {
-                base_old_loc: Some(crate::mmr::Location::new(5)),
-            },
-        )];
-
-        let creates = extract_parent_deleted_creates(&mut mutations, &base_diff);
-
-        // Delete of a deleted key is not a create.
-        assert!(creates.is_empty());
-        // Mutation unchanged.
-        assert_eq!(mutations.len(), 1);
-        assert!(mutations.contains_key(&1));
-    }
+    recreated_keys_apply_pending_chain_test!(
+        unordered_recreated_keys_apply_pending_chain,
+        UnorderedFixedDb
+    );
+    recreated_keys_apply_pending_chain_test!(
+        ordered_recreated_keys_apply_pending_chain,
+        OrderedFixedDb
+    );
 
     /// `operations()` must cover exactly the batch's own applied range and match the
     /// operations a post-apply `historical_proof` recovers from the log, including
@@ -3693,7 +3958,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("operations-match-applied-log", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_a = Sha256::hash(&[b"operations-a"]);
             let key_b = Sha256::hash(&[b"operations-b"]);
@@ -3846,7 +4111,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_update = Sha256::hash(&[b"update-through-all-layers"]);
             let key_recreate_then_delete = Sha256::hash(&[b"recreate-then-delete"]);
@@ -3949,7 +4214,7 @@ mod tests {
                     >;
 
                     let config = fixed_db_config::<OneCap>($partition, &context);
-                    let db = TestDb::init(context, config).await.unwrap();
+                    let db = TestDb::init(context, config, None).await.unwrap();
 
                     let k0 = colliding_digest(0x40 + $shift, 0);
                     let k1 = colliding_digest(0x40 + $shift, 1);
@@ -4120,7 +4385,7 @@ mod tests {
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
             let config = fixed_db_config::<OneCap>("unordered-staged-resolve-updates", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0x90, 0);
             let k1 = colliding_digest(0x90, 1);
@@ -4199,7 +4464,7 @@ mod tests {
 
             let config =
                 fixed_db_config::<OneCap>("unordered-staged-resolve-updates-scale", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let n: usize = 512;
             let keys: Vec<_> = (0..n).map(|i| colliding_digest(0xA0, i as u64)).collect();
@@ -4288,7 +4553,7 @@ mod tests {
             type TestUpdate = update::Unordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
             let config = fixed_db_config::<OneCap>("unordered-staged-prior-mutation", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key = colliding_digest(0x95, 0);
             let old = colliding_digest(0x95, 1);
@@ -4347,7 +4612,7 @@ mod tests {
             type TestUpdate = update::Ordered<sha256::Digest, FixedEncoding<sha256::Digest>>;
 
             let config = fixed_db_config::<OneCap>("ordered-staged-resolve-updates", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let delete_key = colliding_digest(0x92, 0);
             let update_a = colliding_digest(0x92, 1);
@@ -4408,7 +4673,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("staged-bad-index", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0x40, 0);
             let keys = vec![&k0];
@@ -4472,7 +4737,7 @@ mod tests {
                         };
                         let context = context.child(label);
                         let config = fixed_db_config::<OneCap>(label, &context);
-                        let db = TestDb::init(context, config).await.unwrap();
+                        let db = TestDb::init(context, config, None).await.unwrap();
 
                         let mut seed = db.new_batch();
                         for i in 0..100u64 {
@@ -4588,19 +4853,22 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_db = colliding_digest(0x30, 0);
             let value_db = colliding_digest(0x30, 1);
+            let key_db_second = colliding_digest(0x33, 0);
+            let value_db_second = colliding_digest(0x33, 1);
             let key_parent = colliding_digest(0x31, 0);
             let value_parent = colliding_digest(0x31, 1);
             let key_current = colliding_digest(0x32, 0);
             let value_current = colliding_digest(0x32, 1);
 
-            // Commit one key to the DB so it's on disk.
+            // Commit two keys to the DB so they're on disk.
             let seed = db
                 .new_batch()
                 .write(key_db, Some(value_db))
+                .write(key_db_second, Some(value_db_second))
                 .merkleize(&db, None)
                 .await
                 .unwrap();
@@ -4608,8 +4876,9 @@ mod tests {
             let db = db.commit().await.unwrap();
 
             let committed_loc = db.snapshot.get(&key_db).next().copied().unwrap();
+            let committed_loc_second = db.snapshot.get(&key_db_second).next().copied().unwrap();
 
-            // Create a parent batch with a second key (in-memory ancestor).
+            // Create a parent batch with an in-memory ancestor key.
             let parent = db
                 .new_batch()
                 .write(key_parent, Some(value_parent))
@@ -4621,7 +4890,7 @@ mod tests {
                 .loc()
                 .unwrap();
 
-            // Create a child batch with a third key (current ops).
+            // Create a child batch with a current-ops key.
             let child = parent
                 .new_batch::<Sha256>()
                 .write(key_current, Some(value_current));
@@ -4632,6 +4901,39 @@ mod tests {
                 key_current,
                 value_current,
             ))];
+
+            // Interleave in-memory sources with a sorted or reversed committed subset.
+            for reverse in [false, true] {
+                let mut committed = [
+                    (committed_loc, key_db, value_db),
+                    (committed_loc_second, key_db_second, value_db_second),
+                ];
+                committed.sort_unstable_by_key(|&(loc, _, _)| loc);
+                if reverse {
+                    committed.reverse();
+                }
+                let [
+                    (first_loc, first_key, first_value),
+                    (second_loc, second_key, second_value),
+                ] = committed;
+                let ops = merkleizer
+                    .read_ops(
+                        &[current_loc, first_loc, parent_loc, second_loc],
+                        &batch_ops,
+                        &db.log,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    ops,
+                    vec![
+                        Operation::Update(update::Unordered(key_current, value_current)),
+                        Operation::Update(update::Unordered(first_key, first_value)),
+                        Operation::Update(update::Unordered(key_parent, value_parent)),
+                        Operation::Update(update::Unordered(second_key, second_value)),
+                    ]
+                );
+            }
 
             // read_ops should resolve all three sources correctly while preserving order and
             // duplicates across the disk-backed subset.
@@ -4673,7 +4975,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4755,7 +5057,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
 
@@ -4834,7 +5136,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-basic", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed an initial key.
             let seed = db
@@ -4903,7 +5205,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed an initial key so we have an existing entry.
             let key = colliding_digest(0x10, 0);
@@ -4977,7 +5279,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("fork-after-commit", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Seed.
             let seed = db
@@ -5058,7 +5360,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ff-cross", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Grandparent: 2 keys.
             let grandparent = db
@@ -5127,7 +5429,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).
             let k0 = colliding_digest(0xAA, 0);
@@ -5204,7 +5506,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-recreate-deleted-collision", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
             let k6 = colliding_digest(0xAA, 6);
@@ -5284,7 +5586,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-redundant-delete-collision", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
             let k6 = colliding_digest(0xAA, 6);
@@ -5355,7 +5657,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-stale-candidates", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let v = |n| colliding_digest(0xB0, n);
             let initial = db
@@ -5426,12 +5728,9 @@ mod tests {
     /// bucket in the committed snapshot, and the same loop pushes each entry it examines
     /// into the next/prev candidate sets that stitch the ordered links. In this scenario the
     /// child updates a sibling that collides with a parent-deleted key, so the scan pulls
-    /// the deleted key's stale committed location into the loop. The guard skips the stale
-    /// entry, and it must do so before the candidate pushes: a stale prev-candidate makes
-    /// `find_prev_key`'s wrap-around land on the deleted key, whose rewrite is then skipped
-    /// as batch-created, and the true predecessor's rewrite is emitted at a different stream
-    /// position than on the committed path, so the roots diverge with identical key-value
-    /// data.
+    /// the deleted key's stale committed location into the loop. Excluding that operation
+    /// before candidate insertion keeps predecessor selection and operation order identical
+    /// between the pending and committed parent paths.
     #[test]
     fn ordered_stale_classifier_candidates_root_matches() {
         let runner = deterministic::Runner::default();
@@ -5447,7 +5746,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-stale-classifier", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let v = |n| colliding_digest(0xB0, n);
             let initial = db
@@ -5535,7 +5834,7 @@ mod tests {
                 Sequential,
             >;
             let config = fixed_db_config::<OneCap>("ordered-stale-sibling-scan", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
             let v = |n| colliding_digest(0xB0, n);
             let initial = db
                 .new_batch()
@@ -5611,7 +5910,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("ordered-redundant-delete-underflow", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let k0 = colliding_digest(0xAA, 0);
             let k6 = colliding_digest(0xAA, 6);
@@ -5667,6 +5966,95 @@ mod tests {
         });
     }
 
+    /// An update-only child skips ancestor neighbor discovery, so the successors it emits
+    /// must come from the resolved operations alone even when the pending parent changed
+    /// membership around the updated keys.
+    #[test]
+    fn ordered_update_only_child_on_membership_changing_parent_root_matches() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            type TestDb = OrderedFixedDb<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                Sequential,
+            >;
+
+            let config = fixed_db_config::<OneCap>("ordered-update-only-child", &context);
+            let db = TestDb::init(context, config, None).await.unwrap();
+
+            let v = |n| colliding_digest(0xB0, n);
+            let initial = db
+                .new_batch()
+                .write(colliding_digest(1, 9), Some(v(0)))
+                .write(colliding_digest(3, 10), Some(v(1)))
+                .write(colliding_digest(3, 20), Some(v(2)))
+                .write(colliding_digest(3, 31), Some(v(3)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            let (db, _) = db.apply_batch(initial).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            // Parent: delete the middle bucket-3 key and create a new smallest key, rewriting
+            // the successors of both remaining bucket-3 keys.
+            let parent = db
+                .new_batch()
+                .write(colliding_digest(3, 20), None)
+                .write(colliding_digest(0, 0), Some(v(4)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            // Child: overwrite only existing keys. Its bucket scan encounters the deleted
+            // key's stale committed op alongside keys created or rewritten by the parent.
+            let pending_child = parent
+                .new_batch::<Sha256>()
+                .write(colliding_digest(0, 0), Some(v(5)))
+                .write(colliding_digest(1, 9), Some(v(6)))
+                .write(colliding_digest(3, 10), Some(v(7)))
+                .write(colliding_digest(3, 31), Some(v(8)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            let (db, _) = db.apply_batch(parent).await.unwrap();
+            let db = db.commit().await.unwrap();
+
+            let committed_child = db
+                .new_batch()
+                .write(colliding_digest(0, 0), Some(v(5)))
+                .write(colliding_digest(1, 9), Some(v(6)))
+                .write(colliding_digest(3, 10), Some(v(7)))
+                .write(colliding_digest(3, 31), Some(v(8)))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                pending_child.root(),
+                committed_child.root(),
+                "child root depended on pending-vs-committed parent path"
+            );
+            assert_eq!(
+                pending_child.total_active_keys,
+                committed_child.total_active_keys
+            );
+
+            let (db, _) = db.apply_batch(pending_child).await.unwrap();
+            assert_eq!(
+                db.root(),
+                committed_child.root(),
+                "applied pending child root diverged"
+            );
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     #[test]
     fn get_many_resolves_mutation_parent_and_db() {
         let runner = deterministic::Runner::default();
@@ -5682,7 +6070,7 @@ mod tests {
             >;
 
             let config = fixed_db_config::<OneCap>("get-many-basic", &context);
-            let db = TestDb::init(context, config).await.unwrap();
+            let db = TestDb::init(context, config, None).await.unwrap();
 
             let key_db = colliding_digest(0x40, 0);
             let val_db = colliding_digest(0x40, 1);

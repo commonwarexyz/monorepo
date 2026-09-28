@@ -4,6 +4,7 @@
 use std::{
     fs::{File, OpenOptions, TryLockError},
     io,
+    ops::Deref,
     path::Path,
     sync::Arc,
 };
@@ -22,10 +23,10 @@ const HOLD_NAME: &str = ".hold";
 /// A backend shares the hold (via [Arc]) with everything that can still touch
 /// the directory after its storage instance is gone. For tokio that is every
 /// blob's file handle and every dispatched blocking operation. For io_uring it
-/// is the ring thread, which the instance and every blob keep alive through
-/// their ring handles. The hold is released only once all of them have
-/// finished, including operations whose futures were dropped, since dropping a
-/// future does not cancel work already handed to a blocking pool or ring.
+/// is every blob's file handle and every registered storage request. The hold is
+/// released only once all of them have finished, including operations whose
+/// futures were dropped, since dropping a future does not immediately retire
+/// work already handed to a blocking pool or ring.
 /// [Hold::acquire] waits for that release.
 ///
 /// The lock lives on the open file description, not the file: the OS releases
@@ -33,11 +34,12 @@ const HOLD_NAME: &str = ".hold";
 /// cleanup. Every thread of the process shares that description, so a blocking
 /// pool thread holds the lock through the same file, and exit releases it only
 /// after every thread has stopped, so an operation still running when the
-/// process dies cannot land under a successor. Child processes do not inherit
-/// it, since the file is opened close-on-exec. The file is empty and never
-/// deleted, so a contended holder is found with `lsof` or `fuser`. The lock is
-/// bound to the inode: removing or recreating the directory while a run may
-/// still be alive voids the exclusion.
+/// process dies cannot land under a successor. A forked child inherits the
+/// description and keeps the hold until it closes the descriptor or exits.
+/// An exec closes the inherited descriptor because it is close-on-exec. The
+/// file is empty and never deleted, so a contended holder is found with `lsof`
+/// or `fuser`. The lock is bound to the inode: removing or recreating the
+/// directory while a run may still be alive voids the exclusion.
 ///
 /// The guarantee is scoped to one machine and to filesystems with real
 /// advisory locks. On network filesystems (NFS, SMB, FUSE) the lock may be
@@ -79,6 +81,32 @@ impl Hold {
             Err(TryLockError::Error(err)) => return Err(err),
         }
         Ok(Arc::new(Self { _file: file }))
+    }
+}
+
+/// A blob's file bundled with the hold on its storage directory.
+///
+/// Each open retains this owner and each request retains its open, keeping the
+/// directory hold alive while any blob or request still owns the file.
+pub(crate) struct Held {
+    /// Open file shared by every request on the blob.
+    file: File,
+    /// Directory exclusion retained until every file and request is released.
+    _hold: Arc<Hold>,
+}
+
+impl Held {
+    /// Retain a file and the directory hold that protects its storage.
+    pub(crate) const fn new(file: File, hold: Arc<Hold>) -> Self {
+        Self { file, _hold: hold }
+    }
+}
+
+impl Deref for Held {
+    type Target = File;
+
+    fn deref(&self) -> &Self::Target {
+        &self.file
     }
 }
 

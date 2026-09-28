@@ -117,10 +117,7 @@ use commonware_runtime::{
         traces::TracedExt as _,
     },
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::TracedAsyncMutex,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use rand_core::Rng;
 use std::sync::Arc;
 use tracing::{Instrument as _, debug, info_span, warn};
@@ -167,7 +164,7 @@ where
     S: Strategy,
     ES: Epocher,
 {
-    context: Arc<TracedAsyncMutex<E>>,
+    context: Arc<E>,
     application: A,
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as Verifier>::PublicKey>>,
     shards: shards::Mailbox<B, C, H, <Z::Scheme as Verifier>::PublicKey>,
@@ -281,7 +278,7 @@ where
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
-            context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
+            context: Arc::new(context),
             application,
             marshal,
             shards,
@@ -315,7 +312,7 @@ where
     /// If `prefetched_block` is provided, it will be used directly instead of fetching from
     /// the marshal. This is useful in `certify` when we've already fetched the block to
     /// extract its embedded context.
-    async fn deferred_verify(
+    fn deferred_verify(
         &mut self,
         consensus_context: Context<Commitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
         commitment: Commitment<B, C, H>,
@@ -331,8 +328,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("deferred_verify")
             .with_attribute("round", consensus_context.round);
         let span = info_span!(
@@ -483,7 +478,7 @@ where
         rx
     }
 
-    async fn certify_from_embedded_context(
+    fn certify_from_embedded_context(
         &mut self,
         round: Round,
         payload: Commitment<B, C, H>,
@@ -519,12 +514,7 @@ where
         let mut marshaled = self.clone();
         let shards = self.shards.clone();
         let (mut tx, rx) = oneshot::channel();
-        let context = self
-            .context
-            .lock()
-            .await
-            .child("certify")
-            .with_attribute("round", round);
+        let context = self.context.child("certify").with_attribute("round", round);
         context.spawn(move |_| {
             async move {
                 let block = select! {
@@ -583,9 +573,12 @@ where
 
                 // Use the block's embedded context for verification, passing the
                 // prefetched block to avoid fetching it again inside deferred_verify.
-                let verify_rx = marshaled
-                    .deferred_verify(embedded_context, payload, Some(block), Stage::Certified)
-                    .await;
+                let verify_rx = marshaled.deferred_verify(
+                    embedded_context,
+                    payload,
+                    Some(block),
+                    Stage::Certified,
+                );
                 gates::forward(tx, verify_rx, |result| match result {
                     GateOutcome::Ready(result) => Some(result),
                     GateOutcome::Recover => None,
@@ -600,9 +593,7 @@ where
         });
         rx
     }
-
-    #[allow(clippy::async_yields_async)]
-    async fn certify_from_existing_task(
+    fn certify_from_existing_task(
         &mut self,
         round: Round,
         payload: Commitment<B, C, H>,
@@ -622,15 +613,11 @@ where
         let (tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("certify_existing")
             .with_attribute("round", round);
         context.spawn(move |_| {
-            gates::drive(tx, task, round, payload, move || async move {
-                marshaled
-                    .certify_from_embedded_context(round, payload)
-                    .await
+            gates::drive(tx, task, round, payload, move || {
+                marshaled.certify_from_embedded_context(round, payload)
             })
             .instrument(info_span!(
                 "marshal.coding.certify.existing",
@@ -711,8 +698,6 @@ where
         let (mut tx, rx) = oneshot::channel();
         let context = self
             .context
-            .lock()
-            .await
             .child("propose")
             .with_attribute("round", consensus_context.round);
         let span = info_span!(
@@ -983,8 +968,6 @@ where
             let (mut tx, rx) = oneshot::channel();
             let context = self
                 .context
-                .lock()
-                .await
                 .child("verify_reproposal")
                 .with_attribute("round", round);
             context.spawn(move |_| {
@@ -1069,9 +1052,7 @@ where
         // drops the verify receiver without cancelling certification for it, so
         // deferred verification must survive that drop for certify to consume.
         let round = consensus_context.round;
-        let task = self
-            .deferred_verify(consensus_context, payload, None, Stage::Verified)
-            .await;
+        let task = self.deferred_verify(consensus_context, payload, None, Stage::Verified);
         self.gates.insert(round, payload, task);
 
         match scheme.me() {
@@ -1084,8 +1065,6 @@ where
                 let (tx, rx) = oneshot::channel();
                 let context = self
                     .context
-                    .lock()
-                    .await
                     .child("shard_validity_wait")
                     .with_attribute("round", round);
                 context.spawn(move |_| {
@@ -1137,10 +1116,10 @@ where
         // First, check for an in-progress certification gate task.
         let task = self.gates.take(round, payload);
         if let Some(task) = task {
-            return self.certify_from_existing_task(round, payload, task).await;
+            return self.certify_from_existing_task(round, payload, task);
         }
 
-        self.certify_from_embedded_context(round, payload).await
+        self.certify_from_embedded_context(round, payload)
     }
 }
 

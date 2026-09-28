@@ -6,7 +6,7 @@ use super::{
     delivery::PendingVerification,
     durability::{DispatchGate, Durable as _},
     finalized,
-    floor::{Floor, State as FloorState},
+    floor::{Floor, Processed, State as FloorState},
     mailbox::{CommitmentFallback, Mailbox, Message},
     staged::Staged,
     stream::Stream,
@@ -33,7 +33,7 @@ use commonware_cryptography::{
     Digestible,
     certificate::{Provider, Scoped, Verifier},
 };
-use commonware_macros::{boxed, select_loop};
+use commonware_macros::{boxed, select, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
@@ -51,7 +51,10 @@ use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
     futures::{AbortablePool, Pool},
 };
-use futures::future::{join, join_all};
+use futures::{
+    TryFutureExt as _,
+    future::{self, join, join_all},
+};
 use rand_core::CryptoRng;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{Instrument as _, Span, debug, info_span, warn};
@@ -127,7 +130,7 @@ where
     strategy: T,
 
     // ---------- State ----------
-    // Current durable floor and any update awaiting its anchor block
+    // Durable floor and floor updates not yet applied
     floor: FloorState<P::Scheme, V::Commitment>,
     // Application delivery cursor
     stream: Stream<E>,
@@ -151,7 +154,7 @@ where
     // ---------- Storage ----------
     // Prunable cache
     cache: cache::Manager<E, V, P::Scheme>,
-    // Finalized certificates and blocks, shared with the backfill task
+    // Finalized certificates and blocks, shared with the backfill server
     storage: finalized::Storage<C, B>,
 
     // ---------- Metrics ----------
@@ -208,7 +211,7 @@ where
 
         // Genesis is a local anchor. A floor finalization is verified and
         // resolved after `run` receives the resolver and buffer.
-        let pending_floor_anchor = match config.start {
+        let configured = match config.start {
             Start::Genesis(anchor) => {
                 assert_eq!(
                     anchor.height(),
@@ -228,8 +231,12 @@ where
             last_processed_height,
         )
         .await;
+        let last_processed = match last_processed_height {
+            Some(height) => Some(Self::processed(&finalized_blocks, height).await),
+            None => None,
+        };
 
-        // Put both stores behind the lock and start the backfill-serving task. A resolver
+        // Put both stores behind the lock and prepare the backfill server. A resolver
         // batch forwards at most `max_repair` requests, so one batch always fits the channel.
         let storage = finalized::new::<_, V, _, _>(
             context.child("storage"),
@@ -244,16 +251,8 @@ where
         if let Some(last_processed_height) = last_processed_height {
             let _ = processed_height.try_set(last_processed_height.get());
         }
-        let floor_state = pending_floor_anchor.map_or_else(
-            || FloorState::resolved(last_processed_height, last_processed_round),
-            |finalization| {
-                FloorState::awaiting_anchor(
-                    last_processed_height,
-                    last_processed_round,
-                    finalization,
-                )
-            },
-        );
+        let floor_state =
+            FloorState::new(configured, Floor::new(last_processed, last_processed_round));
         let floor = floor_state.snapshot();
 
         // Initialize mailbox
@@ -338,7 +337,7 @@ where
 
     /// Start the actor.
     pub fn start<R, Buf>(
-        self,
+        mut self,
         application: impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         buffer: Buf,
         resolver: (handler::Receiver<V::Commitment>, R),
@@ -351,8 +350,14 @@ where
             >,
         Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
+        let server = self.storage.take_server();
         let mut actor = Box::new(self);
-        spawn_cell!(actor.context, actor.run(application, buffer, resolver))
+        spawn_cell!(actor.context, async move {
+            select! {
+                _ = actor.run(application, buffer, resolver) => {},
+                _ = finalized::run::<V, _, _>(server) => {},
+            }
+        })
     }
 
     /// Start the actor without a broadcast buffer.
@@ -403,7 +408,7 @@ where
         // installation, gap repair, and the initial dispatch all run before any
         // mailbox message arrives, so without this root their work would emit as
         // orphan traces.
-        (self, application, buffer, resolver) = async move {
+        (self, application, buffer, resolver, waiters) = async move {
             // Get tip and send to application
             let tip = self.get_latest().await;
             if let Some((height, digest, round)) = tip {
@@ -418,14 +423,14 @@ where
             self.cache = self.cache.load_persisted_epochs().await;
 
             // A configured floor follows the same path as `SetFloor`: verify it,
-            // then apply a local anchor or fetch the anchor block.
-            if let Some(finalization) = self.floor.take_pending_anchor() {
+            // then apply a local anchor or await it from the buffer or peers.
+            if let Some(finalization) = self.floor.take_configured() {
                 self = self
                     .install_floor(
                         finalization,
-                        false,
                         &mut resolver,
                         &mut buffer,
+                        &mut waiters,
                         &mut application,
                     )
                     .await;
@@ -443,7 +448,7 @@ where
             // Attempt to dispatch the next finalized block to the application, if it is ready.
             self = self.try_dispatch_blocks(&mut application).await;
 
-            (self, application, buffer, resolver)
+            (self, application, buffer, resolver, waiters)
         }
         .instrument(info_span!("marshal.actor.start"))
         .await;
@@ -574,7 +579,8 @@ where
                 Ok(()) => {
                     // Apply in-memory progress updates for this acknowledged
                     // block. The metadata sync below makes drained updates durable.
-                    self.update_processed_height(height, resolver);
+                    // Only archived blocks are dispatched, so the block is stored.
+                    self.update_processed(Processed::Block(height), resolver);
                     self = self
                         .update_processed_round(height, buffer, application, resolver)
                         .await;
@@ -869,8 +875,21 @@ where
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
-            Message::GetProcessedHeight { response, .. } => {
-                response.send_lossy(self.stream.processed_height());
+            Message::GetProcessed { response, .. } => {
+                response.send_lossy(self.floor.processed());
+            }
+            Message::GetAnchor { response, .. } => {
+                let anchor = match self.floor.processed() {
+                    Some(processed) => {
+                        let block = self
+                            .get_finalized_block(processed.anchor())
+                            .await
+                            .expect("processed position must be backed by a stored block");
+                        Some((processed, block))
+                    }
+                    None => None,
+                };
+                response.send_lossy(anchor);
             }
             Message::HintFinalized {
                 height, targets, ..
@@ -933,7 +952,7 @@ where
             }
             Message::SetFloor { finalization, .. } => {
                 self = self
-                    .install_floor(finalization, true, resolver, buffer, application)
+                    .install_floor(finalization, resolver, buffer, waiters, application)
                     .await;
             }
             Message::Prune { height, .. } => {
@@ -1063,7 +1082,7 @@ where
                 response.send_lossy(block.encode());
             }
             Key::Finalized { height } => {
-                // Hand off to the backfill-serving task.
+                // Hand off to the backfill server.
                 self.storage.serve(height, response);
             }
             Key::Notarized { round } => {
@@ -1177,13 +1196,13 @@ where
             .insert(span, key, response, waiters, buffer);
     }
 
-    /// Verifies and installs a floor, fetching the anchor block if needed.
+    /// Verifies and installs a floor, awaiting the anchor block from the buffer or peers if needed.
     async fn install_floor<Buf, R>(
         mut self: Box<Self>,
         finalization: Finalization<P::Scheme, V::Commitment>,
-        skip_if_superseded: bool,
         resolver: &mut R,
         buffer: &mut Buf,
+        waiters: &mut AbortablePool<'_, Result<V::Block, SubscriptionKeyFor<V>>>,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) -> Box<Self>
     where
@@ -1216,14 +1235,15 @@ where
             .put_finalization(round, digest, &finalization)
             .await;
 
-        // A pending anchor at the same or a newer floor already blocks
+        // A pending floor at the same or a newer round already blocks
         // progress. Keep waiting for it instead of replacing it.
-        if skip_if_superseded && self.floor.has_pending_anchor_at_or_after(round) {
+        if self.floor.pending_supersedes(round) {
             return self;
         }
 
+        // A local anchor replaces any older pending floor and installs through ingest.
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-            self.floor.await_anchor(finalization);
+            self.floor.set_pending(finalization, None);
             let anchored;
             (self, anchored) = self.ingest(block, buffer, application, resolver).await;
             assert!(anchored, "failed to ingest pending floor anchor");
@@ -1235,8 +1255,16 @@ where
         // but retain their heights and commitments until the anchor makes the floor active.
         self.cleared_acks.extend(self.pending_acks.clear());
 
+        // The pending floor holds the waiter, which is released when the floor is
+        // replaced, applied, or superseded. Reporting a closed subscription as an
+        // error would cancel every caller subscription on the anchor, so the waiter
+        // stays pending instead. The fetch below is issued either way.
+        let aborter = buffer
+            .subscribe_by_commitment(commitment)
+            .map(|rx| waiters.push(rx.or_else(|_| future::pending())));
+        self.floor.set_pending(finalization, aborter);
+
         debug!(?round, ?commitment, "starting fetch for floor block");
-        self.floor.await_anchor(finalization);
         self.floor
             .fetch_if_permitted(resolver, Request::finalized_by_round(commitment, round))
             .ignore();
@@ -1291,23 +1319,20 @@ where
     ) -> (Box<Self>, bool) {
         self.block_subscriptions.notify(block.clone());
 
-        if !self.floor.matches_pending_anchor(V::commitment(&block)) {
+        let Some(finalization) = self.floor.take_matching(V::commitment(&block)) else {
             return (self, false);
-        }
+        };
 
         self = self
-            .apply_pending_floor(block, buffer, application, resolver)
+            .apply_floor(finalization, block, buffer, application, resolver)
             .await;
         (self, true)
     }
 
-    /// Applies the pending floor transition using its matching anchor block.
-    ///
-    /// # Panics
-    ///
-    /// Panics if no pending floor anchor is installed.
-    async fn apply_pending_floor<Buf: Buffer<V>>(
+    /// Applies the floor transition that `finalization` announces using its anchor block.
+    async fn apply_floor<Buf: Buffer<V>>(
         mut self: Box<Self>,
+        finalization: Finalization<P::Scheme, V::Commitment>,
         block: V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
@@ -1333,10 +1358,6 @@ where
                 existing = %self.floor.processed_height(),
                 "floor not updated, at or below existing"
             );
-            let finalization = self
-                .floor
-                .take_pending_anchor()
-                .expect("pending floor anchor missing");
             self = self
                 .update_processed_round_floor(
                     height,
@@ -1360,10 +1381,6 @@ where
         }
 
         let digest = block.digest();
-        let finalization = self
-            .floor
-            .take_pending_anchor()
-            .expect("pending floor anchor missing");
         let round = finalization.round();
         self.storage
             .put(height, digest, block.into(), Some(finalization))
@@ -1382,7 +1399,12 @@ where
         let dispatch_floor = height
             .previous()
             .expect("floor anchor above processed height must have predecessor");
-        self.update_processed_height(dispatch_floor, resolver);
+        let processed = if self.storage.get_block(dispatch_floor).await.is_some() {
+            Processed::Block(dispatch_floor)
+        } else {
+            Processed::Absent(dispatch_floor)
+        };
+        self.update_processed(processed, resolver);
 
         // Release staged blocks skipped by the floor transition
         self.staged.retain(height);
@@ -1410,8 +1432,8 @@ where
             exact_retirements: commitments,
         });
 
-        // The floor is durable, so cache/finalized data below it can be pruned.
-        self = self.prune(height).await;
+        // Keep the processed block so the application can restart from it.
+        self = self.prune_after_floor(dispatch_floor).await;
 
         // Keep caller-owned block subscriptions alive across the floor update. Resolver pruning
         // stops obsolete network work, but later local ingress can still satisfy these waiters,
@@ -1872,7 +1894,7 @@ where
     ///   try_dispatch_blocks  ->  sends durable blocks to app, enqueues pending acks
     ///
     /// Iteration M (ack handler, M > N):
-    ///   ack handler       ->  update_processed_height  ->  metadata buffered
+    ///   ack handler       ->  update_processed         ->  metadata buffered
     ///   stream.sync       ->  metadata durable
     /// ```
     async fn try_dispatch_blocks(
@@ -2331,19 +2353,32 @@ where
 
     /// Buffers a processed height update in memory and metrics. Does NOT sync
     /// to durable storage. Sync metadata after buffered updates to make them durable.
-    fn update_processed_height(
+    fn update_processed(
         &mut self,
-        height: Height,
+        processed: Processed,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) {
+        let height = processed.height();
         self.stream.acknowledge(height);
-        self.floor.set_processed_height(height);
+        self.floor.set_processed(processed);
         let _ = self
             .processed_height
             .try_set(self.floor.processed_height().get());
 
         // Resolver request retention is independent of caller-owned block subscriptions.
         resolver.retain(handler::above_height_floor::<V::Commitment>(height));
+    }
+
+    /// Classifies a processed height by whether its block is stored.
+    ///
+    /// A floor installed above a missing predecessor records that predecessor as processed. The
+    /// floor block is stored before the processed height is recorded.
+    async fn processed(finalized_blocks: &B, height: Height) -> Processed {
+        match finalized_blocks.get(ArchiveID::Index(height.get())).await {
+            Ok(Some(_)) => Processed::Block(height),
+            Ok(None) => Processed::Absent(height),
+            Err(err) => panic!("failed to get processed block: {err}"),
+        }
     }
 
     /// Returns the latest recoverable round at or immediately after the processed height.
@@ -2435,7 +2470,7 @@ where
             return self;
         }
 
-        self.floor.set_processed_round(round);
+        self.floor.set_round(round);
 
         // Retain view-indexed cache data for a window behind the previously
         // processed finalized block.
@@ -2450,7 +2485,7 @@ where
 
         // A superseded anchor is an ancestor of a processed block, so the floor
         // it announced is already active. Retire the acks it displaced and resume.
-        if self.floor.take_superseded_anchor(round).is_none() {
+        if self.floor.take_superseded(round).is_none() {
             return self;
         }
         let commitments = self.take_superseded_ack_commitments();
@@ -2467,7 +2502,7 @@ where
     }
 
     /// Prunes finalized storage and height-indexed certified cache data below `height`.
-    async fn prune(mut self: Box<Self>, height: Height) -> Box<Self> {
+    async fn prune_after_floor(mut self: Box<Self>, height: Height) -> Box<Self> {
         (self.cache, ()) = join(
             self.cache.prune_by_height(height),
             self.storage.prune(height),

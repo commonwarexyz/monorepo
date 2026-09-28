@@ -1,8 +1,54 @@
-//! Non-empty [`Range`] type that guarantees at least one element.
+//! Utilities for linear ranges and cyclic spans.
 
 use bytes::BufMut;
 use commonware_codec::{Buf, BufsMut, EncodeSize, Error as CodecError, Read, Write};
+use commonware_macros::stability;
+#[stability(ALPHA)]
+use core::ops::{
+    Bound::{Excluded, Included, Unbounded},
+    RangeBounds,
+};
 use core::{fmt, ops::Range};
+
+/// Whether `key` is in the cyclic span described by the current bounds of `span`.
+///
+/// When both endpoints are bounded, a start greater than the end wraps around the key
+/// domain. Equal endpoints span the entire domain, except for the endpoint itself when
+/// both bounds exclude it. Unbounded endpoints use ordinary linear range semantics.
+///
+/// # Examples
+///
+/// ```
+/// use commonware_utils::range::contains_cyclic;
+/// use core::ops::Bound::{Excluded, Included};
+///
+/// assert!(contains_cyclic(2..6, &2));
+/// assert!(!contains_cyclic(2..6, &6));
+/// assert!(contains_cyclic((Excluded(2), Included(6)), &6));
+/// assert!(contains_cyclic(6..2, &0));
+/// assert!(contains_cyclic(3..3, &9));
+/// ```
+#[stability(ALPHA)]
+pub fn contains_cyclic<K: Ord + ?Sized>(span: impl RangeBounds<K>, key: &K) -> bool {
+    let start = span.start_bound();
+    let end = span.end_bound();
+    let after_start = match start {
+        Included(start) => key >= start,
+        Excluded(start) => key > start,
+        Unbounded => true,
+    };
+    let before_end = match end {
+        Included(end) => key <= end,
+        Excluded(end) => key < end,
+        Unbounded => true,
+    };
+    match (start, end) {
+        (Included(start) | Excluded(start), Included(end) | Excluded(end)) if start >= end => {
+            after_start || before_end
+        }
+        _ => after_start && before_end,
+    }
+}
 
 /// Error returned when attempting to create a non-empty range from an empty range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -134,6 +180,78 @@ macro_rules! non_empty_range {
 mod tests {
     use super::*;
     use commonware_codec::{DecodeExt, Encode};
+
+    #[test]
+    fn test_contains_cyclic_boundaries() {
+        let cases: &[(_, &[u8])] = &[
+            ((Included(2), Excluded(6)), &[2, 3, 4, 5]),
+            ((Excluded(2), Included(6)), &[3, 4, 5, 6]),
+            ((Included(2), Included(6)), &[2, 3, 4, 5, 6]),
+            ((Excluded(2), Excluded(6)), &[3, 4, 5]),
+            ((Included(6), Excluded(2)), &[0, 1, 6, 7]),
+            ((Excluded(6), Included(2)), &[0, 1, 2, 7]),
+            ((Included(6), Included(2)), &[0, 1, 2, 6, 7]),
+            ((Excluded(6), Excluded(2)), &[0, 1, 7]),
+            ((Included(3), Excluded(3)), &[0, 1, 2, 3, 4, 5, 6, 7]),
+            ((Excluded(3), Included(3)), &[0, 1, 2, 3, 4, 5, 6, 7]),
+            ((Included(3), Included(3)), &[0, 1, 2, 3, 4, 5, 6, 7]),
+            ((Excluded(3), Excluded(3)), &[0, 1, 2, 4, 5, 6, 7]),
+            ((Unbounded, Included(3)), &[0, 1, 2, 3]),
+            ((Unbounded, Excluded(3)), &[0, 1, 2]),
+            ((Included(3), Unbounded), &[3, 4, 5, 6, 7]),
+            ((Excluded(3), Unbounded), &[4, 5, 6, 7]),
+            ((Unbounded, Unbounded), &[0, 1, 2, 3, 4, 5, 6, 7]),
+        ];
+        for &(bounds, expected) in cases {
+            let actual: Vec<_> = (0..=7).filter(|key| contains_cyclic(bounds, key)).collect();
+            assert_eq!(actual, expected, "bounds: {bounds:?}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::reversed_empty_ranges)]
+    fn test_contains_cyclic_extremes() {
+        for key in u8::MIN..=u8::MAX {
+            assert_eq!(contains_cyclic(u8::MAX..u8::MIN, &key), key == u8::MAX);
+            assert_eq!(
+                contains_cyclic((Excluded(u8::MAX), Included(u8::MIN)), &key),
+                key == u8::MIN
+            );
+            assert!(contains_cyclic(u8::MIN..u8::MIN, &key));
+            assert!(contains_cyclic(u8::MAX..u8::MAX, &key));
+            assert!(!contains_cyclic(..u8::MIN, &key));
+            assert!(!contains_cyclic((Excluded(u8::MAX), Unbounded), &key));
+        }
+    }
+
+    #[test]
+    fn test_contains_cyclic_range_syntax() {
+        let start = String::from("a");
+        let end = String::from("c");
+        let key = String::from("b");
+        assert!(contains_cyclic(&start..&end, &key));
+        assert!(!contains_cyclic(&start..&end, &end));
+        assert!(contains_cyclic(&start..=&end, &end));
+        assert!(contains_cyclic(&start.., &key));
+        assert!(!contains_cyclic(..&end, &end));
+        assert!(contains_cyclic(..=&end, &end));
+        assert!(contains_cyclic(.., &key));
+        assert!(contains_cyclic((Excluded(&start), Included(&end)), &end));
+        assert!(contains_cyclic(
+            (Included(start.as_str()), Excluded(end.as_str())),
+            key.as_str()
+        ));
+    }
+
+    #[test]
+    fn test_contains_cyclic_current_bounds() {
+        let mut span = 2..=6;
+        assert_eq!(span.next(), Some(2));
+        assert_eq!(span.next_back(), Some(6));
+        for key in 0..=7 {
+            assert_eq!(contains_cyclic(span.clone(), &key), (3..=5).contains(&key));
+        }
+    }
 
     #[test]
     fn test_non_empty_range_valid() {

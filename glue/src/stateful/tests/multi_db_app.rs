@@ -67,8 +67,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type QmdbA<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-/// The compact (witness-only) QMDB used as DB-B, so the suite drives deep rewind,
-/// pruning, and state sync through the compact path as well.
+/// The compact (witness-only) QMDB used as DB-B for bounded recovery, pruning, and state sync.
 pub(super) type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
@@ -105,7 +104,7 @@ pub(super) fn qmdb_config(
             replay_buffer: IO_BUFFER_SIZE,
         },
         translator: TwoCap,
-        init_cache_size: Some(NZUsize!(1024)),
+        init_cache: Some(NZUsize!(1024)),
         init_buffer: NZUsize!(1 << 21),
         init_concurrency: (),
     };
@@ -555,7 +554,11 @@ impl EngineDefinition for MultiDbEngine {
         );
 
         let stateful_startup_context = context.child("stateful_startup");
-        let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
+        let mut plan = SyncPlan::init(
+            stateful_startup_context.child("plan"),
+            partition_prefix.clone(),
+        )
+        .await;
         let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
         let provider = ConstantProvider::new(scheme.clone());
 
